@@ -12,9 +12,11 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hacivat_meta::merge::{self, MergeOutcome, MergePolicy, NamespaceResult};
+use hacivat_meta::merge::{self, ChangedObject, MergeOutcome, MergePolicy, NamespaceResult};
 use hacivat_meta::name::FoldRule;
-use hacivat_meta::{Level, Name, NamespaceSnapshot, NsKey, NsKind, ObjectKey, ServerFacts};
+use hacivat_meta::{
+    Level, Name, NamespaceSnapshot, NsKey, NsKind, Obj, ObjFlags, ObjectKey, ServerFacts, Subtree,
+};
 use hacivat_proto::DbmsKind;
 use hacivat_session::meta::{MetaConn, MetaError};
 use tokio::sync::broadcast;
@@ -474,6 +476,42 @@ async fn identity(ctx: &WorkerCtx, conn: &mut MetaConn) -> IdentityRead {
     }
 }
 
+// ## m4-t30-gates (named exception in Task 15's file; T30 review I-2)
+/// A system-mode read (the `40-system` sections) flags its objects `SYSTEM`; the namespace
+/// root gets the flag too (a root update), so the schema sits in the explorer's Built-in group
+/// and `CatalogView` reports `is_system`. A root update the read carries keeps its props.
+fn flag_system_root(ns: &NsKey, r: &mut NamespaceResult) {
+    let root_kind = ns.kind.root_kind();
+    let root = r
+        .changed
+        .iter()
+        .position(|c| c.subtree.root_obj().kind() == root_kind && c.subtree.len() == 1);
+    let (obj, parent) = match root {
+        Some(i) => {
+            let c = r.changed.remove(i);
+            (c.subtree.root_obj().clone(), c.parent)
+        }
+        None => (
+            Obj::new(root_kind, Name::from(ns.root_name())),
+            ObjectKey {
+                kind: root_kind,
+                path: ns.path.iter().cloned().collect(),
+                server_id: None,
+                overload_sig: None,
+                raw_kind: None,
+            },
+        ),
+    };
+    r.changed.insert(
+        0,
+        ChangedObject {
+            parent,
+            subtree: Subtree::new(obj.add_flags(ObjFlags::SYSTEM)),
+        },
+    );
+}
+// ## m4-t30-gates
+
 /// Filters `r`, fills the engine's fields and merges it into the task's `prev` (or the empty
 /// base of a first load), on the blocking pool (a 160k-column merge is tens of milliseconds).
 async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult) -> Output {
@@ -483,6 +521,17 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
         _ => return Output::Failed(IntroError::Protocol(Name::from("merge"))),
     };
     spec.filters.apply(&ns, spec.system, &mut r);
+    // ## m4-t30-gates (named exception in Task 15's file; T30 review I-2)
+    if matches!(
+        spec.work,
+        Work::Pass {
+            mode: Mode::System,
+            ..
+        }
+    ) {
+        flag_system_root(&ns, &mut r);
+    }
+    // ## m4-t30-gates
     // ## m4-t22-state (named exception): stamps a state check read before this re-read become
     // the marks of the owners it re-read without a mark of their own.
     if !spec.marks.is_empty() {

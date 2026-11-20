@@ -1604,7 +1604,8 @@ fn rebuild_into(
 /// Gate G2 (R-M4-45): one `HV-FACT g2 …` line per snapshot file of `committed` or
 /// `regenerated`, comparing the two files' raw bytes (the `.hvsnap.zst` frames themselves,
 /// not their decompressed JSON), with the committed byte count and XXH3-64 digest, and a
-/// closing line counting the files that matched.
+/// closing line counting the snapshots that matched and whether `manifest.toml` matched too;
+/// `verdict=reproduced` needs both (review m-3).
 pub fn g2_facts(regenerated: &Path, committed: &Path) -> Result<Vec<String>> {
     let names = |d: &Path| -> Result<BTreeSet<String>> {
         let mut out = BTreeSet::new();
@@ -1635,10 +1636,12 @@ pub fn g2_facts(regenerated: &Path, committed: &Path) -> Result<Vec<String>> {
              committed_digest={digest} equal={equal}"
         ));
     }
+    let manifest = |d: &Path| std::fs::read(d.join(MANIFEST)).ok();
+    let manifest_equal = manifest(regenerated).is_some_and(|m| Some(m) == manifest(committed));
     lines.push(format!(
-        "HV-FACT g2 files={} equal={equal_count} verdict={}",
+        "HV-FACT g2 files={} equal={equal_count} manifest_equal={manifest_equal} verdict={}",
         all.len(),
-        if equal_count == all.len() && !all.is_empty() {
+        if equal_count == all.len() && !all.is_empty() && manifest_equal {
             "reproduced"
         } else {
             "differs"
@@ -2719,8 +2722,18 @@ mod tests {
             && l.ends_with("equal=true")));
         assert_eq!(
             facts[n],
-            format!("HV-FACT g2 files={n} equal={n} verdict=reproduced")
+            format!("HV-FACT g2 files={n} equal={n} manifest_equal=true verdict=reproduced")
         );
+        // Review m-3: a manifest that differs alone is no reproduction either.
+        let m = committed.path().join(MANIFEST);
+        let text = std::fs::read_to_string(&m).unwrap();
+        std::fs::write(&m, format!("{text}\n")).unwrap();
+        let facts = g2_facts(regenerated.path(), committed.path()).unwrap();
+        assert_eq!(
+            facts[n],
+            format!("HV-FACT g2 files={n} equal={n} manifest_equal=false verdict=differs")
+        );
+        std::fs::write(&m, text).unwrap();
         // The same JSON in another zstd frame (another level) decompresses equal but is not
         // the same file: G2 compares the files.
         let f = committed.path().join("mysql-8.4.hvsnap.zst");

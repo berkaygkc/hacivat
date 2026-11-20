@@ -426,6 +426,18 @@ async fn unsupported_version_brings_its_system_schemas_into_scope_live() {
         panic!("a live pg_catalog object: {hit:?}");
     };
     assert!(!h.obj().flags().contains(ObjFlags::PRE_INTROSPECTED));
+    // Review I-2: read by the system sections, so the objects and the schema root carry
+    // `SYSTEM` (the explorer's Built-in group, `CatalogView`'s `is_system`).
+    assert!(h.obj().flags().contains(ObjFlags::SYSTEM));
+    assert!(h.ns.root().flags().contains(ObjFlags::SYSTEM));
+    assert!(fake.calls().iter().any(|c| matches!(
+        c,
+        hacivat_introspect::testing::fake::FakeCall::Introspect {
+            ns,
+            mode: Mode::System,
+            level: Level::Names,
+        } if *ns == pg_catalog
+    )));
     handle.shutdown();
 }
 
@@ -538,6 +550,8 @@ async fn pg13_engine_reads_system_schemas_live_at_names_level() {
         panic!("pg13 pg_catalog.pg_class through the engine: {hit:?}");
     };
     assert!(!h.obj().flags().contains(ObjFlags::PRE_INTROSPECTED));
+    assert!(h.obj().flags().contains(ObjFlags::SYSTEM));
+    assert!(h.ns.root().flags().contains(ObjFlags::SYSTEM));
     let miss = view.lookup(&parts("pg_catalog.hv_t30_absent"), KindGroup::Relations);
     assert!(!matches!(miss, Lookup::Found(_)), "{miss:?}");
     println!(
@@ -557,5 +571,33 @@ async fn pg13_engine_reads_system_schemas_live_at_names_level() {
     drop(cat);
     hub.shutdown(pg.profile.id).await;
     pg.shutdown().await;
+}
+// REVIEW HOSTILE (T30 opus review, I-1): a user's explicit negative clause keeps a system
+// schema out of scope on an unsupported version ("removing is always safe", scope.rs docs).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_negative_clause_keeps_pg_catalog_out_on_unsupported_version() {
+    use hacivat_introspect::scope::parse_scope;
+    let (catalog, handle, fake) = hub_like_engine(Some(Ok(pg_facts("13.22", Some(false)))));
+    with_fake_pg_catalog(&fake);
+    common::bounded(handle.on_connect()).await.unwrap();
+    common::idle(&handle).await;
+    let pg_catalog = NsKey::schema(["db", "pg_catalog"]);
+    assert!(!matches!(
+        ns_state(&catalog, &pg_catalog),
+        LoadState::OutOfScope
+    ));
+    handle.set_scope(
+        parse_scope("@:*|!@:pg_catalog", sql_dialect::DialectId::Postgres).expect("a scope"),
+    );
+    // The scope change is a command: wait on the condition, never on "idle" alone (which may
+    // be seen before the command is handled).
+    let excluded = || matches!(ns_state(&catalog, &pg_catalog), LoadState::OutOfScope);
+    common::wait_until(std::time::Duration::from_secs(10), excluded).await;
+    let st = ns_state(&catalog, &pg_catalog);
+    assert!(
+        matches!(st, LoadState::OutOfScope),
+        "the user excluded pg_catalog, yet it is {st:?}"
+    );
+    handle.shutdown();
 }
 // ## m4-t30-gates

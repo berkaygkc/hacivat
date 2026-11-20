@@ -323,10 +323,12 @@ fn two_level(d: DialectId) -> bool {
 }
 
 // ## m4-t30-gates (named exception in Task 15's file; T26 carry, R-M4-6, PO-Q7)
-/// Whether `facts` name a released PostgreSQL, MySQL or MariaDB version that the attached
-/// snapshot set has no snapshot for (exact selection, never the closest line): its system
-/// schemas are then introspected live. Unknown version (not connected yet, a failed facts
-/// read), no attached set, SQLite and the forks: never.
+/// Whether `facts` name a PostgreSQL, MySQL or MariaDB version that the attached snapshot set
+/// has no snapshot for (exact selection by line, never the closest one): its system schemas
+/// are then introspected live. Any non-empty version text counts, a release or not: an
+/// unparsable one (`19devel`, `PostgreSQL 17`) has no line, so it reads live too, which is
+/// truthful (live data, no layer). An empty version (not connected yet, a failed facts read),
+/// no attached set, SQLite and the forks: never.
 pub(crate) fn live_system_schemas(
     facts: &hacivat_meta::ServerFacts,
     set: Option<&Arc<hacivat_meta::system::SystemCatalogs>>,
@@ -339,9 +341,21 @@ pub(crate) fn live_system_schemas(
 }
 
 /// The listed system namespaces a snapshot would have covered (`minicat::system_schemas`) in
-/// the databases `in_scope` reads (PostgreSQL; MySQL/MariaDB have one level).
-fn live_system_keys(infos: &[NsInfo], in_scope: &BTreeSet<NsKey>, dbms: DbmsKind) -> Vec<NsKey> {
-    let names = crate::minicat::system_schemas(dbms);
+/// the databases `in_scope` reads (PostgreSQL; MySQL/MariaDB have one level). Names are
+/// compared by the server's schema identity rule (review m-4).
+fn live_system_keys<'a>(
+    infos: &'a [NsInfo],
+    in_scope: &BTreeSet<NsKey>,
+    server: &hacivat_meta::ServerFacts,
+) -> Vec<&'a NsInfo> {
+    let ident = &server.ident;
+    let key = |s: &str| {
+        hacivat_meta::name::match_key(ident.dialect, ident, s, true, NameClass::Schema).ok()
+    };
+    let names: Vec<_> = crate::minicat::system_schemas(server.dbms)
+        .iter()
+        .filter_map(|n| key(n))
+        .collect();
     let dbs: HashSet<&Name> = in_scope
         .iter()
         .filter(|k| k.kind == NsKind::Schema && k.path.len() == 2)
@@ -351,12 +365,27 @@ fn live_system_keys(infos: &[NsInfo], in_scope: &BTreeSet<NsKey>, dbms: DbmsKind
         .iter()
         .filter(|i| i.system && i.key.kind == NsKind::Schema)
         .filter(|i| match i.key.path.as_slice() {
-            [db, s] => dbs.contains(db) && names.contains(&&**s),
-            [s] => names.iter().any(|n| n.eq_ignore_ascii_case(s)),
+            [db, s] => dbs.contains(db) && key(s).is_some_and(|k| names.contains(&k)),
+            [s] => key(s).is_some_and(|k| names.contains(&k)),
             _ => false,
         })
-        .map(|i| i.key.clone())
         .collect()
+}
+
+/// Review I-2 and m-1: a live system namespace is read by the system sections (`40-system`,
+/// R-M4-44, plan Task 16) at `Names`, whatever an override of its database says; a fragment
+/// there becomes that pass (a user-mode fragment would replace system objects by unflagged
+/// ones).
+fn live_system_work(work: &mut Work) {
+    let ns = match work {
+        Work::Pass { ns, .. } | Work::Fragment { ns, .. } => ns.clone(),
+        _ => return,
+    };
+    *work = Work::Pass {
+        ns,
+        mode: Mode::System,
+        level: Level::Names,
+    };
 }
 // ## m4-t30-gates
 
@@ -839,6 +868,11 @@ impl Actor {
             job.resolve(Err(IntroError::Cancelled));
             return;
         }
+        // ## m4-t30-gates (named exception in Task 15's file; T30 review I-2, m-1)
+        if self.live_system && job.work.ns().is_some_and(|ns| self.system_ns.contains(ns)) {
+            live_system_work(&mut job.work);
+        }
+        // ## m4-t30-gates
         let prev = job
             .work
             .ns()
@@ -1506,8 +1540,15 @@ impl Actor {
         // shipped snapshot for the server's version, the snapshot's system schemas of every
         // database the scope reads are in scope too, read live like any other namespace.
         if self.live_system {
-            let extra = live_system_keys(&infos, &in_scope, self.catalog.current().server.dbms);
-            in_scope.extend(extra);
+            let server = self.catalog.current().server.clone();
+            let extra = live_system_keys(&infos, &in_scope, &server);
+            // Review I-1: the user's `!` clauses still remove them.
+            in_scope.extend(
+                extra
+                    .into_iter()
+                    .filter(|i| !self.scope.excludes(i, &self.current))
+                    .map(|i| i.key.clone()),
+            );
         }
         // ## m4-t30-gates
         self.current_ns = self.current_only.as_ref().and_then(|p| {
