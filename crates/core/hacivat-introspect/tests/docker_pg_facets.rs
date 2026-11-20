@@ -11,6 +11,9 @@
 //!
 //! Run: `<main>/target/docker/run-docker-tests.sh --set full -p hacivat-introspect --test
 //! docker_pg_facets` (PR set: pg17 only).
+// ## m4-t33a-hygiene (named exception): the modules this file uses exist only with the
+// `session` feature, so `--no-default-features --tests` builds (T16b/T17 carry).
+#![cfg(feature = "session")]
 
 mod common;
 

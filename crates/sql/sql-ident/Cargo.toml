@@ -13,9 +13,8 @@ description = "SQL identifiers: ASCII-only folding, comparison and qualified nam
 sql-dialect.workspace = true
 sql-text.workspace = true
 smallvec.workspace = true
-# ## m4-t01a-manifests: held for Task 17's adoption if its probe shows MySQL folds column names
-# beyond ASCII (R-M4-41); unused otherwise and removed at the M4 gate (a controller-listed edit).
-icu_casemap.workspace = true
+# ## m4-t33a-hygiene: `icu_casemap` (held by Task 1a for R-M4-41) was never used here: Task 17b
+# pinned the MySQL/MariaDB column folds as tables, so it is removed (plan Task 33 step 1).
 
 [lints]
 workspace = true

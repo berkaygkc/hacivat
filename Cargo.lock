@@ -8487,7 +8487,6 @@ dependencies = [
 name = "sql-ident"
 version = "0.0.0"
 dependencies = [
- "icu_casemap",
  "smallvec",
  "sql-dialect",
  "sql-text",

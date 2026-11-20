@@ -1,6 +1,9 @@
 // ## m4-t18-sqlite (fix round 1): the opus review's hostile tests (`task-m4-18-review-hostile.rs`),
 // committed as written except where a test asserted a finding: H1 (I-1), H2 (I-2), H3 (I-3,
 // ruling R-W3-10) and H7 (m1) now assert the fixes, and the calls take R-W3-2's filter.
+// ## m4-t33a-hygiene (named exception): the modules this file uses exist only with the
+// `session` feature, so `--no-default-features --tests` builds (T16b/T17 carry).
+#![cfg(feature = "session")]
 #![allow(dead_code, unused_imports)]
 #![allow(
     clippy::result_large_err,

@@ -381,6 +381,15 @@ impl IntroHandle {
     }
 
     /// Resolves once the engine has published the cached namespaces (on start).
+    ///
+    /// ## m4-t33a-hygiene (fix round 1, review M4)
+    /// It is also an actor-order barrier, and tests rely on that: the engine's loop answers it
+    /// in its own step, after every command, timer and validation step handled before it, and
+    /// after that step's `pump` and progress publish. A step that was already under way when
+    /// it was sent (a validation round that has asked `user_in_transaction`) has queued and
+    /// started its work, and `progress` shows it, by the time it resolves. Never answer it
+    /// outside the actor (from a cached generation on the handle, say): that would break the
+    /// barrier.
     pub fn ready(&self) -> RefreshTicket {
         self.request(scheduler::Request::Ready, Priority::User)
     }

@@ -268,6 +268,9 @@ async fn h5_keep_cached_survives_the_next_validation_round() {
             r.meta.tx_checks.load(std::sync::atomic::Ordering::SeqCst) > before
         }))
         .await;
+        // ## m4-t33a-hygiene (named exception): the engine asks while it still queues the
+        // round's checks; `ready()` is answered after that step (as `freshness.rs`'s `round`).
+        bounded(r.handle.ready()).await.unwrap();
         idle(&r.handle).await;
     };
     drop_range(0, 12);
@@ -363,6 +366,8 @@ async fn h7_keep_cached_does_not_freeze_the_namespace() {
             r.meta.tx_checks.load(SeqCst) > before
         }))
         .await;
+        // ## m4-t33a-hygiene (named exception): the same barrier as above.
+        bounded(r.handle.ready()).await.unwrap();
         idle(&r.handle).await;
     };
     let mut events = r.handle.events();

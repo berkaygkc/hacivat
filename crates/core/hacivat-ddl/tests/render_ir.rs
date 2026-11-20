@@ -1239,3 +1239,69 @@ fn pg_refuses_grant_and_owner_where_the_statement_does_not_exist() {
         "COMMENT ON EXTENSION pg_trgm IS 'trigrams';\n"
     );
 }
+
+// ## m4-t33a-hygiene (T16b review m-1 carry to T19's renderer)
+/// PostgreSQL's role grammar reads `public` as PUBLIC and refuses `none`, quoted or not
+/// (case-sensitively, after the lexer's folding), so a role of that name cannot be named in
+/// `GRANT … TO` or `OWNER TO`: the renderer refuses it rather than grant to everyone. The
+/// introspector already leaves such grants out (`KEYWORD_ROLE_NAMES`); this is the
+/// renderer's own half. Other case spellings are ordinary roles and quoted; the reserved
+/// role keywords (`current_user`, …) are quoted, so they name the role, never the keyword.
+#[test]
+fn pg_role_names_the_role_grammar_reads_as_keywords_are_refused() {
+    let grant = |grantee: &str| {
+        DdlOp::Grant(GrantDef {
+            kind: ObjectKind::Table,
+            object: qn(&["app", "t"]),
+            sig: None,
+            privileges: names(&["SELECT"]),
+            columns: Vec::new(),
+            grantee: n(grantee),
+            grantable: false,
+        })
+    };
+    let owner = |role: &str| DdlOp::Owner {
+        kind: ObjectKind::Table,
+        name: qn(&["app", "t"]),
+        sig: None,
+        owner: n(role),
+    };
+    let pg = ctx_with(DialectId::Postgres, GenOptions::default());
+    for role in ["public", "none"] {
+        for op in [grant(role), owner(role)] {
+            assert!(
+                matches!(
+                    render_text(std::slice::from_ref(&op), &pg),
+                    Err(RenderError::Invalid(_))
+                ),
+                "{role}: {}",
+                op.variant()
+            );
+        }
+    }
+    // Fix round 1 (review N2): owners come from `relowner`, never from the grant sentinel, so
+    // an owner `PUBLIC` is a role of that upper-case name. Quoted, PostgreSQL reads it as an
+    // identifier that is not `public`: correct DDL for that role.
+    assert_eq!(
+        render_pg(&owner("PUBLIC")),
+        "ALTER TABLE app.t OWNER TO \"PUBLIC\";\n"
+    );
+    // The grant's `PUBLIC` stays the keyword (the facet's sentinel).
+    assert_eq!(
+        render_pg(&grant("PUBLIC")),
+        "GRANT SELECT ON TABLE app.t TO PUBLIC;\n"
+    );
+    assert_eq!(
+        render_pg(&grant("Public")),
+        "GRANT SELECT ON TABLE app.t TO \"Public\";\n"
+    );
+    assert_eq!(
+        render_pg(&grant("current_user")),
+        "GRANT SELECT ON TABLE app.t TO \"current_user\";\n"
+    );
+    assert_eq!(
+        render_pg(&owner("session_user")),
+        "ALTER TABLE app.t OWNER TO \"session_user\";\n"
+    );
+}
+// ## m4-t33a-hygiene

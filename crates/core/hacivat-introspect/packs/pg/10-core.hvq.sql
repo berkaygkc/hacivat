@@ -70,7 +70,7 @@ WHERE n.oid = :ns::pg_catalog.oid
 
 -- Every object of the namespace by tag: rel (relation, sub = relkind), seq, idx (parent =
 -- table), con (parent = table, sub = contype), trg (parent = table), fn (sub = prokind),
--- typ (sub = typtype ":" the count of its domain constraints).
+-- typ (sub = typtype, a colon, then the count of its domain constraints).
 --- name: ListExistent ---
 --- returns: tag text, oid u32, parent text, name text, sub text ---
 SELECT 'rel' AS tag, c.oid AS oid, NULL::text AS parent, c.relname::text AS name, c.relkind::text AS sub
@@ -112,8 +112,8 @@ WHERE t.typnamespace = :ns::pg_catalog.oid AND t.typtype IN ('b', 'c', 'd', 'e',
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type e WHERE e.typarray = t.oid)
   AND (t.typtype <> 'c' OR EXISTS (SELECT 1 FROM pg_catalog.pg_class r WHERE r.oid = t.typrelid AND r.relkind = 'c'))
 
--- The (class tag, objoid, objsubid) key of every pg_description row of the namespace's
--- objects. COMMENT ... IS NULL deletes the row (finding 3): only this existence check sees it.
+-- The (class tag, objoid, objsubid) key of every pg_description row of the objects of the
+-- namespace. COMMENT ... IS NULL deletes the row (finding 3): only this existence check sees it.
 -- Tags: c pg_class (relation, column by objsubid, index, sequence), k constraint, t trigger,
 -- p routine, y type, n the schema.
 --- name: ListExistentComments ---
@@ -142,11 +142,11 @@ WHERE (d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
 
 -- (facet, owner oid) for every catalog row of the namespace written at or after the
 -- watermark (the verified per-DDL matrix, ver/01 #pg-xmin, PG spike section 4). Facets: rel
--- (the relation's own row, view rule, inheritance, partition key), columns (pg_attribute,
+-- (the own row of the relation, view rule, inheritance, partition key), columns (pg_attribute,
 -- pg_attrdef), indexes, constraints, triggers, comments (relation and column comments),
 -- sequence, routine, type (pg_type, pg_enum, domain constraints, pg_range, a composite
--- type's class row and attributes, comments) and schema. A comment row goes to its owner's
--- facet.
+-- type: its class row and attributes, comments) and schema. A comment row goes to the facet
+-- of its owner.
 --- name: ChangedParents ---
 --- returns: facet text, oid u32 ---
 WITH rels AS MATERIALIZED (
@@ -242,14 +242,14 @@ SELECT DISTINCT y.f AS facet, y.o AS oid FROM (
 ) AS y
 
 -- The dependency half of the change query (finding 4, R-M4-48): deparsed text names other
--- objects, whose renames leave the dependent's own rows untouched. Every young pg_class,
+-- objects, whose renames leave the own rows of the dependent untouched. Every young pg_class,
 -- pg_attribute, pg_type or pg_proc row of the whole database is a source (and, for renames of
 -- an enum value, a collation, an operator or an operator class, young pg_enum, pg_collation,
--- pg_operator and pg_opclass rows: review m-1), and the
--- namespace's objects that depend on a source through one pg_depend hop (deptype not e, x,
--- p) are re-read. A young pg_namespace row of another schema whose relations, types or
--- routines the namespace's objects (relations, routines, types, constraints, triggers, column
--- defaults, view rules) depend on is reported as schema-rename (a two-hop change, PG spike
+-- pg_operator and pg_opclass rows: review m-1), and the objects of the namespace that depend
+-- on a source through one pg_depend hop (deptype not e, x, p) are re-read. A young
+-- pg_namespace row of another schema whose relations, types or routines the objects of the
+-- namespace (relations, routines, types, constraints, triggers, column defaults, view rules)
+-- depend on is reported as schema-rename (a two-hop change, PG spike
 -- section 7 Q3): the pass then runs full.
 -- m4-t22-state (Task 22 fix round 1 I-1, a named exception in the T16 pack): the renamed
 -- schema may also hold a referenced collation, operator or operator class (their deparsed
@@ -411,7 +411,7 @@ ORDER BY a.attrelid, a.attnum
 
 -- One row per index: keys as ordered arrays (HV-INTRO-13), expression keys deparsed only for
 -- their slots, operator classes only when not the default, collations only when they differ
--- from the column's.
+-- from the collation of the column.
 --- name: RetrieveIndexes ---
 --- returns: relid u32, oid u32, name text, method text, is_unique bool, is_primary bool, is_exclusion bool, immediate bool, valid bool, nulls_not_distinct bool, nkey i16, keys text, key_options text, key_names text, exprs text, opclasses text, collations text, predicate text, definition text, comment text ---
 SELECT i.indrelid AS relid,
@@ -472,7 +472,7 @@ WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm',
 --# end
 ORDER BY i.indrelid, i.indexrelid
 
--- Table constraints, PostgreSQL 18's catalogued NOT NULL constraints (contype n) included.
+-- Table constraints, the catalogued NOT NULL constraints of PostgreSQL 18 (contype n) included.
 --- name: RetrieveConstraints ---
 --- returns: relid u32, oid u32, name text, contype text, is_deferrable bool, is_deferred bool, is_validated bool, is_enforced bool, is_local bool, no_inherit bool, parent_oid u32, conkey text, key_names text, index_oid u32, index_name text, ref_oid u32, ref_schema text, ref_name text, ref_key text, ref_names text, on_update text, on_delete text, match_type text, definition text, check_expr text, excl_ops text, comment text ---
 SELECT k.conrelid AS relid,
@@ -708,9 +708,9 @@ WHERE d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
 ORDER BY d.objoid, d.objsubid
 
 -- The no-write canary (ver/01 #pg-canary), run just before COMMIT: true while this
--- transaction has no XID. The backend's own pg_stat_activity row (backend_xid, read from the
--- process's state when the row is read) carries it: Task 5's token guard refuses every
--- pg_current_xact_id* and txid_current* name, the _if_assigned forms included.
+-- transaction has no XID. The own pg_stat_activity row of the backend (backend_xid, read from
+-- the state of the process when the row is read) carries it: the token guard of Task 5
+-- refuses every pg_current_xact_id* and txid_current* name, the _if_assigned forms included.
 --- name: Canary ---
 --- returns: no_xid bool ---
 SELECT a.backend_xid IS NULL AS no_xid
