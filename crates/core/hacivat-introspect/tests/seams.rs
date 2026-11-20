@@ -276,12 +276,60 @@ async fn stub_stamps_and_facet_not_implemented() {
                 intro.identity(&mut c).await,
                 Err(IntroError::Meta(_))
             ));
-            for kind in [FacetKind::Grants, FacetKind::Dependencies] {
+            // ## m4-t16b-pg-facets (named exception): the facets are real since Task 16b. A
+            // key with an oid reaches the server, so an offline connection fails the read
+            // (nothing is answered); keys without an oid select nothing (no name reaches the
+            // server) and answer no key; `Sources` is a level on PostgreSQL, not a facet read.
+            let mut with_oid = keys[0].clone();
+            with_oid.server_id = Some(hacivat_meta::ServerId::Oid(16_384));
+            for kind in [
+                FacetKind::Grants,
+                FacetKind::Dependencies,
+                FacetKind::Statistics,
+            ] {
                 assert_eq!(
-                    intro.facet(&mut c, &n, &keys, kind).await,
-                    Err(IntroError::NotImplemented)
+                    intro
+                        .facet(&mut c, &n, std::slice::from_ref(&with_oid), kind)
+                        .await,
+                    Err(IntroError::Meta(
+                        hacivat_session::meta::MetaError::Unavailable
+                    )),
+                    "{kind:?}"
+                );
+                let none = intro.facet(&mut c, &n, &keys, kind).await;
+                assert!(
+                    matches!(
+                        &none,
+                        Ok(hacivat_introspect::introspector::FacetRows::Grants(v)) if v.is_empty()
+                    ) || matches!(
+                        &none,
+                        Ok(hacivat_introspect::introspector::FacetRows::Dependencies(v)) if v.is_empty()
+                    ) || matches!(
+                        &none,
+                        Ok(hacivat_introspect::introspector::FacetRows::Statistics(v)) if v.is_empty()
+                    ),
+                    "{kind:?}: {none:?}"
                 );
             }
+            assert_eq!(
+                intro.facet(&mut c, &n, &keys, FacetKind::Sources).await,
+                Err(IntroError::NotImplemented)
+            );
+            // The server namespace (roles) reaches the server too.
+            assert!(matches!(
+                intro
+                    .introspect(
+                        &mut c,
+                        &hacivat_meta::NsKey::server(),
+                        Mode::Full,
+                        Level::Names,
+                        &all,
+                        None,
+                        &cancel
+                    )
+                    .await,
+                Err(IntroError::Meta(_))
+            ));
             continue;
         }
         assert_eq!(

@@ -601,7 +601,8 @@ mod tests {
                 assert!(!text.is_empty(), "{d:?} {name}");
                 // ## m4-t16-pg (named exception): Task 16 wrote the PostgreSQL core, state and
                 // system files; `20-facets` stays a header until Task 16b.
-                if d == DialectId::Postgres && *name != "20-facets" {
+                // ## m4-t16b-pg-facets (named exception): Task 16b wrote `20-facets`.
+                if d == DialectId::Postgres {
                     continue;
                 }
                 assert!(

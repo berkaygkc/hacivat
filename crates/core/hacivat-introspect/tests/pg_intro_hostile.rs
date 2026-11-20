@@ -90,6 +90,13 @@ fn h2_every_called_function_is_a_known_pure_read() {
         "pg_backend_pid",
         "count",
         "has_database_privilege",
+        // ## m4-t16b-pg-facets (named exception): the facet sections' reads. `aclexplode`
+        // returns an ACL's items as rows, `acldefault` builds an object type's default ACL
+        // from its owner, `pg_identify_object` names a catalog object: no write, no lock, no
+        // XID (PostgreSQL documentation, aclitem and object information functions).
+        "aclexplode",
+        "acldefault",
+        "pg_identify_object",
     ];
     const SYNTAX: &[&str] = &[
         "in",

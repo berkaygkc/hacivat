@@ -347,8 +347,11 @@ mod tests {
             // ## m4-t16-pg (named exception): PostgreSQL is incremental since Task 16.
             // ## m4-t18-sqlite (named exception): SQLite's introspector is written (Task 18).
             match dbms {
+                // ## m4-t16b-pg-facets (named exception): PostgreSQL reads grants,
+                // dependencies and statistics since Task 16b.
                 DbmsKind::Postgres => {
-                    assert!(caps.incremental && caps.facets.is_empty(), "{dbms:?}");
+                    assert!(caps.incremental, "{dbms:?}");
+                    assert_eq!(caps.facets, crate::pg::facets::FACETS.to_vec(), "{dbms:?}");
                 }
                 DbmsKind::Sqlite => {}
                 _ => assert!(!caps.incremental && caps.facets.is_empty(), "{dbms:?}"),

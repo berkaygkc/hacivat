@@ -1813,3 +1813,73 @@ the refresh decision, rebuilt on the pack and the model.
   task, not the blocking pool (user actions and connects, O(arena size)) → T22 (which owns
   the identity behaviour) or a later engine touch; the `Partial` stale mark (m12) stays as
   noted; gating the fakes is R-W3-7 (T33).
+
+## m4-t16b — PostgreSQL facets
+
+Task 16b (R-M4-30). `packs/pg/20-facets.hvq.sql` (written from the PostgreSQL documentation:
+the system catalogs, the aclitem functions `aclexplode`/`acldefault`, `pg_identify_object`)
+and `pg/facets.rs` fill `Introspector::facet` and the `NsKind::Server` namespace. Every read is
+one Task 16 pass (`Identity`, the sections, the canary, `COMMIT`) on a read-only metadata
+connection with the pinned `search_path`; objects are selected by oid inside the namespace
+(`:ns` plus the chunked `:[oids]` list), no name reaches the server, and every rendered
+section passes Task 5's guard in a pure test (R-W3-9).
+
+- **What `facet` answers.** `FacetRows` lists only the keys read completely; a key it leaves
+  out stays `NotLoaded` (the DDL producer then says `ddl-grants-not-loaded`, never a script
+  that silently lacks grants). Left out: a key that is not an object of the namespace the
+  facet applies to, or has no oid; a key whose oid now names an object with another name or
+  kind (a rename, or a reused oid); and, for grants, an object whose ACL the GRANT-only
+  `GrantsFacet` cannot carry (below). The engine (Task 15b) must treat an absent key as "not
+  loaded", never as "no grants".
+- **Grants are never parsed from ACL text.** `aclexplode` returns each ACL item as a row
+  (grantee oid, privilege keyword, grant option); the grantee is named by its `pg_roles` row,
+  `0` is `PUBLIC`. A NULL ACL is the default privileges (`acldefault`). The facet holds what
+  the ACL **adds to the defaults** (a dump's rule): the owner's own privileges and `PUBLIC`'s
+  default `EXECUTE`/`USAGE` are not entries (`CREATE` recreates them); grantors are not kept
+  (one entry per grantee, privilege and column set; with grant option when any grantor gave
+  it); column privileges (`attacl`) are entries of the table's facet, columns in `attnum`
+  order. **Deviation from "decoded client-side":** the server explodes the ACL; the client
+  diffs, groups and names. The probe "an ACL parsed by splitting on characters a quoted role
+  name may contain" cannot apply.
+- **Incomplete objects are left out** (`facets::grants` reports them; `read` drops them):
+  a default the ACL **revokes** (`REVOKE EXECUTE … FROM PUBLIC`, an owner who revoked a
+  privilege of their own: re-granting the facet's entries would hand the default back, and
+  `GrantsFacet` has no revocation), a grantee oid without a role row, a role named exactly
+  `PUBLIC` (T19's renderer writes that grantee as the keyword, granting everyone), a
+  privilege that is not an upper-case keyword.
+- **Dependencies** are the `pg_depend` rows (`deptype` not `e`, `x`, `p`) of the object and
+  its parts: a relation's view rules (`pg_rewrite`), constraints, column defaults, user
+  triggers and indexes; a type's domain constraints and a composite type's relation row.
+  Each referenced object is named by its own catalog (an array type by its element, a table
+  row type by its table, an index or column under its table, a constraint under its table or
+  domain) or, for the other catalogs, by `pg_identify_object` (collation, operator, language,
+  extension, …; unmapped types are `ObjectKind::Unknown`). References back to the object or
+  its own parts are dropped; one `Ref` per object, sorted by kind code and path;
+  `DepsKind::Catalog`. A referenced object without a name was dropped during the read
+  (`CatalogRace`, retried once by the engine). Built-in (pinned) objects are never recorded by
+  the server, so they never appear.
+- **Statistics** re-read `reltuples` on demand (tables, materialized views, foreign tables):
+  VACUUM/ANALYZE update it in place, so an incremental pass never sees it move (Task 16
+  review m-5).
+- **Server namespace:** `ListRoles` (`pg_roles`, every role) at `Names`, a full result whose
+  `Role` existence set is complete; roles keep their oid. Tablespaces are not read in M4.
+- **Refused reads** (`42501`, e.g. `REVOKE SELECT ON pg_catalog.pg_roles FROM PUBLIC`) fail
+  the whole read with `Permission` (`Role` for the role list), never an empty answer. The
+  grants sections name grantees through `pg_roles`, so they fail with it; the dependencies
+  still answer. The engine (Task 15b) publishes a refused facet as `Partial`/`Failed`.
+- **Invalidation:** a `GRANT` rewrites the object's own row (a column `GRANT` its
+  `pg_attribute` row, which Task 16 cascades to the relation; `GRANT … ON ALL TABLES IN
+  SCHEMA` every table's), so the next pass re-reads the object. `facets::invalidated(ns,
+  result)` names every object a pass result re-read; their loaded `Grants` and
+  `Dependencies` (`INVALIDATED_FACETS`) are stale, and Task 15b drops them so the next
+  `load_facet` re-reads. Over-invalidation (a relation re-emitted for an index change, every
+  object after a full pass) costs one re-read; never a stale fact. A role **rename** moves no
+  namespace row: loaded grantee names stay old until the facet is re-read (carried to T22).
+- **Not joinable.** No facet section is `joinable`: M7 re-grants from a facet loaded before
+  its apply and checks drift by stamps and fragments (`plan-m7.md`), and `aclexplode`,
+  `acldefault`, `pg_identify_object` are not on T4's joinable allowlist. A joined grants read,
+  if M7 needs one, is a new section in its own pack file.
+- **Named exceptions** (fenced `m4-t16b-pg-facets`): `pg/mod.rs` capabilities list
+  `facets::FACETS` (`Grants`, `Dependencies`, `Statistics`); the stub tests in
+  `introspector.rs`, `pack/mod.rs` and `tests/seams.rs` expect the real facets; the T16
+  review's hostile H2 (`tests/pg_intro_hostile.rs`) lists the three new pure read functions.
