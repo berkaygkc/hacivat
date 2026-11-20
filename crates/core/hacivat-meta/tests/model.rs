@@ -870,10 +870,9 @@ fn mysql_non_ascii_cased_column_is_server_dependent_until_pinned() {
     let t = find_table(&n, "t");
     let ctx = my_ctx(0);
     let lookup_column = |probe: &str| n.match_child(t, ObjectKind::Column, probe, false, &ctx);
-    assert!(matches!(
-        lookup_column("äb"),
-        Lookup::Unknown(UnknownReason::ServerDependent)
-    ));
+    // ## m4-t17b-mysql-facets (named exception): `Äb` = `äb` is pinned by Task 17's probe
+    // (CI 44649745390), so this probe is found now; `ab` (an accent) is still not pinned.
+    assert!(matches!(lookup_column("äb"), Lookup::Found(i) if i == t + 1));
     assert!(matches!(lookup_column("Äb"), Lookup::Found(i) if i == t + 1));
     assert!(matches!(lookup_column("PLAIN"), Lookup::Found(i) if i == t + 2));
     // The stored `Äb` makes an ASCII miss uncertain: never `Missing`.

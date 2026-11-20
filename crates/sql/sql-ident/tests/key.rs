@@ -498,3 +498,108 @@ fn non_ascii_cased_letters_are_detected_without_case_mapping() {
         assert!(!has_non_ascii_cased(uncased), "{uncased}");
     }
 }
+
+// ## m4-t17-mysql-fold (M4 Task 17b): one check per pair Task 17's probe recorded on CI
+// 44649745390 (`column_fold` lines of `t17-docker-facts-44649745390.txt`; mysql80 and mysql84
+// answered alike). `pinned_column_eq` is `true` exactly where the server found the column.
+
+/// `(target, stored, probe, server found it)`.
+const RECORDED: [(&str, &str, &str, bool); 36] = [
+    ("mysql", "Äb", "äb", true),
+    ("mysql", "Äb", "ıd", false),
+    ("mysql", "Äb", "Id", false),
+    ("mysql", "Äb", "ID", false),
+    ("mysql", "Äb", "id", false),
+    ("mysql", "Äb", "İd", false),
+    ("mysql", "ıd", "äb", false),
+    ("mysql", "ıd", "Id", false),
+    ("mysql", "ıd", "ID", false),
+    ("mysql", "ıd", "ıd", true),
+    ("mysql", "ıd", "id", false),
+    ("mysql", "ıd", "İd", false),
+    ("mysql", "İd", "äb", false),
+    ("mysql", "İd", "ıd", false),
+    ("mysql", "İd", "Id", true),
+    ("mysql", "İd", "ID", true),
+    ("mysql", "İd", "id", true),
+    ("mysql", "İd", "İd", true),
+    ("mariadb", "Äb", "äb", true),
+    ("mariadb", "Äb", "ıd", false),
+    ("mariadb", "Äb", "Id", false),
+    ("mariadb", "Äb", "ID", false),
+    ("mariadb", "Äb", "id", false),
+    ("mariadb", "Äb", "İd", false),
+    ("mariadb", "ıd", "äb", false),
+    ("mariadb", "ıd", "Id", false),
+    ("mariadb", "ıd", "ID", false),
+    ("mariadb", "ıd", "ıd", true),
+    ("mariadb", "ıd", "id", false),
+    ("mariadb", "ıd", "İd", false),
+    ("mariadb", "İd", "äb", false),
+    ("mariadb", "İd", "ıd", false),
+    ("mariadb", "İd", "Id", false),
+    ("mariadb", "İd", "ID", false),
+    ("mariadb", "İd", "id", false),
+    ("mariadb", "İd", "İd", true),
+];
+
+fn flavor(target: &str) -> DialectId {
+    if target == "mariadb" {
+        DialectId::MariaDb
+    } else {
+        DialectId::MySql
+    }
+}
+
+#[test]
+fn every_recorded_column_pair_is_pinned_as_the_server_answered() {
+    use sql_ident::key::pinned_column_eq;
+    for (target, stored, probe, found) in RECORDED {
+        let d = flavor(target);
+        let ctx = IdentCtx::new(d);
+        assert_eq!(
+            pinned_column_eq(d, &ctx, stored, probe),
+            found,
+            "{target}: {stored} vs {probe}"
+        );
+        // Symmetric: the server compares the two texts, whichever is stored.
+        assert_eq!(
+            pinned_column_eq(d, &ctx, probe, stored),
+            found,
+            "{target}: {probe} vs {stored}"
+        );
+    }
+}
+
+#[test]
+fn the_pinned_column_rule_claims_nothing_beyond_the_probe() {
+    use sql_ident::key::pinned_column_eq;
+    for d in [DialectId::MySql, DialectId::MariaDb] {
+        let ctx = IdentCtx::new(d);
+        // ASCII case on top of the probed letters.
+        assert!(pinned_column_eq(d, &ctx, "ÄB_x", "äb_X"));
+        // Unprobed letters, accents and expansions decide nothing.
+        for (a, b) in [
+            ("Éa", "éa"),
+            ("ab", "äb"),
+            ("ß", "ss"),
+            ("Öz", "öz"),
+            ("ǅ", "ǆ"),
+        ] {
+            assert!(!pinned_column_eq(d, &ctx, a, b), "{d:?}: {a} vs {b}");
+        }
+        // Not under another lower_case_table_names (the probe ran at 0).
+        let lctn1 = IdentCtx {
+            lower_case_table_names: 1,
+            ..IdentCtx::new(d)
+        };
+        assert!(!pinned_column_eq(d, &lctn1, "Äb", "äb"));
+    }
+    // Never another dialect; never the Turkish rule (`I` to dotless `ı`).
+    let pg = IdentCtx::new(DialectId::Postgres);
+    assert!(!pinned_column_eq(DialectId::Postgres, &pg, "Äb", "äb"));
+    let my = IdentCtx::new(DialectId::MySql);
+    assert!(!pinned_column_eq(DialectId::MySql, &my, "Id", "ıd"));
+    assert!(pinned_column_eq(DialectId::MySql, &my, "I", "i"));
+}
+// ## m4-t17-mysql-fold

@@ -30,8 +30,10 @@ use crate::name::{
     DialectId, FoldRule, IdentCtx, IdentKey, Name, NameClass, has_invisible_chars,
     has_non_ascii_cased, lossy_name, match_key,
 };
+// ## m4-t17b-mysql-facets (named exception): the pinned MySQL/MariaDB column comparison.
 use crate::props::Props;
 use crate::view::{Lookup, MissingReason, UnknownReason};
+use sql_ident::key::pinned_column_eq;
 
 bitflags! {
     /// Per-object flags (alg/02 HV-MODEL-01 `Obj.flags`). Bits are part of the cache format:
@@ -790,6 +792,15 @@ impl NamespaceSnapshot {
             return Lookup::Unknown(UnknownReason::ServerDependent);
         }
         let rule = self.class_rule(class);
+        // ## m4-t17b-mysql-facets (named exception; R-M4-41 pinned by Task 17's probe): a MySQL
+        // or MariaDB column whose name the server certainly compares equal to the probe (the
+        // probed letters plus ASCII case, `sql_ident::key::pinned_column_eq`) is found; a
+        // miss stays `ServerDependent` wherever it did before.
+        let pinned = |name: &str| {
+            class == NameClass::Column
+                && mysql_family(self.dbms)
+                && pinned_column_eq(ctx.dialect, ctx, name, probe)
+        };
         match match_key(ctx.dialect, ctx, probe, quoted, class) {
             Ok(key) => {
                 let unpinned = self.unpinned(class);
@@ -801,7 +812,13 @@ impl NamespaceSnapshot {
                     uncertain |= unpinned && has_non_ascii_cased(&o.name);
                 }
                 if uncertain {
-                    Lookup::Unknown(UnknownReason::ServerDependent)
+                    match self
+                        .children_of_kind(parent, kind)
+                        .find(|(_, o)| pinned(&o.name))
+                    {
+                        Some((i, _)) => Lookup::Found(i),
+                        None => Lookup::Unknown(UnknownReason::ServerDependent),
+                    }
                 } else {
                     Lookup::Missing(MissingReason::NotFound)
                 }
@@ -811,6 +828,10 @@ impl NamespaceSnapshot {
                     .then(|| {
                         self.children_of_kind(parent, kind)
                             .find(|(_, o)| *o.name == *probe)
+                            .or_else(|| {
+                                self.children_of_kind(parent, kind)
+                                    .find(|(_, o)| pinned(&o.name))
+                            })
                     })
                     .flatten();
                 match exact {
