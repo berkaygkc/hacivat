@@ -167,6 +167,9 @@ struct State {
     /// The filter text of every introspect and fragment call, in order.
     filters: Vec<String>,
     identity: Option<u128>,
+    // ## m4-t17-mysql (named exception; review I-2): what `server_facts` answers (`None`:
+    // the default `Ok(None)`).
+    facts: Option<Result<hacivat_meta::ServerFacts, IntroError>>,
     /// The metadata source whose last connection names the database a listing is for.
     meta: Option<Arc<FakeMetaSource>>,
     calls: Vec<FakeCall>,
@@ -289,6 +292,13 @@ impl FakeIntrospector {
     /// The server identity `identity` answers (`None`: `Unknown`). Default: a fixed one.
     pub fn set_identity(&self, fp: Option<u128>) {
         self.lock().identity = fp;
+    }
+
+    // ## m4-t17-mysql (named exception; review I-2)
+    /// What `server_facts` answers: `None` reads none (the default), `Some(Err(_))` a failed
+    /// read.
+    pub fn set_facts(&self, facts: Option<Result<hacivat_meta::ServerFacts, IntroError>>) {
+        self.lock().facts = facts;
     }
 
     /// The filter text every introspect and fragment call got, in order.
@@ -740,6 +750,14 @@ impl Introspector for FakeIntrospector {
                 None => ServerIdentity::Unknown,
             })
         })
+    }
+
+    // ## m4-t17-mysql (named exception; review I-2)
+    fn server_facts<'a>(
+        &'a self,
+        _c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<Option<hacivat_meta::ServerFacts>, IntroError>> {
+        Box::pin(async move { self.lock().facts.clone().transpose() })
     }
 
     fn capabilities(&self) -> IntroCaps {

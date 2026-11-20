@@ -295,9 +295,28 @@ async fn stub_stamps_and_facet_not_implemented() {
             }
             continue;
         }
-        assert_eq!(
-            intro.stamps(&mut c, &keys).await,
-            Err(IntroError::NotImplemented),
+        // ## m4-t17-mysql (named exception in Task 1c's file): the MySQL introspector is
+        // written; on an offline connection every read fails `Unavailable`, never a fact.
+        // Its facets stay Task 17b's stubs (checked below); its identity is `Unknown`.
+        let written = matches!(dbms, DbmsKind::MySql | DbmsKind::MariaDb);
+        let expected = |e: &Result<(), IntroError>| -> bool {
+            if written {
+                *e == Err(IntroError::Meta(
+                    hacivat_session::meta::MetaError::Unavailable,
+                ))
+            } else {
+                *e == Err(IntroError::NotImplemented)
+            }
+        };
+        // A MySQL namespace is `[schema]`.
+        let n_any = if written {
+            NsKey::schema(["public"])
+        } else {
+            n.clone()
+        };
+        // ## m4-t17-mysql
+        assert!(
+            expected(&intro.stamps(&mut c, &keys).await.map(drop)),
             "{dbms:?}"
         );
         for kind in [
@@ -312,10 +331,7 @@ async fn stub_stamps_and_facet_not_implemented() {
                 "{dbms:?} {kind:?}"
             );
         }
-        assert_eq!(
-            intro.list_namespaces(&mut c).await,
-            Err(IntroError::NotImplemented)
-        );
+        assert!(expected(&intro.list_namespaces(&mut c).await.map(drop)));
         // ## m4-t15-engine (named exception, ruling R-W3-2): the filter argument; and the
         // identity default is `Unknown` (R-W3-3).
         let all = hacivat_introspect::filter::parse_filter(
@@ -324,35 +340,32 @@ async fn stub_stamps_and_facet_not_implemented() {
             hacivat_introspect::filter::FilterRole::Introspect,
         )
         .expect("the empty filter");
-        assert!(matches!(
-            intro
+        assert!(expected(
+            &intro
                 .introspect(
                     &mut c,
-                    &n,
+                    &n_any,
                     Mode::Full,
                     Level::Structure,
                     &all,
                     None,
                     &cancel
                 )
-                .await,
-            Err(IntroError::NotImplemented)
+                .await
+                .map(drop)
         ));
-        assert!(matches!(
-            intro
-                .fragment(&mut c, &n, &keys, Level::Names, &all, &cancel)
-                .await,
-            Err(IntroError::NotImplemented)
+        assert!(expected(
+            &intro
+                .fragment(&mut c, &n_any, &keys, Level::Names, &all, &cancel)
+                .await
+                .map(drop)
         ));
         assert_eq!(
             intro.identity(&mut c).await,
             Ok(hacivat_introspect::introspector::ServerIdentity::Unknown)
         );
         // ## m4-t15-engine
-        assert_eq!(
-            intro.check_state(&mut c, &keys).await,
-            Err(IntroError::NotImplemented)
-        );
+        assert!(expected(&intro.check_state(&mut c, &keys).await.map(drop)));
     }
 }
 

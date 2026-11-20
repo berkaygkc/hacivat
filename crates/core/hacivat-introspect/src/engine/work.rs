@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hacivat_meta::merge::{self, MergeOutcome, MergePolicy, NamespaceResult};
 use hacivat_meta::name::FoldRule;
-use hacivat_meta::{Level, Name, NamespaceSnapshot, NsKey, NsKind, ObjectKey};
+use hacivat_meta::{Level, Name, NamespaceSnapshot, NsKey, NsKind, ObjectKey, ServerFacts};
 use hacivat_proto::DbmsKind;
 use hacivat_session::meta::{MetaConn, MetaError};
 use tokio::sync::broadcast;
@@ -22,7 +22,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::filters::Filters;
 use super::{CacheHandle, EngineEvent, EngineLimits, MetaSource};
-use crate::introspector::{IntroError, Introspector, ServerIdentity, Staleness};
+use crate::introspector::{
+    IntroError, Introspector, ProgressSink, ServerIdentity, Staleness, with_progress,
+};
 use crate::pack::Mode;
 use crate::scope::{CurrentCtx, NsInfo, ScopePattern};
 
@@ -64,6 +66,8 @@ pub(super) struct WorkerCtx {
     pub events: broadcast::Sender<EngineEvent>,
     /// The cache, for the server identity check of `on_connect` (R-W3-3).
     pub cache: Option<CacheHandle>,
+    // ## m4-t17-mysql (named exception; T15 carry m11): the progress a pass reports itself.
+    pub progress: Arc<tokio::sync::watch::Sender<super::Progress>>,
 }
 
 /// What a scope refresh needs besides the listing of the profile's own database.
@@ -73,6 +77,17 @@ pub(super) struct Listing {
     pub current: CurrentCtx,
     /// Read the server's identity too, and check it against the cache (R-W3-3).
     pub identity: bool,
+}
+
+// ## m4-t17-mysql (T15 carry m4, review I-2)
+/// What the scope refresh learned of the server's facts.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum FactsRead {
+    /// The introspector reads none (the catalog keeps its facts).
+    NotRead,
+    Read(Box<ServerFacts>),
+    /// The introspector reads them, and the read failed: the identifier rule is unknown.
+    Failed,
 }
 
 /// What the identity step found (R-W3-3).
@@ -130,7 +145,8 @@ pub(super) struct Merged {
 pub(super) enum Output {
     /// The listing, the identity, and the other databases that could not be listed (unknown:
     /// their schemas keep their states; review RR-2).
-    Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>),
+    // ## m4-t17-mysql (named exception; T15 carry m4): the server's facts, when read.
+    Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>, FactsRead),
     Merged(Box<Merged>),
     Staleness(Vec<ObjectKey>, Vec<Staleness>),
     Failed(IntroError),
@@ -191,11 +207,11 @@ async fn run_inner(ctx: &Arc<WorkerCtx>, spec: Spec, cancel: &CancellationToken)
                 }
             }
             Err(e) => return Output::Failed(e),
-            Ok(Read::Namespaces(infos, identity, others)) => {
+            Ok(Read::Namespaces(infos, identity, others, facts)) => {
                 // The first connection is closed: list the other databases one connection at
                 // a time (review RR-3).
                 let (infos, unlisted) = list_others(ctx, infos, others, cancel).await;
-                return Output::Namespaces(infos, identity, unlisted);
+                return Output::Namespaces(infos, identity, unlisted, facts);
             }
             Ok(Read::Staleness(keys, st)) => return Output::Staleness(keys, st),
             Ok(Read::Result(r)) => return merge_result(ctx, &spec, r).await,
@@ -223,8 +239,9 @@ async fn acquire(
 }
 
 enum Read {
-    /// The listing, the identity, and the other databases still to list.
-    Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>),
+    /// The listing, the identity, the other databases still to list, and the server's facts
+    /// (m4-t17-mysql).
+    Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>, FactsRead),
     Result(NamespaceResult),
     Staleness(Vec<ObjectKey>, Vec<Staleness>),
 }
@@ -237,9 +254,9 @@ async fn read(
 ) -> Result<Read, IntroError> {
     match &spec.work {
         Work::ScopeRefresh => list(ctx, spec, conn).await,
-        Work::Pass { ns, mode, level } => ctx
-            .intro
-            .introspect(
+        Work::Pass { ns, mode, level } => with_progress(
+            sink(ctx, ns),
+            ctx.intro.introspect(
                 conn,
                 ns,
                 *mode,
@@ -247,21 +264,23 @@ async fn read(
                 spec.filters.for_pass(ns, spec.system),
                 spec.prev.as_deref(),
                 cancel,
-            )
-            .await
-            .map(Read::Result),
-        Work::Fragment { ns, keys, level } => ctx
-            .intro
-            .fragment(
+            ),
+        )
+        .await
+        .map(Read::Result),
+        Work::Fragment { ns, keys, level } => with_progress(
+            sink(ctx, ns),
+            ctx.intro.fragment(
                 conn,
                 ns,
                 keys,
                 *level,
                 spec.filters.for_pass(ns, spec.system),
                 cancel,
-            )
-            .await
-            .map(Read::Result),
+            ),
+        )
+        .await
+        .map(Read::Result),
         Work::CheckState { keys } => {
             let st = ctx.intro.check_state(conn, keys).await?;
             if st.len() != keys.len() {
@@ -272,14 +291,44 @@ async fn read(
     }
 }
 
+// ## m4-t17-mysql (named exception; T15 carry m11)
+/// The sink of a pass over `ns`: the introspector's own phase and counts replace the batch
+/// count of `ns`'s entry in the engine's progress (the actor's next update writes the batch
+/// count back; the pass reports again as it goes).
+fn sink(ctx: &WorkerCtx, ns: &NsKey) -> ProgressSink {
+    let progress = ctx.progress.clone();
+    let ns = ns.clone();
+    ProgressSink::new(move |phase, done, total| {
+        progress.send_if_modified(|p| {
+            let Some(t) = p.tasks.iter_mut().find(|t| t.ns == ns) else {
+                return false;
+            };
+            let next = (phase, done, total);
+            if (t.phase, t.done, t.total) == next {
+                return false;
+            }
+            (t.phase, t.done, t.total) = next;
+            true
+        });
+    })
+}
+
 /// The scope refresh on the profile's own connection: its database's namespaces, on connect the
 /// server's identity checked against the cache (R-W3-3), and on PostgreSQL the other listed
 /// databases the scope may select (`pg_namespace` is per database; review I-2), which
 /// [`list_others`] reads after this connection is closed (review RR-3).
 async fn list(ctx: &WorkerCtx, spec: &Spec, conn: &mut MetaConn) -> Result<Read, IntroError> {
     let infos = ctx.intro.list_namespaces(conn).await?;
+    // ## m4-t17-mysql (T15 carry m4; review I-2): the facts of the server behind the
+    // connection. A failed read is reported as such: the scheduler then publishes facts whose
+    // `lower_case_table_names` is unknown, never the lctn-0 placeholder (a guess).
+    let facts = match ctx.intro.server_facts(conn).await {
+        Ok(Some(f)) => FactsRead::Read(Box::new(f)),
+        Ok(None) => FactsRead::NotRead,
+        Err(_) => FactsRead::Failed,
+    };
     let Some(listing) = &spec.listing else {
-        return Ok(Read::Namespaces(infos, None, Vec::new()));
+        return Ok(Read::Namespaces(infos, None, Vec::new(), facts));
     };
     let identity = if listing.identity {
         Some(identity(ctx, conn).await)
@@ -302,7 +351,7 @@ async fn list(ctx: &WorkerCtx, spec: &Spec, conn: &mut MetaConn) -> Result<Read,
         })
         .map(|i| i.key.path[0].clone())
         .collect();
-    Ok(Read::Namespaces(infos, identity, others))
+    Ok(Read::Namespaces(infos, identity, others, facts))
 }
 
 /// The schemas of each other database, each on its own connection, one at a time (the first
