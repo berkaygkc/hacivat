@@ -268,10 +268,15 @@ pub fn objects_complete(facts: &ServerFacts, sys: &SystemSnapshot) -> bool {
         && miss_is_fact(facts.dbms, &facts.version, &sys.server_version)
 }
 
-/// Ruling R-W5-7: whether the snapshot's setting list is the server's complete list: only for
-/// the exact release it was read from (patch releases add and remove settings on every
-/// engine).
+/// Ruling R-W5-7 (amended by RR-I-1): whether the snapshot's setting list is the server's
+/// complete list. PostgreSQL: only for the exact release it was read from (patch releases add
+/// and remove settings). MySQL and MariaDB: never, even at the exact release: plugin
+/// variables (`rpl_semi_sync_source_enabled`, `group_replication_group_name`,
+/// `audit_log_file`) exist only where the plugin is loaded, not on the snapshot image.
 pub fn settings_complete(dbms: DbmsKind, live_version: &str, snapshot_version: &str) -> bool {
+    if dbms != DbmsKind::Postgres {
+        return false;
+    }
     match (
         patch_parts(dbms, live_version),
         patch_parts(dbms, snapshot_version),
@@ -1124,7 +1129,13 @@ mod tests {
         assert!(!settings_complete(pg, "17.11", "17.12"));
         assert!(!settings_complete(pg, "17.13", "17.12"));
         let my = DbmsKind::MySql;
-        assert!(settings_complete(my, "8.4.13-log", "8.4.13"));
+        // RR-I-1: never on MySQL/MariaDB (plugin variables), even at the exact release.
+        assert!(!settings_complete(my, "8.4.13-log", "8.4.13"));
+        assert!(!settings_complete(
+            DbmsKind::MariaDb,
+            "10.11.19",
+            "10.11.19"
+        ));
         assert!(!settings_complete(my, "8.4.3", "8.4.13"));
         assert!(!settings_complete(my, "", "8.4.13"));
     }

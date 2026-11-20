@@ -2676,3 +2676,8 @@ and implements `sql_catalog::CatalogView` for it (HV-INTRO-16 consumer side; R-M
     introspection of unsupported versions (R-M4-6).
   - The review's hostile tests are `hacivat-meta/tests/overlay_hostile.rs` (H1 and H2
     tightened to `Found`).
+- **Fix round 2 (RR-I-1, amends R-W5-7).** On MySQL and MariaDB the snapshot's setting list is
+  never complete, even at its exact release: plugin variables (`rpl_semi_sync_source_enabled`,
+  `group_replication_group_name`, `audit_log_file`) exist only where the plugin is loaded, so
+  `settings()` is `Unknown` there and a `setting(name)` miss is `Unknown`, never `Missing`.
+  PostgreSQL keeps the exact-release rule. Probes: `hacivat-meta/tests/overlay_rr1_hostile.rs`.
