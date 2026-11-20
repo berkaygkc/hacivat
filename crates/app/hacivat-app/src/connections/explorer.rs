@@ -1230,6 +1230,21 @@ impl ExplorerView {
                 "explorer-filter-unloaded",
             ));
         }
+        // ## m4-t33b-carries (T14 carry, R-W2-13): the matches whose rows the filter did not
+        // open (past `REVEAL_HITS`) are counted, never silently left closed.
+        let more = result
+            .count
+            .saturating_sub(crate::explorer::adapter::REVEAL_HITS);
+        if more > 0 {
+            out.push(line(
+                crate::explorer::live::text(
+                    cx,
+                    "hv-explorer-filter-more",
+                    vec![("n", hacivat_l10n::ArgValue::Count(more as u64))],
+                ),
+                "explorer-filter-more",
+            ));
+        }
         out
     }
 

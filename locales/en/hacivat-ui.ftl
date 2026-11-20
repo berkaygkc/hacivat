@@ -4119,3 +4119,18 @@ hv-history-clear-damaged = The history file was damaged, so Hacivat set it aside
 #   $version (String) - the bundled catalog's server version, e.g. "17".
 #   $schemas (String) - the schema names the bundled catalog answers for, a list, e.g. "information_schema".
 hv-explorer-builtin-tip-mixed = Built-in catalog (version { $version }) for { $schemas }: shipped with Hacivat and read without a connection. The other built-in schemas were read from the server.
+# Surface 4 (Filter field). Under the field when more objects match than the filter opens (T14 carry, R-W2-13).
+# Variables:
+#   $n (Number) - how many matches the filter did not open, e.g. 50.
+hv-explorer-filter-more = { $n ->
+        [one] { $n } more match isn't opened. Open its group, or type more to narrow the filter.
+       *[other] { $n } more matches aren't opened. Open their groups, or type more to narrow the filter.
+    }
+# Surface 14 (Long introspection). The meta of a loaded schema row while it is read again: the share read, in whole percents (T24 carry).
+# Variables:
+#   $fraction (Number) - the share read so far, from 0 to 1, e.g. 0.23.
+hv-explorer-progress-percent = { NUMBER($fraction, style: "percent", minimumFractionDigits: 0, maximumFractionDigits: 0) }
+# Surface 13 (Settings › Metadata). The clear-cache question's subtitle: the size of the cached metadata (T27 carry).
+# Variables:
+#   $size (String) - a preformatted size, e.g. "38.4 MB".
+hv-metadata-clear-subtitle = { $size } on this computer

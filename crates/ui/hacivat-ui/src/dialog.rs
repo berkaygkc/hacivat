@@ -194,6 +194,8 @@ pub struct Dialog {
     role: Role,
     // ## m4-t33b-carries (named exception): the content's own tab stops (a checkbox).
     content_focus: Vec<FocusHandle>,
+    // ## m4-t33b-carries (named exception): a line under the title (a size, a connection).
+    subtitle: Option<TextFn>,
 }
 
 impl EventEmitter<DialogEvent> for Dialog {}
@@ -240,6 +242,7 @@ impl Dialog {
                 content: None,
                 role: Role::Dialog,
                 content_focus: Vec::new(),
+                subtitle: None,
             }
         })
     }
@@ -264,6 +267,13 @@ impl Dialog {
     /// A view drawn between the body text and the buttons (a control the answer needs).
     pub fn set_content(&mut self, content: AnyView) {
         self.content = Some(content);
+    }
+
+    // ## m4-t33b-carries (named exception)
+    /// A line under the title (12 px `text-2`; NOTES M4 surface 13: the cache's size). An
+    /// empty text draws nothing (a size still being measured).
+    pub fn set_subtitle(&mut self, subtitle: TextFn) {
+        self.subtitle = Some(subtitle);
     }
 
     // ## m4-t33b-carries (named exception)
@@ -474,6 +484,24 @@ impl Render for Dialog {
                         .gap(px(t.spacing.xl))
                         .child(title_element)
                         .child(close),
+                )
+                // ## m4-t33b-carries: the subtitle, when it says something.
+                .children(
+                    self.subtitle
+                        .as_ref()
+                        .map(|f| f(cx))
+                        .filter(|s| !s.is_empty())
+                        .map(|s| {
+                            div().mt(px(-t.spacing.sm)).child(
+                                Label::new(
+                                    s,
+                                    TextSource::Fluent,
+                                    t.type_ramp.body_sm,
+                                    c.text_2.to_hsla(),
+                                )
+                                .id("dialog-subtitle"),
+                            )
+                        }),
                 )
                 // ## m2a-t21-shots: the body wraps to the card (a long locale never clips).
                 .child(div().child(crate::text::paragraph(

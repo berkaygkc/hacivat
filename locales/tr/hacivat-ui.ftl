@@ -3764,3 +3764,17 @@ hv-history-clear-damaged = Geçmiş dosyası hasarlıydı, bu yüzden Hacivat on
 #   $schemas (String) - the schema names the bundled catalog answers for, a list, e.g. "information_schema".
 # Review: PO
 hv-explorer-builtin-tip-mixed = { $schemas } için yerleşik katalog (sürüm { $version }): Hacivat ile gelir, bağlantı olmadan okunur. Diğer yerleşik şemalar sunucudan okundu.
+# Surface 4 (Filter field). Under the field when more objects match than the filter opens (T14 carry, R-W2-13).
+# Variables:
+#   $n (Number) - how many matches the filter did not open, e.g. 50.
+# Review: PO
+hv-explorer-filter-more = { $n } eşleşme daha açılmadı. Gruplarını açın ya da filtreyi daraltmak için yazmaya devam edin.
+# Surface 14 (Long introspection). The meta of a loaded schema row while it is read again: the share read, in whole percents (T24 carry).
+# Variables:
+#   $fraction (Number) - the share read so far, from 0 to 1, e.g. 0.23.
+hv-explorer-progress-percent = { NUMBER($fraction, style: "percent", minimumFractionDigits: 0, maximumFractionDigits: 0) }
+# Surface 13 (Settings › Metadata). The clear-cache question's subtitle: the size of the cached metadata (T27 carry).
+# Variables:
+#   $size (String) - a preformatted size, e.g. "38.4 MB".
+# Review: PO
+hv-metadata-clear-subtitle = Bu bilgisayarda { $size }

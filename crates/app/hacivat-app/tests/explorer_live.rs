@@ -1645,3 +1645,65 @@ fn mysql_server_facts_replace_the_placeholder_and_stay(cx: &mut TestAppContext) 
         .map(|c| c.server.ident.lower_case_table_names);
     assert_eq!(shown, Some(1), "the explorer shows the server's facts");
 }
+
+// ## m4-t33b-carries (T24 carry, mock 14): a loaded namespace read again keeps its rows (no
+// flicker) and says it is being read: its row carries the static run marker, the share read
+// as its meta ("42%") and the words in its tooltip.
+#[gpui::test]
+fn a_loaded_namespace_read_again_shows_its_progress_on_its_row(cx: &mut TestAppContext) {
+    let (vcx, src, id) = connected_loaded(cx, &["users", "orders"]);
+    open(vcx, &["app-dev", "app"]);
+    let gate = src.intro.gate(|c| matches!(c, FakeCall::Introspect { .. }));
+    *src.report.lock().unwrap() = Some((hacivat_introspect::engine::Phase::Columns, 3, Some(7)));
+    put_cursor(vcx, key_of(vcx, "public"));
+    assert!(run(vcx, "explorer.refresh"));
+    wait_gate(vcx, &gate);
+    let schema = key_of(vcx, "public");
+    wait_until(vcx, "the re-read's progress on the row", |vcx| {
+        let row = vcx.cx.read(|cx| {
+            let model = explorer::tree(cx)
+                .expect("the tree")
+                .read(cx)
+                .model()
+                .clone();
+            hacivat_ui::tree::TreeModel::row(&model, schema)
+        });
+        row.is_some_and(|r| {
+            r.meta_mark == Some(hacivat_ui::tree::MetaMark::Running)
+                && r.meta.as_deref().map(strip).as_deref() == Some("42%")
+        })
+    });
+    let row = vcx
+        .cx
+        .read(|cx| {
+            let model = explorer::tree(cx)
+                .expect("the tree")
+                .read(cx)
+                .model()
+                .clone();
+            hacivat_ui::tree::TreeModel::row(&model, schema)
+        })
+        .expect("the row");
+    assert_eq!(
+        row.tooltip.as_deref().map(strip).as_deref(),
+        Some(
+            "Reading public: the columns of 3 of 7 tables so far. The explorer stays usable \
+             meanwhile."
+        )
+    );
+    // Its rows stay while it is read.
+    assert_eq!(tables_of(vcx, id, &public()), ["users", "orders"]);
+    gate.release();
+    wait_until(vcx, "the pass ends and the mark goes", |vcx| {
+        vcx.cx
+            .read(|cx| {
+                let model = explorer::tree(cx)
+                    .expect("the tree")
+                    .read(cx)
+                    .model()
+                    .clone();
+                hacivat_ui::tree::TreeModel::row(&model, schema)
+            })
+            .is_some_and(|r| r.meta_mark.is_none())
+    });
+}
