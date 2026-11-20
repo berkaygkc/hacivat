@@ -35,6 +35,20 @@ const PKS: usize = 15_000;
 const FKS: usize = 5_000;
 const INDEXES: usize = 20_000;
 
+// ## m4-t33c-facts (named exception)
+/// Prints one `HV-FACT …` line (`format!` arguments) straight to the process's stdout, on one
+/// line: libtest captures only the `print!` family, so the line reaches the CI log of a passing
+/// test too (R-W3-14).
+macro_rules! fact {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let line = format!($($arg)*).replace('\n', " ");
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    }};
+}
+
 /// The G1 catalog: the server and database namespaces of the shared generator, then one schema
 /// with every table.
 fn g1_catalog() -> Vec<NamespaceSnapshot> {
@@ -138,6 +152,17 @@ fn bench_fixture_is_15k_tables_160k_columns() {
                 .all(|(p, q)| p.kind() == q.kind() && p.name() == q.name())
         );
     }
+    // ## m4-t33c-facts: the shape just asserted, as the G1 fixture's record.
+    fact!(
+        "HV-FACT g1 bench-fixture schema={DB}.{SCHEMA} namespaces={} tables={} columns={} \
+         primary_keys={} foreign_keys={} indexes={} deterministic=yes",
+        a.len(),
+        count(&a, ObjectKind::Table),
+        count(&a, ObjectKind::Column),
+        count(&a, ObjectKind::PrimaryKey),
+        count(&a, ObjectKind::ForeignKey),
+        count(&a, ObjectKind::Index),
+    );
 }
 
 /// Writes `nss` as a plaintext cache at `path` (any older file there is replaced).

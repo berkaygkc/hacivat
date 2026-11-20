@@ -31,6 +31,9 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+// ## m4-t33c-facts (named exception): every fact goes straight to stdout (`common::g4::fact`),
+// so the gate's `t15b_*` lines reach the CI log of a passing run (libtest captures `println!`).
+use common::g4::fact;
 use common::pg::{DropSchemas, PG, Pg, admin, unique};
 use futures::future::BoxFuture;
 use hacivat_driver::TxStatus;
@@ -272,10 +275,10 @@ async fn joined_fragment_sees_the_apply_txns_uncommitted_column() {
             .next()
             .unwrap_or_default()
             .to_ascii_uppercase();
-        println!(
-            "HV-FACT t15b_joined_last_statement_keyword={first_word} target={}",
+        fact(&format!(
+            "t15b_joined_last_statement_keyword={first_word} target={}",
             t.id
-        );
+        ));
         assert_eq!(first_word, "SELECT", "{}: {last}", t.id);
         // The same transaction, the same XID: nothing began or ended it.
         assert_eq!(
@@ -378,10 +381,10 @@ async fn joined_pg_sections_return_type_names_not_format_type_text() {
         );
         // A joined read is at most `Structure` (no deparsed text).
         assert_eq!(got.meta().level, Level::Structure, "{}", t.id);
-        println!(
-            "HV-FACT t15b_joined_pg_type_of_varchar64=varchar target={}",
+        fact(&format!(
+            "t15b_joined_pg_type_of_varchar64=varchar target={}",
             t.id
-        );
+        ));
 
         // R-W3-11: a path that puts a schema before `pg_catalog` is refused before any read.
         exec(
@@ -461,10 +464,10 @@ async fn joined_read_refuses_another_backends_temp_schema() {
             ),
         )
         .await;
-        println!(
-            "HV-FACT t15b_foreign_temp_in_job_path={listed} target={}",
+        fact(&format!(
+            "t15b_foreign_temp_in_job_path={listed} target={}",
             t.id
-        );
+        ));
         let got = on_session(
             &j,
             &facts(DbmsKind::Postgres),
@@ -649,7 +652,7 @@ async fn pg_grants_facet_loaded_through_the_handle() {
                     .collect()
             })
             .unwrap_or_default();
-        println!("HV-FACT t15b_pg_grants={entries:?} target={}", t.id);
+        fact(&format!("t15b_pg_grants={entries:?} target={}", t.id));
         assert_eq!(
             entries,
             [("PUBLIC".to_string(), "SELECT".to_string())],
@@ -923,11 +926,11 @@ async fn mysql_joined_fragment_reads_inside_the_jobs_transaction() {
             "{}: the transaction is untouched",
             t.id
         );
-        println!(
-            "HV-FACT t15b_mysql_joined_columns={:?} target={}",
+        fact(&format!(
+            "t15b_mysql_joined_columns={:?} target={}",
             names(&cols),
             t.id
-        );
+        ));
         // The job's ROLLBACK removes the row: the joined read committed nothing.
         exec(&j, &t.id, "ROLLBACK").await;
         let rows = cell(&j, &t.id, "SELECT CAST(COUNT(*) AS CHAR) FROM hvm4_t").await;

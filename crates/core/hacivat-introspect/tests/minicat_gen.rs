@@ -29,6 +29,10 @@ mod common;
 
 use std::path::{Component, Path, PathBuf};
 
+// ## m4-t33c-facts (named exception): facts go straight to stdout (`common::g4::fact`), so they
+// reach the CI log of a passing run (libtest captures `println!`).
+use common::g4::fact;
+
 use common::pg::{Pg, admin_on};
 use hacivat_driver::{ExecOpts, Protocol, ServerInfo};
 use hacivat_introspect::minicat::{run_system_sections, system_schemas, system_sections};
@@ -329,13 +333,13 @@ async fn builtins(t: &DockerTarget, reader: &str) -> Value {
     }
     // The histogram lists every answer code (unknown ones with `?`).
     let summary: Vec<String> = codes.iter().map(|(c, n)| format!("{c}:{n}")).collect();
-    println!(
-        "HV-FACT minicat-probe target={} rows={} sql_functions={} answers={}",
+    fact(&format!(
+        "minicat-probe target={} rows={} sql_functions={} answers={}",
         t.id,
         rows.len(),
         sql_functions,
         summary.join(",")
-    );
+    ));
     assert!(
         unknown.is_empty(),
         "{}: probe answers in neither list (look, then extend PRESENT or ABSENT): {}",
@@ -407,7 +411,7 @@ async fn read_target(id: &str, raw: &Path, reader: &str) {
             "reader": reader,
         }),
     );
-    println!("HV-FACT minicat-read target={id} version={version}");
+    fact(&format!("minicat-read target={id} version={version}"));
 }
 
 // -----------------------------------------------------------------------------------------------

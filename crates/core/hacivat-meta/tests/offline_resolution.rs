@@ -24,6 +24,20 @@ use hacivat_proto::DbmsKind;
 use sql_catalog::types::RelRef;
 use sql_catalog::view::CatalogView;
 
+// ## m4-t33c-facts (named exception)
+/// Prints one `HV-FACT …` line (`format!` arguments) straight to the process's stdout, on one
+/// line: libtest captures only the `print!` family, so the line reaches the CI log of a passing
+/// test too (R-W3-14). Lines are catalog facts, never a secret.
+macro_rules! fact {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let line = format!($($arg)*).replace('\n', " ");
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    }};
+}
+
 /// The current database of the offline PostgreSQL views (any name: the system layer serves
 /// every database).
 const DB: &str = "app";
@@ -158,7 +172,7 @@ fn assert_found(view: &SnapshotView, path: &str, group: KindGroup, cols: &[&str]
             "{at}: {path} lacks column {c}"
         );
     }
-    println!(
+    fact!(
         "HV-FACT g3 found target=\"{at}\" object={path} via=ModelView,CatalogView columns={}",
         columns.len()
     );
@@ -197,7 +211,7 @@ fn assert_routine_found(view: &SnapshotView, path: &str) {
         sigs.iter().all(|f| f.args.is_some()),
         "{at}: {path} {sigs:?}"
     );
-    println!(
+    fact!(
         "HV-FACT g3 routine target=\"{at}\" object={path} overloads={} args=known",
         sigs.len()
     );
@@ -212,7 +226,7 @@ fn assert_routine_name_only(view: &SnapshotView, name: &str) {
     assert!(sigs[0].args.is_none(), "{at}: {name} {:?}", sigs[0]);
     assert!(sigs[0].is_name_only(), "{at}: {name}");
     assert!(sigs[0].returns.is_none(), "{at}: {name}");
-    println!("HV-FACT g3 builtin target=\"{at}\" name={name} args=none");
+    fact!("HV-FACT g3 builtin target=\"{at}\" name={name} args=none");
 }
 
 /// A `sys` routine with the real signature the snapshot read from the server.
@@ -244,7 +258,7 @@ fn assert_routine_with_signature(view: &SnapshotView, path: &str, args: &[(&str,
         .collect();
     assert_eq!(got, want, "{at}: {path}");
     assert!(sigs[0].returns.is_some(), "{at}: {path}");
-    println!("HV-FACT g3 sys-routine target=\"{at}\" object={path} args={got:?}");
+    fact!("HV-FACT g3 sys-routine target=\"{at}\" object={path} args={got:?}");
 }
 
 /// The `sys` routine checked per MySQL/MariaDB target, with its arguments as each snapshot
@@ -380,7 +394,7 @@ fn answer(view: &SnapshotView, pair: &Pair) -> &'static str {
         ));
         // `ModelView` sees built-ins only through the layer's own names; `CatalogView` is the
         // completion layer and is the one asserted.
-        println!(
+        fact!(
             "HV-FACT g3 builtin-lookup target=\"{at}\" name={} model={model}",
             pair.path
         );
@@ -434,10 +448,13 @@ fn version_specific_objects_resolve_only_in_their_version() {
             "Unknown"
         };
         assert_eq!(answer(&proven, pair), want, "{} proven", pair.older);
-        println!(
+        fact!(
             "HV-FACT g3 version-pair older={} newer={} object={} newer=Found older=Unknown \
              older_initdb_only={want} source=\"{}\"",
-            pair.older, pair.newer, pair.path, pair.notes
+            pair.older,
+            pair.newer,
+            pair.path,
+            pair.notes
         );
     }
 }
@@ -510,7 +527,7 @@ fn unsupported_version_is_not_served_from_another_snapshot() {
             func.1
         );
         assert!(matches!(view.settings(), Lookup::Unknown(_)));
-        println!(
+        fact!(
             "HV-FACT g3 unsupported dbms={dbms:?} version=\"{version}\" layer=none answers=Unknown"
         );
     }
