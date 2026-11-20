@@ -356,44 +356,44 @@ async fn pg_grants_and_owner_read() {
         assert!(!rows.iter().any(|(k, _)| k.same_object(&kg)), "{}", t.id);
         assert!(rows.iter().any(|(k, _)| k.same_object(&kt)), "{}", t.id);
         // A role named exactly PUBLIC would print as the keyword: its object is left out.
+        // PostgreSQL 13-18 accept the name (only `public` and `none` are reserved), so the
+        // step always runs (review m-8): a leftover from a killed run is dropped first, and a
+        // refusal fails the test.
         let twin = PUBLIC.to_string();
         let mut a = admin(&t).await;
-        let created = a
-            .live()
-            .raw()
-            .batch(&format!("CREATE ROLE {}", qi(&twin)))
-            .await
-            .is_ok();
-        if created {
-            let _drop_twin = Fixture {
-                t: t.clone(),
-                schema: unique("hvm4_t16b_none"),
-                roles: vec![twin.clone()],
-            };
-            a.batch(&format!(
-                "GRANT SELECT ON {}.plain TO {}",
-                f.schema,
-                qi(&twin)
-            ))
-            .await;
-            a.close().await;
-            let all = read_grants(&mut c, &ns, std::slice::from_ref(&kplain)).await;
-            assert!(all[0].opaque && !all[0].complete(), "{}: {all:?}", t.id);
-            let rows = facet_grants(&mut c, &ns, std::slice::from_ref(&kplain)).await;
-            assert!(rows.is_empty(), "{}: {rows:?}", t.id);
-            a = admin(&t).await;
-            a.batch(&format!(
-                "REVOKE SELECT ON {}.plain FROM {}",
-                f.schema,
-                qi(&twin)
-            ))
-            .await;
-        } else {
-            eprintln!(
-                "{}: the server refuses a role named PUBLIC; step skipped",
-                t.id
-            );
-        }
+        a.batch(
+            "DO $$ BEGIN
+               IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'PUBLIC') THEN
+                 EXECUTE 'DROP OWNED BY \"PUBLIC\"';
+                 EXECUTE 'DROP ROLE \"PUBLIC\"';
+               END IF;
+             END $$",
+        )
+        .await;
+        a.batch(&format!("CREATE ROLE {}", qi(&twin))).await;
+        let _drop_twin = Fixture {
+            t: t.clone(),
+            schema: unique("hvm4_t16b_none"),
+            roles: vec![twin.clone()],
+        };
+        a.batch(&format!(
+            "GRANT SELECT ON {}.plain TO {}",
+            f.schema,
+            qi(&twin)
+        ))
+        .await;
+        a.close().await;
+        let all = read_grants(&mut c, &ns, std::slice::from_ref(&kplain)).await;
+        assert!(all[0].opaque && !all[0].complete(), "{}: {all:?}", t.id);
+        let rows = facet_grants(&mut c, &ns, std::slice::from_ref(&kplain)).await;
+        assert!(rows.is_empty(), "{}: {rows:?}", t.id);
+        let mut a = admin(&t).await;
+        a.batch(&format!(
+            "REVOKE SELECT ON {}.plain FROM {}",
+            f.schema,
+            qi(&twin)
+        ))
+        .await;
         a.close().await;
         drop(c);
         pg.shutdown().await;
@@ -464,9 +464,24 @@ async fn pg_view_dependencies_read() {
              CREATE SEQUENCE {s}.sq;
              CREATE FUNCTION {s}.trg() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
              CREATE TABLE {s}.child (id int DEFAULT nextval('{s}.sq'), pid int REFERENCES {s}.t (id), m {s}.mood[]);
-             CREATE TRIGGER tr BEFORE INSERT ON {s}.child FOR EACH ROW EXECUTE FUNCTION {s}.trg();",
+             CREATE TRIGGER tr BEFORE INSERT ON {s}.child FOR EACH ROW EXECUTE FUNCTION {s}.trg();
+             CREATE FUNCTION {s}.allowed(x int) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT x > 0';
+             CREATE FUNCTION {s}.sq2(x int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT x * x';
+             CREATE TABLE {s}.pol (a int);
+             CREATE POLICY p ON {s}.pol USING ({s}.allowed(a));",
         )
         .await;
+        // Review m-3: an expression statistics object (14 and later) is a part of its table.
+        let expr_stats = t.major.parse::<u32>().unwrap_or(0) >= 14;
+        if expr_stats {
+            let mut a = admin(&t).await;
+            a.batch(&format!(
+                "CREATE STATISTICS {0}.st ON ({0}.sq2(a)) FROM {0}.pol",
+                f.schema
+            ))
+            .await;
+            a.close().await;
+        }
         let s = f.schema.as_str();
         let db = t.database.as_str();
         let ns = ns_of(&t, s);
@@ -485,12 +500,18 @@ async fn pg_view_dependencies_read() {
             k(ObjectKind::Sequence, "sq"),
             k(ObjectKind::Schema, ""),
         );
+        let (kpol, kallowed, ksq2) = (
+            k(ObjectKind::Table, "pol"),
+            k(ObjectKind::Routine, "allowed"),
+            k(ObjectKind::Routine, "sq2"),
+        );
         let keys = vec![
             kt.clone(),
             kv.clone(),
             kv2.clone(),
             kchild.clone(),
             ktrg.clone(),
+            kpol.clone(),
         ];
         let rows = match PgIntrospector
             .facet(&mut c, &ns, &keys, FacetKind::Dependencies)
@@ -574,6 +595,23 @@ async fn pg_view_dependencies_read() {
         );
         // The table depends on its schema only (its own columns, key and index are parts).
         assert_eq!(deps(&kt), vec![schema.clone()], "{}", t.id);
+        // A row-level security policy and an expression statistics object are parts: the
+        // functions they call are the table's dependencies (review m-3).
+        let pol = deps(&kpol);
+        let allowed = r(
+            ObjectKind::Routine,
+            &[db, s, "allowed"],
+            Some(oid_of(&kallowed)),
+        );
+        let sq2 = r(ObjectKind::Routine, &[db, s, "sq2"], Some(oid_of(&ksq2)));
+        assert!(pol.contains(&allowed), "{}: {pol:#?}", t.id);
+        assert_eq!(pol.contains(&sq2), expr_stats, "{}: {pol:#?}", t.id);
+        assert!(
+            !pol.iter()
+                .any(|x| x.path.get(2).is_some_and(|p| &**p == "pol")),
+            "{}: nothing of its own: {pol:#?}",
+            t.id
+        );
         // A PL/pgSQL function depends on its language (a catalog the section names through
         // pg_identify_object).
         let trg = deps(&ktrg);
@@ -692,7 +730,8 @@ async fn grant_change_invalidates_a_loaded_grants_facet() {
             std::slice::from_ref(&role),
             "CREATE TABLE {s}.t (a int, b int);
              CREATE TABLE {s}.u (a int);
-             CREATE FUNCTION {s}.f() RETURNS int LANGUAGE sql AS 'SELECT 1';",
+             CREATE FUNCTION {s}.f() RETURNS int LANGUAGE sql AS 'SELECT 1';
+             CREATE TYPE {s}.mood AS ENUM ('sad', 'ok');",
         )
         .await;
         let ns = ns_of(&t, &f.schema);
@@ -764,6 +803,42 @@ async fn grant_change_invalidates_a_loaded_grants_facet() {
         let r3 = pass_at(&mut c, &ns, Mode::Incremental, Some(&n2)).await;
         assert!(hits(&r3, &kf), "{}: routine grant", t.id);
         assert!(!hits(&r3, &kt), "{}: the table did not change", t.id);
+        let n3 = apply(&n2, r3);
+        // A type GRANT rewrites its pg_type row (review m-8).
+        let kmood = key_of(&n3, ObjectKind::EnumType, "mood");
+        grant(format!(
+            "GRANT USAGE ON TYPE {}.mood TO {}",
+            f.schema,
+            qi(&role)
+        ))
+        .await;
+        let r4 = pass_at(&mut c, &ns, Mode::Incremental, Some(&n3)).await;
+        assert!(hits(&r4, &kmood), "{}: type grant", t.id);
+        let n4 = apply(&n3, r4);
+        let reread = facet_grants(&mut c, &ns, std::slice::from_ref(&kmood)).await;
+        assert_eq!(
+            reread[0].1.entries,
+            vec![g(&role, "USAGE", &[], false)],
+            "{}",
+            t.id
+        );
+        // A schema GRANT rewrites the pg_namespace row: the namespace's own schema object.
+        let ks = key_of(&n4, ObjectKind::Schema, "");
+        grant(format!(
+            "GRANT USAGE ON SCHEMA {} TO {}",
+            f.schema,
+            qi(&role)
+        ))
+        .await;
+        let r5 = pass_at(&mut c, &ns, Mode::Incremental, Some(&n4)).await;
+        assert!(hits(&r5, &ks), "{}: schema grant", t.id);
+        let reread = facet_grants(&mut c, &ns, std::slice::from_ref(&ks)).await;
+        assert_eq!(
+            reread[0].1.entries,
+            vec![g(&role, "USAGE", &[], false)],
+            "{}",
+            t.id
+        );
         drop(c);
         pg.shutdown().await;
     }
@@ -783,7 +858,7 @@ async fn pg_statistics_facet_reads_the_current_row_estimate() {
             &t,
             "stats",
             &[],
-            "CREATE TABLE {s}.t (a int);
+            "CREATE TABLE {s}.t (a int) WITH (autovacuum_enabled = false);
              INSERT INTO {s}.t SELECT g FROM pg_catalog.generate_series(1, 1000) g;
              CREATE VIEW {s}.v AS SELECT a FROM {s}.t;",
         )
@@ -800,6 +875,26 @@ async fn pg_statistics_facet_reads_the_current_row_estimate() {
             FacetRows::Statistics(v) => v,
             other => panic!("{other:?}"),
         };
+        // Never analyzed (autovacuum off for the table): no estimate on 14+ (`-1`); 13
+        // reports 0, which is indistinguishable from an empty table (review m-4, carried).
+        let before = stats(
+            PgIntrospector
+                .facet(
+                    &mut c,
+                    &ns,
+                    std::slice::from_ref(&kt),
+                    FacetKind::Statistics,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e:?}", t.id)),
+        );
+        let want = if t.major.parse::<u32>().unwrap_or(0) >= 14 {
+            None
+        } else {
+            Some(0)
+        };
+        assert_eq!(before.len(), 1, "{}", t.id);
+        assert_eq!(before[0].1.row_estimate, want, "{}: never analyzed", t.id);
         // ANALYZE updates reltuples in place (no new xmin): only the facet sees it.
         let mut a = admin(&t).await;
         a.batch(&format!("ANALYZE {}.t", f.schema)).await;

@@ -16,8 +16,9 @@
 //! - for grants, its ACL says something a GRANT-only [`GrantsFacet`] cannot carry: a default
 //!   privilege it revokes (`REVOKE EXECUTE … FROM PUBLIC` on a function: re-granting the
 //!   facet's entries would hand `PUBLIC` back its default), a grantee without a role row, a
-//!   role named exactly `PUBLIC` (the DDL renderer writes that name as the keyword), or a
-//!   privilege that is not a keyword. [`grants`] reports these per object
+//!   role named `PUBLIC`, `public` or `none` (names the DDL renderer or the role grammar
+//!   turn into the keyword), or a privilege outside PostgreSQL's set for the object's kind
+//!   ([`privileges_of`]: `ALL` included). [`grants`] reports these per object
 //!   ([`ObjGrants::revoked`], [`ObjGrants::opaque`]).
 //!
 //! A refused read (`42501`: a hardened server that revoked `SELECT` on a catalog) is an
@@ -35,9 +36,9 @@
 //! `attnum` order. Owners are `Props.owner`, read with the structure by Task 16.
 //!
 //! **Dependencies** are the `pg_depend` rows (deptype not `e`, `x` or `p`) of the object and
-//! of its parts (a relation's view rules, constraints, column defaults, user triggers and
-//! indexes; a type's domain constraints and a composite type's attributes), each referenced
-//! object as a [`Ref`] (kind, exact path, oid; a column by its path only), self references
+//! of its parts (a relation's view rules, constraints, column defaults, user triggers,
+//! indexes, row-level security policies and extended statistics; a type's domain
+//! constraints and a composite type's attributes), each referenced object as a [`Ref`] (kind, exact path, oid; a column by its path only), self references
 //! and references to the object's own parts left out, one reference per object
 //! ([`DepsKind::Catalog`]). Built-in objects are pinned and never recorded by the server.
 //!
@@ -103,6 +104,52 @@ pub const INVALIDATED_FACETS: [FacetKind; 2] = [FacetKind::Grants, FacetKind::De
 
 /// The grantee `aclexplode` reports as oid `0`, and the keyword the DDL renderer writes.
 pub const PUBLIC: &str = "PUBLIC";
+
+// ## m4-t16b-pg-facets (review m-1, m-2)
+/// Role names a grant cannot name faithfully, compared case-sensitively as the grammar does:
+/// `PUBLIC` (the DDL renderer's keyword), and `public` and `none`, which PostgreSQL's role
+/// grammar reads as PUBLIC or refuses whether quoted or not. Only a catalog edit makes such a
+/// role; its object's grants are not loaded.
+pub const KEYWORD_ROLE_NAMES: [&str; 3] = [PUBLIC, "public", "none"];
+
+const RELATION_PRIVILEGES: &[&str] = &[
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+    "MAINTAIN",
+];
+const COLUMN_PRIVILEGES: &[&str] = &["SELECT", "INSERT", "UPDATE", "REFERENCES"];
+const SEQUENCE_PRIVILEGES: &[&str] = &["SELECT", "UPDATE", "USAGE"];
+const ROUTINE_PRIVILEGES: &[&str] = &["EXECUTE"];
+const TYPE_PRIVILEGES: &[&str] = &["USAGE"];
+const SCHEMA_PRIVILEGES: &[&str] = &["USAGE", "CREATE"];
+
+/// The privileges PostgreSQL grants on an object of `kind` and on its columns (the GRANT
+/// reference page; `MAINTAIN` from 17). Anything else in an ACL item (`ALL`, a phrase, a
+/// lower-case word) makes the object's grants not loaded.
+pub fn privileges_of(kind: ObjectKind) -> (&'static [&'static str], &'static [&'static str]) {
+    match kind {
+        ObjectKind::Table
+        | ObjectKind::View
+        | ObjectKind::MaterializedView
+        | ObjectKind::ForeignTable => (RELATION_PRIVILEGES, COLUMN_PRIVILEGES),
+        ObjectKind::Sequence => (SEQUENCE_PRIVILEGES, &[]),
+        ObjectKind::Routine | ObjectKind::Procedure | ObjectKind::Aggregate => {
+            (ROUTINE_PRIVILEGES, &[])
+        }
+        ObjectKind::Domain
+        | ObjectKind::EnumType
+        | ObjectKind::CompositeType
+        | ObjectKind::RangeType
+        | ObjectKind::Unknown => (TYPE_PRIVILEGES, &[]),
+        ObjectKind::Schema => (SCHEMA_PRIVILEGES, &[]),
+        _ => (&[], &[]),
+    }
+}
 
 /// The catalog an object's facets are read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -260,7 +307,7 @@ pub struct ObjGrants {
     /// Default privileges the ACL takes away (a GRANT-only facet cannot say so).
     pub revoked: Vec<Grant>,
     /// An item the facet cannot carry faithfully: a grantee without a role row, a role named
-    /// exactly `PUBLIC`, a privilege that is not a keyword.
+    /// [`KEYWORD_ROLE_NAMES`], a privilege outside [`privileges_of`] the object's kind.
     pub opaque: bool,
 }
 
@@ -275,19 +322,17 @@ impl ObjGrants {
 /// The grants of `key` from its rows (its object row matched): module docs.
 pub fn decide_grants(key: ObjectKey, rows: &[AclRow]) -> ObjGrants {
     let mut opaque = false;
+    let (on_object, on_column) = privileges_of(key.kind);
     // The grantee's name and the privilege, or `None` (and opaque) when the facet cannot
     // carry them faithfully.
-    let mut carry = |it: &AclItem| -> Option<(Name, Name)> {
-        let privilege_ok = !it.privilege.is_empty()
-            && it
-                .privilege
-                .bytes()
-                .all(|b| b.is_ascii_uppercase() || b == b' ')
-            && !it.privilege.starts_with(' ')
-            && !it.privilege.ends_with(' ');
+    let mut carry = |it: &AclItem, column: bool| -> Option<(Name, Name)> {
+        // Review m-2: PostgreSQL's closed set for the object's kind, never "any keyword".
+        let allowed = if column { on_column } else { on_object };
+        let privilege_ok = allowed.contains(&it.privilege.as_str());
         let who = match (it.grantee, it.grantee_name.as_deref()) {
             (0, _) => Some(PUBLIC),
-            (_, Some(n)) if n != PUBLIC => Some(n),
+            // Review m-1: names the grammar reads as a keyword whether quoted or not.
+            (_, Some(n)) if !KEYWORD_ROLE_NAMES.contains(&n) => Some(n),
             _ => None,
         };
         match who {
@@ -312,7 +357,7 @@ pub fn decide_grants(key: ObjectKey, rows: &[AclRow]) -> ObjGrants {
         if in_default {
             continue;
         }
-        if let Some(k) = carry(a) {
+        if let Some(k) = carry(a, false) {
             *object.entry(k).or_default() |= a.grantable;
         }
     }
@@ -323,7 +368,7 @@ pub fn decide_grants(key: ObjectKey, rows: &[AclRow]) -> ObjGrants {
         if kept {
             continue;
         }
-        if let Some((grantee, privilege)) = carry(d) {
+        if let Some((grantee, privilege)) = carry(d, false) {
             revoked.push(Grant {
                 grantee,
                 privilege,
@@ -339,7 +384,7 @@ pub fn decide_grants(key: ObjectKey, rows: &[AclRow]) -> ObjGrants {
         let (Some(it), Some((num, col))) = (r.item.as_ref(), r.col.as_ref()) else {
             continue;
         };
-        if let Some((who, privilege)) = carry(it) {
+        if let Some((who, privilege)) = carry(it, true) {
             *per_column
                 .entry((who, privilege, *num, Name::from(col.as_str())))
                 .or_default() |= it.grantable;
@@ -1177,14 +1222,75 @@ mod tests {
             &[obj_row(), row(AclSrc::Acl, 78, None, "SELECT", false)],
         );
         assert!(ghost.opaque && !ghost.complete(), "{ghost:?}");
-        // A privilege that is not a keyword is not carried.
-        for bad in ["select", "SELECT;", "", " SELECT"] {
+        // Review m-1: role names the grammar reads as a keyword, quoted or not.
+        for who in ["public", "none"] {
+            let got = decide_grants(
+                table(),
+                &[obj_row(), row(AclSrc::Acl, 79, Some(who), "SELECT", false)],
+            );
+            assert!(got.opaque && !got.complete(), "{who}: {got:?}");
+        }
+        assert!(
+            decide_grants(
+                table(),
+                &[
+                    obj_row(),
+                    row(AclSrc::Acl, 79, Some("Public"), "SELECT", false)
+                ],
+            )
+            .complete(),
+            "a quoted mixed-case name is a role"
+        );
+        // Review m-2: only the kind's own privileges are carried (`ALL` never; `EXECUTE` is
+        // a routine's, `USAGE` on a table no privilege at all).
+        for bad in [
+            "select",
+            "SELECT;",
+            "",
+            " SELECT",
+            "ALL",
+            "ALL PRIVILEGES",
+            "EXECUTE",
+            "USAGE",
+        ] {
             let got = decide_grants(
                 table(),
                 &[obj_row(), row(AclSrc::Acl, READER, Some("r"), bad, false)],
             );
             assert!(got.opaque, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn privileges_follow_the_object_kind() {
+        let one = |k: ObjectKey, src: AclSrc, privilege: &str| {
+            let mut it = row(src, READER, Some("r"), privilege, false);
+            if src == AclSrc::Column {
+                it.col = Some((1, "a".into()));
+            }
+            decide_grants(k, &[obj_row(), it]).complete()
+        };
+        let sq = key(ObjectKind::Sequence, "sq", Some(3));
+        let f = key(ObjectKind::Routine, "f", Some(4));
+        let d = key(ObjectKind::Domain, "d", Some(5));
+        let s = ObjectKey {
+            kind: ObjectKind::Schema,
+            path: ns().path.iter().cloned().collect(),
+            server_id: None,
+            overload_sig: None,
+            raw_kind: None,
+        };
+        assert!(one(table(), AclSrc::Acl, "MAINTAIN"));
+        assert!(one(table(), AclSrc::Column, "REFERENCES"));
+        assert!(!one(table(), AclSrc::Column, "DELETE"), "no column DELETE");
+        assert!(one(sq.clone(), AclSrc::Acl, "USAGE"));
+        assert!(!one(sq, AclSrc::Acl, "INSERT"));
+        assert!(one(f.clone(), AclSrc::Acl, "EXECUTE"));
+        assert!(!one(f, AclSrc::Acl, "USAGE"));
+        assert!(one(d.clone(), AclSrc::Acl, "USAGE"));
+        assert!(!one(d, AclSrc::Acl, "SELECT"));
+        assert!(one(s.clone(), AclSrc::Acl, "CREATE"));
+        assert!(!one(s, AclSrc::Acl, "TEMPORARY"), "a database privilege");
     }
 
     #[test]
@@ -1604,6 +1710,7 @@ mod tests {
         };
         let list = regex::Regex::new(r"IN \((\$\d+)(, \$\d+)*\)").unwrap();
         let bind = regex::Regex::new(r"\$\d+").unwrap();
+        let cast = regex::Regex::new(r"::\s*([A-Za-z_][A-Za-z0-9_.]*)").unwrap();
         for section in name::ALL {
             let sec = p
                 .section(section)
@@ -1633,6 +1740,16 @@ mod tests {
                     }
                     for acl in ["acl::", "acl AS", "array_to_string"] {
                         assert!(!sql.contains(acl), "{section}: an ACL read as text");
+                    }
+                    // Review m-6: every cast names a pg_catalog type.
+                    for line in sql.lines().filter(|l| !l.trim_start().starts_with("--")) {
+                        for m in cast.captures_iter(line) {
+                            assert!(
+                                m[1].starts_with("pg_catalog."),
+                                "{section}: an unqualified cast to {}",
+                                &m[1]
+                            );
+                        }
                     }
                 }
             }

@@ -1883,3 +1883,24 @@ section passes Task 5's guard in a pure test (R-W3-9).
   `facets::FACETS` (`Grants`, `Dependencies`, `Statistics`); the stub tests in
   `introspector.rs`, `pack/mod.rs` and `tests/seams.rs` expect the real facets; the T16
   review's hostile H2 (`tests/pg_intro_hostile.rs`) lists the three new pure read functions.
+- **Minors round (security review, approved):**
+  - *m-1.* `KEYWORD_ROLE_NAMES` = `PUBLIC`, `public`, `none`, compared case-sensitively as
+    the role grammar does (`public` and `none` are keywords whether quoted or not): a grantee
+    with such a name makes the object's grants not loaded.
+  - *m-2.* Privileges are checked against PostgreSQL's closed set per object kind
+    (`privileges_of`: relations `SELECT INSERT UPDATE DELETE TRUNCATE REFERENCES TRIGGER
+    MAINTAIN`, columns `SELECT INSERT UPDATE REFERENCES`, sequences `SELECT UPDATE USAGE`,
+    routines `EXECUTE`, types `USAGE`, schemas `USAGE CREATE`); anything else, `ALL`
+    included, makes the object's grants not loaded.
+  - *m-3.* Row-level security policies (`pg_policy`) and extended statistics
+    (`pg_statistic_ext`) are relation parts of `Dependencies`: a function a policy or a
+    statistics expression calls is a dependency of the table.
+  - *m-6.* Every cast in the facet sections names a `pg_catalog` type.
+  - The review's hostile probes are `tests/pg_facets_hostile.rs` (HR1 and HR2 now pass;
+    HR3's function rows take a routine key; HR6 refuses `pg_stat_*`, `pg_statistic` and
+    `pg_statistic_ext_data`, and allows `pg_statistic_ext`, which holds definitions only).
+  - Carried: m-4 (PostgreSQL 13 reports a never-analyzed table as 0 rows) → PO-Q14/T24;
+    m-5 (a Dependencies facet naming an object renamed outside T16's change sources) and
+    the role rename → T22/T15b; m-7 (facet reads on a joined session are refused with
+    `NotJoinable`) → T15b; m-9 (`same_object` ignores the overload signature; needs OID
+    wraparound) → T33.
