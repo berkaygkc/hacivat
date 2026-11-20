@@ -41,13 +41,13 @@ use hacivat_meta::name::Name;
 use hacivat_meta::persist::{CacheCaps, CacheStore, Encryption, RebuildReason, RowKey, WriterId};
 use hacivat_meta::system::SystemCatalogs;
 use hacivat_meta::{Catalog, ServerFacts};
-use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+use hacivat_proto::{DbmsKind, ProfileId};
 use hacivat_secrets::SecretStore;
 use hacivat_session::ConnectionManager;
 use hacivat_session::meta::{MetaConn, MetaConnSpec, MetaError};
 use hacivat_session::profile::Profile;
 use hacivat_session::session::SessionManager;
-use hacivat_settings::{LocalPaths, MetadataSettings, ValidateInterval};
+use hacivat_settings::{LocalPaths, MetadataSettings};
 use sql_dialect::DialectId;
 use sql_ident::key::IdentCtx;
 use tokio_util::sync::CancellationToken;
@@ -559,13 +559,9 @@ fn current_of(profile: &Profile, dialect: DialectId) -> CurrentCtx {
 }
 
 /// Periodic validation (R-M4-20): `auto` is every 10 minutes for `local`/`dev` profiles.
+// ## m4-t22-state (named exception): the rule lives with freshness (Task 22).
 fn validate_every(m: &MetadataSettings, profile: &Profile) -> Option<Duration> {
-    match m.validate_interval_min {
-        ValidateInterval::Off => None,
-        ValidateInterval::Minutes(n) => Some(Duration::from_secs(u64::from(n.get()) * 60)),
-        ValidateInterval::Auto => matches!(profile.environment, Some(EnvTag::Local | EnvTag::Dev))
-            .then(|| Duration::from_secs(10 * 60)),
-    }
+    crate::freshness::validate_interval(m, profile.environment)
 }
 // ## m4-t15-hub
 
@@ -602,6 +598,7 @@ fn dialect_of(dbms: DbmsKind) -> Option<DialectId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hacivat_proto::EnvTag;
 
     struct NoSessions;
     impl SessionLookup for NoSessions {

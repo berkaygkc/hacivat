@@ -784,10 +784,20 @@ async fn pending_confirmation_changes_nothing_until_confirmed() {
         state(&r, &n),
         LoadState::Loaded { stale: false, .. }
     ));
-    // Held again, then "Remove from cache".
+    // ## m4-t22-freshness (named exception; ruling R-W4-9): a later background pass keeps
+    // what the user kept, and asks nothing.
     bounded(
         r.handle
             .refresh(Target::Namespace(n.clone()), Trigger::Background),
+    )
+    .await
+    .unwrap();
+    assert_eq!(tables_in(&r, &n).len(), 30);
+    assert_eq!(r.handle.pending_confirmation(&n), None);
+    // The user's own refresh is held again, then "Remove from cache".
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
     )
     .await
     .unwrap();
@@ -838,6 +848,9 @@ async fn periodic_validation_skips_during_user_tx_on_single_connection() {
         before,
         "no validation inside the user's transaction"
     );
+    // ## m4-t22-freshness (named exception): a round is the cheap check now (Task 22): only a
+    // namespace that changed on the server is read again.
+    r.fake.touch(&n, "t1");
     r.meta.in_tx.store(false, SeqCst);
     bounded(wait_until(Duration::from_secs(60), || passes() > before)).await;
     let (_, mode, level) = introspects(&r).pop().unwrap();

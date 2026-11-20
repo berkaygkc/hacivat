@@ -42,8 +42,15 @@ pub(super) enum Work {
         keys: Vec<ObjectKey>,
         level: Level,
     },
+    // ## m4-t22-state (named exception): a state check runs on the connection of its keys'
+    // database (PostgreSQL oids are per database; the carry "split CheckState by
+    // connection"), and the cheap validation of a cached namespace.
     CheckState {
         keys: Vec<ObjectKey>,
+        database: Option<Name>,
+    },
+    Validate {
+        ns: NsKey,
     },
 }
 
@@ -51,7 +58,7 @@ impl Work {
     /// The namespace the task reads and publishes (`None`: the scope refresh, a state check).
     pub fn ns(&self) -> Option<&NsKey> {
         match self {
-            Work::Pass { ns, .. } | Work::Fragment { ns, .. } => Some(ns),
+            Work::Pass { ns, .. } | Work::Fragment { ns, .. } | Work::Validate { ns } => Some(ns),
             Work::ScopeRefresh | Work::CheckState { .. } => None,
         }
     }
@@ -118,6 +125,15 @@ pub(super) struct Spec {
     pub fold: FoldRule,
     /// A scope refresh's extras.
     pub listing: Option<Listing>,
+    // ## m4-t22-state (named exception)
+    /// A state check's catalog (the marks it compares with).
+    pub snapshot: Option<Arc<hacivat_meta::CatalogSnapshot>>,
+    /// A fragment's stamps read before it (by a state check): stored as the marks of the
+    /// re-read owners that bring none of their own (PostgreSQL).
+    pub marks: Vec<(ObjectKey, hacivat_meta::StateMark)>,
+    /// What the user chose to keep cached ("Keep cached", D-039) in a background read's
+    /// namespace: reported existent, so the read never removes it (fix round 2, R-W4-9).
+    pub kept: Vec<ObjectKey>,
 }
 
 /// A merged pass or fragment, ready to publish.
@@ -148,7 +164,14 @@ pub(super) enum Output {
     // ## m4-t17-mysql (named exception; T15 carry m4): the server's facts, when read.
     Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>, FactsRead),
     Merged(Box<Merged>),
-    Staleness(Vec<ObjectKey>, Vec<Staleness>),
+    // ## m4-t22-state (named exception): the stamps of the owners that read `Changed`, and a
+    // namespace validation's verdict (with the arena it validated).
+    Staleness(
+        Vec<ObjectKey>,
+        Vec<Staleness>,
+        Vec<(ObjectKey, hacivat_meta::StateMark)>,
+    ),
+    Validated(NsKey, Option<usize>, crate::freshness::NsVerdict),
     Failed(IntroError),
 }
 
@@ -158,8 +181,10 @@ pub(super) fn database_of(dbms: DbmsKind, ns: Option<&NsKey>) -> Option<Name> {
     let ns = ns?;
     match dbms {
         DbmsKind::Postgres if ns.kind != NsKind::Server => ns.path.first().cloned(),
-        DbmsKind::Sqlite if ns.path.len() == 1 && &*ns.path[0] == "temp" => {
-            Some(ns.path[0].clone())
+        // ## m4-t22-state (named exception; review m-7): `temp` matched as `freshness` and T18
+        // match it (ASCII-caseless), and always asked for by its canonical name.
+        DbmsKind::Sqlite if ns.path.len() == 1 && ns.path[0].eq_ignore_ascii_case("temp") => {
+            Some(Name::from("temp"))
         }
         _ => None,
     }
@@ -182,7 +207,11 @@ pub(super) async fn run(ctx: Arc<WorkerCtx>, spec: Spec, cancel: CancellationTok
 }
 
 async fn run_inner(ctx: &Arc<WorkerCtx>, spec: Spec, cancel: &CancellationToken) -> Output {
-    let database = database_of(ctx.dbms, spec.work.ns());
+    // ## m4-t22-state (named exception): a state check names its database.
+    let database = match &spec.work {
+        Work::CheckState { database, .. } => database.clone(),
+        w => database_of(ctx.dbms, w.ns()),
+    };
     let mut restarted = false;
     let mut raced = false;
     loop {
@@ -213,7 +242,12 @@ async fn run_inner(ctx: &Arc<WorkerCtx>, spec: Spec, cancel: &CancellationToken)
                 let (infos, unlisted) = list_others(ctx, infos, others, cancel).await;
                 return Output::Namespaces(infos, identity, unlisted, facts);
             }
-            Ok(Read::Staleness(keys, st)) => return Output::Staleness(keys, st),
+            Ok(Read::Staleness(keys, st, marks)) => return Output::Staleness(keys, st, marks),
+            Ok(Read::Validated(v)) => {
+                let ptr = spec.prev.as_ref().map(|p| Arc::as_ptr(p) as usize);
+                let ns = spec.work.ns().cloned().unwrap_or_else(NsKey::server);
+                return Output::Validated(ns, ptr, v);
+            }
             Ok(Read::Result(r)) => return merge_result(ctx, &spec, r).await,
         }
     }
@@ -243,7 +277,13 @@ enum Read {
     /// (m4-t17-mysql).
     Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>, FactsRead),
     Result(NamespaceResult),
-    Staleness(Vec<ObjectKey>, Vec<Staleness>),
+    // ## m4-t22-state (named exception)
+    Staleness(
+        Vec<ObjectKey>,
+        Vec<Staleness>,
+        Vec<(ObjectKey, hacivat_meta::StateMark)>,
+    ),
+    Validated(crate::freshness::NsVerdict),
 }
 
 async fn read(
@@ -281,12 +321,26 @@ async fn read(
         )
         .await
         .map(Read::Result),
-        Work::CheckState { keys } => {
-            let st = ctx.intro.check_state(conn, keys).await?;
-            if st.len() != keys.len() {
+        // ## m4-t22-state (named exception): `freshness::check_state` compares the stamps with
+        // the snapshot's marks (Task 22); the introspector's own `check_state` has no marks.
+        Work::CheckState { keys, .. } => {
+            let snap = spec
+                .snapshot
+                .as_deref()
+                .ok_or_else(|| IntroError::Protocol(Name::from("check_state")))?;
+            let got = crate::freshness::check_state(&*ctx.intro, conn, snap, keys).await?;
+            if got.staleness.len() != keys.len() {
                 return Err(IntroError::Protocol(Name::from("check_state")));
             }
-            Ok(Read::Staleness(keys.clone(), st))
+            Ok(Read::Staleness(keys.clone(), got.staleness, got.marks))
+        }
+        Work::Validate { ns } => {
+            let Some(prev) = spec.prev.as_deref() else {
+                return Err(IntroError::Protocol(Name::from("validate")));
+            };
+            crate::freshness::check_namespace(&*ctx.intro, conn, ns, prev)
+                .await
+                .map(Read::Validated)
         }
     }
 }
@@ -429,6 +483,15 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
         _ => return Output::Failed(IntroError::Protocol(Name::from("merge"))),
     };
     spec.filters.apply(&ns, spec.system, &mut r);
+    // ## m4-t22-state (named exception): stamps a state check read before this re-read become
+    // the marks of the owners it re-read without a mark of their own.
+    if !spec.marks.is_empty() {
+        record_marks(&mut r, &spec.marks);
+    }
+    // ## m4-t22-state (named exception; fix round 2, R-W4-9)
+    if !spec.kept.is_empty() {
+        protect_kept(&mut r, &ns, &spec.kept);
+    }
     // R-W2-1: the level the pass read and when (display only).
     r.level = level;
     if r.read_at_ms == 0 {
@@ -480,6 +543,62 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
         Ok(Ok(m)) => Output::Merged(Box::new(m)),
         Ok(Err(e)) => Output::Failed(e),
         Err(_) => Output::Failed(IntroError::Protocol(Name::from("merge"))),
+    }
+}
+
+// ## m4-t22-state (named exception; fix round 2, R-W4-9)
+/// Reports every kept object of `ns` existent in the existence sets of `r` that would decide it
+/// (a complete set, or a scoped one covering it): the merge then deletes none of them, while
+/// every other deletion, addition and change of the read applies.
+fn protect_kept(r: &mut NamespaceResult, ns: &NsKey, kept: &[ObjectKey]) {
+    for k in kept {
+        let Some(rel) = k.path.strip_prefix(ns.path.as_slice()) else {
+            continue;
+        };
+        let rel: Vec<Name> = rel.to_vec();
+        let id = merge::Identity {
+            path: rel.clone(),
+            server_id: k.server_id,
+            overload_sig: k.overload_sig.clone(),
+            raw_kind: k.raw_kind.clone(),
+            state: hacivat_meta::StateMark::None,
+        };
+        let ids = match r.existent.get_mut(&k.kind) {
+            Some(merge::ExistSet::Ok(ids)) => ids,
+            Some(merge::ExistSet::Scoped { scope, ids })
+                if scope.iter().any(|s| rel.starts_with(s)) =>
+            {
+                ids
+            }
+            _ => continue,
+        };
+        if !ids.iter().any(|i| i.path == rel) {
+            ids.push(id);
+        }
+    }
+}
+
+// ## m4-t22-state (named exception)
+/// Sets `marks` on the top-level objects of `r` they name that the read left without a mark
+/// (module docs of `freshness`, "Marks recorded on re-read").
+fn record_marks(r: &mut NamespaceResult, marks: &[(ObjectKey, hacivat_meta::StateMark)]) {
+    for c in &mut r.changed {
+        let obj = c.subtree.root_obj();
+        if obj.state() != hacivat_meta::StateMark::None {
+            continue;
+        }
+        let mut path = c.parent.path.clone();
+        path.push(obj.name().clone());
+        let key = ObjectKey {
+            kind: obj.kind(),
+            path,
+            server_id: obj.server_id(),
+            overload_sig: obj.props().overload_sig().cloned(),
+            raw_kind: obj.raw_kind().cloned(),
+        };
+        if let Some((_, m)) = marks.iter().find(|(k, _)| k.same_object(&key)) {
+            c.subtree.set_root_state(*m);
+        }
     }
 }
 

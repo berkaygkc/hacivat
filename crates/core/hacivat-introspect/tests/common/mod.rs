@@ -493,3 +493,55 @@ pub async fn bounded<T>(f: impl Future<Output = T>) -> T {
         .expect("finished in time")
 }
 // ## m4-t15-engine
+
+// ## m4-t22-freshness
+/// [`rig_with`] on a manual validation clock (Task 22's clock seam): periodic validation runs
+/// only when the test advances the clock.
+pub fn rig_with_clock(
+    fake: FakeIntrospector,
+    opts: RigOpts,
+) -> (Rig, hacivat_introspect::freshness::ManualClock) {
+    let dialect = match opts.dbms {
+        DbmsKind::MySql => DialectId::MySql,
+        DbmsKind::MariaDb => DialectId::MariaDb,
+        DbmsKind::Sqlite => DialectId::Sqlite,
+        _ => DialectId::Postgres,
+    };
+    let fake = fake.with_incremental(opts.incremental);
+    let meta = FakeMetaSource::new(opts.dbms);
+    fake.link_meta(meta.clone());
+    let catalog = Arc::new(Catalog::new(Arc::new(ServerFacts::new(
+        opts.dbms,
+        IdentCtx::new(dialect),
+    ))));
+    let (clock, hand) = hacivat_introspect::freshness::ValidationClock::manual();
+    let handle = Engine::start_with_clock(
+        EngineConfig {
+            profile: hacivat_proto::ProfileId::new(),
+            dbms: opts.dbms,
+            meta: meta.clone(),
+            introspector: Arc::new(fake.clone()),
+            catalog: catalog.clone(),
+            catalog_publisher: catalog.publisher().expect("the only writer"),
+            cache: opts.cache,
+            levels: opts.levels,
+            scope: parse_scope(opts.scope, dialect).expect("a scope"),
+            current: opts.current,
+            filters: opts.filters,
+            validate_every: opts.validate_every,
+            limits: opts.limits,
+            runtime: tokio::runtime::Handle::current(),
+        },
+        clock,
+    );
+    (
+        Rig {
+            fake,
+            meta,
+            catalog,
+            handle,
+        },
+        hand,
+    )
+}
+// ## m4-t22-freshness

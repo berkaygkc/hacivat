@@ -182,15 +182,24 @@ fn scope_selects_the_current_and_every_user_schema() {
     assert_eq!(scope("*:*"), set(["db.public", "db.app"]));
 }
 
-#[test]
-fn stub_check_state_is_unknown() {
+// ## m4-t22-freshness (named exception): the stub became Task 22's state check; a catalog
+// that holds nothing still decides every key `Unknown`, and reads nothing to do so.
+#[tokio::test]
+async fn stub_check_state_is_unknown() {
     let catalog = hacivat_meta::Catalog::new(Arc::new(hacivat_meta::ServerFacts::new(
         DbmsKind::Postgres,
         sql_ident::key::IdentCtx::new(DialectId::Postgres),
     )));
     let keys = [table("public", "orders"), table("public", "gone")];
+    let plan = hacivat_introspect::freshness::plan(DbmsKind::Postgres, &catalog.current(), &keys);
+    assert!(plan.probes.is_empty());
+    let intro = introspector_for(DbmsKind::Postgres).unwrap();
+    let mut c = MetaConn::offline(DbmsKind::Postgres);
     assert_eq!(
-        check_state(&catalog.current(), &keys),
+        check_state(&*intro, &mut c, &catalog.current(), &keys)
+            .await
+            .unwrap()
+            .staleness,
         vec![Staleness::Unknown, Staleness::Unknown]
     );
 }
