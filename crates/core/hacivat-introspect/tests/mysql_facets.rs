@@ -598,7 +598,9 @@ fn a_refused_grant_table_is_a_permission_error_never_an_empty_answer() {
             }),
             "{code}"
         );
-        let mut r = Script::default().refuse(name::GRANTS_SCHEMA, code);
+        let mut r = Script::default()
+            .answer(name::PARTIAL_REVOKES, vec![row(&[Some("0")])])
+            .refuse(name::GRANTS_SCHEMA, code);
         let got = block_on(read_on(
             &mut r,
             &mysql(),
@@ -636,7 +638,8 @@ fn a_grants_read_answers_only_complete_objects_with_names_as_binds() {
                 row(&[Some("a"), Some("%"), Some("x'y"), Some("Select,Bogus")]),
             ],
         )
-        .answer(name::GRANTS_SCHEMA, vec![db_row("a", "hvm4_db", &["Y"])]);
+        .answer(name::GRANTS_SCHEMA, vec![db_row("a", "hvm4_db", &["Y"])])
+        .answer(name::PARTIAL_REVOKES, vec![row(&[Some("0")])]);
     let keys = [
         table("t"),
         table("x'y"),
@@ -657,16 +660,94 @@ fn a_grants_read_answers_only_complete_objects_with_names_as_binds() {
     let sections: Vec<&str> = log.iter().map(|l| l.0.as_str()).collect();
     assert_eq!(
         sections,
-        [name::GRANTS_TABLE, name::GRANTS_COLUMN, name::GRANTS_SCHEMA]
+        [
+            name::GRANTS_TABLE,
+            name::GRANTS_COLUMN,
+            name::PARTIAL_REVOKES,
+            name::GRANTS_SCHEMA
+        ]
     );
     for (s, sql, binds) in &log {
         assert!(!sql.contains("x'y"), "{s}");
-        if s == name::GRANTS_SCHEMA {
+        if s == name::PARTIAL_REVOKES {
+            assert!(binds.is_empty());
+        } else if s == name::GRANTS_SCHEMA {
             assert_eq!(binds, &["hvm4_db".to_string(), "hvm4\\_db".to_string()]);
         } else {
             assert!(binds.contains(&"x'y".to_string()), "{s}: {binds:?}");
         }
     }
+}
+
+/// Fix round 1 (I-1): with `partial_revokes` on, a database-level `REVOKE` of a global
+/// privilege lives in `mysql.user.User_attributes` (never read), so the schema's grants are
+/// answered only when the variable reads off, in the same snapshot; tables are unaffected.
+#[test]
+fn schema_grants_need_partial_revokes_off() {
+    let schema = key(ObjectKind::Schema, &["hvm4_db"]);
+    let keys = [schema.clone(), table("t")];
+    let answered = |r: Result<FacetRows, IntroError>| match r {
+        Ok(FacetRows::Grants(g)) => g.into_iter().map(|(k, _)| k).collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    for (value, listed) in [
+        (Some("0"), true),
+        (Some("OFF"), true),
+        (Some("1"), false),
+        (Some("ON"), false),
+        (Some(""), false),
+        (None, false),
+    ] {
+        let rows = value.map(|v| vec![row(&[Some(v)])]).unwrap_or_default();
+        let mut r = Script::default()
+            .answer(name::PARTIAL_REVOKES, rows)
+            .answer(name::GRANTS_SCHEMA, vec![db_row("app", "hvm4_db", &["Y"])]);
+        let got = answered(block_on(read_on(
+            &mut r,
+            &mysql(),
+            &ns(),
+            &keys,
+            FacetKind::Grants,
+        )));
+        assert_eq!(got.contains(&schema), listed, "{value:?}");
+        assert!(
+            got.contains(&table("t")),
+            "{value:?}: tables are unaffected"
+        );
+        assert!(r.sections().contains(&name::PARTIAL_REVOKES.to_string()));
+    }
+    // The rich read says why.
+    let mut r = Script::default().answer(name::PARTIAL_REVOKES, vec![row(&[Some("1")])]);
+    let got = block_on(facets::grants(
+        &mut r,
+        &mysql(),
+        &ns(),
+        std::slice::from_ref(&schema),
+    ))
+    .unwrap();
+    assert_eq!(got[0].opaque, vec![Opaque::PartialRevokes]);
+    // A refusal fails the read.
+    let mut r = Script::default().refuse(name::PARTIAL_REVOKES, 1227);
+    assert_eq!(
+        block_on(read_on(&mut r, &mysql(), &ns(), &keys, FacetKind::Grants)),
+        Err(IntroError::Permission {
+            kind: ObjectKind::Table
+        })
+    );
+    // Before 8.0.16 the variable does not exist and there are no partial revokes.
+    let mut old = mysql();
+    old.version_num = 80_015;
+    let mut r =
+        Script::default().answer(name::GRANTS_SCHEMA, vec![db_row("app", "hvm4_db", &["Y"])]);
+    let got = answered(block_on(read_on(
+        &mut r,
+        &old,
+        &ns(),
+        &keys,
+        FacetKind::Grants,
+    )));
+    assert!(got.contains(&schema));
+    assert!(!r.sections().contains(&name::PARTIAL_REVOKES.to_string()));
 }
 
 #[test]

@@ -277,6 +277,9 @@ pub enum Opaque {
     NoTableRow,
     /// A `mysql.db` row stored in the schema name's escaped (`\_`, `\%`) form.
     EscapedSchemaRow,
+    /// `partial_revokes` is not off (fix round 1, I-1): a database-level `REVOKE` of a global
+    /// privilege is then stored in `mysql.user.User_attributes`, which is never read.
+    PartialRevokes,
 }
 
 /// One object's grants as read: the facet, and why it is incomplete (empty: complete).
@@ -375,8 +378,21 @@ pub fn decide_relation_grants(
             };
             // (user, host) → grant option of its table row.
             let mut grant_option: HashMap<(&str, &str), bool> = HashMap::new();
+            // ## m4-t17b-mysql-facets (fix round 1, m-5): the grant-table scope columns are
+            // NOT NULL; a NULL one (a broken or hostile server) is opaque, never `''`.
+            let null_scope = |r: &Row, n: usize| (0..n).any(|i| cell(r, i).is_none());
+            for r in table_rows.iter().chain(column_rows) {
+                if null_scope(r, 3) || (r.len() == 5 && cell(r, 3).is_none()) {
+                    out.opaque.push(Opaque::Account {
+                        user: cell(r, 0).unwrap_or("").to_string(),
+                        host: cell(r, 1).unwrap_or("").to_string(),
+                    });
+                }
+            }
             for r in table_rows.iter().filter(|r| cell(r, 2) == Some(table)) {
-                let (user, host) = (cell(r, 0).unwrap_or(""), cell(r, 1).unwrap_or(""));
+                let (Some(user), Some(host)) = (cell(r, 0), cell(r, 1)) else {
+                    continue;
+                };
                 let mut privs = Vec::new();
                 let mut g = false;
                 for e in elements(cell(r, 3)) {
@@ -409,8 +425,11 @@ pub fn decide_relation_grants(
             // (user, host, privilege) → columns.
             let mut cols: BTreeMap<(&str, &str, &'static str), BTreeSet<Name>> = BTreeMap::new();
             for r in column_rows.iter().filter(|r| cell(r, 2) == Some(table)) {
-                let (user, host) = (cell(r, 0).unwrap_or(""), cell(r, 1).unwrap_or(""));
-                let column = Name::from(cell(r, 3).unwrap_or(""));
+                let (Some(user), Some(host), Some(column)) = (cell(r, 0), cell(r, 1), cell(r, 3))
+                else {
+                    continue;
+                };
+                let column = Name::from(column);
                 for e in elements(cell(r, 4)) {
                     match column_privilege(e) {
                         Some(p) => {
@@ -455,14 +474,20 @@ pub fn decide_schema_grants(key: &ObjectKey, schema: &str, rows: &[Row]) -> ObjG
         opaque: Vec::new(),
     };
     for r in rows {
-        let db = cell(r, 2).unwrap_or("");
+        // Fix round 1, m-5: a NULL scope column is opaque.
+        let (Some(user), Some(host), Some(db)) = (cell(r, 0), cell(r, 1), cell(r, 2)) else {
+            out.opaque.push(Opaque::Account {
+                user: cell(r, 0).unwrap_or("").to_string(),
+                host: cell(r, 1).unwrap_or("").to_string(),
+            });
+            continue;
+        };
         if db != schema {
             if db == escaped_schema(schema) {
                 out.opaque.push(Opaque::EscapedSchemaRow);
             }
             continue;
         }
-        let (user, host) = (cell(r, 0).unwrap_or(""), cell(r, 1).unwrap_or(""));
         let mut privs = Vec::new();
         let mut g = false;
         for (i, kw) in SCHEMA_PRIVILEGES.iter().enumerate() {
@@ -537,6 +562,23 @@ pub async fn grants(
     if let Some(key) = own
         && renders(srv, name::GRANTS_SCHEMA)
     {
+        // ## m4-t17b-mysql-facets (fix round 1, I-1): read in the same snapshot. Only "off"
+        // proves no restriction exists (MySQL refuses to turn it off while one does); a
+        // server without the variable (before 8.0.16) has no partial revokes.
+        if renders(srv, name::PARTIAL_REVOKES) {
+            let pr = read_rows(r, srv, name::PARTIAL_REVOKES, Params::default(), 1)
+                .await
+                .map_err(refused)?
+                .unwrap_or_default();
+            if !matches!(pr.rows.first().and_then(|r| cell(r, 0)), Some("0" | "OFF")) {
+                out.push(ObjGrants {
+                    key,
+                    facet: GrantsFacet::default(),
+                    opaque: vec![Opaque::PartialRevokes],
+                });
+                return Ok(out);
+            }
+        }
         let spellings = [schema.clone(), Name::from(escaped_schema(&schema))];
         let rows = read_rows(
             r,

@@ -633,6 +633,29 @@ async fn mysql_view_table_usage_read() {
             )
             .await
             .unwrap_or_else(|e| panic!("{}: {e:?}", t.id));
+            // Fix round 1 (m-2): pin the `USER_PRIVILEGES.GRANTEE` spelling the coverage gate
+            // compares (`'user'@'host'`, unescaped): `hv_test` holds no global privilege, so
+            // its own row reads `USAGE`.
+            let rows = r
+                .read(
+                    sections::DEPS_COVERAGE,
+                    srv.pack_ctx(Mode::Full, Level::Structure, Params::default()),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e:?}", t.id));
+            let own: Vec<String> = rows
+                .rows
+                .iter()
+                .filter(|r| r.first().and_then(|c| c.as_deref()) == Some("'hv_test'@'%'"))
+                .map(|r| {
+                    r.get(1)
+                        .and_then(|c| c.as_deref())
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .collect();
+            fact(&t, &format!("user_privileges_hv_test={}", own.join(",")));
+            assert_eq!(own, ["USAGE"], "{}: {:?}", t.id, rows.rows);
             drop(r);
             txn.commit().await.expect("commit");
             out

@@ -2106,3 +2106,33 @@ Knowledge Base). Rulings R-M4-30, R-W4-3 (a key left out of `FacetRows` is not l
   column's (`c2`/`pid`). `NamedAfterConstraint` is set; the unnamed case stays shown (valid DDL).
   `fk_created` now requires exactly the FK's columns: a longer index named like the constraint
   was the user's (InnoDB created none) and hiding it would drop its extra parts.
+
+### m4-t17b fix round 1 (security review: 1 Important, 6 Minor)
+
+- **Schema grants need `partial_revokes` off (I-1).** With it on (MySQL 8.0.16+), `REVOKE …
+  ON db.*` of a global privilege writes no `mysql.db` row but a restriction in
+  `mysql.user.User_attributes`, which is never read. The grants read therefore reads
+  `PartialRevokes` in the same snapshot and answers the schema key only when it reads `0`/`OFF`
+  (MySQL refuses to turn it off while any restriction exists, so "off" proves there is none);
+  any other value leaves the schema not loaded (`Opaque::PartialRevokes`), and a refusal is
+  `Permission { Table }`. Table and column grants are unaffected (restrictions are
+  database-level only). Before 8.0.16 the variable does not exist and neither do partial
+  revokes. **MariaDB** has no partial revokes (a database-level `REVOKE` removes or edits the
+  `mysql.db` row), and its database-level grants are not read at all (above).
+- **FK-created index (m-1).** Hidden as the FK's only when it also has InnoDB's own attributes:
+  no comment, every part ascending and whole (no prefix, no expression), visible, `BTREE` or no
+  method. A user index with any other attribute backs the FK too and stays shown.
+- **NULL scope columns (m-5)** of a grant-table row (`User`, `Host`, `Db`, `Table_name`,
+  `Column_name` are `NOT NULL`) make the object opaque, never the anonymous user `''`.
+- **`DepsKind::Usage` scope (m-3).** It covers stored tables, views and stored functions only;
+  loadable functions (UDFs) are never listed by `VIEW_ROUTINE_USAGE`, and the model has no key
+  for them. Carried to M7 (drop impact).
+- **Where the fold pin rests (m-4).** The `column_fold` facts come from mysql80 (8.0.46), mysql84
+  (8.4.13) and mariadb114 (11.4.13) only. `IdentCtx` carries no server version, so a version
+  gate is not cheap: the pin applies to every MySQL/MariaDB server at lctn 0, including the
+  matrix's mariadb106/mariadb1011 (same `utf8mb3_general_ci` column collation, unprobed) and any
+  later MySQL. Carried to T33: add mariadb106 and mariadb1011 to the probe; a server whose column
+  collation changes must re-run it before the pin is trusted there.
+- **m-2:** `docker_mysql_facets` pins `hv_test`'s own `USER_PRIVILEGES` row as
+  `('hv_test'@'%', USAGE)`, the spelling the coverage gate compares. **m-6** (one refused key
+  fails a whole `Sources` batch) is carried to T15b, which requests per-key reads.

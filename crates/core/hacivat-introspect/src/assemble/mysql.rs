@@ -396,7 +396,21 @@ fn fk_created(idx: &KeyObj, fk: &KeyObj) -> bool {
     // ## m4-t17b-mysql-facets (named exception): exactly the FK's columns. An index the user
     // made longer (named like the constraint, made before it) also supports the FK, so InnoDB
     // creates none; hiding it would drop its extra parts from the DDL.
-    !f.columns.is_empty()
+    // ## m4-t17b-mysql-facets (fix round 1, m-1): and only with the attributes InnoDB's own
+    // index has (no comment, every part ascending and whole, visible, BTREE or no method). A
+    // user index with any other attribute also backs the FK, and hiding it would drop that
+    // attribute from the DDL.
+    let defaults = idx.index().is_some_and(|i| {
+        i.comment.as_deref().is_none_or(str::is_empty)
+            && i.prefix_len.iter().all(Option::is_none)
+            && i.method
+                .as_deref()
+                .is_none_or(|m| m.eq_ignore_ascii_case("BTREE"))
+    }) && !k.invisible
+        && k.desc.iter().all(|d| !d)
+        && k.expressions.is_empty();
+    defaults
+        && !f.columns.is_empty()
         && k.columns.len() == f.columns.len()
         && k.columns
             .iter()
