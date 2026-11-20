@@ -456,6 +456,29 @@ fn match_all() -> hacivat_introspect::filter::CompiledFilter {
     .expect("the empty filter")
 }
 
+/// Prints one server fact as `HV-FACT <target> <key>=<value>` straight to the process's
+/// stdout: libtest captures only the `print!` family, so the line reaches the CI log of a
+/// passing test too (CI uploads no artifact directory). Values are server facts, never a
+/// password or a fixture statement.
+fn fact(t: &DockerTarget, kv: &str) {
+    use std::io::Write as _;
+    let line = format!("HV-FACT {} {}\n", t.id, kv.replace('\n', " "));
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(line.as_bytes());
+    let _ = out.flush();
+}
+
+/// After a full pass `s0` taken right after fixture DDL, the objects created in the same
+/// second as its `W` are in the R-M4-39 window and the next incremental pass re-reads them
+/// (the intended fail-safe). This takes that pass and waits out its window, so a test can
+/// assert exactly what a later DDL re-reads.
+async fn settled(t: &DockerTarget, db: &Db, s0: &NamespaceSnapshot) -> NamespaceSnapshot {
+    past_window(t, watermark_of(s0)).await;
+    let (s1, _, _) = pass(t, db, Mode::Incremental, Some(s0)).await;
+    past_window(t, watermark_of(&s1)).await;
+    s1
+}
+
 fn intro(t: &DockerTarget) -> MySqlIntrospector {
     MySqlIntrospector { flavor: t.engine }
 }
@@ -719,14 +742,19 @@ async fn a_login_without_show_view_still_sees_a_replaced_view() {
             t: t.clone(),
             user: user.into(),
         };
-        harness::exec(
-            &t,
-            Login::Fixture,
-            None,
-            &fixture_sql::grant("SELECT", &db.name, None, user),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("{}: grant: {e}", t.id));
+        // Table-level grants through the definer procedure: a database-level GRANT reads `_`
+        // in the database name as a wildcard, wider than the definer's `hvm4\_%` grant, and
+        // MySQL refuses it (1044, CI 44645719558); a table-level one names one object.
+        for table in ["customers", "orders", "v_orders"] {
+            harness::exec(
+                &t,
+                Login::Fixture,
+                None,
+                &fixture_sql::grant("SELECT", &db.name, Some(table), user),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: grant on {table}: {e}", t.id));
+        }
         let limited = t.as_test_account(user).expect("a MySQL-family target");
         let (s0, _, _) = pass(&limited, &db, Mode::Full, None).await;
         assert!(
@@ -735,8 +763,12 @@ async fn a_login_without_show_view_still_sees_a_replaced_view() {
             t.id
         );
         // Unchanged, the hidden definition still makes the view a re-read every pass.
-        past_window(&t, watermark_of(&s0)).await;
+        let s0 = settled(&limited, &db, &s0).await;
         let (s1, stats) = incremental_equals_full(&limited, &db, &s0).await;
+        fact(
+            &t,
+            &format!("noshowview_rereads={}", reread(&stats).join(",")),
+        );
         assert_eq!(reread(&stats), ["v_orders"], "{}", t.id);
         // Replaced (as hv_test, the definer), with another column: caught for this login.
         db.run("CREATE OR REPLACE VIEW v_orders AS SELECT id, status, customer_id FROM orders")
@@ -757,6 +789,9 @@ async fn create_or_replace_view_rehashes_and_rereads_columns() {
         let db = Db::create(&t, "view").await;
         base_schema(&db).await;
         let (s0, _, _) = pass(&t, &db, Mode::Full, None).await;
+        // CI 44645719558: without this, `customers` and `orders` (created in the second of
+        // the first pass's W) were re-read as well: the window, not the view mark.
+        let s0 = settled(&t, &db, &s0).await;
         db.run("CREATE OR REPLACE VIEW v_orders AS SELECT id, status, customer_id FROM orders")
             .await;
         let (s1, stats) = incremental_equals_full(&t, &db, &s0).await;
@@ -1012,6 +1047,13 @@ async fn mysql_column_name_matching_is_pinned() {
                     Err(code) => code.clone(),
                 };
                 let _ = writeln!(tsv, "{}\t{sys}\t{coll}\t{stored}\t{probe}\t{verdict}", t.id);
+                fact(
+                    &t,
+                    &format!(
+                        "column_fold charset_system={sys} column_collation={coll} \
+                         stored={stored} probe={probe} server={verdict}"
+                    ),
+                );
                 if found.is_ok() {
                     // The server says the same column: the client may say "same" or "not
                     // pinned", never "different" (a wrong Missing, F31).
@@ -1214,6 +1256,13 @@ async fn sections_prepare(ids: &[&str]) {
                         Ok(_) => "prepared".to_string(),
                         Err(e) => format!("{e:?}"),
                     };
+                    fact(
+                        &t,
+                        &format!(
+                            "show_create_trigger_prepared={}",
+                            if got.is_ok() { "ok" } else { "1295" }
+                        ),
+                    );
                     eprintln!(
                         "{}: SHOW CREATE TRIGGER on the prepared path: {verdict}",
                         t.id
@@ -1308,6 +1357,18 @@ async fn show_create_sections_quote_hostile_names() {
         let padded = intro(&t)
             .show_create(&mut c, ObjectKind::Table, &db.name, "t ")
             .await;
+        fact(
+            &t,
+            &format!(
+                "show_create_padded_probe={}",
+                match &padded {
+                    Ok(Some(text)) if text.starts_with("CREATE TABLE `t`") => "resolved_to_t",
+                    Ok(Some(_)) => "other_text",
+                    Ok(None) => "no_row",
+                    Err(_) => "error",
+                }
+            ),
+        );
         assert!(
             !matches!(&padded, Ok(Some(text)) if text.starts_with("CREATE TABLE `t`")),
             "{}: {padded:?}",
@@ -1321,7 +1382,7 @@ async fn show_create_sections_quote_hostile_names() {
 async fn mysql_enum_column_labels_parsed_with_doubled_quotes() {
     for t in targets(&MYSQL) {
         let db = Db::create(&t, "enum").await;
-        db.run("CREATE TABLE t (e ENUM('a','it''s','İ',''), s SET('x,y','z'))")
+        db.run("CREATE TABLE t (e ENUM('a','it''s','İ',''), s SET('x''y','z'))")
             .await;
         let (s, _, _) = pass(&t, &db, Mode::Full, None).await;
         let labels = |col: &str| -> Vec<String> {
@@ -1336,7 +1397,7 @@ async fn mysql_enum_column_labels_parsed_with_doubled_quotes() {
                 .unwrap_or_default()
         };
         assert_eq!(labels("e"), ["a", "it's", "İ", ""], "{}", t.id);
-        assert_eq!(labels("s"), ["x,y", "z"], "{}", t.id);
+        assert_eq!(labels("s"), ["x'y", "z"], "{}", t.id);
     }
 }
 
@@ -1495,6 +1556,10 @@ async fn mysql_fk_auto_index_is_pinned() {
         .await;
         for r in &rows {
             let _ = writeln!(tsv, "{}\t{}\t{}\t{}", t.id, r[0], r[1], r[2]);
+            fact(
+                &t,
+                &format!("fk_index table={} index={} column={}", r[0], r[1], r[2]),
+            );
         }
         // MySQL 8.4 manual, FOREIGN KEY constraints: the implicit index takes the constraint's
         // name when one is given.
@@ -1552,6 +1617,25 @@ async fn server_facts_filled_per_engine() {
         let mut c2 = harness::meta(&t, &db.name).await;
         let b = intro(&t).server_fingerprint(&mut c2).await.unwrap();
         assert!(a.is_some() && a == b, "{}", t.id);
+        fact(
+            &t,
+            &format!(
+                "lctn={} version={} flavor={:?} server_uuid={} charset_system={} utf8mb4={} \
+                 utc_session={} fingerprint={}",
+                srv.lower_case_table_names,
+                srv.version_text,
+                srv.flavor,
+                if srv.server_uuid.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                },
+                srv.character_set_system.as_deref().unwrap_or("?"),
+                srv.utf8mb4,
+                srv.utc_session,
+                if a.is_some() { "known" } else { "unknown" },
+            ),
+        );
     }
 }
 
@@ -1621,6 +1705,14 @@ async fn record_mariadb_create_time_behaviour() {
             db.run(ddl).await;
             let after = ctime().await;
             let _ = writeln!(tsv, "{}\t{step}\t{}", t.id, before != after);
+            fact(
+                &t,
+                &format!(
+                    "mariadb_create_time step={} changed={}",
+                    step.replace(' ', "_"),
+                    before != after
+                ),
+            );
         }
     }
     if docker_enabled() {
