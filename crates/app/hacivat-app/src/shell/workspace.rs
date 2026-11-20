@@ -234,11 +234,12 @@ impl Workspace {
         }
         // The cached trees of app start, now that the expanded rows are known (R-M4-15).
         crate::explorer::live::start(cx);
-        ws._subscriptions.push(
-            cx.observe_global::<crate::explorer::live::ExpandedState>(|this, cx| {
-                this.layout_changed(cx);
-            }),
-        );
+        ws._subscriptions
+            .push(
+                cx.observe_global::<crate::explorer::live::ExpandedState>(|this, cx| {
+                    this.layout_changed(cx);
+                }),
+            );
         ws
     }
 

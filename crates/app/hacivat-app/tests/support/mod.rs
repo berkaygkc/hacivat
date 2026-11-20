@@ -1758,6 +1758,12 @@ pub mod live {
         pub threads: Arc<Mutex<Vec<ThreadId>>>,
         pub ensures: AtomicU64,
         made: Mutex<HashMap<ProfileId, ProfileCatalog>>,
+        // ## m4-t24-live (fix round 1)
+        /// What the source did, in order: `ensure sensitive=<bool>`, `shutdown watched=<bool>`
+        /// (whether [`FakeSource::watch`] existed when the store was closed).
+        pub log: Mutex<Vec<String>>,
+        /// A file whose presence `shutdown` records.
+        pub watch: Mutex<Option<PathBuf>>,
     }
 
     impl FakeSource {
@@ -1773,6 +1779,8 @@ pub mod live {
                 threads: Arc::default(),
                 ensures: AtomicU64::new(0),
                 made: Mutex::new(HashMap::new()),
+                log: Mutex::new(Vec::new()),
+                watch: Mutex::new(None),
             }
         }
 
@@ -1799,6 +1807,10 @@ pub mod live {
             Box::pin(async move {
                 self.note();
                 self.ensures.fetch_add(1, Ordering::SeqCst);
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("ensure sensitive={}", profile.catalog_sensitive()));
                 if let Some(pc) = self.made(profile.id) {
                     return Ok(pc);
                 }
@@ -1873,6 +1885,16 @@ pub mod live {
         fn shutdown(&self, profile: ProfileId) -> BoxFuture<'_, ()> {
             Box::pin(async move {
                 self.note();
+                let watched = self
+                    .watch
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|p| p.exists());
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("shutdown watched={watched}"));
                 let gone = self.made.lock().unwrap().remove(&profile);
                 if let Some(pc) = gone {
                     pc.handle.shutdown();

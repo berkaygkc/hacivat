@@ -3983,3 +3983,17 @@ hv-cmd-explorer-collapse-children = Collapse all children
 hv-cmd-explorer-level-menu = Introspection level
 # Surface 5 (Context menus). The title of the disabled Modify… placeholder (never in the palette).
 hv-cmd-explorer-modify = Modify
+# Surface 5 (Context menus). Open data refused: the object is in another database than the one
+# this connection's consoles use.
+# Variables:
+#   $database (String) - the object's database, verbatim, e.g. "reports".
+#   $current (String) - the database the consoles use, verbatim, e.g. "app".
+hv-explorer-open-data-other-db = This connection's consoles use { $current }, so Open data can't show the data of { $database }. Connect to { $database } to see it.
+# Surface 5 (Context menus). Open data refused: which database the consoles use is not known.
+# Variables:
+#   $database (String) - the object's database, verbatim, e.g. "reports".
+hv-explorer-open-data-db-unknown = Hacivat can't tell which database this connection's consoles use, so Open data didn't open { $database }. Set the connection's database, or open a console on it first.
+# Surface 5 (Context menus). Hide objects like this refused: the name can't be written as a view filter.
+# Variables:
+#   $name (String) - the object's name, verbatim, e.g. "yedek_2019".
+hv-explorer-hide-refused = Objects like { $name } can't be hidden: the name can't be written as a view filter.

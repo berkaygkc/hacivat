@@ -577,7 +577,11 @@ fn meta_typed_seams_answer_nothing_until_their_tasks(cx: &mut TestAppContext) {
     // ## m4-t24-live (named exception): Task 24 installs the default handler; for a profile
     // the app does not know it opens nothing.
     assert!(ran, "the default open-data handler is installed");
-    assert_eq!(tab_count(vcx), 1, "Open data opened a console for an unknown profile");
+    assert_eq!(
+        tab_count(vcx),
+        1,
+        "Open data opened a console for an unknown profile"
+    );
     // A handler, once set, receives the object; a second one replaces it.
     let seen: Rc<RefCell<Vec<(&str, ObjectKey)>>> = Rc::default();
     for name in ["first", "second"] {

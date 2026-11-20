@@ -105,7 +105,10 @@ const MENU_COMMANDS: [(&str, &str); 6] = [
     ("explorer.copy_name", "hv-cmd-explorer-copy-name"),
     ("explorer.hide_like_this", "hv-cmd-explorer-hide-like-this"),
     ("explorer.show_hidden", "hv-cmd-explorer-show-hidden"),
-    ("explorer.collapse_children", "hv-cmd-explorer-collapse-children"),
+    (
+        "explorer.collapse_children",
+        "hv-cmd-explorer-collapse-children",
+    ),
     ("explorer.level_menu", "hv-cmd-explorer-level-menu"),
     (actions::MODIFY, "hv-cmd-explorer-modify"),
 ];
@@ -141,9 +144,7 @@ fn filled(id: &str) -> Option<(ActionFn, Enabled)> {
         "explorer.collapse_all" => Some((actions::collapse_all, actions::can_collapse_all)),
         "explorer.open_data" => Some((actions::open_data_command, actions::can_open_data)),
         "explorer.refresh" => Some((actions::refresh_command, actions::can_refresh)),
-        "explorer.expand_all_children" => {
-            Some((actions::expand_all_children, actions::has_cursor))
-        }
+        "explorer.expand_all_children" => Some((actions::expand_all_children, actions::has_cursor)),
         "explorer.collapse_children" => Some((actions::collapse_children, actions::has_cursor)),
         "explorer.hide_like_this" => Some((actions::hide_like_this, actions::can_hide)),
         "explorer.show_hidden" => Some((actions::show_hidden, actions::can_show_hidden)),

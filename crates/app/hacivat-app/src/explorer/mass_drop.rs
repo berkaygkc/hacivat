@@ -63,8 +63,14 @@ pub fn spec(ns: &NsKey, count: u32) -> DialogSpec {
         ),
         body: text("hv-metadata-mass-body", Vec::new()),
         buttons: vec![
-            button(text("hv-metadata-mass-remove", Vec::new()), ButtonKind::Default),
-            button(text("hv-metadata-mass-keep", Vec::new()), ButtonKind::Primary),
+            button(
+                text("hv-metadata-mass-remove", Vec::new()),
+                ButtonKind::Default,
+            ),
+            button(
+                text("hv-metadata-mass-keep", Vec::new()),
+                ButtonKind::Primary,
+            ),
         ],
         cancel: KEEP,
         primary: KEEP,

@@ -302,7 +302,16 @@ impl CatalogHub {
                 return Ok(found);
             }
             let (key, store, cache) = self.open_cache(&rt, &profile).await;
-            let introspector = introspector_for(profile.engine)
+            // ## m4-t24-live (named exception, R-W3-10): SQLite reads each attached schema on a
+            // reader of its own, from the same metadata source as the engine.
+            let meta = Arc::new(HubMeta {
+                sessions: self.sessions.clone(),
+                profile: profile.id,
+                single_session: profile.single_session,
+                timeout: META_STATEMENT_TIMEOUT,
+                verified: Mutex::new(std::sync::Weak::new()),
+            });
+            let introspector = introspector_with_readers(profile.engine, meta.clone())
                 .ok_or(HubError::UnsupportedEngine(profile.engine))?;
             let server = ServerFacts::new(profile.engine, IdentCtx::new(dialect));
             let catalog = Arc::new(Catalog::new(Arc::new(server)));
@@ -312,13 +321,7 @@ impl CatalogHub {
             let handle = Engine::start(EngineConfig {
                 profile: profile.id,
                 dbms: profile.engine,
-                meta: Arc::new(HubMeta {
-                    sessions: self.sessions.clone(),
-                    profile: profile.id,
-                    single_session: profile.single_session,
-                    timeout: META_STATEMENT_TIMEOUT,
-                    verified: Mutex::new(std::sync::Weak::new()),
-                }),
+                meta,
                 introspector,
                 catalog: catalog.clone(),
                 catalog_publisher: publisher,
@@ -558,6 +561,25 @@ fn validate_every(m: &MetadataSettings, profile: &Profile) -> Option<Duration> {
 }
 // ## m4-t15-hub
 
+// ## m4-t24-live (named exception, R-W3-10)
+/// The introspector of `dbms` (`introspector_for`), SQLite's with its per-schema readers taken
+/// from `meta` (one reader connection per attached schema, R-W3-10: without them a second
+/// attached schema fails closed).
+pub fn introspector_with_readers(
+    dbms: DbmsKind,
+    meta: Arc<dyn MetaSource>,
+) -> Option<Arc<dyn crate::introspector::Introspector>> {
+    match dbms {
+        DbmsKind::Sqlite => Some(Arc::new(sqlite_with_readers(meta))),
+        _ => introspector_for(dbms),
+    }
+}
+
+fn sqlite_with_readers(meta: Arc<dyn MetaSource>) -> crate::sqlite::SqliteIntrospector {
+    crate::sqlite::SqliteIntrospector::default().with_readers(meta)
+}
+// ## m4-t24-live
+
 /// The SQL dialect of an engine M4 introspects.
 fn dialect_of(dbms: DbmsKind) -> Option<DialectId> {
     match dbms {
@@ -594,6 +616,22 @@ mod tests {
         assert_eq!(spec.profile, profile);
         assert_eq!(spec.database.as_deref(), Some("app"));
         assert!(!meta.user_in_transaction());
+    }
+
+    // ## m4-t24-live (named exception, R-W3-10)
+    #[test]
+    fn the_hubs_sqlite_introspector_has_its_readers() {
+        let meta: Arc<dyn MetaSource> = Arc::new(HubMeta {
+            sessions: Arc::new(NoSessions),
+            profile: ProfileId::new(),
+            single_session: false,
+            timeout: META_STATEMENT_TIMEOUT,
+            verified: Mutex::new(std::sync::Weak::new()),
+        });
+        let sqlite = format!("{:?}", sqlite_with_readers(meta.clone()));
+        assert!(sqlite.contains("readers: true"), "{sqlite}");
+        assert!(introspector_with_readers(DbmsKind::Sqlite, meta.clone()).is_some());
+        assert!(introspector_with_readers(DbmsKind::Postgres, meta).is_some());
     }
 
     #[test]

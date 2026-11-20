@@ -175,11 +175,13 @@ pub struct LiveRow {
     pub locked: bool,
 }
 
-/// The catalog of one profile, while open.
+/// The catalog of one profile, while open. `Opening` and `Closing` exist only while the
+/// profile's lifecycle task waits on the source.
 enum Open {
     Closed,
     Opening,
     Ready(ProfileCatalog),
+    Closing,
 }
 
 /// What the host last told one engine.
@@ -194,8 +196,16 @@ struct Sent {
 /// One profile's live state.
 struct Entry {
     open: Open,
-    /// Bumped by every open and close: an answer for an older one is dropped.
-    epoch: u64,
+    // ## fix round 1 (I-1): one lifecycle task per profile serializes opens and closes; the
+    // latest wish wins.
+    /// The catalog should be open (the latest of `open` and `close`).
+    want_open: bool,
+    /// The lifecycle task runs.
+    busy: bool,
+    /// T20's Save is deleting the cache files: nothing opens until `reopen`.
+    deleting: bool,
+    /// `close` callers waiting for the lifecycle task to settle.
+    closers: Vec<oneshot::Sender<()>>,
     /// The profile is connected: the engine runs `on_connect` once it is ready.
     want_connect: bool,
     /// `on_connect` was sent to the engine that is open now.
@@ -222,7 +232,10 @@ impl Default for Entry {
     fn default() -> Self {
         Entry {
             open: Open::Closed,
-            epoch: 0,
+            want_open: false,
+            busy: false,
+            deleting: false,
+            closers: Vec::new(),
             want_connect: false,
             connected: false,
             mode: None,
@@ -343,9 +356,7 @@ pub fn install(cx: &mut App) {
     let secrets = model.secrets().clone();
     // The embedded system catalogs (Task 23 fills them); decoding is lazy.
     let system = Arc::new(hacivat_meta::system::SystemCatalogs::from_embedded());
-    // TODO(m4-t24, R-W3-10): the SQLite introspector's per-schema readers
-    // (`SqliteIntrospector::default().with_readers(meta)`) are built by the hub once Task 18
-    // merges; nothing here can reach them.
+    // The hub builds SQLite's introspector with its per-schema readers (R-W3-10).
     let hub = CatalogHub::new_on(rt.clone(), sessions, settings, secrets, system);
     set_source(Arc::new(HubSource { hub, paths }), cx);
     // A changed explicit level, scope or filter reaches the engine (T20 carry).
@@ -432,7 +443,9 @@ pub fn is_open(profile: ProfileId, cx: &App) -> bool {
 
 /// The mass deletions held for `profile` (background passes).
 pub fn pending(profile: ProfileId, cx: &App) -> BTreeMap<NsKey, u32> {
-    row(profile, cx).map(|r| r.pending.clone()).unwrap_or_default()
+    row(profile, cx)
+        .map(|r| r.pending.clone())
+        .unwrap_or_default()
 }
 
 /// Other databases the last scope refresh could not list.
@@ -581,55 +594,145 @@ pub fn start(cx: &mut App) {
 
 // ---- open, connect, close ---------------------------------------------------------------------
 
-/// Opens `id`'s catalog through the source (on the runtime) unless it is open or opening.
+/// Asks for `id`'s catalog to be open (through the source, on the runtime). Opens and closes of
+/// one profile run one at a time in its lifecycle task, and the latest wish wins (fix round 1,
+/// I-1): an open answered after a close is closed again by the same task, never by a stale
+/// shutdown that could stop a newer engine.
 pub fn open(id: ProfileId, cx: &mut App) {
-    let Some(p) = profile(id, cx) else {
-        return;
-    };
-    let Some((source, rt)) = source_and_runtime(cx) else {
-        return;
-    };
-    let host = cx.default_global::<CatalogHost>();
-    let entry = host.entry(id);
-    if !matches!(entry.open, Open::Closed) {
+    if profile(id, cx).is_none() || source_and_runtime(cx).is_none() {
         return;
     }
-    entry.epoch += 1;
-    entry.open = Open::Opening;
-    let epoch = entry.epoch;
-    host.ensures += 1;
+    let host = cx.default_global::<CatalogHost>();
     host.locked.remove(&id);
-    let rx = on_runtime(&rt, async move { source.ensure(p).await });
-    cx.spawn(async move |cx| {
-        let answer = rx.await.unwrap_or(Err(HubError::Shutdown));
-        cx.update(|cx| opened(id, epoch, answer, cx));
-    })
-    .detach();
+    host.entry(id).want_open = true;
+    kick(id, cx);
     bump(cx);
 }
 
-/// The source answered `id`'s open number `epoch`.
-fn opened(id: ProfileId, epoch: u64, answer: Result<ProfileCatalog, HubError>, cx: &mut App) {
-    let current = cx
-        .try_global::<CatalogHost>()
-        .and_then(|h| h.entries.get(&id))
-        .is_some_and(|e| e.epoch == epoch && matches!(e.open, Open::Opening));
-    if !current {
-        // Closed (or reopened) meanwhile: an engine made for an older open stops.
-        if let (Ok(_), Some((source, rt))) = (&answer, source_and_runtime(cx)) {
-            drop(on_runtime(&rt, async move { source.shutdown(id).await }));
-        }
+/// One step of a profile's lifecycle task.
+enum Step {
+    Open(Arc<dyn CatalogSource>, Handle, Arc<Profile>),
+    Close(Arc<dyn CatalogSource>, Handle),
+    Done,
+}
+
+/// What `id`'s lifecycle task does next: open when wished (and not being deleted) and closed,
+/// close when not wished and open, else nothing.
+fn next_step(id: ProfileId, cx: &mut App) -> Step {
+    let src = source_and_runtime(cx);
+    let p = profile(id, cx);
+    let host = cx.default_global::<CatalogHost>();
+    let entry = host.entry(id);
+    let wanted = entry.want_open && !entry.deleting;
+    let (opening, closing) = (
+        matches!(entry.open, Open::Closed) && wanted,
+        matches!(entry.open, Open::Ready(_)) && !wanted,
+    );
+    if opening {
+        let Some(((s, rt), p)) = src.zip(p) else {
+            entry.want_open = false;
+            return Step::Done;
+        };
+        entry.open = Open::Opening;
+        host.ensures += 1;
+        return Step::Open(s, rt, p);
+    }
+    if closing {
+        teardown(entry);
+        entry.open = if src.is_some() {
+            Open::Closing
+        } else {
+            Open::Closed
+        };
+        host.generation += 1;
+        return match src {
+            Some((s, rt)) => Step::Close(s, rt),
+            None => Step::Done,
+        };
+    }
+    Step::Done
+}
+
+/// Stops what an open entry runs in the UI (its pump, its session watch) and forgets what it
+/// told the engine.
+fn teardown(entry: &mut Entry) {
+    entry.connected = false;
+    entry.user_asked.clear();
+    entry.watched = None;
+    entry.watcher = None;
+    if let Some(pump) = entry.pump.take() {
+        pump.stop.cancel();
+    }
+    entry._ui = None;
+    let mut row = (*entry.row).clone();
+    row.progress = Arc::default();
+    row.live = false;
+    row.db_levels.clear();
+    entry.row = Arc::new(row);
+}
+
+/// Starts `id`'s lifecycle task unless it runs (it reads the latest wish at every step).
+fn kick(id: ProfileId, cx: &mut App) {
+    let entry = cx.default_global::<CatalogHost>().entry(id);
+    if entry.busy {
         return;
     }
+    entry.busy = true;
+    cx.spawn(async move |cx| {
+        loop {
+            match cx.update(|cx| next_step(id, cx)) {
+                Step::Done => {
+                    cx.update(|cx| {
+                        let entry = cx.default_global::<CatalogHost>().entry(id);
+                        entry.busy = false;
+                        for tx in entry.closers.drain(..) {
+                            let _ = tx.send(());
+                        }
+                        bump(cx);
+                    });
+                    break;
+                }
+                Step::Open(source, rt, p) => {
+                    let rx = on_runtime(&rt, async move { source.ensure(p).await });
+                    let answer = rx.await.unwrap_or(Err(HubError::Shutdown));
+                    cx.update(|cx| opened(id, answer, cx));
+                }
+                Step::Close(source, rt) => {
+                    let rx = on_runtime(&rt, async move { source.shutdown(id).await });
+                    let _ = rx.await;
+                    cx.update(|cx| {
+                        cx.default_global::<CatalogHost>().entry(id).open = Open::Closed;
+                    });
+                }
+            }
+        }
+    })
+    .detach();
+}
+
+/// The source answered `id`'s open.
+fn opened(id: ProfileId, answer: Result<ProfileCatalog, HubError>, cx: &mut App) {
     let pc = match answer {
         Ok(pc) => pc,
         Err(e) => {
             tracing::debug!(?e, "explorer: no catalog for the profile");
-            cx.default_global::<CatalogHost>().entry(id).open = Open::Closed;
+            let entry = cx.default_global::<CatalogHost>().entry(id);
+            entry.open = Open::Closed;
+            // A failed open is not retried in a loop: the next connect or expansion asks again.
+            entry.want_open = false;
             bump(cx);
             return;
         }
     };
+    let still = cx
+        .try_global::<CatalogHost>()
+        .and_then(|h| h.entries.get(&id))
+        .is_some_and(|e| e.want_open && !e.deleting);
+    if !still {
+        // Closed meanwhile: the lifecycle task closes it next; nothing of it is shown.
+        cx.default_global::<CatalogHost>().entry(id).open = Open::Ready(pc);
+        return;
+    }
     let name = profile(id, cx).map(|p| p.name.clone()).unwrap_or_default();
     match pc.cache {
         CacheMode::MemoryOnly(MemoryOnlyReason::KeyringUnavailable) => toast(
@@ -639,7 +742,12 @@ fn opened(id: ProfileId, epoch: u64, answer: Result<ProfileCatalog, HubError>, c
             vec![("name", ArgValue::Text(name))],
         ),
         CacheMode::MemoryOnly(MemoryOnlyReason::CacheUnavailable) => {
-            toast(cx, ToastKind::Info, "model-cache-disabled-by-policy", Vec::new());
+            toast(
+                cx,
+                ToastKind::Info,
+                "model-cache-disabled-by-policy",
+                Vec::new(),
+            );
         }
         CacheMode::Persistent {
             rebuilt: Some(reason),
@@ -660,6 +768,9 @@ fn opened(id: ProfileId, epoch: u64, answer: Result<ProfileCatalog, HubError>, c
         entry.open = Open::Ready(pc);
         entry.connected = false;
         entry.sent = Sent::default();
+        // A new catalog: any published generation of it is shown, whatever the old one's
+        // number was; an empty one (generation 0) leaves the last snapshot in place.
+        entry.last_gen = 0;
         entry.pump = Some(pump.0);
         entry._ui = Some(pump.1);
     }
@@ -743,56 +854,60 @@ pub fn on_live_state(id: ProfileId, state: &LiveState, cx: &mut App) {
 }
 
 /// Stops `id`'s engine through the source (pending cache saves are written); the explorer
-/// keeps the last snapshot and the cache file stays. The task resolves when the engine stopped.
+/// keeps the last snapshot and the cache file stays. The task resolves when the profile's
+/// lifecycle task has settled (after an open still in flight, which it then closes).
 pub fn close(id: ProfileId, cx: &mut App) -> Task<()> {
-    let Some((source, rt)) = source_and_runtime(cx) else {
+    let Some(entry) = cx.default_global::<CatalogHost>().entries.get_mut(&id) else {
         return Task::ready(());
     };
-    let host = cx.default_global::<CatalogHost>();
-    let Some(entry) = host.entries.get_mut(&id) else {
-        return Task::ready(());
-    };
-    let was_open = !matches!(entry.open, Open::Closed);
-    entry.epoch += 1;
-    entry.open = Open::Closed;
-    entry.connected = false;
-    entry.user_asked.clear();
-    entry.watched = None;
-    entry.watcher = None;
-    if let Some(pump) = entry.pump.take() {
-        pump.stop.cancel();
-    }
-    entry._ui = None;
-    let mut row = (*entry.row).clone();
-    row.progress = Arc::default();
-    row.live = false;
-    row.db_levels.clear();
-    entry.row = Arc::new(row);
-    host.generation += 1;
-    if !was_open {
-        return Task::ready(());
-    }
-    let rx = on_runtime(&rt, async move { source.shutdown(id).await });
+    entry.want_open = false;
+    let (tx, rx) = oneshot::channel();
+    entry.closers.push(tx);
+    kick(id, cx);
     cx.spawn(async move |_| {
         let _ = rx.await;
     })
 }
 
-/// Closes `id`'s cache store before its files are deleted (T20's Save, T19 carry); the task
-/// resolves once the engine stopped.
+/// Closes `id`'s cache store before its files are deleted (T20's Save, T19 carry): nothing
+/// opens it (a connect, an expansion, an open in flight) until [`reopen`]. The task resolves
+/// once the store is closed.
 pub fn release_cache(id: ProfileId, cx: &mut App) -> Task<()> {
+    cx.default_global::<CatalogHost>().entry(id).deleting = true;
     close(id, cx)
 }
 
-/// Opens `id`'s catalog again after [`release_cache`] when it is still connected.
-pub fn reopen(id: ProfileId, cx: &mut App) {
-    if is_connected(id, cx) {
-        on_live_state(
-            id,
-            &cx.global::<ConnectionsModel>().live(id),
-            cx,
-        );
+/// Ends [`release_cache`]: a connected profile's catalog opens again, made from the profile as
+/// stored now (after Save, so an "encrypt on" save never recreates a plaintext cache). When the
+/// files were `deleted` and the profile is not reopened, the explorer drops its old snapshot
+/// (it would claim a cache that no longer exists; review m-9).
+pub fn reopen(id: ProfileId, deleted: bool, cx: &mut App) {
+    let host = cx.default_global::<CatalogHost>();
+    let entry = host.entry(id);
+    entry.deleting = false;
+    let again = entry.want_connect;
+    if again && is_connected(id, cx) {
+        cx.default_global::<CatalogHost>().entry(id).want_open = true;
+        kick(id, cx);
+    } else if deleted {
+        cx.default_global::<CatalogHost>().entry(id).last_gen = 0;
+        adapter::set_catalog(id, None, None, cx);
     }
+    bump(cx);
+}
+
+/// Whether `id`'s engine was told the profile is connected (tests: D-1).
+pub fn engine_connected(id: ProfileId, cx: &App) -> bool {
+    cx.try_global::<CatalogHost>()
+        .and_then(|h| h.entries.get(&id))
+        .is_some_and(|e| e.connected)
+}
+
+/// Whether `id`'s lifecycle task has settled (tests: a processed signal).
+pub fn settled(id: ProfileId, cx: &App) -> bool {
+    cx.try_global::<CatalogHost>()
+        .and_then(|h| h.entries.get(&id))
+        .is_none_or(|e| !e.busy)
 }
 
 // ---- what the engine is told ------------------------------------------------------------------
@@ -836,7 +951,10 @@ fn forward(id: ProfileId, cx: &mut App) {
             Err(e) => tracing::debug!(?e, "explorer: the saved scope does not parse"),
         }
     }
-    // The scope filters, one profile-wide filter (R-W3-2).
+    // The scope filters, one profile-wide filter (R-W3-2). Review m-7: joining the entries of
+    // several containers with `||` unions their positive items (T12's meaning), so the result
+    // reads as one profile-wide filter only while no writer keys entries per container (none
+    // does in M4). A per-container writer must route each entry to its container instead.
     let filter_text = data
         .scope_filters
         .values()
@@ -894,6 +1012,15 @@ fn user_session(id: ProfileId, cx: &App) -> Option<hacivat_session::session::Ses
             .filter(|s| s.profile == Some(id))
             .find_map(|s| s.session.clone())
     })
+}
+
+/// The database `id`'s user session is on, when a session of it has read its context
+/// (`SessionSnapshot::schema`).
+pub fn session_database(id: ProfileId, cx: &App) -> Option<String> {
+    let session = user_session(id, cx)?;
+    let snapshot = session.state();
+    let db = snapshot.borrow().schema.as_ref()?.database.clone();
+    db.filter(|d| !d.is_empty())
 }
 
 /// Follows the current database and schema of `id`'s user session (`set_current`; T15 carry:
@@ -994,6 +1121,9 @@ struct Pump {
     stop: CancellationToken,
     /// Wakes sent (tests).
     wakes: AtomicU64,
+    /// The newest catalog generation whose `Published` event was taken in (tests; a lagging
+    /// receiver still takes in the newest events).
+    received: AtomicU64,
 }
 
 impl Pump {
@@ -1014,8 +1144,12 @@ impl Pump {
             wake,
             stop: CancellationToken::new(),
             wakes: AtomicU64::new(0),
+            received: AtomicU64::new(0),
         });
-        if let Some(rt) = cx.try_global::<CatalogHost>().and_then(|h| h.runtime.clone()) {
+        if let Some(rt) = cx
+            .try_global::<CatalogHost>()
+            .and_then(|h| h.runtime.clone())
+        {
             let mut catalog = pc.catalog.subscribe();
             let mut events = pc.handle.events();
             let mut progress = pc.handle.progress();
@@ -1025,15 +1159,21 @@ impl Pump {
                     let r = select(Box::pin(p.stop.cancelled()), Box::pin(catalog.recv())).await;
                     match r {
                         Either::Left(_) => break,
-                        Either::Right((Ok(CatalogEvent::Published { delta, .. }), _)) => {
+                        Either::Right((Ok(CatalogEvent::Published { delta, generation }), _)) => {
                             p.push(|i| i.deltas.push(delta));
+                            p.received.fetch_max(generation, Ordering::SeqCst);
                         }
+                        Either::Right((Ok(CatalogEvent::PendingConfirmation { ns, count }), _)) => {
+                            p.push(|i| i.pending.push((ns, count)))
+                        }
+                        // A lagging receiver re-reads `current()` (the flush does anyway); the
+                        // lagged deltas' renames and drops do not reach the expansion then.
                         Either::Right((
-                            Ok(CatalogEvent::PendingConfirmation { ns, count }),
+                            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)),
                             _,
-                        )) => p.push(|i| i.pending.push((ns, count))),
-                        // A lagging receiver re-reads `current()` (the flush does anyway).
-                        Either::Right((Ok(_) | Err(_), _)) => p.push(|_| {}),
+                        )) => p.push(|_| {}),
+                        // Fix round 1 (m-4): the catalog is gone; never spin.
+                        Either::Right((Err(_), _)) => break,
                     }
                     if p.stop.is_cancelled() {
                         break;
@@ -1046,7 +1186,10 @@ impl Pump {
                     match select(Box::pin(p.stop.cancelled()), Box::pin(events.recv())).await {
                         Either::Left(_) => break,
                         Either::Right((Ok(e), _)) => p.push(|i| i.events.push(e)),
-                        Either::Right((Err(tokio::sync::broadcast::error::RecvError::Lagged(_)), _)) => {}
+                        Either::Right((
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)),
+                            _,
+                        )) => {}
                         Either::Right((Err(_), _)) => break,
                     }
                 }
@@ -1079,6 +1222,30 @@ impl Pump {
     }
 }
 
+/// Puts engine event `e` into `profile`'s inbox as the engine's forwarder would (test seam,
+/// feature `test-support`: events the fakes cannot produce, such as `CacheWriteFailed`).
+#[cfg(feature = "test-support")]
+pub fn inject_event(profile: ProfileId, e: EngineEvent, cx: &App) -> bool {
+    let Some(pump) = cx
+        .try_global::<CatalogHost>()
+        .and_then(|h| h.entries.get(&profile))
+        .and_then(|e| e.pump.clone())
+    else {
+        return false;
+    };
+    pump.push(|i| i.events.push(e));
+    true
+}
+
+/// The newest catalog generation the forwarder of `profile` has taken in (tests: a processed
+/// signal).
+pub fn forwarded_generation(profile: ProfileId, cx: &App) -> u64 {
+    cx.try_global::<CatalogHost>()
+        .and_then(|h| h.entries.get(&profile))
+        .and_then(|e| e.pump.as_ref())
+        .map_or(0, |p| p.received.load(Ordering::SeqCst))
+}
+
 /// Wakes the UI task of `profile` (tests).
 pub fn wakes(profile: ProfileId, cx: &App) -> u64 {
     cx.try_global::<CatalogHost>()
@@ -1090,7 +1257,10 @@ pub fn wakes(profile: ProfileId, cx: &App) -> u64 {
 /// Applies one batch of `id`'s inbox: one `set_catalog` when the generation moved.
 fn flush(id: ProfileId, cx: &mut App) {
     let (pc, pump) = {
-        let Some(e) = cx.try_global::<CatalogHost>().and_then(|h| h.entries.get(&id)) else {
+        let Some(e) = cx
+            .try_global::<CatalogHost>()
+            .and_then(|h| h.entries.get(&id))
+        else {
             return;
         };
         let Open::Ready(pc) = &e.open else {
@@ -1166,7 +1336,10 @@ fn flush(id: ProfileId, cx: &mut App) {
                 Some(LoadState::Loaded { stale: true, .. })
             )
         });
-        row.db_levels = db_levels(&pc, &snap);
+        // Fix round 1 (m-5): only when the catalog moved (a level change re-reads, so it moves).
+        if changed {
+            row.db_levels = db_levels(&pc, &snap);
+        }
         if row != *entry.row {
             entry.row = Arc::new(row);
             changed = true;
@@ -1186,7 +1359,8 @@ fn flush(id: ProfileId, cx: &mut App) {
 /// The automatic level of each database of `snap` with at least one loaded schema (m8).
 fn db_levels(pc: &ProfileCatalog, snap: &CatalogSnapshot) -> BTreeMap<Name, (Level, usize)> {
     let mut out: BTreeMap<Name, (Level, usize)> = BTreeMap::new();
-    if hacivat_meta::kind::database_level(snap.server.dbms) != hacivat_meta::kind::DbLevel::Database {
+    if hacivat_meta::kind::database_level(snap.server.dbms) != hacivat_meta::kind::DbLevel::Database
+    {
         return out;
     }
     let mut counts: BTreeMap<Name, usize> = BTreeMap::new();
@@ -1244,7 +1418,10 @@ fn notice(id: ProfileId, e: EngineEvent, cx: &mut App) {
 
 // ---- expansion ----------------------------------------------------------------------------
 
-fn tree_of(cx: &App) -> Option<hacivat_ui_core::gpui_surface::Entity<hacivat_ui::tree::TreeView<super::ExplorerModel>>> {
+fn tree_of(
+    cx: &App,
+) -> Option<hacivat_ui_core::gpui_surface::Entity<hacivat_ui::tree::TreeView<super::ExplorerModel>>>
+{
     crate::connections::explorer::tree(cx)
 }
 
@@ -1306,7 +1483,14 @@ fn apply_restored(id: ProfileId, cx: &mut App) {
     {
         let host = cx.default_global::<CatalogHost>();
         host.restored.remove(&id);
-        host.restoring.extend(present.iter().copied());
+        // Fix round 1 (m-2): only the rows the tree announces (expanded with children not
+        // loaded) raise an `Expand` to swallow; any other key would eat a later user expansion.
+        host.restoring.extend(
+            present
+                .iter()
+                .copied()
+                .filter(|k| matches!(model.children(*k), ChildState::NotLoaded)),
+        );
     }
     tree.update(cx, |t, cx| {
         let mut all: Vec<TreeKey> = t.expanded().iter().copied().collect();
@@ -1394,9 +1578,11 @@ pub fn on_expand(key: TreeKey, cx: &mut App) {
     let model = tree.read(cx).model().clone();
     match model.info(key) {
         Some(NodeInfo::Profile(id)) => {
-            let closed = cx
-                .try_global::<CatalogHost>()
-                .is_none_or(|h| h.entries.get(&id).is_none_or(|e| matches!(e.open, Open::Closed)));
+            let closed = cx.try_global::<CatalogHost>().is_none_or(|h| {
+                h.entries
+                    .get(&id)
+                    .is_none_or(|e| matches!(e.open, Open::Closed))
+            });
             let locked = cx
                 .try_global::<CatalogHost>()
                 .is_some_and(|h| h.locked.contains(&id));
@@ -1411,9 +1597,14 @@ pub fn on_expand(key: TreeKey, cx: &mut App) {
                 drop(h.expand(ns));
             }
         }
-        Some(NodeInfo::Object { profile, key: object }) => {
-            if matches!(model.children(key), ChildState::NotLoaded | ChildState::Loading { .. })
-                && let Some(h) = handle(profile, cx)
+        Some(NodeInfo::Object {
+            profile,
+            key: object,
+        }) => {
+            if matches!(
+                model.children(key),
+                ChildState::NotLoaded | ChildState::Loading { .. }
+            ) && let Some(h) = handle(profile, cx)
                 && is_connected(profile, cx)
             {
                 drop(h.load_children(object));
@@ -1529,18 +1720,19 @@ pub fn refresh_key(key: TreeKey, cx: &mut App) {
         let ticket = h.refresh(Target::Namespace(ns.clone()), Trigger::User);
         let catalog = h.catalog().clone();
         cx.spawn(async move |cx| {
-            let _ = ticket.await;
+            let answered = ticket.await;
             // The guard publishes the namespace stale before it answers: a pass that is not
             // stale held nothing, so the user's question about it ends here (a later background
             // guard only marks the namespace, R-M4-22). A held one keeps it until its
-            // `PendingConfirmation` is drained.
-            let stale = matches!(
-                catalog
-                    .current()
-                    .states
-                    .get(&ContainerKey::Namespace(ns.clone())),
-                Some(LoadState::Loaded { stale: true, .. })
-            );
+            // `PendingConfirmation` is drained. A failed refresh held nothing either (m-3).
+            let stale = answered.is_ok()
+                && matches!(
+                    catalog
+                        .current()
+                        .states
+                        .get(&ContainerKey::Namespace(ns.clone())),
+                    Some(LoadState::Loaded { stale: true, .. })
+                );
             if !stale {
                 cx.update(|cx| {
                     if let Some(e) = cx
@@ -1604,11 +1796,7 @@ fn profile_data_scope(id: ProfileId, cx: &App) -> Option<Option<String>> {
 /// A name as a literal scope-pattern term: a name of word characters as is, anything else as an
 /// anchored, escaped `{…}` regular expression.
 fn glob_name(name: &str) -> String {
-    if !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return name.to_string();
     }
     let mut out = String::from("{");
@@ -1676,7 +1864,10 @@ pub fn database_rows(profile: ProfileId, cx: &App) -> Vec<DatabaseRow> {
     for (key, state) in snap.states.iter() {
         if let ContainerKey::Namespace(ns) = key
             && let Some(db) = ns.path.first()
-            && matches!(hacivat_meta::kind::database_level(p.engine), hacivat_meta::kind::DbLevel::Database)
+            && matches!(
+                hacivat_meta::kind::database_level(p.engine),
+                hacivat_meta::kind::DbLevel::Database
+            )
         {
             let in_scope = !matches!(state, LoadState::OutOfScope);
             let e = out.entry(db.clone()).or_insert(false);
@@ -1685,12 +1876,16 @@ pub fn database_rows(profile: ProfileId, cx: &App) -> Vec<DatabaseRow> {
     }
     for key in snap.namespaces.keys() {
         if let Some(db) = key.path.first()
-            && matches!(hacivat_meta::kind::database_level(p.engine), hacivat_meta::kind::DbLevel::Database)
+            && matches!(
+                hacivat_meta::kind::database_level(p.engine),
+                hacivat_meta::kind::DbLevel::Database
+            )
         {
             out.insert(db.clone(), true);
         }
     }
-    let own = p.database.clone();
+    // Fix round 1 (m-8): the database the user's session is on, else the profile's.
+    let own = session_database(profile, cx).or_else(|| p.database.clone());
     let mut rows: Vec<DatabaseRow> = out
         .into_iter()
         .map(|(name, in_scope)| DatabaseRow {
@@ -1705,7 +1900,12 @@ pub fn database_rows(profile: ProfileId, cx: &App) -> Vec<DatabaseRow> {
 
 /// Expands the ancestors of `key` of `profile` (loading them lazily), selects its row and
 /// scrolls it into view (M5 "reveal in explorer", M4b).
-pub fn reveal(profile: ProfileId, key: &ObjectKey, _window: &mut Window, cx: &mut App) -> RevealOutcome {
+pub fn reveal(
+    profile: ProfileId,
+    key: &ObjectKey,
+    _window: &mut Window,
+    cx: &mut App,
+) -> RevealOutcome {
     let Some(tree) = tree_of(cx) else {
         return RevealOutcome::Unavailable;
     };
@@ -1715,7 +1915,8 @@ pub fn reveal(profile: ProfileId, key: &ObjectKey, _window: &mut Window, cx: &mu
     let Some(found) = snap.find(key) else {
         // Not in a loaded namespace: missing only when its namespace is loaded.
         let ns_loaded = snap.namespaces.keys().any(|ns| {
-            key.path.len() > ns.path.len() && key.path.iter().zip(ns.path.iter()).all(|(a, b)| a == b)
+            key.path.len() > ns.path.len()
+                && key.path.iter().zip(ns.path.iter()).all(|(a, b)| a == b)
         });
         return if ns_loaded {
             RevealOutcome::Missing
@@ -1736,7 +1937,10 @@ pub fn reveal(profile: ProfileId, key: &ObjectKey, _window: &mut Window, cx: &mu
         if kids.contains(&target) {
             break;
         }
-        let next = kids.iter().copied().find(|k| leads_to(&model, *k, &ns, key));
+        let next = kids
+            .iter()
+            .copied()
+            .find(|k| leads_to(&model, *k, &ns, key));
         let Some(next) = next else {
             break;
         };

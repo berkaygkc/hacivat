@@ -3613,3 +3613,9 @@ hv-cmd-explorer-collapse-children = Tüm alt öğeleri kapat
 hv-cmd-explorer-level-menu = Okuma düzeyi
 # Review: PO
 hv-cmd-explorer-modify = Değiştir
+# Review: PO
+hv-explorer-open-data-other-db = Bu bağlantının konsolları { $current } veritabanını kullanıyor; bu yüzden Veriyi aç { $database } verisini gösteremiyor. Görmek için { $database } veritabanına bağlanın.
+# Review: PO
+hv-explorer-open-data-db-unknown = Hacivat bu bağlantının konsollarının hangi veritabanını kullandığını bilemiyor; bu yüzden Veriyi aç { $database } verisini açmadı. Bağlantının veritabanını ayarlayın ya da önce bir konsol açın.
+# Review: PO
+hv-explorer-hide-refused = { $name } benzeri nesneler gizlenemiyor: ad bir görünüm filtresi olarak yazılamıyor.

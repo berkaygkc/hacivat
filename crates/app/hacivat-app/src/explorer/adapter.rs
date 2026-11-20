@@ -770,6 +770,9 @@ struct Inner {
     nodes: RefCell<KeyMap<Node>>,
     kids: RefCell<KeyMap<ChildState>>,
     texts: RefCell<HashMap<&'static str, SharedString>>,
+    // ## m4-t24-live (named exception, fix round 1 m-5): each namespace's view filter, compiled
+    // once per generation.
+    views: RefCell<HashMap<(usize, NsKey), Option<ViewFilter>>>,
 }
 
 impl Default for Inner {
@@ -783,6 +786,7 @@ impl Default for Inner {
             nodes: RefCell::default(),
             kids: RefCell::default(),
             texts: RefCell::default(),
+            views: RefCell::default(),
         }
     }
 }
@@ -877,6 +881,7 @@ impl ExplorerModel {
                 nodes: RefCell::new(nodes),
                 kids: RefCell::default(),
                 texts: RefCell::default(),
+                views: RefCell::default(),
             }),
         }
     }
@@ -1049,22 +1054,22 @@ impl ExplorerModel {
 
     // ## m4-t24-live (named exception)
     /// The view filter of namespace `ns` of profile `p` (mock 5 "Hide objects like this").
-    fn view_filter(&self, p: usize, ns: &NsKey) -> Option<(Arc<str>, hacivat_introspect::filter::CompiledFilter)> {
+    fn view_filter(&self, p: usize, ns: &NsKey) -> Option<ViewFilter> {
+        let slot = (p, ns.clone());
+        if let Some(hit) = self.inner.views.borrow().get(&slot) {
+            return hit.clone();
+        }
         let input = &self.inner.inputs.profiles[p];
-        let text = input
+        let made = input
             .userdata
-            .as_ref()?
-            .view_filters
-            .get(&level_pill::namespace_object_key(ns))?
-            .clone();
-        let dialect = super::live::dialect_of(input.profile.engine);
-        let f = hacivat_introspect::filter::parse_filter(
-            &text,
-            dialect,
-            hacivat_introspect::filter::FilterRole::View,
-        )
-        .ok()?;
-        Some((Arc::from(text), f))
+            .as_ref()
+            .and_then(|d| d.view_filters.get(&level_pill::namespace_object_key(ns)))
+            .and_then(|text| {
+                compile_view_filter(text, super::live::dialect_of(input.profile.engine))
+                    .map(|f| (Arc::from(text.as_str()), Arc::new(f)))
+            });
+        self.inner.views.borrow_mut().insert(slot, made.clone());
+        made
     }
 
     // ## m4-t24-live (named exception)
@@ -1672,6 +1677,32 @@ impl ExplorerModel {
             None => "hv-explorer-group-unset",
         })
     }
+}
+
+// ## m4-t24-live (named exception)
+/// A namespace's view filter: its text (the tooltip's) and the compiled filter.
+type ViewFilter = (Arc<str>, Arc<hacivat_introspect::filter::CompiledFilter>);
+
+// ## m4-t24-live (named exception, fix round 1 m-1)
+/// Compiles a view filter. Fail closed per item: when the whole text does not parse, every item
+/// that parses on its own still applies and an item that does not hides nothing (one bad item
+/// never undoes the other hides of the namespace). `None` when nothing parses.
+pub fn compile_view_filter(
+    text: &str,
+    dialect: sql_dialect::DialectId,
+) -> Option<hacivat_introspect::filter::CompiledFilter> {
+    use hacivat_introspect::filter::{FilterRole, parse_filter};
+    if let Ok(f) = parse_filter(text, dialect, FilterRole::View) {
+        return Some(f);
+    }
+    let good: Vec<&str> = text
+        .split("||")
+        .filter(|item| parse_filter(item, dialect, FilterRole::View).is_ok())
+        .collect();
+    if good.is_empty() {
+        return None;
+    }
+    parse_filter(&good.join("||"), dialect, FilterRole::View).ok()
 }
 
 /// The accessible description: the state words, comma-separated (the profile roots' form,

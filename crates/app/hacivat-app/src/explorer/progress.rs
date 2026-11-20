@@ -95,6 +95,10 @@ mod tests {
         assert!(count_args(&t).is_none());
         t.total = Some(2);
         let args = count_args(&t).expect("a count");
-        assert_eq!(args[0].1, ArgValue::Count(2), "done never exceeds the total");
+        assert_eq!(
+            args[0].1,
+            ArgValue::Count(2),
+            "done never exceeds the total"
+        );
     }
 }

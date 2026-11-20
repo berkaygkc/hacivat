@@ -153,6 +153,7 @@ mod t24 {
     use std::collections::HashSet;
     use std::rc::Rc;
 
+    use hacivat_introspect::filter::{FilterRole, parse_filter};
     use hacivat_meta::kind::{DbLevel, database_level};
     use hacivat_meta::name::quote::{QuoteCtx, quote_qualified};
     use hacivat_meta::{NsKey, ObjectKey, ObjectKind};
@@ -192,9 +193,7 @@ mod t24 {
         let skip = usize::from(database_level(dbms) == DbLevel::Database && key.path.len() > 1);
         let path: Vec<&str> = key.path.iter().skip(skip).map(|n| &**n).collect();
         match key.kind {
-            ObjectKind::Database | ObjectKind::Schema => {
-                path.last().copied().into_iter().collect()
-            }
+            ObjectKind::Database | ObjectKind::Schema => path.last().copied().into_iter().collect(),
             ObjectKind::Column => path,
             _ if path.len() > 2 => vec![path[0], path[path.len() - 1]],
             _ => path,
@@ -230,21 +229,12 @@ mod t24 {
         let Some(sql) = open_data_sql(p.engine, &key) else {
             return;
         };
+        // Fix round 1 (I-3): on a database-level engine the object's database goes with the text;
+        // `open_with_text` refuses (with a notice) unless the console's session is on it.
         let database = (database_level(p.engine) == DbLevel::Database)
             .then(|| key.path.first().map(|d| d.to_string()))
             .flatten();
-        let run = match (&database, &p.database) {
-            (Some(db), Some(own)) => db == own,
-            _ => true,
-        };
-        crate::console::commands::open_with_text(
-            profile,
-            database.as_deref(),
-            &sql,
-            run,
-            window,
-            cx,
-        );
+        crate::console::open_with_text(profile, database.as_deref(), &sql, true, window, cx);
     }
 
     /// Installs the default open-data handler unless one is set.
@@ -493,6 +483,21 @@ mod t24 {
         let Some(ns) = ns_of(profile, &key, cx) else {
             return;
         };
+        // Fix round 1 (m-1): an item the filter grammar cannot read is never written (it would
+        // hide nothing); the user is told.
+        let dialect = live::dialect_of(engine(profile, cx).unwrap_or(DbmsKind::Postgres));
+        if parse_filter(&item, dialect, FilterRole::View).is_err() {
+            let name = key.path.last().map(|n| n.to_string()).unwrap_or_default();
+            let label: TextFn = Rc::new(move |cx: &App| {
+                live::text(
+                    cx,
+                    "hv-explorer-hide-refused",
+                    vec![("name", hacivat_l10n::ArgValue::Text(name.clone()))],
+                )
+            });
+            ToastQueue::push(cx, Toast::new(ToastKind::Error, label));
+            return;
+        }
         let slot = namespace_object_key(&ns);
         drop(userdata::update(
             profile,
@@ -618,8 +623,7 @@ mod t24 {
             .filter(|a| a.slot == slot)
             .map(|a| {
                 let label = a.label.clone();
-                MenuItemSpec::new(Rc::new(move |_: &App| label.clone()), a.id)
-                    .disabled(!a.enabled)
+                MenuItemSpec::new(Rc::new(move |_: &App| label.clone()), a.id).disabled(!a.enabled)
             })
             .collect()
     }
@@ -635,7 +639,11 @@ mod t24 {
             NodeInfo::Database { .. } | NodeInfo::Schema { .. } => {
                 out.push(item("hv-explorer-menu-refresh", "explorer.refresh", cx));
                 if matches!(info, NodeInfo::Database { .. }) {
-                    out.push(item("hv-explorer-menu-edit-scope", "explorer.edit_scope", cx));
+                    out.push(item(
+                        "hv-explorer-menu-edit-scope",
+                        "explorer.edit_scope",
+                        cx,
+                    ));
                 }
                 out.push(item("hv-explorer-menu-level", "explorer.level_menu", cx));
                 out.push(sep());
@@ -702,7 +710,11 @@ mod t24 {
                 if !out.is_empty() {
                     out.push(sep());
                 }
-                out.push(item("hv-explorer-menu-copy-plain", "explorer.copy_name", cx));
+                out.push(item(
+                    "hv-explorer-menu-copy-plain",
+                    "explorer.copy_name",
+                    cx,
+                ));
                 out.push(item(
                     "hv-explorer-menu-copy-name",
                     "explorer.copy_qualified_name",
@@ -806,8 +818,14 @@ mod t24 {
         #[test]
         fn qualified_names_quote_only_where_needed() {
             let pg = |p: &[&str]| qualified_name(DbmsKind::Postgres, &key(ObjectKind::Table, p));
-            assert_eq!(pg(&["app", "public", "Users"]).as_deref(), Some("public.\"Users\""));
-            assert_eq!(pg(&["app", "public", "users"]).as_deref(), Some("public.users"));
+            assert_eq!(
+                pg(&["app", "public", "Users"]).as_deref(),
+                Some("public.\"Users\"")
+            );
+            assert_eq!(
+                pg(&["app", "public", "users"]).as_deref(),
+                Some("public.users")
+            );
             assert_eq!(
                 qualified_name(DbmsKind::MySql, &key(ObjectKind::Table, &["api", "order"]))
                     .as_deref(),
@@ -826,7 +844,11 @@ mod t24 {
                 .as_deref(),
                 Some("public.users.\"Id\"")
             );
-            assert_eq!(pg(&["app", "public", "a\u{0}b"]), None, "a NUL copies nothing");
+            assert_eq!(
+                pg(&["app", "public", "a\u{0}b"]),
+                None,
+                "a NUL copies nothing"
+            );
         }
 
         #[test]
@@ -836,8 +858,11 @@ mod t24 {
             assert_eq!(hide_pattern("users"), "users");
             assert_eq!(hide_pattern("a*b_1"), "a\\*b_*");
             assert_eq!(
-                hide_item(&key(ObjectKind::Table, &["app", "public", "yedek_fatura_2019"]))
-                    .as_deref(),
+                hide_item(&key(
+                    ObjectKind::Table,
+                    &["app", "public", "yedek_fatura_2019"]
+                ))
+                .as_deref(),
                 Some("table:-yedek_fatura_*")
             );
         }

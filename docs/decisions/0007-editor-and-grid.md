@@ -1169,3 +1169,21 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
 - *Pending until other branches merge.* The hub's SQLite readers (R-W3-10,
   `with_readers`) and the per-pass progress counts (R-W3-12) arrive with Tasks 18 and 17; the
   user's attached SQLite files are not copied onto the reader (no `attached_files` seam exists).
+- *Fix round 1 (opus review).*
+  - *I-1.* Opens and closes of one profile run one at a time in a lifecycle task that reads
+    the latest wish at every step (`want_open`): an open answered after a close is closed
+    by the same task, so no stale shutdown can stop a newer engine. `release_cache` sets
+    `deleting`: nothing opens the store until `reopen`, which Save calls on every path
+    after the release, with the profile as stored then (an "encrypt on" Save never
+    recreates a plaintext cache).
+  - *I-2, I-3.* Open data's queued run is of exactly the text it generated (it is dropped
+    when the editor changed, the session broke or the tab closed). On a database-level
+    engine `open_with_text` refuses, with a notice, a database other than the one the
+    console's session uses (the user's session context, else the profile's database), and
+    one it cannot tell.
+  - *R-W3-10.* The hub builds SQLite's introspector with its per-schema readers
+    (`hub::introspector_with_readers`, a named exception in Task 15's file).
+  - *m-1.* Task 12's filter keeps an escaped trailing whitespace (`trim_item`, a named
+    exception in `filter.rs`). The adapter compiles a view filter per item when the whole
+    does not parse, so a bad item hides nothing and never undoes the others; "Hide objects
+    like this" refuses, with a notice, an item that does not parse.
