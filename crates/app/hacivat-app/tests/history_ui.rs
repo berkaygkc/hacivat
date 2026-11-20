@@ -1240,3 +1240,114 @@ fn a_recall_read_in_flight_during_a_clear_is_dropped(cx: &mut TestAppContext) {
     }
     stop_core_runtime_test(cx);
 }
+
+// ---- ## m4-t33b-carries (fix round 1: review 3, 6, 7) ----------------------------------------
+
+// Review 3: history off, the live file damaged, one older backup, the box checked. Only the
+// listed backup is deleted; the copy this clear set aside stays, so the toast's "clear again to
+// delete the damaged backup" is true.
+#[gpui::test]
+fn a_damaged_live_file_keeps_its_new_backup_when_the_listed_ones_are_deleted(
+    cx: &mut TestAppContext,
+) {
+    let h = history(cx, &["SELECT 'kept on disk'"]);
+    wait_until(h.vcx, "the records in the store", |_| kept(&h).len() == 1);
+    let path = history_off(&h);
+    let mut s = path.as_os_str().to_owned();
+    s.push(".corrupt-1700000000");
+    let listed = std::path::PathBuf::from(s);
+    std::fs::write(&listed, b"old damaged history").expect("a backup");
+    std::fs::write(&path, b"not a database".repeat(200)).expect("damage the file");
+    assert!(run(h.vcx, "connection.clear_history"));
+    asked(h.vcx);
+    h.vcx.simulate_keystrokes("tab space");
+    h.vcx.run_until_parked();
+    h.vcx.simulate_keystrokes("tab enter");
+    let damaged = "The history file was damaged, so Hacivat set it aside as a backup. The query \
+                   history of orders-dev wasn't cleared from it; clear again to delete the \
+                   damaged backup.";
+    wait_until(h.vcx, "the toast", |vcx| {
+        toast_texts(vcx).iter().any(|t| strip(t) == damaged)
+    });
+    assert!(!listed.exists(), "the listed backup is deleted");
+    let left = backups_of(&h, path);
+    assert_eq!(
+        left.len(),
+        1,
+        "the copy this clear set aside stays: {left:?}"
+    );
+    assert_ne!(left[0], listed);
+    stop_core_runtime_test(cx);
+}
+
+// Review 6: the entries are cleared, then the backups can't be deleted: the toast says both.
+#[cfg(unix)]
+#[gpui::test]
+fn a_failed_backup_delete_after_a_clear_says_the_entries_were_cleared(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    let h = history(cx, &["SELECT 1"]);
+    wait_until(h.vcx, "the records in the store", |_| kept(&h).len() == 1);
+    let path = h
+        .vcx
+        .cx
+        .read(|cx| cx.global::<hacivat_app::AppState>().paths.history_db());
+    let mut s = path.as_os_str().to_owned();
+    s.push(".corrupt-1700000000");
+    let backup = std::path::PathBuf::from(s);
+    std::fs::write(&backup, b"old damaged history").expect("a backup");
+    h.vcx.cx.update(|cx| {
+        hacivat_app::connections::ConnectionsModel::select(cx, Some(h.profile));
+    });
+    assert!(run(h.vcx, "connection.clear_history"));
+    asked(h.vcx);
+    h.vcx.simulate_keystrokes("tab space");
+    h.vcx.run_until_parked();
+    // The folder turns read-only: the files can be written, not unlinked.
+    let dir = path.parent().expect("the history folder").to_path_buf();
+    let mode = std::fs::metadata(&dir)
+        .expect("folder")
+        .permissions()
+        .mode();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+    h.vcx.simulate_keystrokes("tab enter");
+    let want = "The query history of orders-dev was cleared, but its damaged backups couldn't \
+                be deleted.";
+    wait_until(h.vcx, "the toast", |vcx| {
+        toast_texts(vcx).iter().any(|t| strip(t) == want)
+    });
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).expect("chmod back");
+    assert!(kept(&h).is_empty(), "the entries are cleared");
+    assert!(backup.exists());
+    stop_core_runtime_test(cx);
+}
+
+// Review 7: a second ask while the first question's folder listing is still on its way opens
+// no second question.
+#[gpui::test]
+fn asking_twice_opens_one_question(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 1"]);
+    wait_until(h.vcx, "the records in the store", |_| kept(&h).len() == 1);
+    let profile = h.profile;
+    h.vcx.cx.update(|cx| {
+        hacivat_app::history::clear::ask(profile, cx);
+        hacivat_app::history::clear::ask(profile, cx);
+    });
+    asked(h.vcx);
+    for _ in 0..5 {
+        h.vcx.run_until_parked();
+    }
+    assert_eq!(
+        layer_ids(h.vcx).iter().filter(|l| **l == "dialog").count(),
+        1,
+        "{:?}",
+        layer_ids(h.vcx)
+    );
+    // Once it is answered, it can be asked again.
+    h.vcx.simulate_keystrokes("escape");
+    h.vcx.run_until_parked();
+    h.vcx
+        .cx
+        .update(|cx| hacivat_app::history::clear::ask(profile, cx));
+    asked(h.vcx);
+    stop_core_runtime_test(cx);
+}

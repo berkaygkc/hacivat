@@ -293,7 +293,8 @@ impl HistoryStore {
 
     // ## m4-t33b-carries (named exception; T32 carry: rotated corrupt files keep old history)
     /// The damaged copies of the history at `path` that earlier opens set aside
-    /// ([`HistoryStore::recovered_from`]), one per copy, on the blocking pool. They hold every
+    /// ([`HistoryStore::recovered_from`]), one per copy (its stem, also when only its log is
+    /// left), on the blocking pool. They hold every
     /// connection's statements as they were, and no store can open them to clear one
     /// connection. Must be polled inside the core runtime.
     pub fn damaged_backups(
@@ -306,13 +307,17 @@ impl HistoryStore {
         })
     }
 
-    /// Deletes every damaged copy of the history at `path` (with its `-wal` and `-shm`) and
-    /// answers how many copies went; the live file is never touched. Must be polled inside
-    /// the core runtime.
-    pub fn delete_damaged_backups(path: PathBuf) -> BoxFuture<'static, Result<u64, HistoryError>> {
+    /// Deletes the damaged copies `copies` of the history at `path` (as
+    /// [`HistoryStore::damaged_backups`] listed them; with their `-wal` and `-shm`) and answers
+    /// how many went. A path that is not one of its backups, the live file and a copy set aside
+    /// since the listing are never touched. Must be polled inside the core runtime.
+    pub fn delete_damaged_backups(
+        path: PathBuf,
+        copies: Vec<PathBuf>,
+    ) -> BoxFuture<'static, Result<u64, HistoryError>> {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                schema::delete_damaged_backups(&path).map_err(schema::io)
+                schema::delete_damaged_backups(&path, &copies).map_err(schema::io)
             })
             .await
             .map_err(|_| HistoryError::Io("the damaged copies could not be deleted".into()))?

@@ -4134,3 +4134,7 @@ hv-explorer-progress-percent = { NUMBER($fraction, style: "percent", minimumFrac
 # Variables:
 #   $size (String) - a preformatted size, e.g. "38.4 MB".
 hv-metadata-clear-subtitle = { $size } on this computer
+# A toast when the history of a connection was cleared but its damaged backups could not be deleted (T33b review 6).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-cleared-backups-failed = The query history of { $name } was cleared, but its damaged backups couldn't be deleted.

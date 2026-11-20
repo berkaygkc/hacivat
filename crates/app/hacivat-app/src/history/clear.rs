@@ -122,21 +122,41 @@ pub fn ask(profile: ProfileId, cx: &mut App) {
     if !can_clear(Some(profile), cx) {
         return;
     }
+    // ## m4-t33b-carries (fix round 1, review 7): one question per profile, also while its
+    // folder listing is on its way (no modal layer holds the window yet).
+    if question(cx) == Some(profile) || cx.default_global::<Asking>().0.contains(&profile) {
+        return;
+    }
     let listing = match history_path(cx) {
         Some(path) => super::on_core(HistoryStore::damaged_backups(path), cx),
         None => return,
     };
+    cx.default_global::<Asking>().0.insert(profile);
     cx.spawn(async move |cx| {
         // A folder that can't be read offers nothing (the clear itself still works).
-        let count = listing.await.map_or(0, |copies| copies.len());
-        cx.update(|cx| open_question(profile, count, cx));
+        let copies = listing.await.unwrap_or_default();
+        cx.update(|cx| {
+            if !open_question(profile, copies, cx) {
+                cx.default_global::<Asking>().0.remove(&profile);
+            }
+        });
     })
     .detach();
 }
 
-fn open_question(profile: ProfileId, backups: usize, cx: &mut App) {
+// ## m4-t33b-carries (fix round 1, review 7)
+/// The profiles whose clear question is being prepared or is open.
+#[derive(Default)]
+struct Asking(std::collections::HashSet<ProfileId>);
+
+impl Global for Asking {}
+
+/// Opens the question; `copies` are the damaged backups listed for it (the only ones the clear
+/// may delete, review 3). Answers whether it opened.
+fn open_question(profile: ProfileId, copies: Vec<std::path::PathBuf>, cx: &mut App) -> bool {
+    let backups = copies.len();
     let Some(name) = profile_name(profile, cx) else {
-        return;
+        return false;
     };
     let button = |label, kind| DialogButton {
         label,
@@ -186,15 +206,23 @@ fn open_question(profile: ProfileId, backups: usize, cx: &mut App) {
         cx.set_global(OpenQuestion(Some((profile, dialog.downgrade()))));
         // Held until an event comes (the workspace removes the layer on the same event).
         let mut keep = Some(dialog.clone());
+        let mut copies = copies;
         cx.subscribe(&dialog, move |_, event: &DialogEvent, cx| {
             keep.take();
             cx.set_global(OpenQuestion(None));
+            cx.default_global::<Asking>().0.remove(&profile);
             if *event == DialogEvent::Pressed(CLEAR) {
-                clear_with(profile, backups > 0 && delete_backups.get(), cx).detach();
+                let delete = if delete_backups.get() {
+                    std::mem::take(&mut copies)
+                } else {
+                    Vec::new()
+                };
+                clear_with(profile, delete, cx).detach();
             }
         })
         .detach();
     });
+    true
 }
 
 /// How a clear went.
@@ -204,16 +232,25 @@ enum Cleared {
     /// The store opened just for the clear found the file damaged and set it aside: nothing
     /// was cleared from it (RR-2).
     Damaged,
+    // ## m4-t33b-carries (fix round 1, review 6)
+    /// The entries were deleted; the damaged backups could not be.
+    BackupsFailed,
 }
 
 /// Clears `profile`'s query history now (no question): the store deletes its entries, an open
 /// history dialog searches again, and a toast says whether it worked. The task answers how
 /// many entries were deleted (`None`: it failed).
 pub fn clear(profile: ProfileId, cx: &mut App) -> Task<Option<u64>> {
-    clear_with(profile, false, cx)
+    clear_with(profile, Vec::new(), cx)
 }
 
-fn clear_with(profile: ProfileId, delete_backups: bool, cx: &mut App) -> Task<Option<u64>> {
+/// Clears `profile`'s history and deletes the damaged backups `backups` (the ones the question
+/// listed; none: keep every backup).
+fn clear_with(
+    profile: ProfileId,
+    backups: Vec<std::path::PathBuf>,
+    cx: &mut App,
+) -> Task<Option<u64>> {
     let name = profile_name(profile, cx).unwrap_or_default();
     let Some(path) = history_path(cx) else {
         return Task::ready(None);
@@ -248,17 +285,18 @@ fn clear_with(profile: ProfileId, delete_backups: bool, cx: &mut App) -> Task<Op
     let work = super::on_core(
         async move {
             let (n, damaged) = entries.await?;
-            let backups = if delete_backups {
-                HistoryStore::delete_damaged_backups(path).await?
+            // Review 3 and 6: only the listed copies; a failed delete leaves the clear done.
+            let deleted = if backups.is_empty() {
+                Ok(0)
             } else {
-                0
+                HistoryStore::delete_damaged_backups(path, backups).await
             };
             Ok::<_, HistoryError>((
                 n,
-                if damaged {
-                    Cleared::Damaged
-                } else {
-                    Cleared::Done { backups }
+                match (damaged, deleted) {
+                    (true, _) => Cleared::Damaged,
+                    (false, Ok(backups)) => Cleared::Done { backups },
+                    (false, Err(_)) => Cleared::BackupsFailed,
                 },
             ))
         }
@@ -286,6 +324,10 @@ fn clear_with(profile: ProfileId, delete_backups: bool, cx: &mut App) -> Task<Op
                     ToastKind::Error,
                     text("hv-history-clear-damaged", vec![named]),
                 ),
+                Ok((_, Cleared::BackupsFailed)) => (
+                    ToastKind::Error,
+                    text("hv-history-cleared-backups-failed", vec![named]),
+                ),
                 Err(_) => (
                     ToastKind::Error,
                     text("hv-history-clear-failed", vec![named]),
@@ -296,7 +338,7 @@ fn clear_with(profile: ProfileId, delete_backups: bool, cx: &mut App) -> Task<Op
             cx.refresh_windows();
         });
         match result {
-            Ok((n, Cleared::Done { .. })) => Some(n),
+            Ok((n, Cleared::Done { .. } | Cleared::BackupsFailed)) => Some(n),
             _ => None,
         }
     })

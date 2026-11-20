@@ -228,41 +228,77 @@ fn prepare_file(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-// ## m4-t33b-carries (named exception; T32 carry: rotated corrupt files keep old history)
-/// The damaged copies [`rotate`] set aside next to `path` (`<name>.corrupt-<secs>[-n]`), one
-/// entry per copy (their `-wal` and `-shm` are not listed). No directory: none.
+// ## m4-t33b-carries (named exception; T32 carry: rotated corrupt files keep old history;
+// fix round 1, review 3 and 5)
+/// The damaged copies [`rotate`] set aside next to `path`, one entry per copy: its stem
+/// `<name>.corrupt-<secs>[-<n>]`, also when only its `-wal` or `-shm` is left (a crash between
+/// the renames: the log goes first). Only names of exactly that pattern count. No directory:
+/// none.
 pub(crate) fn damaged_backups(path: &Path) -> std::io::Result<Vec<PathBuf>> {
-    Ok(backup_files(path)?
+    let mut stems: Vec<PathBuf> = backup_files(path)?
         .into_iter()
-        .filter(|p| {
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
-            !name.is_some_and(|n| n.ends_with("-wal") || n.ends_with("-shm"))
-        })
-        .collect())
+        .map(|(stem, _)| stem)
+        .collect();
+    stems.sort();
+    stems.dedup();
+    Ok(stems)
 }
 
-/// Deletes every damaged copy next to `path` with its `-wal` and `-shm`; answers how many
-/// copies went. The live file is never touched.
-pub(crate) fn delete_damaged_backups(path: &Path) -> std::io::Result<u64> {
-    let copies = damaged_backups(path)?.len() as u64;
-    for file in backup_files(path)? {
-        match std::fs::remove_file(&file) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+/// Deletes the damaged copies `copies` (stems as [`damaged_backups`] listed them) with their
+/// `-wal` and `-shm`; answers how many of them had a file deleted. A path that is not a backup
+/// stem of `path` is skipped; the live file and anything set aside since are never touched.
+pub(crate) fn delete_damaged_backups(path: &Path, copies: &[PathBuf]) -> std::io::Result<u64> {
+    let mut deleted = 0;
+    for (stem, files) in group_by_stem(backup_files(path)?) {
+        if !copies.contains(&stem) {
+            continue;
+        }
+        let mut any = false;
+        for file in files {
+            match std::fs::remove_file(&file) {
+                Ok(()) => any = true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if any {
+            deleted += 1;
         }
     }
-    Ok(copies)
+    Ok(deleted)
 }
 
-/// Every file whose name starts with `<name>.corrupt-` in `path`'s directory.
-fn backup_files(path: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+fn group_by_stem(files: Vec<(PathBuf, PathBuf)>) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    let mut out: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+    for (stem, file) in files {
+        match out.iter_mut().find(|(s, _)| *s == stem) {
+            Some((_, f)) => f.push(file),
+            None => out.push((stem, vec![file])),
+        }
+    }
+    out
+}
+
+/// The stem of `file_name` when it is a backup of `name` (`<name>.corrupt-<digits>[-<digits>]`
+/// plus an optional `-wal`/`-shm`).
+fn backup_stem(name: &str, file_name: &str) -> Option<String> {
+    let rest = file_name.strip_prefix(name)?.strip_prefix(".corrupt-")?;
+    let core = rest
+        .strip_suffix("-wal")
+        .or_else(|| rest.strip_suffix("-shm"))
+        .unwrap_or(rest);
+    let mut parts = core.splitn(2, '-');
+    let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    let secs = parts.next()?;
+    let ok = digits(secs) && parts.next().is_none_or(digits);
+    ok.then(|| format!("{name}.corrupt-{core}"))
+}
+
+/// Every backup file next to `path`, with its stem's path.
+fn backup_files(path: &Path) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
         return Ok(Vec::new());
     };
-    let mut prefix = name.to_os_string();
-    prefix.push(".corrupt-");
-    let prefix = prefix.to_string_lossy().into_owned();
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -271,10 +307,14 @@ fn backup_files(path: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in entries {
         let entry = entry?;
-        if entry.file_type()?.is_file() && entry.file_name().to_string_lossy().starts_with(&prefix)
-        {
-            out.push(entry.path());
+        if !entry.file_type()?.is_file() {
+            continue;
         }
+        let file_name = entry.file_name();
+        let Some(stem) = file_name.to_str().and_then(|f| backup_stem(name, f)) else {
+            continue;
+        };
+        out.push((dir.join(stem), entry.path()));
     }
     Ok(out)
 }

@@ -3778,3 +3778,8 @@ hv-explorer-progress-percent = { NUMBER($fraction, style: "percent", minimumFrac
 #   $size (String) - a preformatted size, e.g. "38.4 MB".
 # Review: PO
 hv-metadata-clear-subtitle = Bu bilgisayarda { $size }
+# A toast when the history of a connection was cleared but its damaged backups could not be deleted (T33b review 6).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-history-cleared-backups-failed = { $name } için sorgu geçmişi temizlendi, ancak hasarlı yedekleri silinemedi.
