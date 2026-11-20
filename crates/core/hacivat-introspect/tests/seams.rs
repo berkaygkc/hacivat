@@ -62,6 +62,9 @@ fn executed(_sql: &str, effect: DdlEffect) -> ExecutedStmt {
     ExecutedStmt {
         kind: StmtKind::CreateTable,
         ddl: vec![effect],
+        // ## m4-t21-refresh (named exception): the fields Task 21 added.
+        names: Vec::new(),
+        analysed: true,
     }
 }
 
@@ -142,8 +145,11 @@ fn hub() -> (Arc<CatalogHub>, tempfile::TempDir) {
 
 // ---- tests -----------------------------------------------------------------------------------
 
+// ## m4-t21-refresh (named exception; renamed from
+// `stub_plan_refresh_widens_any_ddl_to_the_current_namespace`): the planner landed. A named
+// `CREATE TABLE s.t` refreshes `s.t` and `s`'s name list, not the current namespace.
 #[test]
-fn stub_plan_refresh_widens_any_ddl_to_the_current_namespace() {
+fn plan_refresh_targets_the_named_table_and_its_namespace() {
     let p = plan_refresh(
         &[executed(
             "CREATE TABLE s.t(a int)",
@@ -153,7 +159,12 @@ fn stub_plan_refresh_widens_any_ddl_to_the_current_namespace() {
         TxnState::AutoCommit,
         &caps_pg(),
     );
-    assert_eq!(p.now, vec![Target::Namespace(ns("public"))]);
+    let mut key = ObjectKey::unknown(["db", "s", "t"].into_iter().map(name).collect(), None, None);
+    key.kind = ObjectKind::Table;
+    assert_eq!(
+        p.now,
+        vec![Target::Object(key), Target::NamespaceNames(ns("s"))]
+    );
     assert!(p.pending.is_empty());
 }
 
@@ -188,15 +199,102 @@ fn stub_check_state_is_unknown() {
 async fn stub_stamps_and_facet_not_implemented() {
     let keys = [table("public", "orders")];
     let cancel = CancellationToken::new();
-    for dbms in [
-        DbmsKind::Postgres,
-        DbmsKind::MySql,
-        DbmsKind::MariaDb,
-        DbmsKind::Sqlite,
-    ] {
+    // ## m4-t18-sqlite (named exception): SQLite is written (Task 18); on an offline connection
+    // its reads answer `Meta(Unavailable)`, never a fact.
+    {
+        let intro = introspector_for(DbmsKind::Sqlite).expect("an M4 engine");
+        let mut c = MetaConn::offline(DbmsKind::Sqlite);
+        let n = NsKey::schema(["main"]);
+        let unavailable = Some(IntroError::Meta(
+            hacivat_session::meta::MetaError::Unavailable,
+        ));
+        assert_eq!(intro.stamps(&mut c, &keys).await.err(), unavailable);
+        assert_eq!(intro.list_namespaces(&mut c).await.err(), unavailable);
+        assert!(matches!(
+            intro
+                .introspect(
+                    &mut c,
+                    &n,
+                    Mode::Full,
+                    Level::Structure,
+                    &hacivat_introspect::filter::parse_filter(
+                        "",
+                        sql_dialect::DialectId::Sqlite,
+                        hacivat_introspect::filter::FilterRole::Introspect,
+                    )
+                    .expect("the empty filter"),
+                    None,
+                    &cancel
+                )
+                .await,
+            Err(IntroError::Meta(
+                hacivat_session::meta::MetaError::Unavailable
+            ))
+        ));
+        assert_eq!(
+            intro
+                .facet(&mut c, &n, &keys, FacetKind::Sources)
+                .await
+                .err(),
+            unavailable
+        );
+    }
+    for dbms in [DbmsKind::Postgres, DbmsKind::MySql, DbmsKind::MariaDb] {
         let intro = introspector_for(dbms).expect("an M4 engine");
         let mut c = MetaConn::offline(dbms);
         let n = ns("public");
+        // ## m4-t16-pg (named exception): the PostgreSQL introspector is real since Task 16;
+        // on an offline connection every read fails `Unavailable` (nothing is published), and
+        // its facets stay Task 16b's stubs.
+        if dbms == DbmsKind::Postgres {
+            let off = Err(IntroError::Meta(
+                hacivat_session::meta::MetaError::Unavailable,
+            ));
+            assert_eq!(
+                intro.stamps(&mut c, &keys).await,
+                off.clone().map(|()| Vec::new())
+            );
+            assert_eq!(
+                intro.list_namespaces(&mut c).await,
+                off.clone().map(|()| Vec::new())
+            );
+            assert_eq!(
+                intro.check_state(&mut c, &keys).await,
+                off.clone().map(|()| Vec::new())
+            );
+            let all = hacivat_introspect::filter::parse_filter(
+                "",
+                sql_dialect::DialectId::Postgres,
+                hacivat_introspect::filter::FilterRole::Introspect,
+            )
+            .expect("the empty filter");
+            assert!(matches!(
+                intro
+                    .introspect(
+                        &mut c,
+                        &n,
+                        Mode::Full,
+                        Level::Structure,
+                        &all,
+                        None,
+                        &cancel
+                    )
+                    .await,
+                Err(IntroError::Meta(_))
+            ));
+            // R-W3-3: the identity read fails on an offline connection; nothing is invented.
+            assert!(matches!(
+                intro.identity(&mut c).await,
+                Err(IntroError::Meta(_))
+            ));
+            for kind in [FacetKind::Grants, FacetKind::Dependencies] {
+                assert_eq!(
+                    intro.facet(&mut c, &n, &keys, kind).await,
+                    Err(IntroError::NotImplemented)
+                );
+            }
+            continue;
+        }
         assert_eq!(
             intro.stamps(&mut c, &keys).await,
             Err(IntroError::NotImplemented),

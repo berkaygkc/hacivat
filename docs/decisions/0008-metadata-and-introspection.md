@@ -1381,6 +1381,104 @@ new.
   PostgreSQL, `no_inherit` on PostgreSQL checks, and an exclusion's deferral from `CheckRare`
   (rendered after the text, which no longer carries it). Golden `pg/index_part_options`.
 
+## m4-t16 — PostgreSQL introspection
+
+Task 16 (HV-INTRO-05; the PostgreSQL parts of HV-INTRO-13 and -15), spike origin `5a5ab08`.
+The packs `packs/pg/{10-core,30-state,40-system}.hvq.sql` are written from the PostgreSQL
+documentation; `pg/**` runs them on Task 5's `MetaConn` (one `SnapshotTxn` per pass, pinned
+`search_path`), decodes them, and builds the model (keys through Task 13's assembly).
+
+- **Change detection** as R-M4-8 and R-M4-48: `age(x.xmin) BETWEEN 0 AND age($W::xid)` with
+  `W mod 2^32` as a bind, the 64-bit span check on the client, `ListExistent` (one tagged
+  `UNION ALL`, namespace-wide existence sets for every kind but columns), `ListExistentComments`
+  (removed comments, finding 3), `ChangedParents`, `ChangedDependents` (one `pg_depend` hop
+  from young rows of the whole database, finding 4) and the facet cascade (finding 5). A
+  relation is always re-emitted with what was read (its cached properties when its own row is
+  not young), so a re-read child replaces its twin and an unread child stays; re-read columns
+  report a `Scoped` column set.
+- **Full instead of incremental:** `no-watermark`, `restart`, `identity` (also a watermark
+  ahead of the server's next XID), `version`, `standby`, `wraparound`, `schema-rename`,
+  `mass-change`, plus `level` (the requested level is above the cached one) and `requested`.
+  **Deviation:** the mass-change rule (> 25 % of the relations) applies only from 20
+  relations (`MASS_CHANGE_MIN_RELATIONS`): below that a few re-reads are cheaper, and the
+  narrow-read guarantees of HV-INTRO-05 tests 1–7 hold on small schemas. Task 28 records the
+  threshold with timings.
+- **The watermark's identity word.** `Watermark::PgXid { w, identity }` has room for the
+  system identifier and the start time only; `system_identifier` stores one 64-bit word: the
+  high 48 bits an XXH3 of `system_identifier | timeline | database oid` (each `-` when the
+  role may not read it), the low 16 bits the major version. A different word's high bits is
+  `identity`, its low bits `version`; the start time is `restart`.
+- **The canary** reads the backend's own `pg_stat_activity.backend_xid IS NULL` (deviation
+  from the plan's `pg_current_xact_id_if_assigned()`): Task 5's token guard refuses every
+  `pg_current_xact_id*` and `txid_current*` name by prefix, the read-only forms included. A
+  pass whose canary is false fails (`Protocol`), and nothing is published.
+- **Joined text.** A `joinable` section is checked by the guard of every lexer (the joined
+  engine is unknown), and `::` does not lex everywhere: the `StateOf<Kind>` sections cast with
+  `CAST(x AS text)`. No section comment holds a `;` (the guard refuses it in raw text).
+  `tests/pg_rows.rs` runs every rendered variant through `check_own_text` and every joinable
+  one through `check_read_text`.
+- **Composite types are types**, one model object (`CompositeType`, identity = the `pg_type`
+  oid, attributes from `RetrieveTypeAttributes`), never also a relation. Base types
+  (`typtype b`) have no model kind: `Unknown` with the raw kind `pg-base-type`; system types
+  (`Mode::System`) `pg-type`.
+- **State marks** (`stamps`): per object an XXH3-64 of the sorted `(source, xmin)` rows of
+  its `StateOf<Kind>` section (own row, comments, children, one dependency hop); `None` when
+  its own row is gone; `Some(StateMark::None)` for a key without an oid (a column).
+  `check_state` answers `Dropped` for a gone object and `Unknown` otherwise: comparing marks
+  is Task 22's. `check_namespace` answers the existence count and digest and
+  `StateMark::Xmin` of the cached watermark when nothing changed since it (else of the
+  current snapshot xmin), running only `Identity`, `ListExistent` and the two change queries.
+- **Fragments** report `Scoped` sets resolved by oid (RR-1) and `Watermark::None`: a fragment
+  reads a few objects, so the engine must keep the namespace's watermark (carry to T15; with
+  `None` the next pass is full, which is correct).
+- **Server facts** come from `Identity`: version text and number, encoding,
+  `standard_conforming_strings`, recovery, the database's default collation
+  (`PassReport.facts`). `list_namespaces` lists the connectable databases
+  (`NsKind::Database`) and the connected database's schemas.
+- **Scope filter:** applied on the client (objects it excludes are not built, and their
+  existence identities are left out). Server pushdown waits for the trait's filter
+  parameter (ruling R-W3-2); `PassOpts.filter` carries it.
+- **`hv_m4_big`** is a schema of database `hv_test` on `pg17` (deviation from "database":
+  no second connection per test, no `CREATE DATABASE`), built and dropped in 250-table `DO`
+  blocks of `IF [NOT] EXISTS` statements (`testing::big_catalog`).
+- **Named exceptions:** `hacivat-meta/src/props.rs` re-exports `ArgMode`, `FnArg`, `FnKind`,
+  `Volatility` (one line: an introspector builds `RoutineProps` without depending on
+  `sql-catalog`); the T1c/T4 stub tests (`introspector.rs`, `pack/mod.rs`, `tests/seams.rs`)
+  now expect the real PostgreSQL introspector; `hacivat-introspect` gains the dev-dependencies
+  `hacivat-net` and `hacivat-driver` (the Docker tests build `ConnectDeps`; the hacivat-exec
+  precedent; `Cargo.lock` gains edges only). `hacivat-net` is the controller's R-W3-4; `hacivat-driver` still needs a controller
+  ruling.
+- **Fix round 1 (security review, I-1..I-6):**
+  - *Schema rename (I-1).* The `schema-rename` branch of `ChangedDependents` now sees every
+    depender class: relations, routines and types, constraints (`connamespace`), triggers,
+    column defaults and view rules (through their relation); and referenced relations of the
+    renamed schema as well as its types and routines. A hit runs a full pass of the namespace
+    (the fail-safe: a renamed schema is two hops away and rare). Enum value, collation,
+    operator and operator-class renames are sources of the dependency hop too (m-1).
+  - *Stamps (I-2).* Every dependency hop of the `StateOf*` sections reads the referenced
+    column's `pg_attribute` row (a column rename touches nothing else) and the referenced
+    type's `pg_type` row.
+  - *Validation (I-3).* `check_namespace`'s digest covers each object's `sub` (a domain's
+    constraint count) and the comment keys (`ListExistentComments`).
+  - *Search-path immunity (I-4).* The joinable `StateOf*` text writes every operator as
+    `OPERATOR(pg_catalog.op)`, every cast to a `pg_catalog` type, every function qualified;
+    `tests/pg_rows.rs` refuses any bare operator, `::`, unqualified cast or function in a
+    joinable section (named exception: T4's `SYNTAX` words gain `operator`). The list bind's
+    `IN` stays (the pack grammar fixes it; oid against oid parameters): a joined read must
+    refuse a session whose `search_path` does not start with `pg_catalog` (carry to T15b
+    and M7). `hv_m4_big` as a schema of `hv_test` is ruling R-W3-8.
+- **Seams adopted after T15 (R-W3-2, R-W3-3).** `introspect` and `fragment` take the scope
+  filter. `ListExistent`, `RetrieveRelations` and `ChangedParents` (its `rels` set and its
+  relation branch) push it through `engine::bounded_pushdown` over every relation kind
+  (`Table`, `View`, `MaterializedView`, `ForeignTable`: `pushdown_kinds`) as
+  `(:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)`, one run per
+  pattern (NULL when nothing is pushed), rows deduplicated by oid; the client filter still
+  decides. `identity` is an XXH3-128 of the system identifier, the major version and the
+  database oid from one `Identity` probe, `Unknown` when the role may not read the system
+  identifier. Each section reports its engine `Phase` and row count to the pass's progress
+  sink (`PassOpts.progress`); the trait has no sink yet, so the engine's own counts stay
+  per pass until a seam carries one (carry to T15's owner).
+
 ## m4-t20 — scope editor, encrypted cache option, level pills
 
 M4 Task 20 (gpui) fills `connections/dialog/schemas.rs`, `explorer/level_pill.rs` and
@@ -1436,6 +1534,108 @@ M4 Task 20 (gpui) fills `connections/dialog/schemas.rs`, `explorer/level_pill.rs
     rows would not give the same syntax tree, a click adds or removes one clause for its row
     (`!@:"s"`, `@:"s"`, `!db:*`, …), verified through `select_explicit`; a click that cannot be
     made that way asks before writing the pattern again.
+
+## m4-t18 — SQLite introspection
+
+Task 18 (HV-INTRO-08; the SQLite parts of HV-INTRO-13 and -15). Spike origin `f690f45`
+(`sqlite.rs`): the bulk joins, their per-relation fallback, `table_options`, the digest and
+the refresh decision, rebuilt on the pack and the model.
+
+- **Connections (R-M4-38).** `main` and attached schemas are read on the separate `mode=ro`
+  reader, inside its deferred `BEGIN` (one consistent snapshot per pass). `temp` is read on
+  the user's own idle connection (`MetaConnSpec { database: Some("temp") }`) with only the
+  pragmas its read-only authorizer allows: `pragma_table_list` and `pragma_module_list` are
+  never run there, so `WITHOUT ROWID`/`STRICT` come from the text scan and FTS5 shadow tables
+  are not recognised in `temp`. A joined read (R-M4-29) uses the same text (every SQLite
+  section is `joinable`); T5 refuses to join SQLite's single session until M7 adds the writer
+  seam, so the joined path is proven only for an in-memory profile, whose metadata connection
+  is the writer.
+- **No `PRAGMA` statement, no spliced schema.** Every pragma is its table-valued function
+  with the schema as a bind. `sqlite_schema` itself needs the schema as a qualifier, so the
+  sections that read it come in three copies: `…Main`, `…Temp` and `…Attached`, the last
+  reading the fixed alias **`hacivat_attached`**. To read an attached schema the introspector
+  attaches the file the connection already lists under that alias, read-only, through
+  `MetaConn::attach_read_only` (the alias is reused on the same reader; a different file
+  under it, or an attached schema on the user's connection, answers `Meta(Unavailable)`).
+  The alias is never listed as a namespace. A schema the connection lacks is
+  `Meta(Unavailable)`, never an empty namespace. No section uses `LIKE`, `GLOB` or a folding
+  function, so `case_sensitive_like` on the user's connection changes nothing (T12 M6).
+- **Change detection.** `main`'s `schema_version` (the table-valued form reads `main` only;
+  `temp` and attached schemas have version 0 and rely on the digest), the main or attached
+  file's `(dev, inode)` (Unix; unknown elsewhere), and an XXH3-128 digest of the **sorted**
+  `(type, name, tbl_name, sql)` rows, each field length-prefixed with NULL distinct from
+  empty. The digest runs on a connection's first pass (`PassConn::Fresh`; the engine opens
+  one reader per task, so every trait pass is one), on an identity change or an unknown
+  identity, without a version, and on every pass with `digest_every_pass` (network shares,
+  edge 5). A different version or digest re-reads the schema whole; otherwise the pass returns
+  no change and the fresh watermark. `data_version` is not used (F8). A fragment re-reads its
+  relations from a whole read of the schema (local; the spike's 10k-table Structure read is
+  245 ms) and returns `Watermark::None`, so the next incremental pass reads the schema again
+  instead of trusting a watermark the fragment did not check.
+- **Existence (R-W2-5).** Relation kinds are `Ok` on a full read and `Scoped` to the asked
+  relations on a fragment; every child kind is `Scoped` to the relations whose children were
+  read. A relation whose columns fail (a broken view, a virtual table with a missing module)
+  is kept `BROKEN` with no columns and stays out of the column and key scopes, so cached
+  children are never decided gone and a column is never "missing" from it. A failed index or
+  FK pragma is `Failed`. CHECKs are not modelled (F10, R-M4-24). The engine's message of a
+  broken relation has no field in the model; it is kept in the read (`SchemaRows::broken`)
+  only.
+- **Shapes.** `hidden` 1 = a hidden virtual-table column, 2 = virtual and 3 = stored
+  generated (expression from the column's definition text); the declared collation from the
+  text, and an index part's collation only where it differs from the column's (`BINARY`
+  without one, and for expressions and the rowid; ASCII-caseless); the rowid alias is the
+  single primary-key column declared exactly `INTEGER` on a rowid table with no `pk`
+  autoindex (`AUTOINCREMENT` → `Identity::AutoIncrement`); FK deferral from the text, clause
+  `k` of `n` being id `n − 1 − k`, unknown (not deferrable) when the counts disagree; triggers
+  under their table or view with timing, event and `WHEN` from the text (`BROKEN` when the
+  text has another shape); `sqlite_*` names `SYSTEM`; `shadow` tables `IMPLICIT`.
+- **State (HV-INTRO-15)** is schema-level: every object carries `Hash(XXH3-64(schema_version
+  ‖ digest))`; `stamps` answers that mark for a key that exists and `None` for one that does
+  not; `check_state` answers `Dropped` or `Unknown` (it has no stored mark; Task 22 compares
+  `stamps`); `check_namespace` the relation count, the mark and an existence digest that
+  `sqlite::ns_check_of` computes the same way from a cached namespace.
+- **Locks.** `SQLITE_BUSY`/`SQLITE_LOCKED` after the driver's 5 s busy timeout: a pass is tried
+  twice, then fails softly (`Failed`, nothing decided).
+- **Built-ins** (`function_list`, `module_list`, `collation_list`) are read live per
+  connection (`SqliteIntrospector::builtins`, R-M4-6); none enters a namespace (the explorer
+  shows no Built-in group for SQLite). **Facets:** `Sources` (`sqlite_schema.sql` of tables,
+  views, indexes and triggers); `Grants` not applicable (empty); `Statistics` without a row
+  estimate; `Dependencies` unsupported (`NotImplemented`). Capabilities: incremental (the
+  version/digest skip), transactional DDL, facets `Sources`, `Grants`, `Statistics`.
+- **File identity (R-W3-3, prepared).** `SqliteIntrospector::file_fingerprint`: XXH3-128 of
+  `main`'s `application_id` and the file's canonical path (stable across DDL and `VACUUM`;
+  the inode is left out so a save-by-rename keeps the database); unknown for an in-memory
+  database.
+- **After T15 (resume).** `introspect`/`fragment` take R-W3-2's scope filter and apply it on
+  the client (a relation it does not keep is neither built nor listed as existing; nothing is
+  pushed down: the read is local). `identity` (R-W3-3) is `file_fingerprint`.
+  `SqliteIntrospector::with_progress` reports `Tables`, `Columns`, `Indexes` and `Constraints`
+  counts per pass (the seam has no progress parameter, so the engine hands the sink to the
+  introspector it builds). Every rendered section, in every copy, passes T5's guards
+  (R-W3-9, `every_rendered_sqlite_section_passes_the_metadata_guard`).
+- **Fix round 1 (opus review).**
+  - **`temp` is read whole on every pass** (I-1): a temp view or trigger may depend on `main`
+    or an attached schema, which leaves `temp.sqlite_schema` and its digest unchanged.
+  - **`temp` is never decided off its connection** (I-2): `check_state` answers `Unknown` for
+    `temp` keys, `stamps` and `check_namespace` answer `Meta(Unavailable)` when asked about
+    `temp`. The engine-side split of a state check by connection is T22's.
+  - **One reader per attached schema** (I-3, ruling R-W3-10): with
+    `SqliteIntrospector::with_readers(source)` (the engine's `MetaSource`), each attached
+    schema is read on a reader of its own (pool slot keyed by the schema's name), which
+    attaches exactly that file under the alias and is closed, and reported released, as soon
+    as the read ends. A call over several attached schemas works, and a user schema named
+    `hacivat_attached` is an ordinary namespace. Without a source the connection handed in
+    holds the alias for one file (fail-closed `Unavailable` for a second). No T5 detach seam.
+  - **FK deferral** follows SQLite's `sqlite3DeferForeignKey` (m1): a `DEFERRABLE` clause
+    applies to the table's most recent foreign key, also when it stands alone in a later
+    column. A trigger's `WHEN` ends at the body's `BEGIN` only: a bare top-level word followed
+    by a statement keyword, never a `begin` identifier or name part (m2).
+  - **Bounded fallback** (m3): after `MAX_FALLBACK_FAILURES` (64) relations of one kind fail
+    one by one, the rest of that kind is kept `BROKEN` unread (children undecided), so a
+    crafted file of views at SQLite's reference cap cannot keep the reader busy for minutes.
+  - **`check_namespace` counts what the cache could hold** (m5): its relation count and
+    existence digest cover the server relations the cached namespace has (already cut by the
+    scope filter); a newly kept relation moves the mark instead.
 
 ## m4-t15 — engine and hub
 
@@ -1613,3 +1813,82 @@ M4 Task 20 (gpui) fills `connections/dialog/schemas.rs`, `explorer/level_pill.rs
   task, not the blocking pool (user actions and connects, O(arena size)) → T22 (which owns
   the identity behaviour) or a later engine touch; the `Partial` stale mark (m12) stays as
   noted; gating the fakes is R-W3-7 (T33).
+
+## m4-t21 — refresh after DDL
+
+HV-INTRO-12 (`hacivat-introspect::ddl_effects`, `refresh_coord`; the sink in `hacivat-exec`,
+ADR 0006 `m4-t21`).
+
+- **Refresh more, never less.** Every rule below that cannot be exact widens: an unresolved
+  PostgreSQL relation behind `ALTER TABLE` (a view, a sequence, an index) → its namespace (T6
+  carry); an unqualified name the catalog cannot place → every search-path namespace before
+  the first hit; `DROP … CASCADE` → every loaded namespace of the database
+  (`Target::Database`); an opaque DDL statement (`DROP OWNED`, `REASSIGN OWNED`, `ALTER
+  DEFAULT PRIVILEGES`, `DROP COLUMN … CASCADE`, `CREATE EXTENSION`, `CREATE SCHEMA
+  AUTHORIZATION`) → the database and the namespace list (U-2, widened from "the statement
+  kind `DropOwned`" to every opaque DDL-class statement); a DDL-class, `Other` or
+  `EXPLAIN ANALYZE` statement with no effect → opaque (m-B3); a run with no reports (over
+  1 MiB, ambiguous boundary) → the database and the list (T6 carry); a session that does not
+  know its namespace → every loaded namespace.
+- **Targets.** The plan's `Target::Object` (a top-level object; its namespace is its key's
+  path without the last name), `NamespaceNames`, `Database` are lowered by `ddl_effects::lower`
+  on the catalog **at refresh time** into the engine's `Namespace`/`Objects`/`ScopeRefresh`
+  (a named exception in `engine/scheduler.rs` does the same for a direct caller). A namespace
+  that is neither loaded nor loading is dropped: a refresh never loads what nobody opened,
+  and never publishes a half namespace. A namespace target subsumes object targets of the
+  same namespace (the incremental pass is trusted to equal a full one, G4).
+- **Identity.** A name the catalog holds is refreshed by the catalog's own key (with the OID),
+  so a fragment after `RENAME` keeps identity (T11 carry). Names are folded with
+  `sql_ident::fold`; SQLite's unqualified names search `main` then the other loaded schemas.
+- **Timing.** PostgreSQL and SQLite DDL in a transaction is pending until the end; `CREATE
+  INDEX CONCURRENTLY` and `CREATE`/`DROP DATABASE` are immediate; MySQL/MariaDB always
+  immediate. `ROLLBACK TO s` keeps what ran before `s`; a `ROLLBACK TO` of a savepoint the
+  coordinator never saw keeps everything; no compensating refresh (R-M4-42). PostgreSQL
+  `PREPARE TRANSACTION` counts as an unknown end (refreshed).
+- **Transaction ends come from the server's status** (`TxChanged` within the unit, the
+  `ROLLBACK` tag, a failed transaction), never the text; a lost connection after `COMMIT` is
+  `TxOutcome::Unknown` (refreshed); a lost connection inside a transaction is a rollback.
+  Ends outside a run (the toolbar, a closed session) are told by the caller
+  (`tx_ended`, `session_closed`; Task 27).
+- **Preference.** `never` marks the namespaces stale through the engine (`IntroHandle::
+  mark_stale`, a named exception: the engine stays the only writer); `ask` marks stale and
+  emits `CoordEvent::Ask` (answered by `answer`); `refresh_now` ignores it.
+- **After the refresh**, `check_state` on the refreshed objects (alg/02 step 6). A refresh that
+  fails for want of a connection is owed until `reconnected` (edge case 13).
+- **Known gaps (background validation, T22, catches them):** DDL run by a function a plain
+  `SELECT f()` calls when the classifier reads `f` as a read (T6); a plain `DROP TABLE`'s
+  partitions or owned sequences in a namespace loaded below `Structure` (no props to find
+  them); `COMMIT PREPARED` from another session.
+
+### m4-t21 fix round 1 (review I1–I5, m1–m8)
+
+- **Chained ends (I1).** A successful `COMMIT`/`ROLLBACK`-kind unit that started inside a
+  transaction and left the status inside one (`COMMIT AND CHAIN`, `ROLLBACK AND CHAIN`, a
+  MySQL `COMMIT` with `autocommit` off) ends the transaction: `Committed` (unless the
+  transaction had failed or the tag said `ROLLBACK`) or `RolledBack`. `ROLLBACK TO` and
+  `PREPARE TRANSACTION` are excluded.
+- **Maybe-committed units (I2).** A unit that did not succeed is planned anyway when it may
+  have committed DDL: a batch run as one on MySQL/MariaDB or SQLite that failed or was
+  cancelled partway (statements commit one by one), or a statement whose answer was lost
+  (`ConnectionLost { outcome_unknown }`) outside a transaction or on an engine without
+  transactional DDL. A PostgreSQL batch is one implicit transaction: nothing. A refresh that
+  then fails for want of a connection is owed (as before).
+- **Widening across units (I3).** The coordinator gathers one drain's targets (every
+  session's `now` part, every committed pending list, every dropped session) and widens them
+  together (`ddl_effects::normalize`) before handing them over; `pending(session)` answers the
+  widened list the commit will refresh.
+- **Scope changes under `never`/`ask` (I4).** A `ScopeRefresh` target marks every loaded
+  schema list stale (`ContainerKey::SchemaList`, `IntroHandle::mark_stale(namespaces,
+  scope)`) and `CoordEvent::Stale { scope: true }` is sent; the explorer badge for it is T27's.
+- **Database DDL in a PostgreSQL transaction (I5).** Only `CREATE DATABASE` and `DROP
+  DATABASE` are immediate; `ALTER DATABASE … RENAME`, `COMMENT ON DATABASE` and database
+  grants wait for the commit (`ALTER DATABASE … SET TABLESPACE` only succeeds in autocommit).
+- **Minors.** m1: `RefreshCoordinator::applied()` counts refreshes handed to the engine
+  (synchronously), so the Docker rollback test proves nothing was issued. m2: at most one
+  unanswered question; a new one takes over the old one's targets. m3: a dropped message of a
+  session outside a transaction leaves nothing pending. m4: a same-session `COMMIT PREPARED`
+  refreshes the whole database (another session's stays a gap). m5: a namespace marked stale
+  while a pass of it is loading or running is published stale when that pass ends (the
+  scheduler's `stale_on_publish`, a named exception in `publish`). m7: the tracker's docs
+  say what it copies. m6 → **T27 carry:** call `RefreshCoordinator::reconnected()` when the
+  profile's metadata connection recovers, not only after the user session's reconnect.

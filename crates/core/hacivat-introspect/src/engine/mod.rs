@@ -516,6 +516,16 @@ impl IntroHandle {
         self.send(scheduler::Cmd::SetFilters(filters));
     }
 
+    // ## m4-t21-refresh (named exception)
+    /// Marks the loaded namespaces `namespaces` stale without reading anything (refresh after
+    /// DDL with the preference `never` or `ask`; the explorer's stale badge). The engine, the
+    /// catalog's only writer, publishes it. A namespace still loading is published stale when
+    /// its pass ends; `scope` also marks every loaded schema list stale (the namespace list
+    /// changed: a schema or database created, dropped or renamed).
+    pub fn mark_stale(&self, namespaces: Vec<NsKey>, scope: bool) {
+        self.send(scheduler::Cmd::MarkStale { namespaces, scope });
+    }
+
     /// The level `ns` is read at and why, as the engine sees it (the pills; review m8): its
     /// role (current, system, other) and its loaded object count. A database namespace answers
     /// its own override, else the auto level of its loaded schemas' objects together. A lock no
