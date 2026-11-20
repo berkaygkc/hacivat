@@ -79,6 +79,17 @@ pub(super) struct Listing {
     pub identity: bool,
 }
 
+// ## m4-t17-mysql (T15 carry m4, review I-2)
+/// What the scope refresh learned of the server's facts.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum FactsRead {
+    /// The introspector reads none (the catalog keeps its facts).
+    NotRead,
+    Read(Box<ServerFacts>),
+    /// The introspector reads them, and the read failed: the identifier rule is unknown.
+    Failed,
+}
+
 /// What the identity step found (R-W3-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum IdentityRead {
@@ -135,12 +146,7 @@ pub(super) enum Output {
     /// The listing, the identity, and the other databases that could not be listed (unknown:
     /// their schemas keep their states; review RR-2).
     // ## m4-t17-mysql (named exception; T15 carry m4): the server's facts, when read.
-    Namespaces(
-        Vec<NsInfo>,
-        Option<IdentityRead>,
-        Vec<Name>,
-        Option<Box<ServerFacts>>,
-    ),
+    Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>, FactsRead),
     Merged(Box<Merged>),
     Staleness(Vec<ObjectKey>, Vec<Staleness>),
     Failed(IntroError),
@@ -235,12 +241,7 @@ async fn acquire(
 enum Read {
     /// The listing, the identity, the other databases still to list, and the server's facts
     /// (m4-t17-mysql).
-    Namespaces(
-        Vec<NsInfo>,
-        Option<IdentityRead>,
-        Vec<Name>,
-        Option<Box<ServerFacts>>,
-    ),
+    Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>, FactsRead),
     Result(NamespaceResult),
     Staleness(Vec<ObjectKey>, Vec<Staleness>),
 }
@@ -318,15 +319,14 @@ fn sink(ctx: &WorkerCtx, ns: &NsKey) -> ProgressSink {
 /// [`list_others`] reads after this connection is closed (review RR-3).
 async fn list(ctx: &WorkerCtx, spec: &Spec, conn: &mut MetaConn) -> Result<Read, IntroError> {
     let infos = ctx.intro.list_namespaces(conn).await?;
-    // ## m4-t17-mysql (T15 carry m4): the facts of the server behind the connection. One that
-    // cannot be read keeps the catalog's (never a guess).
-    let facts = ctx
-        .intro
-        .server_facts(conn)
-        .await
-        .ok()
-        .flatten()
-        .map(Box::new);
+    // ## m4-t17-mysql (T15 carry m4; review I-2): the facts of the server behind the
+    // connection. A failed read is reported as such: the scheduler then publishes facts whose
+    // `lower_case_table_names` is unknown, never the lctn-0 placeholder (a guess).
+    let facts = match ctx.intro.server_facts(conn).await {
+        Ok(Some(f)) => FactsRead::Read(Box::new(f)),
+        Ok(None) => FactsRead::NotRead,
+        Err(_) => FactsRead::Failed,
+    };
     let Some(listing) = &spec.listing else {
         return Ok(Read::Namespaces(infos, None, Vec::new(), facts));
     };

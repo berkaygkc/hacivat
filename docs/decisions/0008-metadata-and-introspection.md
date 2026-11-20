@@ -1823,3 +1823,36 @@ show_create}.rs`, `packs/mysql/{10-core,30-state,40-system}.hvq.sql`.
 - **R-W3-9.** `mysql_rows::every_section_renders_and_passes_the_metadata_guard_in_every_variant`
   renders every reachable variant of every section and runs it through `check_own_text` and
   `check_read_text_for` for MySQL and MariaDB, and every joinable one through `check_read_text`.
+
+### m4-t17 fix round 1 (security review: 4 Important, 7 Minor)
+
+- **View marks (I-1, I-4).** A view's state mark is XXH3-64 over its definition hash
+  (`SHA2(CONCAT_WS(X'1F', VIEW_DEFINITION, CHECK_OPTION, IS_UPDATABLE, SECURITY_TYPE, DEFINER))`,
+  the unit separator the plan names, written `X'1F'` so every guard lexer reads it as one
+  literal; m1), whether the login can read the definition (`def_visible`), and the view's
+  `COLUMNS` rows (name, position, type, nullability, default, collation; new section
+  `ViewColumnMarks`, joinable, list-gated), length-prefixed. `COLUMNS` needs no SHOW VIEW, so a
+  view replaced under a hidden definition moves when its columns do, and a change of a base
+  table moves the view's mark even when the base is outside a pushed filter or in another
+  schema. A view whose definition the login cannot read (`VIEW_DEFINITION = ''`, no SHOW VIEW,
+  not the definer; [Inferred] from the I_S view's `CAN_ACCESS_VIEW`, pinned on Docker by
+  `a_login_without_show_view_still_sees_a_replaced_view`) is re-read by every incremental
+  pass: a definition-only change (a new `WHERE`) moves no column.
+- **Facts fail closed (I-2).** The hub's MySQL-family placeholder carries an unknown
+  `lower_case_table_names` (`u8::MAX`: no table rule pinned, lookups `ServerDependent`). A
+  failed `server_facts` read publishes the current facts with an unknown
+  `lower_case_table_names` (`engine::work::FactsRead::Failed`), never the lctn-0 guess. When
+  published facts change the table fold rule, the scheduler re-folds every cached arena in the
+  same publish (objects, metadata and watermark kept; only the lookup keys change). Named
+  exceptions: `hub.rs`, `engine/{work,scheduler}.rs`, `testing/fake.rs` (`set_facts`).
+- **R-M4-37 pins (I-3).** `SHOW CREATE FUNCTION` runs on Docker; `SHOW CREATE TRIGGER` refused
+  on the prepared path (1295) is detected (`show_create::is_not_preparable`), recorded and
+  reported NEEDS_CONTEXT: the metadata connection has no text-protocol path, and none is added
+  around Task 5's guard. A padded probe (`t `) must never answer `t`'s text.
+- **Minors.** m6: a fragment asked by an `Unknown` key reports a scoped `Unknown` existence
+  set. m7: `check_state` answers `Unknown` for an object `INFORMATION_SCHEMA` no longer lists
+  (the login may only have lost the privilege; drops are a pass's, behind the privilege hash
+  and the guard). m3/m4/m2 are test fixes.
+- **Carried to T22 (m5):** a cross-schema FK target change does not re-read the referring
+  table in another schema (only same-schema referrers are re-read); like the cross-schema view
+  base before this round, it heals at the next full pass.

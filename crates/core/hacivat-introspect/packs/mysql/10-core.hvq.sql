@@ -14,6 +14,10 @@
 --   gated on `not flag(mariadb)`.
 -- - `mode == incremental` is the re-read of named objects (an incremental pass's changed
 --   objects, a fragment): one list bind `:[names]` on the object's own name column.
+-- - A view's marker (review I-1, I-4) is the hash of its definition columns, separated by the
+--   unit separator 0x1f (written `X'1F'`, a literal every lexer reads), folded by the client with its `COLUMNS` rows (`ViewColumnMarks`): a view whose
+--   definition the login cannot read (no SHOW VIEW, `VIEW_DEFINITION = ''`) still moves
+--   when its columns do, and is re-read by every incremental pass (`def_visible = 'NO'`).
 -- - Time markers are cast to text (`CAST(x AS CHAR)`) and compared by the client in UTC: the
 --   metadata session runs with `time_zone = '+00:00'` (Task 5), and `Identity` reads it back.
 -- - R-M4-37: `SHOW CREATE` takes no bind parameter, so the `ShowCreate*` sections name the
@@ -81,11 +85,27 @@ FROM INFORMATION_SCHEMA.TABLES t
 WHERE t.TABLE_SCHEMA = :schema
 
 --- name: ViewMarks ---
---- returns: table_name text, view_hash text ---
+--- returns: table_name text, view_hash text, def_visible text ---
 SELECT v.TABLE_NAME AS table_name,
-  SHA2(CONCAT_WS('|', v.VIEW_DEFINITION, v.CHECK_OPTION, v.IS_UPDATABLE, v.SECURITY_TYPE, v.DEFINER), 256) AS view_hash
+  SHA2(CONCAT_WS(X'1F', v.VIEW_DEFINITION, v.CHECK_OPTION, v.IS_UPDATABLE, v.SECURITY_TYPE, v.DEFINER), 256) AS view_hash,
+  CASE WHEN v.VIEW_DEFINITION = '' THEN 'NO' ELSE 'YES' END AS def_visible
 FROM INFORMATION_SCHEMA.VIEWS v
 WHERE v.TABLE_SCHEMA = :schema
+
+--- name: ViewColumnMarks ---
+--- returns: table_name text, column_name text, ordinal_position u32, column_type text, is_nullable text, column_default text, collation_name text ---
+--- joinable ---
+SELECT c.TABLE_NAME AS table_name, c.COLUMN_NAME AS column_name,
+  c.ORDINAL_POSITION AS ordinal_position, c.COLUMN_TYPE AS column_type,
+  c.IS_NULLABLE AS is_nullable, c.COLUMN_DEFAULT AS column_default,
+  c.COLLATION_NAME AS collation_name
+FROM INFORMATION_SCHEMA.COLUMNS c
+JOIN INFORMATION_SCHEMA.VIEWS v
+  ON v.TABLE_SCHEMA = c.TABLE_SCHEMA AND v.TABLE_NAME = c.TABLE_NAME
+WHERE c.TABLE_SCHEMA = :schema
+--# if mode == incremental
+  AND c.TABLE_NAME IN :[names]
+--# end
 
 --- name: TriggerMarks ---
 --- returns: trigger_name text, table_name text, created text ---
@@ -134,7 +154,7 @@ FROM INFORMATION_SCHEMA.TABLES t
 WHERE t.TABLE_SCHEMA = :schema AND t.TABLE_NAME LIKE :name_like ESCAPE :like_escape
 
 --- name: Views ---
---- returns: table_name text, check_option text, is_updatable text, security_type text, definer text, view_algorithm text, view_hash text ---
+--- returns: table_name text, check_option text, is_updatable text, security_type text, definer text, view_algorithm text, view_hash text, def_visible text ---
 SELECT v.TABLE_NAME AS table_name, v.CHECK_OPTION AS check_option,
   v.IS_UPDATABLE AS is_updatable, v.SECURITY_TYPE AS security_type, v.DEFINER AS definer,
 --# if flag(mariadb)
@@ -142,7 +162,8 @@ SELECT v.TABLE_NAME AS table_name, v.CHECK_OPTION AS check_option,
 --# else
   NULL AS view_algorithm,
 --# end
-  SHA2(CONCAT_WS('|', v.VIEW_DEFINITION, v.CHECK_OPTION, v.IS_UPDATABLE, v.SECURITY_TYPE, v.DEFINER), 256) AS view_hash
+  SHA2(CONCAT_WS(X'1F', v.VIEW_DEFINITION, v.CHECK_OPTION, v.IS_UPDATABLE, v.SECURITY_TYPE, v.DEFINER), 256) AS view_hash,
+  CASE WHEN v.VIEW_DEFINITION = '' THEN 'NO' ELSE 'YES' END AS def_visible
 FROM INFORMATION_SCHEMA.VIEWS v
 WHERE v.TABLE_SCHEMA = :schema
 --# if mode == incremental

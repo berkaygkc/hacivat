@@ -37,7 +37,7 @@ use smallvec::smallvec;
 
 use super::build::{
     RelationParts, Tree, event_tree, micros, raw_kind, relation_kind, relation_mark, relation_tree,
-    routine_kind, routine_tree, trigger_stats,
+    routine_kind, routine_tree, trigger_stats, view_mark, view_marks_with_columns,
 };
 use super::rows::{
     self, ColumnRow, EventRow, ParamRow, RoutineRow, TableRow, TriggerRow, ViewRow, cell, name,
@@ -281,6 +281,9 @@ struct Names {
     relations: BTreeSet<Name>,
     routines: BTreeSet<Name>,
     events: BTreeSet<Name>,
+    /// Names asked by an `ObjectKind::Unknown` key: both families are read for them, so their
+    /// `Unknown` objects are decided too (review m6).
+    unknown: BTreeSet<Name>,
 }
 
 impl Names {
@@ -317,6 +320,8 @@ fn covered<'a>(tables: impl Iterator<Item = &'a Name>) -> u64 {
 struct ReadSet {
     tables: Vec<TableRow>,
     views: Vec<ViewRow>,
+    /// The views' `COLUMNS` rows (`ViewColumnMarks`), for their marks (review I-1).
+    view_cols: Vec<rows::ViewCol>,
     columns: Vec<ColumnRow>,
     keys: Option<KeyRows>,
     triggers: Vec<TriggerRow>,
@@ -352,6 +357,7 @@ async fn read_set(
     let mut set = ReadSet {
         tables,
         views: rows::views(&r.read("Views", ctx(rel)).await?)?,
+        view_cols: rows::view_cols(&r.read("ViewColumnMarks", ctx(rel)).await?)?,
         triggers: rows::triggers(&r.read("Triggers", ctx(rel)).await?)?,
         ..ReadSet::default()
     };
@@ -498,6 +504,10 @@ fn index_read_tables(index: &mut ColumnIndex, set: &ReadSet, srv: &ServerCtx) {
 fn build(set: ReadSet, srv: &ServerCtx, level: Level, index: &ColumnIndex) -> Built {
     let structure = level >= Level::Structure;
     let views: HashMap<&Name, &ViewRow> = set.views.iter().map(|v| (&v.name, v)).collect();
+    let mut view_cols: HashMap<&Name, Vec<&rows::ViewCol>> = HashMap::new();
+    for c in &set.view_cols {
+        view_cols.entry(&c.view).or_default().push(c);
+    }
     let cols = columns_by_table(&set);
     let stats = trigger_stats(&set.triggers);
     let mut trigs: HashMap<&Name, Vec<&TriggerRow>> = HashMap::new();
@@ -519,7 +529,13 @@ fn build(set: ReadSet, srv: &ServerCtx, level: Level, index: &ColumnIndex) -> Bu
             RelationParts {
                 table: t,
                 view,
-                view_hash: view.and_then(|v| v.hash),
+                view_hash: view.map(|v| {
+                    view_mark(
+                        v.hash,
+                        v.def_visible,
+                        view_cols.get(&t.name).map(Vec::as_slice).unwrap_or(&[]),
+                    )
+                }),
                 columns: cols.get(&t.name).map(Vec::as_slice).unwrap_or(&[]),
                 keys: keys.remove(&t.name).unwrap_or_default(),
                 triggers: trigs.get(&t.name).map(Vec::as_slice).unwrap_or(&[]),
@@ -830,9 +846,12 @@ async fn incremental_pass(
         // The pushed predicate decides which relations this pass reads at all (R-W3-2).
         tables.retain(|t| keep.contains(&t.name));
     }
-    let views: HashMap<Name, Option<u64>> = rows::view_marks(&r.read("ViewMarks", ctx()).await?)?
-        .into_iter()
-        .collect();
+    // A view's mark folds in its columns, so a change under it moves it even when its base is
+    // outside the pushed filter or another schema, or its definition is hidden (I-1, I-4).
+    let views = view_marks_with_columns(
+        rows::view_marks(&r.read("ViewMarks", ctx()).await?)?,
+        &rows::view_cols(&r.read("ViewColumnMarks", ctx()).await?)?,
+    );
     let trigger_marks = rows::trigger_marks(&r.read("TriggerMarks", ctx()).await?)?;
     let routines = rows::routine_marks(&r.read("RoutineMarks", ctx()).await?)?;
     let events = rows::event_marks(&r.read("EventMarks", ctx()).await?)?;
@@ -853,11 +872,13 @@ async fn incremental_pass(
         let mark = relation_mark(
             kind,
             t.create_time.as_ref(),
-            views.get(&t.name).copied().flatten(),
+            views.get(&t.name).map(|(m, _)| *m),
             tstats.get(&t.name),
         );
+        // A view whose definition this login cannot read (no SHOW VIEW) may change without a
+        // column moving: it is re-read by every pass (review I-1).
         let has_time = if kind == ObjectKind::View {
-            views.get(&t.name).copied().flatten().is_some()
+            views.get(&t.name).is_some_and(|(_, visible)| *visible)
         } else {
             micros(t.create_time.as_ref()).is_some()
         };
@@ -1072,6 +1093,7 @@ fn changed_result(
                 &want.routines,
             ),
             (&[ObjectKind::Event][..], &want.events),
+            (&[ObjectKind::Unknown][..], &want.unknown),
         ] {
             if asked.is_empty() {
                 continue;
@@ -1139,7 +1161,8 @@ fn names_of(schema: &Name, keys: &[ObjectKey]) -> Names {
             (ObjectKind::Unknown, 2) => {
                 // A relation or a routine of a kind this build does not model: read both.
                 out.relations.insert(top.clone());
-                out.routines.insert(top);
+                out.routines.insert(top.clone());
+                out.unknown.insert(top);
             }
             _ => {
                 out.relations.insert(top);

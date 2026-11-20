@@ -295,16 +295,73 @@ mod harness {
     }
 
     /// [`exec`] on a fresh runtime thread, for drop guards.
+    /// [`exec`] on a fresh runtime thread, for drop guards. A failure is reported on stderr
+    /// with the target and the server's code only (the statement may hold a fixture value;
+    /// review m3: a left-over global must be visible), never a panic inside a drop.
     pub fn exec_blocking(t: &DockerTarget, login: Login, sql: &str) {
         let (t, sql) = (t.clone(), sql.to_string());
-        let _ = std::thread::spawn(move || {
+        let outcome = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("a runtime");
-            rt.block_on(async { exec(&t, login, None, &sql).await.ok() })
+            let got = rt.block_on(exec(&t, login, None, &sql));
+            (t.id, got)
         })
         .join();
+        match outcome {
+            Ok((_, Ok(()))) => {}
+            Ok((id, Err(code))) => {
+                eprintln!("{id}: a drop guard's {login:?} statement failed: {code}");
+            }
+            Err(_) => eprintln!("a drop guard's {login:?} statement panicked"),
+        }
+    }
+
+    /// One `hv_test` connection held for a wait (review m4: a clock wait must not open a
+    /// connection per turn).
+    pub struct Clock {
+        live: LiveConnection,
+        id: String,
+    }
+
+    impl Clock {
+        pub async fn open(t: &DockerTarget) -> Clock {
+            Clock {
+                live: admin(t, Login::Test, None).await,
+                id: t.id.clone(),
+            }
+        }
+
+        /// The server's UTC time, microseconds.
+        pub async fn now(&mut self) -> i64 {
+            let answer = self
+                .live
+                .raw()
+                .execute(
+                    "SELECT CAST(UTC_TIMESTAMP(6) AS CHAR)",
+                    ExecOpts {
+                        max_rows: 1,
+                        protocol: Protocol::Simple,
+                    },
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{}: the clock: {}",
+                        self.id,
+                        code_of(e.server.as_ref(), &e.kind)
+                    )
+                });
+            let text = answer
+                .rows
+                .first()
+                .and_then(|r| r.first())
+                .cloned()
+                .flatten()
+                .unwrap_or_default();
+            hacivat_introspect::mysql::rows::parse_time_micros(&text).expect("a time")
+        }
     }
 }
 
@@ -474,24 +531,21 @@ fn reread(stats: &PassStats) -> Vec<&str> {
     stats.relations.iter().map(|n| &**n).collect()
 }
 
-/// The server's UTC time, microseconds.
-async fn server_now(t: &DockerTarget) -> i64 {
-    let r = harness::rows(t, None, "SELECT CAST(UTC_TIMESTAMP(6) AS CHAR)").await;
-    hacivat_introspect::mysql::rows::parse_time_micros(&r[0][0]).expect("a time")
-}
-
-/// Waits until the server clock enters the next second (a condition on `UTC_TIMESTAMP(6)`).
+/// Waits until the server clock enters the next second (a condition on `UTC_TIMESTAMP(6)`,
+/// on one held connection, a few milliseconds between reads).
 async fn next_server_second(t: &DockerTarget) {
-    let start = server_now(t).await / 1_000_000;
-    while server_now(t).await / 1_000_000 == start {
-        tokio::task::yield_now().await;
+    let mut clock = harness::Clock::open(t).await;
+    let start = clock.now().await / 1_000_000;
+    while clock.now().await / 1_000_000 == start {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
 /// Waits until the server clock is more than one second past `w` (out of the window).
 async fn past_window(t: &DockerTarget, w: i64) {
-    while server_now(t).await < w + 2_000_000 {
-        tokio::task::yield_now().await;
+    let mut clock = harness::Clock::open(t).await;
+    while clock.now().await < w + 2_000_000 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
@@ -619,6 +673,78 @@ async fn ddl_in_the_same_second_as_the_watermark_is_caught() {
         assert!(reread(&stats).contains(&"customers"), "{}", t.id);
         assert!(
             s1.find(&db.key(ObjectKind::Column, &["customers", "b"]))
+                .is_some()
+        );
+    }
+}
+
+/// Drops the `hvm4_*` account when it goes (through `hv_fixture`'s definer procedure).
+struct UserGuard {
+    t: DockerTarget,
+    user: String,
+}
+
+impl Drop for UserGuard {
+    fn drop(&mut self) {
+        harness::exec_blocking(
+            &self.t,
+            Login::Fixture,
+            &hacivat_testkit::fixture_sql::drop_user(&self.user),
+        );
+    }
+}
+
+/// Review I-1: a login that is not the views' definer and holds `SELECT` but no `SHOW VIEW`
+/// reads `VIEW_DEFINITION = ''`. Such a view is re-read by every incremental pass, and a
+/// replaced view is caught through its `COLUMNS` rows, so incremental equals full for that
+/// login too.
+#[tokio::test]
+#[ignore = "docker"]
+async fn a_login_without_show_view_still_sees_a_replaced_view() {
+    use hacivat_testkit::fixture_sql;
+    for t in targets(&MYSQL) {
+        let db = Db::create(&t, "noshowview").await;
+        base_schema(&db).await;
+        let user = "hvm4_t17_nosv";
+        let _ = harness::exec(&t, Login::Fixture, None, &fixture_sql::drop_user(user)).await;
+        harness::exec(
+            &t,
+            Login::Fixture,
+            None,
+            &fixture_sql::create_user(user, &t.password),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}: create_user: {e}", t.id));
+        let _drop_user = UserGuard {
+            t: t.clone(),
+            user: user.into(),
+        };
+        harness::exec(
+            &t,
+            Login::Fixture,
+            None,
+            &fixture_sql::grant("SELECT", &db.name, None, user),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}: grant: {e}", t.id));
+        let limited = t.as_test_account(user).expect("a MySQL-family target");
+        let (s0, _, _) = pass(&limited, &db, Mode::Full, None).await;
+        assert!(
+            s0.find(&db.key(ObjectKind::View, &["v_orders"])).is_some(),
+            "{}: the view is listed without SHOW VIEW",
+            t.id
+        );
+        // Unchanged, the hidden definition still makes the view a re-read every pass.
+        past_window(&t, watermark_of(&s0)).await;
+        let (s1, stats) = incremental_equals_full(&limited, &db, &s0).await;
+        assert_eq!(reread(&stats), ["v_orders"], "{}", t.id);
+        // Replaced (as hv_test, the definer), with another column: caught for this login.
+        db.run("CREATE OR REPLACE VIEW v_orders AS SELECT id, status, customer_id FROM orders")
+            .await;
+        let (s2, stats) = incremental_equals_full(&limited, &db, &s1).await;
+        assert!(reread(&stats).contains(&"v_orders"), "{}", t.id);
+        assert!(
+            s2.find(&db.key(ObjectKind::Column, &["v_orders", "customer_id"]))
                 .is_some()
         );
     }
@@ -797,15 +923,41 @@ async fn turkish_collation_database_items_vs_items_missing() {
         };
         db.run("CREATE TABLE items (id INT PRIMARY KEY)").await;
         let (s, _, _) = pass(&t, &db, Mode::Full, None).await;
-        // Exact names under lctn 0: `items` is found, `İTEMS` and `ıtems` are not the same
-        // table and a probe never folds through the database collation.
+        // Lookups go through the arena with the server's own rule (lctn 0: table names are
+        // exact), never through the database's Turkish collation (review m2).
+        let ident = IdentCtx::new(DialectId::MySql);
+        let found = s.match_named(hacivat_meta::KindGroup::Relations, "items", false, &ident);
         assert!(
-            s.find(&db.key(ObjectKind::Table, &["items"])).is_some(),
+            matches!(found, hacivat_meta::Lookup::Found(_)),
+            "{}: {found:?}",
+            t.id
+        );
+        let ascii = s.match_named(hacivat_meta::KindGroup::Relations, "ITEMS", false, &ident);
+        assert!(
+            matches!(ascii, hacivat_meta::Lookup::Missing(_)),
+            "{}: {ascii:?}",
+            t.id
+        );
+        // An exact table rule keys non-ASCII text exactly too: `İTEMS` is not `items`.
+        let dotted = s.match_named(hacivat_meta::KindGroup::Relations, "İTEMS", false, &ident);
+        assert!(
+            !matches!(dotted, hacivat_meta::Lookup::Found(_)),
+            "{}: {dotted:?}",
+            t.id
+        );
+        // The server agrees: `ITEMS` does not resolve under lctn 0.
+        assert!(
+            harness::exec(
+                &t,
+                Login::Test,
+                Some(&db.name),
+                "SELECT 1 FROM ITEMS LIMIT 0"
+            )
+            .await
+            .is_err(),
             "{}",
             t.id
         );
-        assert!(s.find(&db.key(ObjectKind::Table, &["İTEMS"])).is_none());
-        assert!(s.find(&db.key(ObjectKind::Table, &["ıtems"])).is_none());
     }
 }
 
@@ -1002,6 +1154,10 @@ async fn sections_prepare(ids: &[&str]) {
         db.run("CREATE EVENT ev ON SCHEDULE EVERY 1 DAY DO SET @x = 1")
             .await;
         db.run("CREATE PROCEDURE p() SET @x = 1").await;
+        // `log_bin_trust_function_creators = 1` on mysql80/84 (R-M4-43, C-2): hv_test may
+        // create a function (review I-3: `ShowCreateFunction` runs on a server too).
+        db.run("CREATE FUNCTION fn1() RETURNS INT DETERMINISTIC RETURN 1")
+            .await;
         db.run("CREATE TRIGGER trg BEFORE INSERT ON orders FOR EACH ROW SET NEW.id = NEW.id")
             .await;
         let mut c = harness::meta(&t, &db.name).await;
@@ -1028,7 +1184,7 @@ async fn sections_prepare(ids: &[&str]) {
                 "ShowCreateTable" => "orders",
                 "ShowCreateView" => "v_orders",
                 "ShowCreateProcedure" => "p",
-                "ShowCreateFunction" => continue, // MySQL needs a function: covered by flavor test
+                "ShowCreateFunction" => "fn1",
                 "ShowCreateTrigger" => "trg",
                 "ShowCreateEvent" => "ev",
                 _ => "orders",
@@ -1049,10 +1205,25 @@ async fn sections_prepare(ids: &[&str]) {
                 if pack.render(s, &ctx).is_err() {
                     continue; // gated away for this server (ServerUuid on MariaDB, …)
                 }
-                let rows = r
-                    .read(Box::leak(s.to_string().into_boxed_str()), ctx)
-                    .await
-                    .unwrap_or_else(|e| panic!("{}: {s} {mode:?}: {e:?}", t.id));
+                let got = r.read(Box::leak(s.to_string().into_boxed_str()), ctx).await;
+                // R-M4-37: `SHOW CREATE TRIGGER` is not on the manual's list of statements a
+                // prepared statement may hold. If the server refuses it there (1295), it is
+                // recorded and reported (NEEDS_CONTEXT), never sent another way.
+                if &**s == "ShowCreateTrigger" {
+                    let verdict = match &got {
+                        Ok(_) => "prepared".to_string(),
+                        Err(e) => format!("{e:?}"),
+                    };
+                    eprintln!(
+                        "{}: SHOW CREATE TRIGGER on the prepared path: {verdict}",
+                        t.id
+                    );
+                    if let Err(e) = &got {
+                        assert!(show_create::is_not_preparable(e), "{}: {s}: {e:?}", t.id);
+                        continue;
+                    }
+                }
+                let rows = got.unwrap_or_else(|e| panic!("{}: {s} {mode:?}: {e:?}", t.id));
                 if sec.show_create() {
                     assert_eq!(rows.columns.len(), sec.returns().len(), "{}: {s}", t.id);
                 } else {
@@ -1114,11 +1285,12 @@ async fn snapshot_hides_later_ddl_and_next_pass_catches_it() {
 async fn show_create_sections_quote_hostile_names() {
     for t in targets(&MYSQL) {
         let db = Db::create(&t, "hostile").await;
-        for name in ["a``b", "İ", "t ", "a:x?b"] {
+        // MySQL refuses a name that ends in a space (1103), so `t ` is a probe, below.
+        for name in ["a``b", "İ", "t", "a:x?b", "x``y``z"] {
             db.run(&format!("CREATE TABLE `{name}` (id INT)")).await;
         }
         let mut c = harness::meta(&t, &db.name).await;
-        for name in ["a`b", "İ", "t ", "a:x?b"] {
+        for name in ["a`b", "İ", "t", "a:x?b", "x`y`z"] {
             let text = intro(&t)
                 .show_create(&mut c, ObjectKind::Table, &db.name, name)
                 .await
@@ -1131,6 +1303,16 @@ async fn show_create_sections_quote_hostile_names() {
                 t.id
             );
         }
+        // A padded probe (`t ` is no table: MySQL refuses names that end in a space, 1103)
+        // must never answer `t`'s text (review I-3).
+        let padded = intro(&t)
+            .show_create(&mut c, ObjectKind::Table, &db.name, "t ")
+            .await;
+        assert!(
+            !matches!(&padded, Ok(Some(text)) if text.starts_with("CREATE TABLE `t`")),
+            "{}: {padded:?}",
+            t.id
+        );
     }
 }
 

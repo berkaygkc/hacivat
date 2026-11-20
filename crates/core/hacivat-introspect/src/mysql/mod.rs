@@ -328,9 +328,11 @@ impl Introspector for MySqlIntrospector {
         facets::read(c, ns, keys, kind)
     }
 
-    /// The introspector holds no stored marks: a key whose object is gone is `Dropped`, every
-    /// other `Unknown` (Task 22's `freshness::check_state` compares [`Introspector::stamps`]
-    /// with the snapshot's marks).
+    /// The introspector holds no stored marks, so every key is `Unknown` (Task 22's
+    /// `freshness::check_state` compares [`Introspector::stamps`] with the snapshot's marks).
+    /// A key `INFORMATION_SCHEMA` no longer lists is `Unknown` too, never `Dropped`: the login
+    /// may merely have lost the privilege that showed it (review m7). Drops are decided by a
+    /// pass's existence sets, behind the privilege hash and the mass-deletion guard.
     fn check_state<'a>(
         &'a self,
         c: &'a mut MetaConn,
@@ -341,10 +343,7 @@ impl Introspector for MySqlIntrospector {
                 .stamps_of(c, keys)
                 .await?
                 .into_iter()
-                .map(|m| match m {
-                    None => Staleness::Dropped,
-                    Some(_) => Staleness::Unknown,
-                })
+                .map(|_| Staleness::Unknown)
                 .collect())
         })
     }

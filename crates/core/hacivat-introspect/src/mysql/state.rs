@@ -25,9 +25,10 @@ use crate::introspector::IntroError;
 use crate::pack::Mode;
 use hacivat_meta::Level;
 
-/// One relation's `StateOfRelation` rows folded: its type, `CREATE_TIME`, view hash, and the
-/// newest trigger `CREATED` with the trigger count.
-type RelationState = (Name, Option<Name>, Option<u64>, (i64, u32));
+/// One relation's `StateOfRelation` rows folded: its type, `CREATE_TIME`, view definition hash
+/// and whether the definition is readable, and the newest trigger `CREATED` with the trigger
+/// count.
+type RelationState = (Name, Option<Name>, Option<u64>, bool, (i64, u32));
 
 /// What a key's stamp is read from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,21 +122,45 @@ pub async fn stamps(
         let mut relations: HashMap<Name, RelationState> = HashMap::new();
         if !rels.is_empty() {
             let rows = r.read("StateOfRelation", ctx(&rels)).await?;
-            for row in rows::checked("StateOfRelation", &rows, 6)? {
+            for row in rows::checked("StateOfRelation", &rows, 7)? {
                 let e = relations.entry(name(row, 0)).or_insert_with(|| {
                     (
                         name(row, 1),
                         opt_name(row, 2),
                         cell(row, 3).and_then(rows::hash_mark),
+                        cell(row, 4) == Some("YES"),
                         (0, 0),
                     )
                 });
-                if cell(row, 4).is_some() {
-                    e.3.0 = e.3.0.max(micros(opt_name(row, 5).as_ref()).unwrap_or(0));
-                    e.3.1 = e.3.1.saturating_add(1);
+                if cell(row, 5).is_some() {
+                    e.4.0 = e.4.0.max(micros(opt_name(row, 6).as_ref()).unwrap_or(0));
+                    e.4.1 = e.4.1.saturating_add(1);
                 }
             }
         }
+        // A view's stamp folds in its columns, as the passes' marks do (review I-1).
+        let mut view_cols: Vec<rows::ViewCol> = Vec::new();
+        let views: BTreeSet<Name> = relations
+            .iter()
+            .filter(|(_, s)| relation_kind(&s.0, srv.is_mariadb()) == ObjectKind::View)
+            .map(|(n, _)| n.clone())
+            .collect();
+        if !views.is_empty() {
+            let ctx = srv.pack_ctx(
+                Mode::Incremental,
+                Level::Structure,
+                list_params(&schema, &views),
+            );
+            view_cols = rows::view_cols(&r.read("ViewColumnMarks", ctx).await?)?;
+        }
+        let view_marks = super::build::view_marks_with_columns(
+            relations
+                .iter()
+                .filter(|(n, _)| views.contains(*n))
+                .map(|(n, s)| (n.clone(), s.2, s.3))
+                .collect(),
+            &view_cols,
+        );
         let mut routines: HashMap<(Name, Name), StateMark> = HashMap::new();
         if !rtns.is_empty() {
             let rows = r.read("StateOfRoutine", ctx(&rtns)).await?;
@@ -165,7 +190,7 @@ pub async fn stamps(
         }
         for (i, p) in probes {
             out[i] = match p {
-                Probe::Relation(n, want) => relations.get(&n).and_then(|(ty, ct, hash, trg)| {
+                Probe::Relation(n, want) => relations.get(&n).and_then(|(ty, ct, _, _, trg)| {
                     let kind = relation_kind(ty, srv.is_mariadb());
                     if let Some((wk, wraw)) = &want
                         && (*wk != kind
@@ -174,7 +199,8 @@ pub async fn stamps(
                         // The name now holds another kind of relation: this object is gone.
                         return None;
                     }
-                    Some(relation_mark(kind, ct.as_ref(), *hash, Some(trg)))
+                    let view = view_marks.get(&n).map(|(m, _)| *m);
+                    Some(relation_mark(kind, ct.as_ref(), view, Some(trg)))
                 }),
                 Probe::Routine("", n) => routines
                     .iter()
@@ -263,9 +289,10 @@ pub async fn server_top_marks(
         )
     };
     let tables = rows::table_marks(&r.read("TableMarks", ctx()).await?)?;
-    let views: HashMap<Name, Option<u64>> = rows::view_marks(&r.read("ViewMarks", ctx()).await?)?
-        .into_iter()
-        .collect();
+    let views = super::build::view_marks_with_columns(
+        rows::view_marks(&r.read("ViewMarks", ctx()).await?)?,
+        &rows::view_cols(&r.read("ViewColumnMarks", ctx()).await?)?,
+    );
     let tstats =
         super::build::trigger_stats(&rows::trigger_marks(&r.read("TriggerMarks", ctx()).await?)?);
     let routines = rows::routine_marks(&r.read("RoutineMarks", ctx()).await?)?;
@@ -279,7 +306,7 @@ pub async fn server_top_marks(
             mark: relation_mark(
                 kind,
                 t.create_time.as_ref(),
-                views.get(&t.name).copied().flatten(),
+                views.get(&t.name).map(|(m, _)| *m),
                 tstats.get(&t.name),
             ),
             name: t.name,

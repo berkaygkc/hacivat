@@ -105,6 +105,61 @@ pub fn relation_mark(
     }
 }
 
+// ## m4-t17-mysql (review I-1, I-4)
+/// A view's state mark: XXH3-64 over its definition hash, whether the login can read the
+/// definition, and its `COLUMNS` rows in ordinal order (length-prefixed fields). The column
+/// part moves when a base table under the view changes (also one a pushed filter left
+/// unread, or one in another schema) and when a replaced view's columns change, though the
+/// definition is hidden (no SHOW VIEW).
+pub fn view_mark(def_hash: Option<u64>, def_visible: bool, cols: &[&rows::ViewCol]) -> u64 {
+    let mut cols: Vec<&&rows::ViewCol> = cols.iter().collect();
+    cols.sort_by(|a, b| (a.ordinal, &a.name).cmp(&(b.ordinal, &b.name)));
+    let mut text = String::new();
+    let mut field = |s: &str| {
+        text.push_str(&s.len().to_string());
+        text.push(':');
+        text.push_str(s);
+    };
+    field(&def_hash.map(|h| h.to_string()).unwrap_or_default());
+    field(if def_visible { "visible" } else { "hidden" });
+    for c in cols {
+        field(&c.name);
+        field(&c.ordinal.to_string());
+        field(&c.column_type);
+        field(if c.nullable { "YES" } else { "NO" });
+        // NULL and every text (even an empty one) stay distinct.
+        match c.default.as_deref() {
+            None => field("null"),
+            Some(d) => {
+                field("text");
+                field(d);
+            }
+        }
+        field(c.collation.as_deref().unwrap_or(""));
+    }
+    twox_hash::XxHash3_64::oneshot(text.as_bytes())
+}
+
+/// The marks of `views` (`ViewMarks` rows) folded with their `cols`: view → (mark, the
+/// definition is readable).
+pub fn view_marks_with_columns(
+    views: Vec<(Name, Option<u64>, bool)>,
+    cols: &[rows::ViewCol],
+) -> HashMap<Name, (u64, bool)> {
+    let mut by_view: HashMap<&Name, Vec<&rows::ViewCol>> = HashMap::new();
+    for c in cols {
+        by_view.entry(&c.view).or_default().push(c);
+    }
+    views
+        .into_iter()
+        .map(|(v, hash, visible)| {
+            let cs = by_view.get(&v).map(Vec::as_slice).unwrap_or(&[]);
+            let mark = view_mark(hash, visible, cs);
+            (v, (mark, visible && hash.is_some()))
+        })
+        .collect()
+}
+
 /// The relation object (no children).
 fn relation_obj(
     t: &TableRow,

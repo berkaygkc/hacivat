@@ -29,6 +29,17 @@ pub fn section_of(kind: ObjectKind) -> Option<(&'static str, usize, usize)> {
     })
 }
 
+/// Whether `e` is the server's refusal to prepare the statement (MySQL error 1295, "This
+/// command is not supported in the prepared statement protocol yet"). The metadata
+/// connection reads only through prepared statements, so such a form has no server text
+/// here; R-M4-37 makes it a NEEDS_CONTEXT, never a statement sent another way (review I-3).
+pub fn is_not_preparable(e: &IntroError) -> bool {
+    matches!(
+        e,
+        IntroError::Meta(MetaError::Server { message, .. }) if message.vendor_code == Some(1295)
+    )
+}
+
 /// The `SHOW CREATE` statement of `schema`.`name` of `kind`, as the server prints it.
 /// `Ok(None)`: the kind has none, or the server returned no row.
 pub async fn show_create(

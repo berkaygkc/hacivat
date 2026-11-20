@@ -319,11 +319,14 @@ pub struct ViewRow {
     pub security_type: Option<Name>,
     pub definer: Option<Name>,
     pub algorithm: Option<Name>,
+    /// The definition columns' hash (`SHA2`, first 16 hex digits).
     pub hash: Option<u64>,
+    /// `VIEW_DEFINITION` is readable by this login (`def_visible = 'YES'`; review I-1).
+    pub def_visible: bool,
 }
 
 pub fn views(rows: &Rows) -> Result<Vec<ViewRow>, IntroError> {
-    Ok(checked("Views", rows, 7)?
+    Ok(checked("Views", rows, 8)?
         .iter()
         .map(|r| ViewRow {
             name: name(r, 0),
@@ -333,15 +336,51 @@ pub fn views(rows: &Rows) -> Result<Vec<ViewRow>, IntroError> {
             definer: opt_name(r, 4),
             algorithm: opt_name(r, 5),
             hash: cell(r, 6).and_then(hash_mark),
+            def_visible: cell(r, 7) == Some("YES"),
         })
         .collect())
 }
 
-/// `ViewMarks`: `(view, hash)`.
-pub fn view_marks(rows: &Rows) -> Result<Vec<(Name, Option<u64>)>, IntroError> {
-    Ok(checked("ViewMarks", rows, 2)?
+/// `ViewMarks`: `(view, definition hash, definition visible)`.
+pub fn view_marks(rows: &Rows) -> Result<Vec<(Name, Option<u64>, bool)>, IntroError> {
+    Ok(checked("ViewMarks", rows, 3)?
         .iter()
-        .map(|r| (name(r, 0), cell(r, 1).and_then(hash_mark)))
+        .map(|r| {
+            (
+                name(r, 0),
+                cell(r, 1).and_then(hash_mark),
+                cell(r, 2) == Some("YES"),
+            )
+        })
+        .collect())
+}
+
+/// One `ViewColumnMarks` row: a view's column as `COLUMNS` reports it (visible without SHOW
+/// VIEW; review I-1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewCol {
+    pub view: Name,
+    pub name: Name,
+    pub ordinal: u32,
+    pub column_type: Name,
+    pub nullable: bool,
+    pub default: Option<Name>,
+    pub collation: Option<Name>,
+}
+
+/// `ViewColumnMarks`.
+pub fn view_cols(rows: &Rows) -> Result<Vec<ViewCol>, IntroError> {
+    Ok(checked("ViewColumnMarks", rows, 7)?
+        .iter()
+        .map(|r| ViewCol {
+            view: name(r, 0),
+            name: name(r, 1),
+            ordinal: number32(r, 2).unwrap_or(0),
+            column_type: name(r, 3),
+            nullable: yes(r, 4),
+            default: r.get(5).and_then(Clone::clone),
+            collation: opt_name(r, 6),
+        })
         .collect())
 }
 

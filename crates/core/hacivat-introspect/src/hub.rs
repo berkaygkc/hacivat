@@ -304,7 +304,15 @@ impl CatalogHub {
             let (key, store, cache) = self.open_cache(&rt, &profile).await;
             let introspector = introspector_for(profile.engine)
                 .ok_or(HubError::UnsupportedEngine(profile.engine))?;
-            let server = ServerFacts::new(profile.engine, IdentCtx::new(dialect));
+            // ## m4-t17-mysql (named exception; review I-2): a MySQL-family placeholder does not
+            // know `lower_case_table_names` until the server says, so no table rule is pinned
+            // (lookups answer `ServerDependent`, never a wrong `Missing`); the scope refresh
+            // replaces it with the real facts.
+            let mut ident = IdentCtx::new(dialect);
+            if matches!(dialect, DialectId::MySql | DialectId::MariaDb) {
+                ident.lower_case_table_names = u8::MAX;
+            }
+            let server = ServerFacts::new(profile.engine, ident);
             let catalog = Arc::new(Catalog::new(Arc::new(server)));
             let publisher = catalog.publisher().ok_or(HubError::Shutdown)?;
             let scope =

@@ -6,14 +6,16 @@
 -- table stamp is R-M4-39's `CREATE_TIME | max(TRIGGERS.CREATED) | trigger count`: one row per
 -- trigger (or one row with NULL trigger columns), folded by the client, so the sections hold
 -- no aggregate under the list bind. A view's stamp is the hash of its definition columns (the
--- same expression as `ViewMarks` in 10-core). Times are text in the session's UTC.
+-- same expression as `ViewMarks` in 10-core), folded by the client with its `ViewColumnMarks`
+-- rows (10-core, joinable). Times are text in the session's UTC.
 
 --- name: StateOfRelation ---
---- returns: table_name text, table_type text, create_time text, view_hash text, trigger_name text, trigger_created text ---
+--- returns: table_name text, table_type text, create_time text, view_hash text, def_visible text, trigger_name text, trigger_created text ---
 --- joinable ---
 SELECT t.TABLE_NAME AS table_name, t.TABLE_TYPE AS table_type,
   CAST(t.CREATE_TIME AS CHAR) AS create_time,
-  SHA2(CONCAT_WS('|', v.VIEW_DEFINITION, v.CHECK_OPTION, v.IS_UPDATABLE, v.SECURITY_TYPE, v.DEFINER), 256) AS view_hash,
+  SHA2(CONCAT_WS(X'1F', v.VIEW_DEFINITION, v.CHECK_OPTION, v.IS_UPDATABLE, v.SECURITY_TYPE, v.DEFINER), 256) AS view_hash,
+  CASE WHEN v.VIEW_DEFINITION = '' THEN 'NO' ELSE 'YES' END AS def_visible,
   g.TRIGGER_NAME AS trigger_name, CAST(g.CREATED AS CHAR) AS trigger_created
 FROM INFORMATION_SCHEMA.TABLES t
 LEFT JOIN INFORMATION_SCHEMA.VIEWS v
