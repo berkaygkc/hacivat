@@ -999,11 +999,13 @@ jobs:
             [ -e "$f" ] && cp "$f" fuzz/meta/corpus/pack_parse/
           done
           true
+      # ## m4-t33a-hygiene (named exception; T23 review m-2): `-max_len` 131072, above the
+      # largest committed snapshot (postgres-18, ~67 KB), so no seed is truncated.
       - name: Run each target for 10 minutes (every target runs; the step fails after all)
         run: |
           failed=""
           for t in catalog_row_decode system_snapshot_decode scope_pattern pack_parse; do
-            if ! cargo +"$FUZZ_NIGHTLY" fuzz run --fuzz-dir fuzz/meta --release $t fuzz/meta/corpus/$t -- -max_total_time=600 -max_len=65536 -rss_limit_mb=4096; then
+            if ! cargo +"$FUZZ_NIGHTLY" fuzz run --fuzz-dir fuzz/meta --release $t fuzz/meta/corpus/$t -- -max_total_time=600 -max_len=131072 -rss_limit_mb=4096; then
               failed="$failed $t"
             fi
           done
