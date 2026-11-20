@@ -23,7 +23,8 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use hacivat_introspect::mysql::{MySqlIntrospector, PassStats};
-use hacivat_introspect::{IntroError, Introspector, Mode};
+// ## m4-t17b-mysql-facets (named exception): `IntroError` is no longer named here.
+use hacivat_introspect::{Introspector, Mode};
 use hacivat_meta::merge::{MergePolicy, NamespaceResult, base, merge};
 use hacivat_meta::name::{DialectId, FoldRule, IdentCtx, NameClass, match_key};
 use hacivat_meta::props::{ColumnExt, FkAction, Props};
@@ -1172,9 +1173,42 @@ async fn revoked_mysql_schema_select_fails_users_kind_only() {
                 &CancellationToken::new(),
             )
             .await;
+        // ## m4-t17b-mysql-facets (named exception): the server namespace is Task 17b's now
+        // (it was the T1c stub's `NotImplemented`). It reads `APPLICABLE_ROLES` and the login,
+        // never `mysql.user`: the user kind is a failed read (permission), the role kind reads,
+        // and the result is at `Names`, so an unlisted account is `Unknown`, never missing.
+        let server = server.unwrap_or_else(|e| panic!("{}: the server namespace: {e:?}", t.id));
+        assert_eq!(
+            server.existent.get(&ObjectKind::User),
+            Some(&hacivat_meta::merge::ExistSet::Failed(
+                hacivat_meta::snapshot::IntroErrorCode::PermissionDenied
+            )),
+            "{}: the user kind must fail (mysql.user is never read): {:?}",
+            t.id,
+            server.existent
+        );
         assert!(
-            matches!(server, Err(IntroError::NotImplemented)),
-            "{}",
+            matches!(
+                server.existent.get(&ObjectKind::Role),
+                Some(hacivat_meta::merge::ExistSet::Ok(_))
+            ),
+            "{}: APPLICABLE_ROLES reads on MySQL 8.0.19+: {:?}",
+            t.id,
+            server.existent
+        );
+        assert_eq!(
+            server.level,
+            Level::Names,
+            "{}: never complete, so a miss is never a fact",
+            t.id
+        );
+        assert!(
+            server
+                .changed
+                .iter()
+                .any(|c| c.subtree.root_obj().kind() == ObjectKind::User
+                    && &**c.subtree.root_obj().name() == "'hv_test'@'%'"),
+            "{}: the login is listed",
             t.id
         );
     }

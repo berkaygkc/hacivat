@@ -1108,6 +1108,15 @@ fn roles_are_the_applicable_roles_and_the_login_at_names_level() {
         ]
     );
     assert!(matches!(&r.existent[&ObjectKind::Role], ExistSet::Ok(ids) if ids.len() == 2));
+    // Fix round 2: the accounts are never all read, so the user kind is a failed read.
+    assert_eq!(
+        r.existent[&ObjectKind::User],
+        ExistSet::Failed(IntroErrorCode::PermissionDenied)
+    );
+    assert_eq!(
+        roles_result(Some(&rows), None, false, 0).existent[&ObjectKind::User],
+        ExistSet::Failed(IntroErrorCode::PermissionDenied)
+    );
     // MariaDB roles have no host: the bare name.
     let maria = roles_result(Some(&[row(&[Some("editor"), None])]), Some("u@%"), true, 0);
     assert_eq!(

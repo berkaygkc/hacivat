@@ -47,7 +47,9 @@
 //! **Roles** ([`server_namespace`]): `APPLICABLE_ROLES` (MySQL 8.0.19+, MariaDB) and the
 //! current account. That is not every account of the server, so the result's level is `Names`
 //! and a name it does not list is `Unknown`, never missing; a refused read is
-//! `Permission { Role }`. A server without the view reports the role set as failed.
+//! `Permission { Role }`. A server without the view reports the role set as failed. The user
+//! set is always reported failed (`PermissionDenied`): `mysql.user` is never read, so the
+//! namespace is `Partial` and nothing of the kind is ever deleted (HV-INTRO-01 test 6).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -807,7 +809,8 @@ pub async fn sources(
 /// `APPLICABLE_ROLES`) and the login (`CURRENT_USER()`): each role as an [`ObjectKind::Role`]
 /// (MySQL `'role'@'host'`, MariaDB the bare role name, as `GRANT … TO` names them) and the
 /// login as an [`ObjectKind::User`]. Read at `Names`, so a name it does not list stays
-/// `Unknown`; the role set is `Failed` when the view is missing, never empty.
+/// `Unknown`; the role set is `Failed` when the view is missing, never empty; the `User` set is
+/// always `Failed(PermissionDenied)` (the accounts are never all read).
 pub fn roles_result(
     roles: Option<&[Row]>,
     login: Option<&str>,
@@ -861,8 +864,14 @@ pub fn roles_result(
     {
         let mut ids = Vec::new();
         push(ObjectKind::User, n, &mut ids);
-        existent.insert(ObjectKind::User, ExistSet::Ok(ids));
     }
+    // Fix round 2 (HV-INTRO-01 test 6): the login is listed, but the user accounts are never
+    // all read (`mysql.user` is never read), so the `User` kind is a failed read: nothing of it
+    // is ever deleted, the namespace is `Partial`, and an unlisted account is `Unknown`.
+    existent.insert(
+        ObjectKind::User,
+        ExistSet::Failed(IntroErrorCode::PermissionDenied),
+    );
     NamespaceResult {
         existent,
         changed,

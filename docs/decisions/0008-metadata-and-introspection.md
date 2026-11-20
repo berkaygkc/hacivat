@@ -2136,3 +2136,14 @@ Knowledge Base). Rulings R-M4-30, R-W4-3 (a key left out of `FacetRows` is not l
 - **m-2:** `docker_mysql_facets` pins `hv_test`'s own `USER_PRIVILEGES` row as
   `('hv_test'@'%', USAGE)`, the spelling the coverage gate compares. **m-6** (one refused key
   fails a whole `Sources` batch) is carried to T15b, which requests per-key reads.
+
+### m4-t17b fix round 2 (CI 44662162494)
+
+- **The user kind of the server namespace is a failed read.** `mysql.user` is never read, so
+  the accounts are never all known: `roles_result` lists the login but reports
+  `User: Failed(PermissionDenied)` (HV-INTRO-01 test 6: losing the `mysql` schema fails the
+  users kind only). Nothing of the kind is deleted, the scheduler marks the server namespace
+  `Partial` and its user container `Failed`, and an unlisted account is `Unknown`. The role kind
+  stays `Ok` (`APPLICABLE_ROLES`, so a revoked role is removed). Task 17's
+  `revoked_mysql_schema_select_fails_users_kind_only` asserted the T1c stub's `NotImplemented`;
+  it now asserts this (named exception).
