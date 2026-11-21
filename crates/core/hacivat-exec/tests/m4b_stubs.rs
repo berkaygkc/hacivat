@@ -1,7 +1,8 @@
 // ## m4b-t01a-seams
 //! M4b Task 1a: the run service's script-workspace seams fail closed (F31) until their tasks:
-//! the secret spans cover the whole text (a caller warns, never passes; Task 6), and "Run as
-//! script" refuses, pulls no chunk and sends nothing (Task 12).
+//! "Run as script" refuses, pulls no chunk and sends nothing (Task 12).
+//! ## m4b-t06-secrets (named exception, fix round 1 m9): the secret spans are Task 6's now;
+//! their seam test pins the filled shape (no span in a clean text, `Armed` vs `Value`).
 
 mod common;
 
@@ -19,7 +20,7 @@ use hacivat_exec::{
 // shape: no span in a clean text, `Armed` for an armed statement's string (C9), `Value` for a
 // value position.
 #[test]
-fn exec_secret_spans_stub_covers_the_whole_text() {
+fn exec_secret_spans_tell_value_from_armed() {
     assert!(secret_spans("SELECT 1").is_empty());
     let t = "SELECT password_hash FROM users WHERE password_hash = 'x'";
     assert_eq!(secret_spans(t), [(54..57, SecretSpanKind::Armed)]);

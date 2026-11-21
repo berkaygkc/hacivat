@@ -83,7 +83,10 @@ fn secret_table() {
         ),
         (openssh.as_str(), PrivateKey),
         (rsa.as_str(), PrivateKey),
-        ("'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln'", Jwt),
+        (
+            concat!("'eyJ", "hbGciOiJIUzI1NiJ9.eyJ", "zdWIiOiIxIn0.c2ln'"),
+            Jwt,
+        ),
         ("CREATE USER app PASSWORD 'İDENTİFİED'", Password),
         ("İDENTİFİED BY 'x'", Password),
         ("SELECT pgp_sym_encrypt(data, 'k3y')", Password),
@@ -118,17 +121,25 @@ fn allow_comment_silences_one_line() {
     let f = scan(t);
     assert_eq!(f.len(), 1, "{:?}", kinds(&f));
     assert_eq!(f[0].line, 1);
-    // The other comment forms count too; a marker outside any comment does not.
+    // A block comment counts too; a marker outside any comment does not.
     for t in [
-        "CREATE USER a PASSWORD 'x'; # hacivat:allow-secret",
         "CREATE USER a PASSWORD 'x'; /* hacivat:allow-secret */",
+        "CREATE USER a PASSWORD 'x'; --  hacivat:allow-secret and why",
     ] {
         assert!(scan(t).is_empty(), "{t}");
     }
-    assert_eq!(
-        scan("CREATE USER a PASSWORD 'x' hacivat:allow-secret").len(),
-        1
-    );
+    // ## m4b-t06-secrets (fix round 1, m1): the marker must be inside a comment in both
+    // readings, so `#` (a comment in MySQL only) does not silence, and neither does a quote.
+    for t in [
+        "CREATE USER a PASSWORD 'x' hacivat:allow-secret",
+        "CREATE USER a PASSWORD 'x'; # hacivat:allow-secret",
+        "CREATE USER a PASSWORD 'pw -- hacivat:allow-secret'",
+        "CREATE USER a PASSWORD 'p#ss'; SELECT 'hacivat:allow-secret'",
+        "SELECT data #> '{a}', 'hacivat:allow-secret'; CREATE USER a PASSWORD 's3cret'",
+        "SELECT 'it\\'s -- '; CREATE USER a PASSWORD 's3cret'; SELECT ' hacivat:allow-secret'",
+    ] {
+        assert_eq!(kinds(&scan(t)), [Password], "{t}");
+    }
 }
 
 #[test]
@@ -191,19 +202,22 @@ fn every_pattern_row_names_its_source() {
                 "test_key",
                 "private_key",
                 "jwt",
-                "connection_string"
+                "connection_string",
+                "password"
             ]
             .contains(&kind),
             "{id}: {kind}"
         );
         regex::Regex::new(row["regex"].as_str().unwrap()).unwrap();
-        // The source is one of the vendor or RFC documents alg/28 cites (S9–S16).
+        // The source is one of the vendor or RFC documents alg/28 cites (S9–S16, S21, S22).
         let source = row["source"].as_str().unwrap();
-        let cited = (9..=16).any(|n| source.starts_with(&format!("alg/28 S{n} ")));
+        let cited = [9, 10, 11, 12, 13, 14, 15, 16, 21, 22]
+            .iter()
+            .any(|n| source.starts_with(&format!("alg/28 S{n} ")));
         assert!(cited, "{id}: {source}");
         for key in row.keys() {
             assert!(
-                ["id", "kind", "regex", "source", "check"].contains(&key.as_str()),
+                ["id", "kind", "regex", "source", "check", "min_len"].contains(&key.as_str()),
                 "{id}: {key}"
             );
         }
@@ -326,10 +340,14 @@ fn more_reported_forms() {
     // An unsecured JWT (empty signature) still counts; a three-part base64url run whose header
     // is not a JSON object naming `alg` does not.
     assert_eq!(
-        kinds(&scan("'eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.'")),
+        kinds(&scan(concat!(
+            "'eyJ",
+            "hbGciOiJub25lIn0.eyJ",
+            "zdWIiOiIxIn0.'"
+        ))),
         [Jwt]
     );
-    assert!(scan("'eyJzdWIiOiIxIn0.eyJzdWIiOiIxIn0.c2ln'").is_empty());
+    assert!(scan(concat!("'eyJ", "zdWIiOiIxIn0.eyJ", "zdWIiOiIxIn0.c2ln'")).is_empty());
 }
 
 #[test]
@@ -353,6 +371,147 @@ fn hostile_spans_never_panic() {
         assert!(t.get(r.clone()).is_some(), "{bad:?} → {r:?}");
     }
 }
+
+// ## m4b-t06-secrets (fix round 1)
+/// The literals `scan` reports in `t`, for assertions on what a finding points at.
+fn reported(t: &str) -> Vec<(&str, SecretKind)> {
+    scan(t)
+        .into_iter()
+        .map(|f| (&t[f.range.clone()], f.kind))
+        .collect()
+}
+
+#[test]
+fn comment_prose_is_quiet() {
+    // I1: a bare word after a secret word in a comment is prose, never a value.
+    for t in [
+        "-- remember to rotate the password monthly",
+        "-- password policy: at least twelve characters",
+        "-- TODO change password later",
+        "# password reset flow",
+        "/* the password column holds bcrypt hashes */",
+        "/* the password column holds … */",
+        "-- IDENTIFIED BY is MySQL syntax",
+    ] {
+        assert!(scan(t).is_empty(), "{t}: {:?}", reported(t));
+    }
+    // A quoted value, a `password=` value, a URI password or a token in a comment still is.
+    assert_eq!(
+        reported("/* CREATE USER a PASSWORD 's3cret' */ SELECT 1"),
+        [("'s3cret'", Password)]
+    );
+    assert_eq!(
+        reported("-- password=s3cret"),
+        [("s3cret", ConnectionString)]
+    );
+}
+
+#[test]
+fn pair_names_follow_c9_inside_strings() {
+    // I2: a pair whose name only mentions a secret is no value.
+    for t in [
+        "SELECT '{\"password_changed_at\": \"2024-01-01\"}'",
+        "SELECT '{\"password_policy\": \"strict\"}'::jsonb",
+        "INSERT INTO cfg VALUES ('password_min_length=12')",
+        "INSERT INTO cfg VALUES ('password_hash=abc')",
+    ] {
+        assert!(scan(t).is_empty(), "{t}: {:?}", reported(t));
+    }
+    for t in [
+        "SELECT dblink_connect('host=h user=u password=s3cret')",
+        "SELECT 'Server=h;Pwd=s3cret;'",
+        "SELECT '{\"access_token\": \"s3cret\"}'",
+        "SELECT '{\"apiKey\":\"s3cret\"}'",
+        "SELECT 'aws_secret_access_key=s3cret'",
+        "SELECT 'Authorization: Bearer s3cret'",
+    ] {
+        assert_eq!(reported(t), [("s3cret", ConnectionString)], "{t}");
+    }
+}
+
+#[test]
+fn only_a_crypto_key_is_reported() {
+    // m2: the key or password argument, never the data, the options or a nested call's
+    // argument. The key positions: `crypt` argument 1 (the password), `pgp_pub_decrypt`
+    // arguments 2 and 3, argument 2 of every other crypto function.
+    assert_eq!(
+        reported("SELECT pgp_sym_encrypt('Alice SSN', 'k3y', 'cipher-algo=aes256')"),
+        [("'k3y'", Password)]
+    );
+    assert_eq!(
+        reported("SELECT crypt('newpw', gen_salt('bf'))"),
+        [("'newpw'", Password)]
+    );
+}
+
+#[test]
+fn one_finding_per_literal_across_kinds() {
+    // m3: a history value and a token row over one literal are one finding.
+    let t = "-- jdbc:postgresql://h/db?user=u&password=s3cret";
+    assert_eq!(reported(t), [("s3cret", ConnectionString)]);
+    let t = "ALTER ROLE app PASSWORD 'AKIAIOSFODNN7EXAMPLE'";
+    assert_eq!(kinds(&scan(t)), [AccessToken]);
+}
+
+#[test]
+fn near_miss_token_shapes_are_quiet() {
+    for t in [
+        // m4: 20 capitals with no digit after the prefix.
+        "SELECT * FROM ASIAPACIFICCUSTOMERS",
+        // m5: too short, or a page name.
+        concat!("-- xo", "xb-1-2"),
+        concat!("-- see the xa", "pp-dev-guide-v2 page"),
+    ] {
+        assert!(scan(t).is_empty(), "{t}: {:?}", reported(t));
+    }
+    assert_eq!(kinds(&scan("SELECT 'AKIAIOSFODNN7EXAMPLE'")), [AccessToken]);
+}
+
+#[test]
+fn more_templates_are_quiet() {
+    // m6: printf, Python, shell, CI and redaction placeholders.
+    for t in [
+        "CREATE USER app PASSWORD '%s'",
+        "CREATE USER app PASSWORD '%(pw)s'",
+        "CREATE USER app PASSWORD '{pw}'",
+        "CREATE USER app PASSWORD '$PW'",
+        "CREATE USER app PASSWORD '${{ secrets.PW }}'",
+        "CREATE USER app PASSWORD '{{ vault.db.pw }}'",
+        "CREATE USER app PASSWORD '[REDACTED]'",
+    ] {
+        assert!(scan(t).is_empty(), "{t}: {:?}", reported(t));
+    }
+    // m11: a quoted `'null'` is a literal, not SQL NULL: reported.
+    assert_eq!(kinds(&scan("CREATE USER app PASSWORD 'null'")), [Password]);
+}
+
+#[test]
+fn sp_addlogin_and_pgp_private_keys_are_reported() {
+    for t in [
+        "EXEC sp_addlogin 'l', 's3cret'",
+        "EXECUTE sys.sp_addlogin @loginame = N'l', @passwd = N's3cret', @defdb = 'master'",
+    ] {
+        assert_eq!(reported(t), [("'s3cret'", Password)], "{t}");
+    }
+    assert!(scan("EXECUTE sp_addlogin 'Victoria', '<password>';").is_empty());
+    let pgp = format!(
+        "{}BEGIN PGP {}",
+        "-----",
+        concat!("PRIVATE KEY", " BLOCK-----")
+    );
+    assert_eq!(kinds(&scan(&pgp)), [PrivateKey]);
+    let public = format!("{}BEGIN PGP PUBLIC KEY BLOCK{}", "-----", "-----");
+    assert!(scan(&public).is_empty());
+}
+
+#[test]
+fn a_vertical_tab_does_not_hang_the_scan() {
+    // Found by the byte-identity test: M3's redactor never returned on a vertical tab outside
+    // quotes, so the spans, and the scan with them, never came back.
+    let t = "SELECT\u{b}1;\nCREATE USER a PASSWORD\u{b}'s3cret'";
+    assert_eq!(reported(t), [("'s3cret'", Password)]);
+}
+// ## m4b-t06-secrets
 
 #[test]
 #[ignore = "perf"]

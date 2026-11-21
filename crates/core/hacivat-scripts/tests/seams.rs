@@ -130,7 +130,7 @@ fn env_set_has_one_bit_per_tag() {
 // ## m4b-t06-secrets (named exception): the scanner is Task 6's now (`tests/secrets.rs`); the
 // seam keeps its shape: clean text is clean, an `Other` span is never reported, a value is.
 #[test]
-fn secret_stub_reports_the_whole_text() {
+fn secret_scanner_seam_reports_values_only() {
     assert!(scan_secrets("SELECT 1", &[]).is_empty());
     assert!(scan_secrets("SELECT password_hash", &[(7..20, SpanKind::Other)]).is_empty());
     let f = scan_secrets("PASSWORD 'x'", &[(9..12, SpanKind::Password)]);
