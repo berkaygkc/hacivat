@@ -30,6 +30,8 @@ const CHILD_OUT: &str = "HV_T07_CHILD_OUT";
 const CHILD_FIFOS: &str = "HV_T07_CHILD_FIFOS";
 /// Env var asking the child to spawn a program (the detectors' positive control).
 const CHILD_SPAWN: &str = "HV_T07_CHILD_SPAWN";
+/// Env var giving the child's status budget in milliseconds (default `GitLimits`).
+const CHILD_TIMEOUT_MS: &str = "HV_T07_CHILD_TIMEOUT_MS";
 
 fn fact(line: &str) {
     let mut out = std::io::stdout().lock();
@@ -83,7 +85,14 @@ fn child_run() -> bool {
         #[cfg(not(windows))]
         let _ = Command::new("/bin/sh").args(["-c", "exit 0"]).status();
     }
-    let st = status(Path::new(&lib), &GitLimits::default());
+    let mut limits = GitLimits::default();
+    if let Some(ms) = std::env::var(CHILD_TIMEOUT_MS)
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        limits.timeout = std::time::Duration::from_millis(ms);
+    }
+    let st = status(Path::new(&lib), &limits);
     let mut text = describe(&st);
     if let Some(fifos) = std::env::var_os(CHILD_FIFOS) {
         let opened: Vec<String> = fifos
@@ -335,6 +344,16 @@ fn arm_repository(h: &Hostile) {
     );
     // Changed content of another length: status must look at it.
     write(&root.join("a.sql"), b"select 'changed on disk';\n");
+    // m8: a live filter vector too. Same length as committed and a touched mtime, so the stat
+    // differs and gix must hash `b.sql` through the filter pipeline: a trusted driver would
+    // run here.
+    write(&root.join("b.sql"), b"select 9;\n");
+    let f = std::fs::File::options()
+        .write(true)
+        .open(root.join("b.sql"))
+        .unwrap();
+    f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(10))
+        .unwrap();
     let sub_cfg = root.join(".git/modules/mods/sub/config");
     if sub_cfg.exists() {
         hostile_config(h, &sub_cfg, "submodule");
@@ -676,8 +695,21 @@ fn spawn_detector_sees_a_spawn() {
         "t07 spawn_detector_control detector={} spawned={:?}",
         run.detector, run.spawned
     ));
+    require_detector_on_ci(&run);
     if let Some(n) = run.spawned {
         assert!(n >= 1, "{}: a spawn went unseen", run.detector);
+    }
+}
+
+/// I5: on CI every OS has a real spawn detector (`sandbox-exec`, `strace`, a Job Object); a
+/// run that fell back to markers only fails there instead of passing with no check.
+fn require_detector_on_ci(run: &ChildRun) {
+    if std::env::var_os("CI").is_some() {
+        assert!(
+            run.spawned.is_some(),
+            "no spawn detector on CI (detector={})",
+            run.detector
+        );
     }
 }
 
@@ -705,6 +737,7 @@ fn hostile_repo_runs_no_program() {
         markers.len()
     ));
     assert!(markers.is_empty(), "a repository program ran: {markers:?}");
+    require_detector_on_ci(&run);
     assert_eq!(run.spawned.unwrap_or(0), 0, "{}: a spawn", run.detector);
     assert_eq!(
         std::fs::read(h.root().join(".git/index")).unwrap(),
@@ -728,6 +761,13 @@ fn hostile_repo_runs_no_program() {
     assert_eq!(
         badge(&run.result, ".gitattributes"),
         Some("New"),
+        "{}",
+        run.result
+    );
+    // m8: the same-length, touched file went through the filter pipeline with no driver.
+    assert_eq!(
+        badge(&run.result, "b.sql"),
+        Some("Unknown(Filtered)"),
         "{}",
         run.result
     );
@@ -971,4 +1011,86 @@ fn plain_repository_has_badges() {
         panic!("{st:?}")
     };
     assert_eq!(s.by_path.get("a.sql"), Some(&FileStatus::Modified));
+}
+
+/// P3 (I3, R-T7-2): the files the open and the HEAD lookup read must be regular files under a
+/// cap. A symlink to a 200 MiB sparse file at `HEAD`, at the loose ref HEAD names, at
+/// `packed-refs`, at an untracked nested repository's `HEAD`, or at a nested gitfile, is
+/// refused before anything reads it (`Unavailable(Redirected)`); an oversize regular `HEAD`
+/// is `Failed(TooLarge)`. The `/dev/zero` case runs in a child with a 300 ms budget, so a
+/// regression could read for that long at most.
+#[cfg(unix)]
+#[test]
+fn hostile_head_symlink_is_refused() {
+    if child_run() {
+        return;
+    }
+    for case in [
+        "head",
+        "loose-ref",
+        "packed-refs",
+        "nested-head",
+        "nested-gitfile",
+    ] {
+        let h = base(false);
+        let root = h.root();
+        let big = h.envdir().join("big");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(200 << 20)
+            .unwrap();
+        let target = match case {
+            "head" => root.join(".git/HEAD"),
+            "loose-ref" => root.join(".git/refs/heads/main"),
+            "packed-refs" => root.join(".git/packed-refs"),
+            "nested-head" => {
+                let n = root.join("nested/.git");
+                std::fs::create_dir_all(n.join("objects")).unwrap();
+                std::fs::create_dir_all(n.join("refs")).unwrap();
+                n.join("HEAD")
+            }
+            _ => {
+                std::fs::create_dir_all(root.join("nested")).unwrap();
+                root.join("nested/.git")
+            }
+        };
+        let _ = std::fs::remove_file(&target);
+        std::os::unix::fs::symlink(&big, &target).unwrap();
+        let st = status(&root, &GitLimits::default());
+        assert!(
+            matches!(st, GitState::Unavailable(hacivat_git::GitError::Redirected)),
+            "{case}: {st:?}"
+        );
+    }
+    // An oversize regular HEAD.
+    let h = base(false);
+    let head = h.root().join(".git/HEAD");
+    std::fs::write(
+        &head,
+        format!("ref: refs/heads/main\n{}", " ".repeat(2 << 20)),
+    )
+    .unwrap();
+    let st = status(&h.root(), &GitLimits::default());
+    assert!(
+        matches!(
+            st,
+            GitState::Unavailable(hacivat_git::GitError::Failed(
+                hacivat_git::FailKind::TooLarge
+            ))
+        ),
+        "oversize: {st:?}"
+    );
+    // A device: HEAD -> /dev/zero, in a child with a short budget.
+    let h = base(false);
+    let head = h.root().join(".git/HEAD");
+    std::fs::remove_file(&head).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &head).unwrap();
+    let env = vec![(CHILD_TIMEOUT_MS.to_owned(), "300".to_owned())];
+    let run = run_child(
+        "hostile_head_symlink_is_refused",
+        &h.root(),
+        &env,
+        &h.envdir(),
+    );
+    assert_eq!(run.result, "Unavailable(Redirected)", "/dev/zero");
 }

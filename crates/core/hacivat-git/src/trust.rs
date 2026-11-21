@@ -25,7 +25,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use crate::discover::{DotGit, Found};
-use crate::{GitError, GitState, UntrustReason};
+use crate::{FailKind, GitError, GitState, UntrustReason};
 
 /// The git dir and common dir the checks accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,9 +64,9 @@ fn require_owned(p: &Path, owned: Owner<'_>) -> Result<(), GitState> {
     match owned(p) {
         Ok(true) => Ok(()),
         Ok(false) => Err(GitState::Untrusted(UntrustReason::ForeignOwner)),
-        Err(e) => Err(GitState::Unavailable(GitError::Failed(format!(
-            "the repository's owner could not be read: {e}"
-        )))),
+        Err(_) => Err(GitState::Unavailable(GitError::Failed(
+            FailKind::OwnerUnreadable,
+        ))),
     }
 }
 
@@ -127,10 +127,259 @@ pub(crate) fn check_layout(found: &Found, owned: Owner<'_>) -> Result<Layout, Gi
     Ok(layout)
 }
 
-fn io_failed(e: std::io::Error) -> GitState {
-    GitState::Unavailable(GitError::Failed(format!(
-        "the repository could not be read: {e}"
-    )))
+// ## m4b-t07-git (fix round 1, I3, R-T7-2)
+/// The cap on a ref-sized file: `HEAD`, a loose ref, a gitfile, `commondir`.
+const REF_MAX: u64 = 4 * 1024;
+/// The cap on `packed-refs`, `info/exclude`, `info/attributes`, `config`, `config.worktree`.
+const TEXT_MAX: u64 = 1024 * 1024;
+/// The cap on the index (20,000 entries take a few MiB; this only bounds a hostile one).
+const INDEX_MAX: u64 = 256 * 1024 * 1024;
+/// How deep a symbolic ref chain from `HEAD` may go.
+const SYMREF_DEPTH_MAX: usize = 5;
+
+/// `p`, when present, is a regular file (not a symlink, FIFO or device) of at most `cap`
+/// bytes. Absent is fine (`Ok(false)`): gix then fails or reads nothing.
+fn regular_capped(p: &Path, cap: u64) -> Result<bool, GitState> {
+    let md = match std::fs::symlink_metadata(p) {
+        Ok(md) => md,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(io_failed(e)),
+    };
+    if !md.file_type().is_file() {
+        return redirected();
+    }
+    if md.len() > cap {
+        return Err(GitState::Unavailable(GitError::Failed(FailKind::TooLarge)));
+    }
+    Ok(true)
+}
+
+/// The text of a regular file of at most `cap` bytes, read through a cap (`None`: absent).
+fn capped_text(p: &Path, cap: u64) -> Result<Option<String>, GitState> {
+    if !regular_capped(p, cap)? {
+        return Ok(None);
+    }
+    let mut buf = Vec::new();
+    std::fs::File::open(p)
+        .and_then(|f| f.take(cap + 1).read_to_end(&mut buf))
+        .map_err(io_failed)?;
+    if buf.len() as u64 > cap {
+        return Err(GitState::Unavailable(GitError::Failed(FailKind::TooLarge)));
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
+/// Every file of the git dir and common dir that the open, the index read and the HEAD lookup
+/// read is a regular file under its cap: `gix_ref`'s `ref_contents` reads with no limit and
+/// follows a symlink, so a `HEAD -> /dev/zero` would let an abandoned worker allocate until the
+/// app dies (review I3). `config` and `config.worktree` are [`unsupported_format`]'s.
+pub(crate) fn check_repository_files(layout: &Layout) -> Result<(), GitState> {
+    let (g, c) = (&layout.git_dir, &layout.common_dir);
+    regular_capped(&g.join("index"), INDEX_MAX)?;
+    regular_capped(&c.join("packed-refs"), TEXT_MAX)?;
+    regular_capped(&c.join("info").join("exclude"), TEXT_MAX)?;
+    regular_capped(&c.join("info").join("attributes"), TEXT_MAX)?;
+    let Some(head) = capped_text(&g.join("HEAD"), REF_MAX)? else {
+        return Ok(());
+    };
+    check_symref_chain(head.trim(), layout, 0)
+}
+
+/// A symbolic ref's target (`ref: refs/…`) and its chain: every directory on the way is a real
+/// directory, and the ref file, when loose, a regular file under [`REF_MAX`].
+fn check_symref_chain(text: &str, layout: &Layout, depth: usize) -> Result<(), GitState> {
+    let Some(name) = text.strip_prefix("ref:").map(str::trim) else {
+        return Ok(()); // a detached HEAD names an object id
+    };
+    let valid = name.starts_with("refs/")
+        && !name.contains('\\')
+        && name
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..");
+    if !valid || depth >= SYMREF_DEPTH_MAX {
+        return redirected();
+    }
+    let comps: Vec<&str> = name.split('/').collect();
+    let mut bases = vec![layout.git_dir.clone()];
+    if layout.common_dir != layout.git_dir {
+        bases.push(layout.common_dir.clone());
+    }
+    for base in bases {
+        let mut dir = base;
+        let mut reached = true;
+        for comp in &comps[..comps.len() - 1] {
+            dir.push(comp);
+            match std::fs::symlink_metadata(&dir) {
+                Ok(md) if md.file_type().is_dir() => {}
+                Ok(_) => return redirected(),
+                Err(_) => {
+                    reached = false;
+                    break;
+                }
+            }
+        }
+        if !reached {
+            continue;
+        }
+        if let Some(text) = capped_text(&dir.join(comps[comps.len() - 1]), REF_MAX)? {
+            check_symref_chain(text.trim(), layout, depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
+/// The most entries the library pre-walk lists before it gives up (fail closed).
+const PREWALK_ENTRIES_MAX: usize = 200_000;
+/// The deepest folder the pre-walk enters.
+const PREWALK_DEPTH_MAX: usize = 64;
+/// The in-tree files gix reads to decide what is ignored, filtered or a submodule.
+const CONTROL_FILES: [&str; 3] = [".gitignore", ".gitattributes", ".gitmodules"];
+
+/// What the library pre-walk found that the status reports itself.
+#[derive(Debug, Default)]
+pub(crate) struct TreeFacts {
+    /// Library-relative names (the disk's spelling) of FIFOs, sockets and devices (m5).
+    pub(crate) not_files: Vec<String>,
+}
+
+/// The walk of the library's folders (names and `lstat` only) before gix walks it:
+/// - a control file (`.gitignore`, `.gitattributes`, `.gitmodules`) here, in a folder between
+///   the worktree and the library, or `info/exclude`/`info/attributes`, that is a cloud
+///   placeholder answers `Unavailable(Dataless)`: gix would open it, and opening downloads it
+///   (I4, R-T7-3). `extra` (the `testing` hook, library-relative) adds placeholders;
+/// - a nested repository's `.git` (gix classifies it by reading its `HEAD` with no limit) must
+///   be a real directory with a regular, capped `HEAD`, or a regular, capped gitfile whose
+///   target's `HEAD` is the same; otherwise `Unavailable(Redirected)` (I3);
+/// - FIFOs, sockets and devices are recorded (gix lists none of them; m5).
+///
+/// Symlinked folders are not entered (gix does not follow them), nor nested repositories, nor
+/// `.git`. More than [`PREWALK_ENTRIES_MAX`] entries or a folder deeper than
+/// [`PREWALK_DEPTH_MAX`] answers `Failed(TooLarge)`.
+pub(crate) fn check_library_tree(
+    worktree: &Path,
+    library: &Path,
+    layout: &Layout,
+    extra: &std::collections::BTreeSet<String>,
+    is_dataless: &dyn Fn(&std::fs::Metadata) -> bool,
+) -> Result<TreeFacts, GitState> {
+    let placeholder = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| is_dataless(&m));
+    let dataless = || Err(GitState::Unavailable(GitError::Dataless));
+    for info in ["exclude", "attributes"] {
+        if placeholder(&layout.common_dir.join("info").join(info)) {
+            return dataless();
+        }
+    }
+    // The folders from the worktree down to the library's parent.
+    if let Ok(below) = library.strip_prefix(worktree) {
+        let mut dir = worktree.to_path_buf();
+        let mut chain = vec![dir.clone()];
+        for c in below.components() {
+            dir.push(c);
+            chain.push(dir.clone());
+        }
+        chain.pop();
+        for d in chain {
+            if CONTROL_FILES.iter().any(|f| placeholder(&d.join(f))) {
+                return dataless();
+            }
+        }
+    }
+    let mut facts = TreeFacts::default();
+    let mut seen = 0usize;
+    let mut stack: Vec<(PathBuf, String, usize)> = vec![(library.to_path_buf(), String::new(), 0)];
+    while let Some((dir, rel, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let entries: Vec<std::fs::DirEntry> = rd.filter_map(Result::ok).collect();
+        seen += entries.len();
+        if seen > PREWALK_ENTRIES_MAX || depth > PREWALK_DEPTH_MAX {
+            return Err(GitState::Unavailable(GitError::Failed(FailKind::TooLarge)));
+        }
+        let join = |name: &str| {
+            if rel.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{rel}/{name}")
+            }
+        };
+        // A nested repository: checked, not entered (gix does not enter it either).
+        if dir != worktree && entries.iter().any(|e| e.file_name() == ".git") {
+            check_nested(&dir.join(".git"))?;
+            continue;
+        }
+        for e in &entries {
+            let name = e.file_name();
+            let Ok(ft) = e.file_type() else { continue };
+            let name_str = name.to_str();
+            if let Some(n) = name_str.filter(|n| CONTROL_FILES.contains(n))
+                && (extra.contains(&join(n)) || placeholder(&e.path()))
+            {
+                return dataless();
+            }
+            if name == ".git" {
+                continue;
+            }
+            match name_str {
+                Some(n) if ft.is_dir() => stack.push((e.path(), join(n), depth + 1)),
+                Some(n) if !ft.is_file() && !ft.is_symlink() && !ft.is_dir() => {
+                    facts.not_files.push(join(n));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(facts)
+}
+
+/// A nested repository's `.git` (I3): a real directory whose `HEAD` is regular and capped, or a
+/// regular capped gitfile whose target's `HEAD` is.
+fn check_nested(dot_git: &Path) -> Result<(), GitState> {
+    let Ok(md) = std::fs::symlink_metadata(dot_git) else {
+        return Ok(());
+    };
+    let ft = md.file_type();
+    if ft.is_symlink() {
+        return redirected();
+    }
+    if ft.is_dir() {
+        regular_capped(&dot_git.join("HEAD"), REF_MAX)?;
+        return Ok(());
+    }
+    if !ft.is_file() {
+        return Ok(()); // a FIFO or socket named `.git` is no repository marker
+    }
+    let Some(text) = capped_text(dot_git, REF_MAX)? else {
+        return Ok(());
+    };
+    let target = text
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .unwrap_or("");
+    let base = dot_git.parent().unwrap_or(dot_git);
+    if let Some(t) = resolve(base, target) {
+        regular_capped(&t.join("HEAD"), REF_MAX)?;
+    }
+    Ok(())
+}
+
+/// m10: the owners checked before the open, checked again on what gix opened.
+pub(crate) fn check_owners_again(
+    repo: &gix::Repository,
+    worktree: &Path,
+    owned: Owner<'_>,
+) -> Result<(), GitState> {
+    require_owned(worktree, owned)?;
+    require_owned(repo.git_dir(), owned)?;
+    require_owned(repo.common_dir(), owned)?;
+    Ok(())
+}
+// ## m4b-t07-git
+
+fn io_failed(_: std::io::Error) -> GitState {
+    GitState::Unavailable(GitError::Failed(FailKind::Open))
 }
 
 /// Where a gitfile may lead (n2): a linked worktree's git dir, a submodule's git dir, or a
@@ -256,17 +505,28 @@ pub(crate) fn check_resolved(
 }
 
 /// An object format or ref storage this build cannot read (m2), from the repository's own
-/// config file as written (read raw, no includes, whatever its trust).
-pub(crate) fn unsupported_format(common_dir: &Path) -> bool {
+/// config file as written (read raw, no includes, whatever its trust). A config that cannot be
+/// read counts as unsupported, fail closed (fix round 1, m4): the common dir's `config` missing,
+/// not a regular file (a symlink, FIFO, device), over [`TEXT_MAX`], or not parseable; the same
+/// for the git dir's `config.worktree` when present.
+pub(crate) fn unsupported_format(git_dir: &Path, common_dir: &Path) -> bool {
     use gix::bstr::ByteSlice as _;
-    let path = common_dir.join("config");
-    if small_text(&path).is_none() {
-        return false;
-    }
-    let Ok(file) = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
-    else {
-        return false;
+    let parse = |path: PathBuf, required: bool| -> Result<Option<gix::config::File>, ()> {
+        match regular_capped(&path, TEXT_MAX) {
+            Ok(true) => {}
+            Ok(false) if !required => return Ok(None),
+            _ => return Err(()),
+        }
+        gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
+            .map(Some)
+            .map_err(|_| ())
     };
+    let Ok(Some(file)) = parse(common_dir.join("config"), true) else {
+        return true;
+    };
+    if parse(git_dir.join("config.worktree"), false).is_err() {
+        return true;
+    }
     let other = |key: &str, ok: &str| {
         file.string(key)
             .is_some_and(|v| !v.trim().eq_ignore_ascii_case(ok.as_bytes()))
@@ -494,14 +754,98 @@ mod tests {
     fn formats_this_build_cannot_read_are_unsupported() {
         let (_t, top) = top();
         let cfg = top.join("config");
+        // m4: no config at all is unreadable, so unsupported.
+        assert!(unsupported_format(&top, &top));
         std::fs::write(&cfg, "[core]\n\trepositoryformatversion = 0\n").unwrap();
-        assert!(!unsupported_format(&top));
+        assert!(!unsupported_format(&top, &top));
         std::fs::write(&cfg, "[extensions]\n\tobjectFormat = sha1\n").unwrap();
-        assert!(!unsupported_format(&top));
+        assert!(!unsupported_format(&top, &top));
         std::fs::write(&cfg, "[extensions]\n\tobjectFormat = sha256\n").unwrap();
-        assert!(unsupported_format(&top));
+        assert!(unsupported_format(&top, &top));
         std::fs::write(&cfg, "[extensions]\n\trefStorage = reftable\n").unwrap();
-        assert!(unsupported_format(&top));
+        assert!(unsupported_format(&top, &top));
+        // m4: unparseable, too large, a broken config.worktree.
+        std::fs::write(&cfg, "[core\n").unwrap();
+        assert!(unsupported_format(&top, &top));
+        std::fs::write(&cfg, format!("# {}\n", "x".repeat(2 << 20))).unwrap();
+        assert!(unsupported_format(&top, &top));
+        std::fs::write(&cfg, "[core]\n").unwrap();
+        std::fs::write(top.join("config.worktree"), "[[[").unwrap();
+        assert!(unsupported_format(&top, &top));
+    }
+
+    fn layout_of(g: &Path) -> Layout {
+        Layout {
+            git_dir: g.to_path_buf(),
+            common_dir: g.to_path_buf(),
+        }
+    }
+
+    /// I3: HEAD, the ref it names, `packed-refs` and the index must be regular files under
+    /// their caps; a symlink is refused before anything reads it.
+    #[cfg(unix)]
+    #[test]
+    fn repository_files_must_be_regular_and_capped() {
+        let (_t, top) = top();
+        let g = top.join("g");
+        std::fs::create_dir_all(g.join("refs/heads")).unwrap();
+        std::fs::write(g.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(g.join("refs/heads/main"), "0".repeat(40)).unwrap();
+        assert!(check_repository_files(&layout_of(&g)).is_ok());
+        let elsewhere = top.join("elsewhere");
+        std::fs::write(&elsewhere, "x").unwrap();
+        for f in ["refs/heads/main", "packed-refs", "index"] {
+            let p = g.join(f);
+            let _ = std::fs::remove_file(&p);
+            std::os::unix::fs::symlink(&elsewhere, &p).unwrap();
+            assert_eq!(
+                check_repository_files(&layout_of(&g))
+                    .unwrap_err()
+                    .into_cmp(),
+                GitState::Unavailable(GitError::Redirected).into_cmp(),
+                "{f}"
+            );
+            std::fs::remove_file(&p).unwrap();
+        }
+        // A symlinked folder on the way to HEAD's ref.
+        std::fs::remove_dir_all(g.join("refs/heads")).unwrap();
+        std::os::unix::fs::symlink(&top, g.join("refs/heads")).unwrap();
+        assert!(check_repository_files(&layout_of(&g)).is_err());
+        // A ref outside `refs/`.
+        std::fs::write(g.join("HEAD"), "ref: ../../etc/x\n").unwrap();
+        assert!(check_repository_files(&layout_of(&g)).is_err());
+        // A loose ref over its cap.
+        std::fs::remove_file(g.join("refs/heads")).unwrap();
+        std::fs::create_dir_all(g.join("refs/heads")).unwrap();
+        std::fs::write(g.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(g.join("refs/heads/main"), "0".repeat(8192)).unwrap();
+        assert_eq!(
+            check_repository_files(&layout_of(&g))
+                .unwrap_err()
+                .into_cmp(),
+            GitState::Unavailable(GitError::Failed(FailKind::TooLarge)).into_cmp()
+        );
+    }
+
+    /// m10: ownership is checked again on the directories gix opened.
+    #[test]
+    fn ownership_is_checked_again_after_the_open() {
+        let (_t, top) = top();
+        gix::init(&top).unwrap();
+        let repo = gix::open_opts(
+            &top,
+            gix::open::Options::isolated().with(gix::sec::Trust::Reduced),
+        )
+        .unwrap();
+        assert!(check_owners_again(&repo, &top, &all_owned).is_ok());
+        let git_dir = repo.git_dir().to_path_buf();
+        let owner = |p: &Path| Ok(p != git_dir);
+        assert_eq!(
+            check_owners_again(&repo, &top, &owner)
+                .unwrap_err()
+                .into_cmp(),
+            GitState::Untrusted(UntrustReason::ForeignOwner).into_cmp()
+        );
     }
 
     /// `GitState` has no `PartialEq` (it holds an `Arc`); compare the shape as text.

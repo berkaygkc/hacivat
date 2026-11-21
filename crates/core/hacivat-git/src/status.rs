@@ -49,7 +49,7 @@ use gix::bstr::{BStr, BString, ByteSlice as _};
 use crate::discover::{self, Discovery, Found};
 use crate::map::{self, Badges};
 use crate::trust;
-use crate::{FileStatus, GitError, GitLimits, GitState, GitStatus, UnknownWhy};
+use crate::{FailKind, FileStatus, GitError, GitLimits, GitPath, GitState, GitStatus, UnknownWhy};
 
 /// The libraries whose worker is running (keyed by the root as the caller gave it).
 static RUNNING: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
@@ -69,8 +69,8 @@ impl Drop for Running {
     }
 }
 
-fn failed(msg: impl Into<String>) -> GitState {
-    GitState::Unavailable(GitError::Failed(msg.into()))
+fn failed(kind: FailKind) -> GitState {
+    GitState::Unavailable(GitError::Failed(kind))
 }
 
 /// The whole status of `library_root` on the timed worker; `dataless` adds library-relative
@@ -80,13 +80,16 @@ pub(crate) fn status_with(
     limits: &GitLimits,
     dataless: Vec<String>,
 ) -> GitState {
-    let root = library_root.to_path_buf();
+    // m1: the stuck-worker cap is keyed by the canonical root, so an alias (a symlink, `..`)
+    // cannot start a second worker. Resolving the path reads metadata only.
+    let Ok(root) = std::fs::canonicalize(library_root) else {
+        return failed(FailKind::LibraryUnreadable);
+    };
     let limits = *limits;
-    run_timed(
-        library_root.to_path_buf(),
-        limits.timeout,
-        move |interrupt| pipeline(&root, &limits, &dataless, interrupt),
-    )
+    let key = root.clone();
+    run_timed(key, limits.timeout, move |interrupt| {
+        pipeline(&root, &limits, &dataless, interrupt)
+    })
 }
 
 /// Runs `work` on a worker thread and waits at most `timeout` for its answer (m3).
@@ -95,7 +98,8 @@ where
     F: FnOnce(&AtomicBool) -> GitState + Send + 'static,
 {
     if !running().insert(key.clone()) {
-        return GitState::Unavailable(GitError::Timeout);
+        // m2: an earlier worker for this library is still blocked in a read.
+        return GitState::Unavailable(GitError::Paused);
     }
     let interrupt = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&interrupt);
@@ -106,13 +110,14 @@ where
         .spawn(move || {
             let guard = guard;
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&flag)))
-                .unwrap_or_else(|_| failed("the repository status stopped unexpectedly"));
+                .unwrap_or_else(|_| failed(FailKind::Worker));
             // Leave RUNNING before answering, so that a call right after this answer starts.
             drop(guard);
             let _ = tx.send(out);
         });
     if let Err(e) = spawned {
-        return failed(format!("the repository status could not start: {e}"));
+        let _ = e;
+        return failed(FailKind::Worker);
     }
     match rx.recv_timeout(timeout) {
         Ok(st) => st,
@@ -120,48 +125,60 @@ where
             interrupt.store(true, Ordering::SeqCst);
             GitState::Unavailable(GitError::Timeout)
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            failed("the repository status stopped unexpectedly")
-        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => failed(FailKind::Worker),
     }
 }
 
-/// Discover, check, open, check again, collect.
+/// Discover, check, open, check again, collect. `root` is canonical.
 fn pipeline(
     root: &Path,
     limits: &GitLimits,
     extra_dataless: &[String],
     interrupt: &AtomicBool,
 ) -> GitState {
-    let root = match std::fs::canonicalize(root) {
-        Ok(p) => p,
-        Err(e) => return failed(format!("the library folder could not be read: {e}")),
-    };
+    let root = root.to_path_buf();
     let found = match discover::find(&root) {
         Discovery::Found(f) => f,
         Discovery::NotARepo => return GitState::NotARepo,
         Discovery::NonUtf8Prefix => {
-            return failed("the library's path inside its repository is not UTF-8");
+            return failed(FailKind::PathNotUtf8);
         }
     };
     let layout = match trust::check_layout(&found, &trust::current_user_owns) {
         Ok(l) => l,
         Err(st) => return st,
     };
-    if trust::unsupported_format(&layout.common_dir) {
+    if trust::unsupported_format(&layout.git_dir, &layout.common_dir) {
         return GitState::Unavailable(GitError::Unsupported);
+    }
+    // I3 (R-T7-2), after the format check: a reftable repository has a file at `refs/heads`.
+    if let Err(st) = trust::check_repository_files(&layout) {
+        return st;
+    }
+    let extra: BTreeSet<String> = extra_dataless.iter().cloned().collect();
+    let facts =
+        match trust::check_library_tree(&found.worktree, &root, &layout, &extra, &map::is_dataless)
+        {
+            Ok(f) => f,
+            Err(st) => return st,
+        };
+    if interrupt.load(Ordering::SeqCst) {
+        return GitState::Unavailable(GitError::Timeout);
     }
     let options = gix::open::Options::isolated().with(gix::sec::Trust::Reduced);
     let repo = match gix::open_opts(&found.worktree, options) {
         Ok(r) => r,
-        Err(e) => return failed(format!("the repository could not be opened: {e}")),
+        Err(_) => return failed(FailKind::Open),
     };
     if let Err(e) = trust::check_trust(&repo)
         .and_then(|()| trust::check_resolved(&repo, &layout, &found.worktree))
     {
         return GitState::Unavailable(e);
     }
-    match collect(&repo, &found, &root, limits, extra_dataless, interrupt) {
+    if let Err(st) = trust::check_owners_again(&repo, &found.worktree, &trust::current_user_owns) {
+        return st;
+    }
+    match collect(&repo, &found, &root, limits, &extra, &facts, interrupt) {
         Ok(st) | Err(st) => st,
     }
 }
@@ -233,7 +250,15 @@ impl<'index, 'a> gix::status::plumbing::index_as_worktree_with_renames::VisitEnt
                     self.push(path.as_bstr(), FileStatus::Unknown(UnknownWhy::Submodule));
                 }
                 Some(Kind::Directory) | None => {}
-                Some(_) => self.push(e.rela_path.as_bstr(), FileStatus::New),
+                // m5: a FIFO, socket or device is not a file (the pre-walk records the ones
+                // gix does not emit).
+                Some(Kind::Untrackable) => self.push(
+                    e.rela_path.as_bstr(),
+                    FileStatus::Unknown(UnknownWhy::NotAFile),
+                ),
+                Some(Kind::File | Kind::Symlink) => {
+                    self.push(e.rela_path.as_bstr(), FileStatus::New)
+                }
             }
             return;
         }
@@ -251,8 +276,8 @@ impl<'index, 'a> gix::status::plumbing::index_as_worktree_with_renames::VisitEnt
 }
 
 /// The mapper for a failed `gix` step.
-fn gix_failed(what: &str) -> impl Fn(gix::Error) -> GitState + '_ {
-    move |e| failed(format!("the repository {what} failed: {e}"))
+fn gix_failed(kind: FailKind) -> impl Fn(gix::Error) -> GitState {
+    move |_| failed(kind)
 }
 
 /// The status proper, on an opened and checked repository.
@@ -261,19 +286,25 @@ fn collect(
     found: &Found,
     library: &Path,
     limits: &GitLimits,
-    extra_dataless: &[String],
+    extra_dataless: &BTreeSet<String>,
+    facts: &trust::TreeFacts,
     interrupt: &AtomicBool,
 ) -> Result<GitState, GitState> {
     let timed_out = || GitState::Unavailable(GitError::Timeout);
-    let too_many = || {
-        failed(format!(
-            "the repository lists more than {} changed paths",
-            limits.max_entries
-        ))
-    };
+    let too_many = || failed(FailKind::TooManyEntries);
     let prefix = found.prefix.as_str();
-    let on_disk = repo.index_or_empty().map_err(gix_failed("index read"))?;
+    // I2: whether the file system folds case (`core.ignoreCase`, as gix reads it).
+    let icase = repo.filesystem_options().is_ok_and(|c| c.ignore_case);
+    let on_disk = repo.index_or_empty().map_err(gix_failed(FailKind::Index))?;
     let mut badges = Badges::default();
+    // I1: the library-relative part of an index path, compared in NFC (and by case where the
+    // file system folds it), whatever the disk's spelling of the library folder.
+    let rel_of = |path: &BStr| {
+        path.to_str()
+            .ok()
+            .and_then(|p| map::lib_relative(p, prefix, icase))
+            .map(|(rel, _)| rel)
+    };
 
     // Gitlinks are Unknown(Submodule). Dataless tracked files are Unknown(Dataless) and are
     // removed from an in-memory copy of the index (never written), so gix neither compares
@@ -282,28 +313,19 @@ fn collect(
     // (`excluded_path_is_never_opened_by_status`); [Inferred] that this keeps the OS from
     // downloading it (I2, n6). `alg/28` step 6 named `:(exclude)` pathspecs; 20,000 of them
     // made the walk quadratic (U-05: past the 5 s budget), so Task 7 drops entries instead.
-    let extra: BTreeSet<BString> = extra_dataless
-        .iter()
-        .map(|l| {
-            if prefix.is_empty() {
-                BString::from(l.as_str())
-            } else {
-                BString::from(format!("{prefix}/{l}"))
-            }
-        })
-        .collect();
+    let extra: BTreeSet<String> = extra_dataless.iter().map(|l| map::nfc(l)).collect();
     let mut dataless_paths: BTreeSet<BString> = BTreeSet::new();
     let mut tracked: Vec<(BString, gix::index::entry::Mode)> = Vec::new();
     for entry in on_disk.entries() {
         let path = entry.path(&on_disk);
-        if !map::under_prefix(path, prefix) {
+        let Some(rel) = rel_of(path) else {
             continue;
-        }
+        };
         if entry.mode.is_submodule() {
             badges.add(path, FileStatus::Unknown(UnknownWhy::Submodule));
             continue;
         }
-        let dataless = extra.contains(path)
+        let dataless = extra.contains(&map::nfc(&rel))
             || gix::path::from_bstr(path)
                 .ok()
                 .and_then(|p| std::fs::symlink_metadata(found.worktree.join(p)).ok())
@@ -332,7 +354,19 @@ fn collect(
 
     let mut patterns: Vec<BString> = Vec::new();
     if !prefix.is_empty() {
-        patterns.push(format!(":(top,literal){prefix}").into());
+        // I1: the disk's spelling, and its NFC and NFD forms, so the index's spelling matches
+        // whichever it is (several positive patterns are their union). gix adds ICASE itself
+        // where the file system folds case.
+        let forms = [
+            prefix.to_owned(),
+            map::nfc(prefix),
+            gix::utils::str::decompose(prefix.into()).into_owned(),
+        ];
+        for (i, form) in forms.iter().enumerate() {
+            if !forms[..i].contains(form) {
+                patterns.push(format!(":(top,literal){form}").into());
+            }
+        }
     }
 
     // Index vs worktree.
@@ -345,7 +379,7 @@ fn collect(
     };
     let dirwalk = repo
         .dirwalk_options()
-        .map_err(gix_failed("walk setup"))?
+        .map_err(gix_failed(FailKind::Setup))?
         .emit_untracked(gix::dir::walk::EmissionMode::Matching);
     let options = gix::status::index_worktree::Options {
         sorting: None,
@@ -369,7 +403,7 @@ fn collect(
     if interrupt.load(Ordering::SeqCst) {
         return Err(timed_out());
     }
-    walked.map_err(gix_failed("worktree comparison"))?;
+    walked.map_err(gix_failed(FailKind::Worktree))?;
     for (path, s) in rec.out {
         badges.add(path.as_bstr(), s);
     }
@@ -385,7 +419,7 @@ fn collect(
     // HEAD vs index.
     let head_tree = repo
         .head_tree_id_or_empty()
-        .map_err(gix_failed("HEAD lookup"))?
+        .map_err(gix_failed(FailKind::Head))?
         .detach();
     let mut pathspec = repo
         .pathspec(
@@ -395,7 +429,7 @@ fn collect(
             index,
             gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
         )
-        .map_err(gix_failed("pathspec"))?;
+        .map_err(gix_failed(FailKind::Setup))?;
     let mut staged: Vec<(BString, FileStatus)> = Vec::new();
     let mut overflow = false;
     repo.tree_index_status(
@@ -423,7 +457,7 @@ fn collect(
             Ok(std::ops::ControlFlow::Continue(()))
         },
     )
-    .map_err(gix_failed("HEAD comparison"))?;
+    .map_err(gix_failed(FailKind::Head))?;
     if overflow {
         return Err(too_many());
     }
@@ -441,7 +475,7 @@ fn collect(
             index,
             gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
         )
-        .map_err(gix_failed("attribute setup"))?;
+        .map_err(gix_failed(FailKind::Setup))?;
     let changed = badges.paths();
     let mut probe: Vec<(BString, Option<gix::index::entry::Mode>)> =
         tracked.into_iter().map(|(p, m)| (p, Some(m))).collect();
@@ -458,7 +492,13 @@ fn collect(
         }
     }
 
-    let by_path = badges.into_library(prefix, library, &map::is_dataless);
+    let mut by_path = badges.into_library(prefix, icase, library, &map::is_dataless);
+    // m5: FIFOs, sockets and devices the pre-walk found (gix lists none of them).
+    for rel in &facts.not_files {
+        let s = FileStatus::Unknown(UnknownWhy::NotAFile);
+        let e = by_path.entry(GitPath::new(rel)).or_insert(s);
+        *e = map::stronger(*e, s);
+    }
     if by_path.len() > limits.max_entries {
         return Err(too_many());
     }
@@ -535,7 +575,7 @@ mod tests {
             s2.fetch_add(1, Ordering::SeqCst);
             GitState::NotARepo
         });
-        assert!(matches!(second, GitState::Unavailable(GitError::Timeout)));
+        assert!(matches!(second, GitState::Unavailable(GitError::Paused)));
         release_tx.send(()).unwrap();
         wait_released(&k);
         assert_eq!(started.load(Ordering::SeqCst), 1, "a second worker started");

@@ -64,11 +64,54 @@ pub enum GitError {
     TrustPromoted,
     /// A gitfile, `commondir` or alternates point out of the repository.
     Redirected,
-    /// An unsupported format (`sha256`, `reftable`).
+    /// An unsupported format (`sha256`, `reftable`), or a repository config that cannot be read
+    /// (not a regular file, over the size cap, or not parseable: fail closed, m4).
     Unsupported,
-    /// The repository could not be read (the message never holds file contents).
-    Failed(String),
+    // ## m4b-t07-git (fix round 1)
+    /// A file the status would read to decide what is ignored or filtered (`.gitignore`,
+    /// `.gitattributes`, `.gitmodules`, `info/exclude`, `info/attributes`) is a cloud
+    /// placeholder. It is not opened (opening downloads it), so no status is given (R-T7-3).
+    Dataless,
+    /// The diagnostic "status is paused: a file in the repository does not respond". An
+    /// earlier status of this library is still blocked inside a file read that cannot be
+    /// interrupted (a FIFO named `.gitignore`, say). That worker is never joined, and no
+    /// second one starts while it runs, so the library answers this until the read returns
+    /// or the app restarts (m2). The call that hit the budget first answers `Timeout`.
+    Paused,
+    // ## m4b-t07-git
+    /// The repository could not be read. The kind is fixed text of ours; no message from
+    /// `gix` (which can quote config bytes) is kept (m3).
+    Failed(FailKind),
 }
+
+// ## m4b-t07-git (fix round 1, m3)
+/// What failed, as a fixed kind (never a library's text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailKind {
+    /// The library folder could not be resolved (missing, unreadable).
+    LibraryUnreadable,
+    /// The library's path inside its repository is not UTF-8.
+    PathNotUtf8,
+    /// A path's owner could not be read.
+    OwnerUnreadable,
+    /// `gix` could not open the repository.
+    Open,
+    /// The index could not be read.
+    Index,
+    /// The worktree comparison or the walk failed (an unreadable tracked file fails it all).
+    Worktree,
+    /// `HEAD` or the HEAD-vs-index comparison failed.
+    Head,
+    /// The pathspec or the attribute setup failed.
+    Setup,
+    /// More changed paths than `GitLimits::max_entries`: no partial map.
+    TooManyEntries,
+    /// A repository file over its size cap, or a library too large to pre-check (R-T7-2).
+    TooLarge,
+    /// The worker thread could not start, or stopped without an answer.
+    Worker,
+}
+// ## m4b-t07-git
 
 /// The status of every listed path that is not clean, keyed relative to the **library** root.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -125,6 +168,13 @@ pub enum UnknownWhy {
     Dataless,
     /// A submodule root; the no-op `SubmoduleStatus` never opens it (R-T0-1).
     Submodule,
+    // ## m4b-t07-git (fix round 1)
+    /// The index spells the path differently from the disk only by case (a case-only rename
+    /// on a case-insensitive file system). The key is the disk's spelling (R-T7-1).
+    CaseMismatch,
+    /// Not a regular file, link or folder (an untracked FIFO, socket or device; m5).
+    NotAFile,
+    // ## m4b-t07-git
 }
 
 /// Bounds of one status call.
@@ -150,8 +200,9 @@ impl Default for GitLimits {
 ///
 /// Blocks the calling thread for at most `limits.timeout` (call it from the blocking pool):
 /// the pipeline runs on its own worker, and at the deadline this answers
-/// `Unavailable(Timeout)` without waiting for it. While a worker for the same `library_root`
-/// is still running, a new call answers `Unavailable(Timeout)` at once and starts nothing.
+/// `Unavailable(Timeout)` without waiting for it. While a worker for the same library (by its
+/// canonical path, whatever spelling the caller uses) is still running, a new call answers
+/// `Unavailable(Paused)` at once and starts nothing. Pass the registry's canonical root.
 /// Never runs a program, never writes the index, never reads configuration outside the
 /// repository.
 pub fn status(library_root: &Path, limits: &GitLimits) -> GitState {

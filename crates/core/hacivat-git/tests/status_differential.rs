@@ -184,17 +184,16 @@ impl Repo {
     /// product maps its own answer (`alg/28` §0.4): Conflicted > New > Modified; deleted paths
     /// (absent from the disk) absent.
     fn oracle(&self) -> BTreeMap<String, String> {
-        let mut args = vec![
+        let args = vec![
             "--no-optional-locks",
             "status",
             "--porcelain=v2",
             "-z",
             "--untracked-files=all",
         ];
-        if !self.lib.is_empty() {
-            args.push("--");
-            args.push(&self.lib);
-        }
+        // The whole repository, filtered here: the CLI matches a pathspec case-sensitively,
+        // which would hide a case-renamed library folder from the oracle.
+        let folds = folds_case(&self.library());
         let raw = self.git_in(&self.work, &args);
         let mut out = BTreeMap::new();
         let mut recs = raw.split(|b| *b == 0).filter(|r| !r.is_empty());
@@ -218,24 +217,123 @@ impl Repo {
                 _ => (None, String::new()),
             };
             let Some(badge) = badge else { continue };
-            let rel = if self.lib.is_empty() {
-                path
-            } else {
-                match path.strip_prefix(&format!("{}/", self.lib)) {
-                    Some(r) => r.to_owned(),
-                    None => continue,
-                }
-            };
-            let Some(disk) = on_disk(&self.library(), &rel) else {
+            let Some((rel, case_differs)) = strip_lib(&path, &self.lib, folds) else {
                 continue;
             };
-            let e = out.entry(disk).or_insert_with(|| badge.to_owned());
+            // R-T7-1: the index spells the library folder differently only by case.
+            let badge = if case_differs {
+                "Unknown(CaseMismatch)"
+            } else {
+                badge
+            };
+            // Deleted paths are absent: asked of the OS (its own case and normalisation
+            // rules), not of the product's listing rule (fix round 1, I2).
+            if std::fs::symlink_metadata(self.library().join(&rel)).is_err() {
+                continue;
+            }
+            let e = out.entry(rel).or_insert_with(|| badge.to_owned());
             if rank(badge) > rank(e) {
                 *e = badge.to_owned();
             }
         }
         out
     }
+}
+
+/// NFC, the one normal form both sides are compared in (macOS keeps NFD names, the index
+/// holds NFC ones under `core.precomposeUnicode`).
+fn nfc(s: &str) -> String {
+    gix::utils::str::precompose(s.into()).into_owned()
+}
+
+/// The CLI's repository path relative to the library folder `lib`, in the CLI's spelling, and
+/// whether the folder matched only by folding case. The folder is compared in NFC, and ASCII
+/// case-insensitively only where the file system folds case (`folds`).
+fn strip_lib(path: &str, lib: &str, folds: bool) -> Option<(String, bool)> {
+    if lib.is_empty() {
+        return Some((path.to_owned(), false));
+    }
+    let n = lib.split('/').count();
+    let comps: Vec<&str> = path.split('/').collect();
+    if comps.len() <= n {
+        return None;
+    }
+    let (head, want) = (nfc(&comps[..n].join("/")), nfc(lib));
+    let rest = comps[n..].join("/");
+    if head == want {
+        Some((rest, false))
+    } else if folds && head.eq_ignore_ascii_case(&want) {
+        Some((rest, true))
+    } else {
+        None
+    }
+}
+
+/// Our answer against the CLI's, with two independent rules (fix round 1, I2):
+/// - every CLI path the OS finds on disk has exactly one key of ours equal to it in NFC, with
+///   the same badge; or, failing that, one equal to it ASCII case-insensitively, whose badge
+///   is `Unknown(CaseMismatch)`; and we have no key beyond those;
+/// - every key of ours is the disk's own spelling, component by component.
+fn assert_matches_cli(label: &str, st: &GitState, repo: &Repo) {
+    let got = ours(st);
+    let want = repo.oracle();
+    let mut matched = std::collections::BTreeSet::new();
+    for (p, b) in &want {
+        let exact: Vec<&String> = got.keys().filter(|k| nfc(k) == nfc(p)).collect();
+        if let [k] = exact.as_slice() {
+            assert_eq!(&got[*k], b, "{label}: {p}");
+            matched.insert((*k).clone());
+            continue;
+        }
+        let folded: Vec<&String> = got
+            .keys()
+            .filter(|k| nfc(k).eq_ignore_ascii_case(&nfc(p)))
+            .collect();
+        match folded.as_slice() {
+            [k] => {
+                assert_eq!(got[*k], "Unknown(CaseMismatch)", "{label}: {p} as {k}");
+                matched.insert((*k).clone());
+            }
+            _ => panic!("{label}: the CLI lists {p} ({b}); ours has no key for it: {got:?}"),
+        }
+    }
+    let extra: Vec<&String> = got.keys().filter(|k| !matched.contains(*k)).collect();
+    assert!(
+        extra.is_empty(),
+        "{label}: keys the CLI does not list: {extra:?}"
+    );
+    for k in got.keys() {
+        assert!(
+            is_disk_spelling(&repo.library(), k),
+            "{label}: {k:?} is not the disk's spelling"
+        );
+    }
+}
+
+/// Whether `rel` names an entry whose every component is byte-equal to a name its parent
+/// directory lists.
+fn is_disk_spelling(base: &Path, rel: &str) -> bool {
+    let mut dir = base.to_path_buf();
+    for comp in rel.split('/') {
+        let listed = std::fs::read_dir(&dir).is_ok_and(|d| {
+            d.filter_map(Result::ok)
+                .any(|e| e.file_name().to_str() == Some(comp))
+        });
+        if !listed {
+            return false;
+        }
+        dir.push(comp);
+    }
+    true
+}
+
+/// Whether the file system under `dir` folds case (APFS, NTFS by default).
+fn folds_case(dir: &Path) -> bool {
+    let probe = dir.join("hv-t07-CASE-probe");
+    std::fs::write(&probe, b"").unwrap();
+    let folds = std::fs::symlink_metadata(dir.join("hv-t07-case-probe")).is_ok();
+    std::fs::remove_file(&probe).unwrap();
+    folds
 }
 
 fn rank(b: &str) -> u8 {
@@ -257,25 +355,6 @@ fn xy_badge(xy: &str) -> Option<&'static str> {
     } else {
         None
     }
-}
-
-/// `rel` (as the CLI spells it, precomposed on macOS) as the disk spells it, component by
-/// component; `None` when the path is not on the disk.
-fn on_disk(base: &Path, rel: &str) -> Option<String> {
-    let mut dir = base.to_path_buf();
-    let mut parts = Vec::new();
-    for comp in rel.split('/') {
-        let want = gix::utils::str::precompose(comp.into()).into_owned();
-        let found = std::fs::read_dir(&dir)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .find(|n| n == comp || gix::utils::str::precompose(n.as_str().into()) == want)?;
-        dir.push(&found);
-        parts.push(found);
-    }
-    std::fs::symlink_metadata(&dir).ok()?;
-    Some(parts.join("/"))
 }
 
 /// Our answer as `path -> badge` text, the shape the oracle has.
@@ -302,10 +381,14 @@ fn index_bytes(repo: &Repo) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The fixtures of `alg/28` §0.4 (18) plus a linked worktree and a `clone --shared` (n2).
+// The fixtures of `alg/28` §0.4 (18) plus a linked worktree and a `clone --shared` (n2), and
+// (fix round 1) an NFD-spelled library folder (I1) and case-only renames (I2).
 // ---------------------------------------------------------------------------------------------
 
-const FIXTURES: [&str; 20] = [
+const FIXTURES: [&str; 23] = [
+    "nfd-library-folder",
+    "case-only-rename",
+    "case-only-library-rename",
     "clean",
     "worktree-modified",
     "index-modified",
@@ -331,6 +414,10 @@ const FIXTURES: [&str; 20] = [
 /// The NFD spelling of `café` and `über` (decomposed accents), as macOS keeps such names.
 const NFD_CAFE: &str = "cafe\u{301}.sql";
 const NFD_UBER: &str = "u\u{308}ber";
+/// `çalışma` ("work") decomposed: `c` + U+0327, `s` + U+0327 (`ı` has no decomposition).
+const NFD_CALISMA: &str = "c\u{327}al\u{131}s\u{327}ma";
+/// `İşler` decomposed: `I` + U+0307, `s` + U+0327.
+const NFD_ISLER: &str = "I\u{307}s\u{327}ler.sql";
 
 fn base(r: &Repo) {
     r.write("a.sql", b"select 1;\n");
@@ -342,6 +429,36 @@ fn base(r: &Repo) {
 fn build_fixture(name: &str) -> Repo {
     let mut r = Repo::init();
     match name {
+        // I1: the library folder itself is NFD on disk (macOS keeps it), the index NFC under
+        // `core.precomposeUnicode`; a Turkish name, the primary user's case.
+        "nfd-library-folder" => {
+            r.write(&format!("{NFD_CALISMA}/a.sql"), b"select 1;\n");
+            r.write(&format!("{NFD_CALISMA}/{NFD_ISLER}"), b"select 2;\n");
+            r.write("outside.sql", b"select 3;\n");
+            r.commit_all();
+            r.write(&format!("{NFD_CALISMA}/a.sql"), b"select 11;\n");
+            r.write(&format!("{NFD_CALISMA}/{NFD_ISLER}"), b"select 22;\n");
+            r.write(&format!("{NFD_CALISMA}/yeni.sql"), b"select 4;\n");
+            r.write("outside.sql", b"select 33;\n");
+            r.lib = NFD_CALISMA.into();
+        }
+        // I2: `Foo.sql` committed, renamed on disk to `foo.sql` (no CLI), then changed.
+        "case-only-rename" => {
+            base(&r);
+            r.write("Foo.sql", b"select 1;\n");
+            r.commit_all();
+            std::fs::rename(r.root().join("Foo.sql"), r.root().join("foo.sql")).unwrap();
+            r.write("foo.sql", b"select 'changed';\n");
+        }
+        // I2: the library folder `scripts/` renamed on disk to `Scripts/`, a file changed.
+        "case-only-library-rename" => {
+            r.write("scripts/a.sql", b"select 1;\n");
+            r.write("scripts/b.sql", b"select 2;\n");
+            r.commit_all();
+            std::fs::rename(r.root().join("scripts"), r.root().join("Scripts")).unwrap();
+            r.write("Scripts/a.sql", b"select 'changed';\n");
+            r.lib = "Scripts".into();
+        }
         "clean" => base(&r),
         "worktree-modified" => {
             base(&r);
@@ -496,10 +613,9 @@ fn status_matches_git_cli() {
         let before = index_bytes(&repo);
         // Ours first: the CLI may refresh the index (never with --no-optional-locks, but the
         // order also keeps the index check meaningful).
-        let got = ours(&repo.status());
+        let st = repo.status();
         assert_eq!(index_bytes(&repo), before, "{fx}: the index changed");
-        let want = repo.oracle();
-        assert_eq!(got, want, "{fx}");
+        assert_matches_cli(fx, &st, &repo);
         equal += 1;
     }
     let (_, _, v) = cli_version();
@@ -544,6 +660,102 @@ fn nfd_named_modified_file_has_badge() {
         "key {nested:?} in {:?}",
         s.by_path
     );
+}
+
+/// P1 (I1): the library folder is a Turkish NFD name inside the repository. Every change must
+/// show, keyed by the disk's (NFD) spelling, never an empty "clean" map.
+#[test]
+fn nfd_named_library_folder_has_badges() {
+    let repo = build_fixture("nfd-library-folder");
+    let st = repo.status();
+    let GitState::Ready(s) = &st else {
+        panic!("expected Ready, got {st:?}");
+    };
+    let listed: Vec<String> = std::fs::read_dir(repo.library())
+        .unwrap()
+        .filter_map(|e| e.unwrap().file_name().into_string().ok())
+        .collect();
+    let isler = listed
+        .iter()
+        .find(|n| nfc(n) == nfc(NFD_ISLER))
+        .expect("listed");
+    assert_eq!(
+        s.by_path.get("a.sql"),
+        Some(&FileStatus::Modified),
+        "{:?}",
+        s.by_path
+    );
+    assert_eq!(
+        s.by_path.get(isler.as_str()),
+        Some(&FileStatus::Modified),
+        "{:?}",
+        s.by_path
+    );
+    assert_eq!(
+        s.by_path.get("yeni.sql"),
+        Some(&FileStatus::New),
+        "{:?}",
+        s.by_path
+    );
+    assert_eq!(
+        s.by_path.len(),
+        3,
+        "outside.sql is not in the library: {:?}",
+        s.by_path
+    );
+}
+
+/// P2 (I2, R-T7-1): `Foo.sql` in the index, `foo.sql` on disk, changed. On a file system that
+/// folds case the CLI reports `Foo.sql` modified; ours keys the disk's `foo.sql` with
+/// `Unknown(CaseMismatch)`, never drops it. The expected side is read from the CLI output and
+/// `read_dir`, not from the product's mapping. Where the file system does not fold case, the
+/// rename is a deletion plus a new file.
+#[test]
+fn case_only_rename_is_unknown_case_mismatch() {
+    for fx in ["case-only-rename", "case-only-library-rename"] {
+        let repo = build_fixture(fx);
+        let folds = folds_case(&repo.library());
+        let raw = String::from_utf8(repo.git_in(
+            &repo.work,
+            &["--no-optional-locks", "status", "--porcelain=v2", "-z"],
+        ))
+        .unwrap();
+        let got = ours(&repo.status());
+        let (changed, key) = if fx == "case-only-rename" {
+            ("Foo.sql", "foo.sql")
+        } else {
+            ("scripts/a.sql", "a.sql")
+        };
+        let disk_name = std::fs::read_dir(repo.library())
+            .unwrap()
+            .filter_map(|e| e.unwrap().file_name().into_string().ok())
+            .find(|n| n.eq_ignore_ascii_case(key));
+        assert_eq!(
+            disk_name.as_deref(),
+            Some(key),
+            "{fx}: the disk spells it {key}"
+        );
+        if folds {
+            assert!(
+                raw.split('\0')
+                    .any(|r| r.starts_with("1 .M") && r.ends_with(changed)),
+                "{fx}: the CLI reports {changed} modified: {raw:?}"
+            );
+            assert_eq!(
+                got.get(key).map(String::as_str),
+                Some("Unknown(CaseMismatch)"),
+                "{fx}: {got:?}"
+            );
+            assert!(!got.contains_key(changed), "{fx}: {got:?}");
+        } else {
+            assert_eq!(
+                got.get(key).map(String::as_str),
+                Some("New"),
+                "{fx}: {got:?}"
+            );
+        }
+        fact(&format!("t07 {fx} folds_case={folds} ours={got:?}"));
+    }
 }
 
 #[test]
@@ -829,14 +1041,150 @@ fn timeout_is_unavailable_not_partial() {
         matches!(first, GitState::Unavailable(GitError::Timeout)),
         "{first:?}"
     );
-    // The first worker is still blocked in the FIFO's open: no second worker, no partial answer.
+    // The first worker is still blocked in the FIFO's open: no second worker, no partial
+    // answer; the library says its status is paused (m2).
     let second = status(&repo.library(), &limits);
     assert!(
-        matches!(second, GitState::Unavailable(GitError::Timeout)),
+        matches!(second, GitState::Unavailable(GitError::Paused)),
         "{second:?}"
     );
     // Release the stuck worker (a writer completes its open; closing gives it end of file).
     drop(std::fs::File::options().write(true).open(&fifo).unwrap());
+}
+
+/// P4 (m1): the one-stuck-worker cap is per canonical library, whatever spelling the caller
+/// uses: through a symlinked alias the library still answers `Paused` and starts no worker.
+#[cfg(unix)]
+#[test]
+fn stuck_worker_cap_is_per_canonical_library() {
+    let repo = build_fixture("worktree-modified");
+    let fifo = repo.root().join("reports/.gitignore");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let alias = canonical(repo.env.path()).join("alias");
+    std::os::unix::fs::symlink(repo.root(), &alias).unwrap();
+    let limits = GitLimits {
+        timeout: std::time::Duration::from_millis(300),
+        ..GitLimits::default()
+    };
+    let first = status(&repo.library(), &limits);
+    assert!(
+        matches!(first, GitState::Unavailable(GitError::Timeout)),
+        "{first:?}"
+    );
+    for spelling in [
+        alias.clone(),
+        alias.join("."),
+        repo.root().join("reports/.."),
+    ] {
+        let st = status(&spelling, &limits);
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Paused)),
+            "{spelling:?}: {st:?}"
+        );
+    }
+    drop(std::fs::File::options().write(true).open(&fifo).unwrap());
+}
+
+/// R-T7-3 (I4): a `.gitignore` or `.gitattributes` the status would read is a cloud
+/// placeholder: it is not opened (that downloads it), and the library answers
+/// `Unavailable(Dataless)`. Tracked and untracked, at the library root and deeper.
+#[test]
+fn dataless_control_file_is_unavailable() {
+    for (case, file, tracked) in [
+        ("tracked-gitignore", ".gitignore", true),
+        ("untracked-gitignore", "reports/.gitignore", false),
+        ("tracked-gitattributes", ".gitattributes", true),
+        ("untracked-gitattributes", "reports/.gitattributes", false),
+    ] {
+        let repo = build_fixture("clean");
+        repo.write(file, b"*.tmp\n");
+        if tracked {
+            repo.commit_all();
+        }
+        repo.write("a.sql", b"select 'changed';\n");
+        let st = hacivat_git::testing::status_treating_as_dataless(
+            &repo.library(),
+            &GitLimits::default(),
+            &[file],
+        );
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Dataless)),
+            "{case}: {st:?}"
+        );
+        // Control: not a placeholder, the status is there.
+        assert_eq!(
+            ours(&repo.status()).get("a.sql").map(String::as_str),
+            Some("Modified"),
+            "{case}"
+        );
+    }
+}
+
+/// m5: an untracked FIFO is not a file: `Unknown(NotAFile)`, never New, and never opened.
+#[cfg(unix)]
+#[test]
+fn untracked_fifo_is_unknown() {
+    let repo = build_fixture("clean");
+    let fifo = repo.root().join("pipe.sql");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let got = ours(&repo.status());
+    assert_eq!(
+        got.get("pipe.sql").map(String::as_str),
+        Some("Unknown(NotAFile)"),
+        "{got:?}"
+    );
+}
+
+/// m4: a repository config that cannot be read (garbage, a symlink, too large) is
+/// `Unsupported`, not opened anyway.
+#[test]
+fn unreadable_config_is_unsupported() {
+    let garbage = build_fixture("clean");
+    std::fs::write(
+        garbage.root().join(".git/config"),
+        b"[core\n\tbare = = =\n[[[",
+    )
+    .unwrap();
+    let st = garbage.status();
+    assert!(
+        matches!(st, GitState::Unavailable(GitError::Unsupported)),
+        "garbage: {st:?}"
+    );
+    let big = build_fixture("clean");
+    let cfg = big.root().join(".git/config");
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!("# {}\n", "x".repeat(2 * 1024 * 1024)));
+    std::fs::write(&cfg, text).unwrap();
+    let st = big.status();
+    assert!(
+        matches!(st, GitState::Unavailable(GitError::Unsupported)),
+        "too large: {st:?}"
+    );
+    #[cfg(unix)]
+    {
+        let linked = build_fixture("clean");
+        let cfg = linked.root().join(".git/config");
+        let real = canonical(linked.env.path()).join("real.cfg");
+        std::fs::rename(&cfg, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &cfg).unwrap();
+        let st = linked.status();
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Unsupported)),
+            "symlink: {st:?}"
+        );
+    }
 }
 
 /// More changed paths than `max_entries`: no partial map (badges missing would read as clean).

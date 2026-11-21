@@ -1,13 +1,20 @@
 //! From repository-relative changes to library-relative badges (HV-SCRIPT-11 steps 5 and 6).
 //!
-//! - **Precedence**: `Unknown` overrides every other badge (a filtered, dataless or submodule
-//!   path is never shown as if its comparison were exact); then Conflicted > New > Modified
-//!   (`alg/28` §0.4: `AM` is New, a staged rename's destination is New).
+//! - **Precedence**: `Unknown` overrides every other badge (a filtered, dataless, submodule,
+//!   case-mismatched or non-file path is never shown as if its comparison were exact); then
+//!   Conflicted > New > Modified (`alg/28` §0.4: `AM` is New, a staged rename's destination is
+//!   New).
+//! - **One normal form for comparing** (fix round 1, I1): the library prefix and index paths
+//!   are compared component by component in NFC (macOS keeps an NFD folder name while the index
+//!   holds NFC under `core.precomposeUnicode`), and ASCII case-insensitively where the file
+//!   system folds case (`core.ignoreCase`).
 //! - **Keys**: the repository path minus the library prefix, spelled as the **disk** spells it,
-//!   byte for byte, so that it equals the scanner's `RelPath` (R-T1a-2 carry). The index may
-//!   hold a precomposed (NFC) name where macOS keeps the decomposed (NFD) one; each component
-//!   is matched against its directory's listing, exactly first, then by NFC equality. A path
-//!   that is not on the disk (deleted) has no badge, as the plan says; neither has a name that
+//!   byte for byte, so that it equals the scanner's `RelPath` (R-T1a-2 carry). Each component
+//!   is matched against its directory's listing: exactly, then by NFC equality, then (I2,
+//!   R-T7-1) by the file system's own lookup, identified by inode on Unix and by a unique
+//!   ASCII case-insensitive match on Windows. A path found only that last way, or under a
+//!   prefix that matched only by case, is `Unknown(CaseMismatch)`, never dropped. A path the
+//!   file system cannot find (deleted) has no badge, as the plan says; neither has a name that
 //!   is not UTF-8 (the scanner cannot list it).
 //! - **Dataless** (R-M4b-15): a cloud placeholder's flag is read from `lstat` metadata only.
 
@@ -26,9 +33,21 @@ fn rank(s: FileStatus) -> u8 {
         FileStatus::New => 2,
         FileStatus::Conflicted => 3,
         FileStatus::Unknown(UnknownWhy::Filtered) => 4,
-        FileStatus::Unknown(UnknownWhy::Dataless) => 5,
-        FileStatus::Unknown(UnknownWhy::Submodule) => 6,
+        FileStatus::Unknown(UnknownWhy::CaseMismatch) => 5,
+        FileStatus::Unknown(UnknownWhy::NotAFile) => 6,
+        FileStatus::Unknown(UnknownWhy::Dataless) => 7,
+        FileStatus::Unknown(UnknownWhy::Submodule) => 8,
     }
+}
+
+/// The stronger of two badges.
+pub(crate) fn stronger(a: FileStatus, b: FileStatus) -> FileStatus {
+    if rank(b) > rank(a) { b } else { a }
+}
+
+/// NFC (the one normal form paths are compared in).
+pub(crate) fn nfc(s: &str) -> String {
+    gix::utils::str::precompose(s.into()).into_owned()
 }
 
 /// Repository-relative badges, merged by precedence.
@@ -40,9 +59,7 @@ pub(crate) struct Badges {
 impl Badges {
     pub(crate) fn add(&mut self, path: &BStr, s: FileStatus) {
         let e = self.by_repo_path.entry(path.to_owned()).or_insert(s);
-        if rank(s) > rank(*e) {
-            *e = s;
-        }
+        *e = stronger(*e, s);
     }
 
     pub(crate) fn get(&self, path: &BStr) -> Option<FileStatus> {
@@ -54,11 +71,13 @@ impl Badges {
     }
 
     /// The badges keyed relative to the library root at `library` (canonical), whose path
-    /// relative to the worktree is `prefix`; dataless paths found on the way become
-    /// `Unknown(Dataless)`.
+    /// relative to the worktree is `prefix` (disk spelling); `icase` when the file system
+    /// folds case. Dataless paths found on the way become `Unknown(Dataless)`, case-only
+    /// mismatches `Unknown(CaseMismatch)`.
     pub(crate) fn into_library(
         self,
         prefix: &str,
+        icase: bool,
         library: &Path,
         is_dataless: &dyn Fn(&std::fs::Metadata) -> bool,
     ) -> BTreeMap<GitPath, FileStatus> {
@@ -68,45 +87,58 @@ impl Badges {
             let Ok(repo_path) = repo_path.to_str() else {
                 continue;
             };
-            let Some(rel) = strip_prefix(repo_path, prefix) else {
+            let Some((rel, prefix_case)) = lib_relative(repo_path, prefix, icase) else {
                 continue;
             };
-            let Some((disk, full)) = lister.on_disk(library, rel) else {
+            let Some(found) = lister.on_disk(library, &rel) else {
                 continue;
             };
-            let s = match s {
-                FileStatus::Unknown(_) => s,
-                _ if std::fs::symlink_metadata(&full).is_ok_and(|m| is_dataless(&m)) => {
-                    FileStatus::Unknown(UnknownWhy::Dataless)
-                }
-                _ => s,
-            };
-            let key = GitPath::new(&disk);
-            let e = out.entry(key).or_insert(s);
-            if rank(s) > rank(*e) {
-                *e = s;
+            let mut s = s;
+            if !matches!(s, FileStatus::Unknown(_))
+                && std::fs::symlink_metadata(&found.full).is_ok_and(|m| is_dataless(&m))
+            {
+                s = FileStatus::Unknown(UnknownWhy::Dataless);
             }
+            if prefix_case || found.case_only {
+                s = stronger(s, FileStatus::Unknown(UnknownWhy::CaseMismatch));
+            }
+            let e = out.entry(GitPath::new(&found.key)).or_insert(s);
+            *e = stronger(*e, s);
         }
         out
     }
 }
 
-/// `path` relative to the library `prefix` (`""` is the worktree), or `None` outside it.
-pub(crate) fn strip_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+/// The repository path `path` relative to the library folder `prefix` (disk spelling, `""` for
+/// the worktree), in the index's spelling, and whether the folder matched only by folding case.
+/// Compared component by component in NFC, and ASCII case-insensitively when `icase`. `None`
+/// outside the library.
+pub(crate) fn lib_relative(path: &str, prefix: &str, icase: bool) -> Option<(String, bool)> {
     if prefix.is_empty() {
-        return Some(path).filter(|p| !p.is_empty());
+        return (!path.is_empty()).then(|| (path.to_owned(), false));
     }
-    path.strip_prefix(prefix)?
-        .strip_prefix('/')
-        .filter(|r| !r.is_empty())
+    let n = prefix.split('/').count();
+    let comps: Vec<&str> = path.split('/').collect();
+    if comps.len() <= n {
+        return None;
+    }
+    let (head, want) = (nfc(&comps[..n].join("/")), nfc(prefix));
+    let rest = comps[n..].join("/");
+    if head == want {
+        Some((rest, false))
+    } else if icase && head.eq_ignore_ascii_case(&want) {
+        Some((rest, true))
+    } else {
+        None
+    }
 }
 
-/// Whether the repository path lies inside the library `prefix`.
-pub(crate) fn under_prefix(path: &BStr, prefix: &str) -> bool {
-    prefix.is_empty()
-        || path
-            .strip_prefix(prefix.as_bytes())
-            .is_some_and(|r| r.first() == Some(&b'/'))
+/// A path as the disk spells it.
+struct OnDisk {
+    key: String,
+    full: PathBuf,
+    /// Some component was found only through the file system's case folding.
+    case_only: bool,
 }
 
 /// Directory listings, read once each (names only, never contents).
@@ -124,8 +156,8 @@ impl Lister {
                 .filter_map(Result::ok)
                 .filter_map(|e| e.file_name().into_string().ok())
                 .map(|n| {
-                    let nfc = gix::utils::str::precompose(n.as_str().into()).into_owned();
-                    (n, nfc)
+                    let f = nfc(&n);
+                    (n, f)
                 })
                 .collect();
             self.dirs.insert(dir.to_path_buf(), names);
@@ -133,26 +165,74 @@ impl Lister {
         self.dirs.get(dir).map(Vec::as_slice)
     }
 
-    /// `rel` as the disk spells it under `base`, and its full path; `None` when absent.
-    fn on_disk(&mut self, base: &Path, rel: &str) -> Option<(String, PathBuf)> {
+    /// `rel` (the index's spelling) as the disk spells it under `base`; `None` when the file
+    /// system cannot find it.
+    fn on_disk(&mut self, base: &Path, rel: &str) -> Option<OnDisk> {
         let mut dir = base.to_path_buf();
         let mut parts: Vec<String> = Vec::new();
+        let mut case_only = false;
         for comp in rel.split('/') {
             if comp.is_empty() || comp == "." || comp == ".." {
                 return None;
             }
+            let want = nfc(comp);
             let names = self.names(&dir)?;
-            let found = match names.iter().find(|(n, _)| n == comp) {
-                Some((n, _)) => n.clone(),
+            let exact = names
+                .iter()
+                .find(|(n, _)| n == comp)
+                .or_else(|| names.iter().find(|(_, f)| *f == want))
+                .map(|(n, _)| n.clone());
+            let found = match exact {
+                Some(n) => n,
                 None => {
-                    let want = gix::utils::str::precompose(comp.into());
-                    names.iter().find(|(_, nfc)| *nfc == want)?.0.clone()
+                    // The file system's own lookup (case folding): never dropped (R-T7-1).
+                    let md = std::fs::symlink_metadata(dir.join(comp)).ok()?;
+                    case_only = true;
+                    same_entry(&dir, names, &md, &want).unwrap_or_else(|| comp.to_owned())
                 }
             };
             dir.push(&found);
             parts.push(found);
         }
-        Some((parts.join("/"), dir))
+        Some(OnDisk {
+            key: parts.join("/"),
+            full: dir,
+            case_only,
+        })
+    }
+}
+
+/// The listed name in `dir` that is the entry `md` describes: by inode on Unix.
+#[cfg(unix)]
+fn same_entry(
+    dir: &Path,
+    names: &[(String, String)],
+    md: &std::fs::Metadata,
+    _want: &str,
+) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    names
+        .iter()
+        .find(|(n, _)| {
+            std::fs::symlink_metadata(dir.join(n))
+                .is_ok_and(|m| m.dev() == md.dev() && m.ino() == md.ino())
+        })
+        .map(|(n, _)| n.clone())
+}
+
+/// The listed name in `dir` that is the entry `md` describes: `std` has no stable file id on
+/// Windows, so the one name equal to `want` ASCII case-insensitively (in NFC).
+#[cfg(not(unix))]
+fn same_entry(
+    _dir: &Path,
+    names: &[(String, String)],
+    _md: &std::fs::Metadata,
+    want: &str,
+) -> Option<String> {
+    let mut hits = names.iter().filter(|(_, f)| f.eq_ignore_ascii_case(want));
+    match (hits.next(), hits.next()) {
+        (Some((n, _)), None) => Some(n.clone()),
+        _ => None,
     }
 }
 
@@ -208,16 +288,80 @@ mod tests {
         assert_eq!(b.get(p), Some(FileStatus::Unknown(UnknownWhy::Filtered)));
     }
 
+    fn rel(path: &str, prefix: &str, icase: bool) -> Option<(String, bool)> {
+        lib_relative(path, prefix, icase)
+    }
+
     #[test]
     fn prefix_is_stripped_and_paths_outside_are_dropped() {
-        assert_eq!(strip_prefix("lib/a.sql", "lib"), Some("a.sql"));
-        assert_eq!(strip_prefix("lib/x/a.sql", "lib"), Some("x/a.sql"));
-        assert_eq!(strip_prefix("library/a.sql", "lib"), None);
-        assert_eq!(strip_prefix("lib", "lib"), None);
-        assert_eq!(strip_prefix("a.sql", ""), Some("a.sql"));
-        assert!(under_prefix("lib/a.sql".into(), "lib"));
-        assert!(!under_prefix("library/a.sql".into(), "lib"));
-        assert!(under_prefix("anything".into(), ""));
+        assert_eq!(
+            rel("lib/a.sql", "lib", false),
+            Some(("a.sql".into(), false))
+        );
+        assert_eq!(
+            rel("lib/x/a.sql", "lib", false),
+            Some(("x/a.sql".into(), false))
+        );
+        assert_eq!(rel("library/a.sql", "lib", false), None);
+        assert_eq!(rel("lib", "lib", false), None);
+        assert_eq!(rel("a.sql", "", false), Some(("a.sql".into(), false)));
+        assert_eq!(
+            rel("a/b/c.sql", "a/b", false),
+            Some(("c.sql".into(), false))
+        );
+    }
+
+    /// I1: an NFD library folder on disk against the index's NFC spelling (Turkish names).
+    #[test]
+    fn the_prefix_is_compared_in_nfc() {
+        let nfd = "c\u{327}al\u{131}s\u{327}ma";
+        let nfc_path = "\u{e7}al\u{131}\u{15f}ma/a.sql";
+        assert_eq!(rel(nfc_path, nfd, false), Some(("a.sql".into(), false)));
+        assert_eq!(
+            rel(&format!("{nfd}/a.sql"), nfd, false),
+            Some(("a.sql".into(), false))
+        );
+        // Dotless `ı` is not `i`, in any normal form.
+        assert_eq!(rel("\u{e7}alis\u{327}ma/a.sql", nfd, false), None);
+    }
+
+    /// I2: a folder that matches only by case does so only where the file system folds case,
+    /// and says so.
+    #[test]
+    fn the_prefix_matches_by_case_only_when_the_file_system_folds_it() {
+        assert_eq!(rel("scripts/a.sql", "Scripts", false), None);
+        assert_eq!(
+            rel("scripts/a.sql", "Scripts", true),
+            Some(("a.sql".into(), true))
+        );
+        assert_eq!(
+            rel("Scripts/a.sql", "Scripts", true),
+            Some(("a.sql".into(), false))
+        );
+    }
+
+    /// I2 (R-T7-1): the index's `Foo.sql` for the disk's `foo.sql`, on a file system that folds
+    /// case, is the disk's key with `Unknown(CaseMismatch)`; never dropped. Where the file
+    /// system does not fold case, the index spelling is not on disk: no badge.
+    #[test]
+    fn a_case_only_difference_is_unknown_and_keyed_by_the_disk() {
+        let t = tempfile::tempdir().unwrap();
+        let lib = std::fs::canonicalize(t.path()).unwrap();
+        std::fs::write(lib.join("foo.sql"), b"x").unwrap();
+        let folds = std::fs::symlink_metadata(lib.join("FOO.sql")).is_ok();
+        let mut b = Badges::default();
+        b.add("Foo.sql".into(), FileStatus::Modified);
+        let out = b.into_library("", folds, &lib, &never);
+        if folds {
+            assert_eq!(
+                out.get("foo.sql"),
+                Some(&FileStatus::Unknown(UnknownWhy::CaseMismatch)),
+                "{out:?}"
+            );
+            assert_eq!(out.len(), 1);
+        } else {
+            assert!(out.is_empty(), "{out:?}");
+        }
     }
 
     #[test]
@@ -235,7 +379,7 @@ mod tests {
         b.add("lib/plain.sql".into(), FileStatus::New);
         b.add("lib/gone.sql".into(), FileStatus::Modified);
         b.add("outside.sql".into(), FileStatus::Modified);
-        let out = b.into_library("lib", &lib, &never);
+        let out = b.into_library("lib", false, &lib, &never);
         let want_key = format!("{nfd_dir}/{nfd_file}");
         assert_eq!(
             out.get(want_key.as_str()),
@@ -256,7 +400,7 @@ mod tests {
         b.add("cloud.sql".into(), FileStatus::New);
         b.add("local.sql".into(), FileStatus::New);
         // A stand-in for the flag: empty files are "placeholders" here.
-        let out = b.into_library("", &lib, &|m| m.len() == 0);
+        let out = b.into_library("", false, &lib, &|m| m.len() == 0);
         assert_eq!(
             out.get("cloud.sql"),
             Some(&FileStatus::Unknown(UnknownWhy::Dataless))
