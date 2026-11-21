@@ -25,6 +25,11 @@
 //! - [`watch::OsEventSource`] is built only as `new_debouncer_opt::<_, RecommendedWatcher,
 //!   NoCache>` with `follow_symlinks(false)` (R-T0-2) and watches nothing.
 //!
+//! ## m4b-t04-scanner (named exception, fix round 1 m9)
+//! Task 4 replaced three of those stubs: [`envscope::visible`], [`pathsafe::component`] and
+//! [`pathsafe::join`] now apply the real rules, and [`scan::scan`] lists a library (ADR 0009
+//! `m4b-t04`).
+//!
 //! Module owners: `registry`, `manifest`, `binding`, `names` (Task 3); `scan`, `pathsafe`,
 //! `envscope`, `tree`, `dataless` (Task 4); `fileio`, `encoding`, `recovery` (Task 5); `secrets`
 //! (Task 6); `watch` (Task 9); `service`, `index`, `events` (Task 10).

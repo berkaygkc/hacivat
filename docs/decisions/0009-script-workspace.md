@@ -287,3 +287,130 @@ D7 and HV-SCRIPT-01 step 4 say the writes are relative to the validated director
   The `hui-editor-t2-*` and `hui-editor-paste-confirm-*` ids stay with Task 11.
 - **Icons.** `folder` and `file-text` are new SVGs. `IconName` also gains `Download` and `FileDiff`, whose SVGs already ship.
 - **Placeholders for Task 1a.** `scripts::{DatabaseName, LibraryId, PathError, RelPath}` stand in for Task 1a's `hacivat_scripts` types, which were not on its manifests commit. They copy the API Task 1a merged (`Display` and string serde for `LibraryId`, `RelPath::parse -> Result`, `components`, `DatabaseName::new`), so the controller swaps them for one `pub use` line. `scripts::parse_library_id` and `scripts::file_name` are the app's own helpers over that API. `scripts::tabs::display_name` stands in for Task 4's display escaping.
+
+## m4b-t04 — scan and scope
+
+Task 4 fills `pathsafe`, `scan`, `envscope`, `tree` and `dataless` (HV-SCRIPT-03, -04; R-M4b-6, -12..15, -23; Q3 option (a), Q15; alg/28 C11).
+
+### Names (`pathsafe::component`)
+
+- Refused on every host: empty, `.`, `..`, `/` or `\`, NUL, any control character (C0, DEL, C1), more than 255 bytes, not UTF-8. Bidi and invisible characters are allowed as names. Display escapes them.
+- Refused on Windows only: `<>:"|?*` (the plan named `:`; the other six cannot be created through Win32 either), a trailing dot or space, and the device names with any extension. The device names are the plan's list plus `COM0`, `LPT0`, the superscript `COM¹²³`/`LPT¹²³`, `CONIN$` and `CONOUT$`. The stem before the first `.` is compared with its trailing spaces dropped, so `con .sql` counts.
+  - On Unix these names stay ordinary. A macOS teammate's `con.sql` lists on macOS.
+  - `component_on(name, Host)` runs the Windows rules on every CI runner.
+- Signature: the seam's `Result<&str, PathError>` is kept. The plan's `NameProblem` is `PathError::Name(NameProblem)`, and its `PathProblem` is the other `PathError` variants. Task 1a's `PathError::NotImplemented` is gone, so a stale caller fails to compile instead of silently matching nothing.
+
+### Joining (`pathsafe::join`)
+
+- Every component is re-validated. The skipped ones (a leading `.`, `node_modules`) are refused (`Name(Skipped)`), so nothing opens `.git/` or `.hacivat/` through a library path. Task 3's manifest writer has its own fd-relative code.
+- The root must still resolve, both as chosen (`path`) and as stored (`canonical`), to `canonical`. Otherwise the answer is `RootChanged`.
+- Folders on the way are checked with `symlink_metadata`. A link or junction is `LinkOnPath`, even one that stays inside, and a file on the way is `NotAFolder`. Then the parent's `realpath` must lie under the root.
+- The last component:
+  - absent: the path is answered (new script);
+  - a FIFO, socket or device: `NotAFile`;
+  - a file or folder: its `realpath` must lie under the root;
+  - a file link: answers its target only when the scan would list that target itself (a regular `.sql`/`.md` file inside the root, in no skipped folder). Otherwise `OutsideRoot`, which covers out, dangling, a loop, a folder, `.git/config`, `notes.txt` and the root itself. The link is resolved as text inside the root (fix round 1 below).
+- Containment is a component-wise byte prefix of canonical paths, never a case fold. On a case-insensitive volume, `realpath` returns the stored case on both sides.
+- `join` is a check, as fresh as the call. Task 5 still opens relative to a directory handle with `O_NOFOLLOW` (HV-SCRIPT-03 step 8, carries n8). Since fix round 1 it answers a `Joined` (what it resolved), and the caller re-checks scope.
+
+### The scan (`scan::scan`)
+
+- Through the `Fs` seam, which has `read_dir` (names, capped), `symlink_metadata`, `canonicalize` and `read_link`. It has no read method, so a scan cannot read contents by construction.
+  - Fix round 1 replaced the first round's `resolve` (OS `realpath`, which walked outside paths) with `read_link`, and loops are counted as hops.
+  - Tests inject an in-memory `Fs`.
+- The walk is iterative, with an explicit stack. The names of each folder are visited in byte order. A stop on the file or depth limit is deterministic. A stop on the visited limit is not: since fix round 1 (m3) a folder is read only up to the cap, so which names it yields first depends on the OS's order. The output is in tree order (`tree::order`): an ancestor before its contents, folders before files among siblings, then the name's bytes.
+- Not listed:
+  - dot names (folders and files, C11) and `node_modules` (ASCII case-insensitive), skipped silently;
+  - names that fail `component`, each with a `Diag::BadName` that holds the display form;
+  - FIFOs, sockets and devices;
+  - folders without a listed file below them.
+- File links are resolved once:
+  - `InsideLink` takes the target's metadata. Its scope is the intersection of the link's scope and the target's (`envscope::combine`). Without that, a plain `a.sql` pointing at `@staging/drop_all.sql` would show a staging-only script on production.
+  - No system call names a path outside the root (fix round 1, I3; the first round's `realpath` did).
+  - A link to a folder is never followed. One named like a script is listed as `OutsideLink`; any other is not listed.
+- Limits are R-M4b-14 plus two the plan did not name:
+  - 20,000 files;
+  - depth 32: a listed entry has at most 32 components;
+  - 200,000 visited names: a library full of `.txt` files also stops;
+  - 256 diagnostics, with the environment diagnostics first and the rest counted in `suppressed`.
+  - Any of the first three stops the whole scan where it is, with `stopped` set and what was found kept.
+- `ScanResult.root` reports a root that could not be scanned: `Missing`, `Changed` (repointed, or a stored path that is not canonical) or `Unreadable`. Then nothing is listed.
+- Identity is the OS bytes. `RelPath` holds exactly what `read_dir` returned (NFD on macOS included); display is `RelPath::display_text`, which is NFC plus the `<U+XXXX>` escapes.
+  - **Carry for Tasks 7 and 10:** `GitPath` keys must equal these bytes.
+- Dataless files: macOS `SF_DATALESS` is defined here as `1 << 30`, because `libc` 0.2.191 lacks it. On Windows, `RECALL_ON_DATA_ACCESS`, `RECALL_ON_OPEN` and `OFFLINE` all count.
+  - Fail closed: a file wrongly called dataless only loses its badge, while a file wrongly called local would be hashed and so downloaded.
+  - The flag comes from the scan's own `lstat`. Other systems answer `false`.
+- **Carry for Task 10:** `LibraryDiag` (service, Task 10's file) has no scan arm yet. Task 10 adds `LibraryDiag::Scan(scan::Diag)` and maps `ScanResult.root` to `Unavailable(Missing | RootChanged)`.
+
+### Environment scoping (`envscope`)
+
+- Only the five tags scope, ASCII case-insensitive (`@PRODUCTION`). No locale casing anywhere, so `@productİon` and `@productıon` are unknown under `tr_TR` too. The tests also run under `LC_ALL=tr_TR.UTF-8`.
+- Unknown, and so hidden everywhere with a diagnostic:
+  - any other `@name`;
+  - a folder that reads as an environment folder but is not a plain `@` followed by visible text: a full-width `＠` or small `﹫` commercial at, or an invisible formatting character anywhere in it (`\u{200B}@production`, `@production\u{200B}`, a bidi override).
+  - Treating those as ordinary folders would fail open.
+- "Did you mean" (`EnvFolder::Unknown { suggestion }`) is computed over the visible text, ASCII-folded, in this order:
+  1. an exact tag;
+  2. the closest tag by optimal string alignment distance, at most 3 and at most half the tag's length, ties going to the more severe tag;
+  3. a tag the text starts, given at least 3 characters (`@prod`);
+  4. a tag that starts the text (`@develop`).
+  - So `@x` and `@` suggest nothing, and `@stg` suggests nothing.
+- Folder components only (`@production.sql` scopes nothing).
+  - A folder entry is scoped by its own name too (`folder_scope`), so the `@production` row itself is hidden on staging.
+  - `visible` recomputes the scope from the entry's path and also requires the stored scope, so an entry built with `EnvScope::Any` cannot widen it, and a link keeps its target's narrower scope.
+- Diagnostics: one `UnknownEnvFolder { name, suggestion }` per distinct unknown name among the listed folders, and one `EnvContradiction { folder }` where a chain first becomes empty. The text comes from the UI's FTL, never from here.
+
+### Measurements and verification
+
+- Scan time on macOS (APFS, debug build), three runs: 10,000 files in 46 ms, 20,000 files in 91–95 ms. These are the `#[ignore = "perf"]` tests, gated on `HACIVAT_PERF`.
+- The `pathsafe` fuzz target ran for 60 s on nightly-2026-11-01: 10.2 M runs, no crash.
+
+### Named exception
+
+`tests/seams.rs` (Task 1a's file): the stub assertions for `visible`, `pathsafe::component` and `pathsafe::join` are removed, with fenced `// ## m4b-t04-scanner` notes in their place. Their real rules are tested in `tests/{envscope,pathsafe,scan}.rs`.
+
+### Fix round 1 (review I1–I3, m1–m9; rulings R-T4-1, R-T4-2)
+
+- **I1, leading characters before `@`.** `classify` first skips a leading run that a person does not see: Unicode `White_Space` (NBSP, U+3000, the en and em spaces), `Default_Ignorable_Code_Point`, combining marks (`\p{M}`), controls, format, private-use and unassigned code points, and the blank glyphs (U+2800, the Hangul fillers, U+1D159).
+  - The classes come from `regex`'s Unicode tables, already a dependency, so there is no manifest change.
+  - A name whose first visible character is the ASCII `@` scopes when the rest is exactly a tag: ` @production` and `\u{200B}@production` are `Tag(Production)`, per the controller's ruling.
+  - Anything else is unknown and hidden with "did you mean": a lookalike `@` after the blanks, a misspelt tag, an invisible character after the `@`. A visible character before the `@` (`x@`, `(@`, `é@`) keeps an ordinary folder.
+  - First-round change: `\u{200B}@production` was `Unknown`; it now scopes. Both answers keep it off staging.
+- **I2, `join` answers what it resolved (R-T4-2).** `join` and `join_with` answer `Joined { path, target, kind }`, where `target` is the link's target inside the library and `kind` is `Absent`, `File` or `Folder`.
+  - **The caller contract** is in the `Joined` doc. Before opening, the Task 5 read and save, the Task 14 tab and the Task 15 chooser re-apply `envscope::visible_at(rel, kind, joined.target, env)`, which combines the scope of `rel` with the scope of the resolved target.
+  - `join_entry(root, &ScriptEntry)` refuses with `PathError::Changed` when a scanned plain file is now a link, a link points elsewhere (`ScriptEntry::target`, new, records the scanned target), a link became a file, or a file became a folder. It refuses `OutsideLink` and `Loop` entries outright.
+- **I3, link resolution is text-only inside the root (R-T4-1, which replaces the plan's "resolved once with `realpath`").** `pathsafe::resolve_link`, used by both the scan and `join`:
+  1. reads the link text (`read_link`, on the link itself);
+  2. walks a relative text from the link's real folder; an absolute text must begin with the canonical root, component for component, or the link is `Outside` with no further call;
+  3. pops on `..`, refusing to pop above the root;
+  4. `lstat`s each name inside the root, and splices in any link it meets, with at most 40 hops before `Loop`;
+  5. canonicalises the link-free final path, which stays inside the root, and requires a name the scan would list.
+  - On Windows a UNC, device, `\\?\`, other-drive, drive-relative or rooted text is refused from its components alone, so no SMB connection is ever made.
+  - An absolute link that spells the root another way (for example `/var/…` for `/private/var/…`, or another case) is `Outside`: the rule is a text comparison with the root's spellings (re-review n2 below).
+  - A link hidden by its target's scope gets `Diag::LinkScope { rel }` (m4).
+- **m1, identity.** `join` canonicalises the folders on the way, and the final file or folder, and requires `inside_rel` to equal the requested `RelPath` byte for byte. Otherwise it answers `PathError::Alias`: an 8.3 short name (`GIT~1/config`, `NODE_M~1/x.sql`) or a case or normalisation variant. Scan-produced paths are the OS's stored bytes, so they always match.
+- **m2, dataless folders.** A folder with the dataless flag is listed as a disabled row (`ScriptEntry.dataless = true`, `kind = Folder`), with its ancestors, and is never read. The test double fails on any `read_dir` of such a folder. Running the scan thread under `setiopolicy_np(IOPOL_MATERIALIZE_DATALESS_FILES_OFF)` would need FFI and `unsafe`, which this crate may not use. Not done.
+- **m3.** `Fs::read_dir(dir, cap)` stops reading at `max_visited − visited + 1` names.
+- **m5.** `ScanResult.stopped` and `.suppressed` must be shown by Task 10 (R-M4b-14). The controller routes this carry.
+- **m6.** Tests named `symlink_loop_is_disabled` and `dir_symlink_is_not_followed` were added, and ADS names (`a.sql:stream`, `a.sql::$DATA`) are rows of the Windows table.
+- **m7, chosen: refuse.** A library root whose canonical path has an environment folder anywhere, its own name included, is refused: `RootProblem::InEnvFolder(name)` in the scan, `PathError::RootInEnvFolder` in `join`. `envscope::root_env_folder` is public, so attach (Tasks 3, 16) can refuse before adding the library.
+  - Why not scope by the ancestor: every consumer would have to carry the root's scope (the index, the chooser, `visible_at`), and one that forgot would fail open. A refusal cannot be forgotten.
+  - Cost: a user who keeps libraries under `…/@production/` moves them, or attaches the parent.
+- **m8.** Left as it is (plan-mandated); it is on the PO queue.
+- **m9.** `lib.rs` gains a fenced `## m4b-t04-scanner` note (named exception): `visible`, `component`, `join` and `scan` are no longer stubs. T1a's bullets are untouched, so the merge with Task 3 stays clean.
+
+### Re-review notes (n1–n4; ruling R-T4-3)
+
+- **n1, the test guard.** The in-memory `Fs` now refuses any path whose components after the root are not plain names. A lexical `starts_with` had accepted `/lib/../elsewhere`.
+  - Proof: the reviewer's mutation (`resolve_link` pushes `..` instead of popping it, so it looks up through `..`) now turns `outside_link_texts_are_refused_without_touching_outside` RED. Before this change it stayed green.
+  - The real-file-system twin `a_link_out_through_dot_dot_is_outside` checks only the answer, not the lookups.
+- **n2, absolute link targets on Windows (R-T4-3).** An absolute text may start with any of the root's spellings (`pathsafe::root_spellings`), compared as text, component for component:
+  - the canonical root, on every host;
+  - on Windows also the root as the user chose it (`LibraryRoot::path`) and the plain form of the canonical root (`C:\…` for `\\?\C:\…`, `\\server\…` for `\\?\UNC\server\…`), because `mklink` stores absolute targets as typed.
+  - After a match the walk continues from the canonical root, so no lookup goes through another spelling.
+  - **Remaining cost:** any other absolute text is a disabled "points outside the library" row even when it leads back in. That covers a different drive-letter case, a `subst` or mapped drive, a path through a junction or symlink outside, 8.3 spellings, and on macOS the `/var/…` spelling of `/private/var/…`. A relative link is unaffected. This is a PO-visible cost; it fails closed.
+- **n3.** The "stop is deterministic" line above is corrected for the visited-limit cap.
+- **n4, residual beside R-T3-1.** Two final `canonicalize` calls go through the OS: the one in `resolve_link` (on the link-free final path) and the one in `join`'s identity check.
+  - Both are made only after an `lstat` walk has shown every component inside the root and free of links. If an inside folder were swapped for an outside link in the tiny window between the walk and the call, `realpath` would follow it. The swap needs a local writer racing the scan, the same class of window as R-T3-1, and the fd-relative `O_NOFOLLOW` open of Task 5 still protects the read and the save.
+  - On Windows, `canonicalize` is a `CreateFileW` on an inside file, which may recall a `RECALL_ON_OPEN` placeholder. That is a download, never an outside access.
+  - Not changed; recorded.
