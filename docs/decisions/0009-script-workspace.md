@@ -206,3 +206,59 @@ The controller accepted all deviations (R-T1a-2); their carries go to Tasks 7, 1
 - **Public API (M1).** Type aliases of backend types (transitively) and renames of a backend crate (`use notify as n; pub use n::Config`) count as backend names; a backend trait implemented for a type this file declares private (`impl DebounceEventHandler for Sink` with `struct Sink;`) is allowed.
 - **Sets (M2).** `ScriptsBelowExec` also refuses `hacivat-net`, `hacivat-secrets` and `rustls`, and walks build edges as well as normal ones. `BACKENDS` gains `notify-types`, `file-id`, `inotify`, `inotify-sys`, `kqueue`, `kqueue-sys` and `fsevent-sys` (owner `hacivat-scripts`); the public-API list gains them too.
 - **Types (M3–M5).** `EnvSet`'s bit is an exhaustive `match`. `LibraryId` has no `Default`. `LogicalDb` derives no `PartialEq`/`Eq`/`Hash`/`Ord` (nor do `DbNode` and `ManifestRead`, which hold one); binding uses `LogicalDb::same_db`/`names::same_db` (HV-SCRIPT-02 step 4), a stub answering `false` until Task 3. `LocalPaths::script_recovery_dir` returns `Option<PathBuf>`, `None` unless `lib` is one plain name.
+
+## m4b-t07 — git status
+
+HV-SCRIPT-11, `crates/core/hacivat-git` (`discover`, `trust`, `status`, `map`). Showing a badge never runs a program: the hostile and FIFO tests under `crates/core/hacivat-git/tests/` run the real call path under a spawn detector on every OS.
+
+### The pipeline (all on one timed worker)
+
+- **One worker per call.** Discovery, the layout reads, the open, both status halves, the attribute probe and the mapping all run on a dedicated thread (n4). The caller waits at most `GitLimits::timeout` (5 s). At the deadline it answers `Unavailable(Timeout)`, sets the interrupt flag and returns without joining the worker: an untracked FIFO named `.gitignore` blocks gix's open forever (`alg/28` §0.8, m3). While that worker lives, a new call for the same library root answers `Unavailable(Timeout)` at once and starts nothing. So at most one stuck worker exists per library, keyed by the root as the caller passes it (Task 10 passes a stable path).
+- **Discovery** walks up from the canonical library root to the first `.git` entry, metadata only. It never considers the home directory or anything above it, and stops where `st_dev` changes. On Windows, where `std` has no device id, the path prefix stands in. A FIFO, socket or device named `.git` is not a marker. `gix::discover` is not used, because it honours environment overrides.
+- **Before the open** (`trust::check_layout`):
+  - Ownership (Unix, via `gix::sec::identity`): the worktree, `.git`, the resolved git dir and common dir, and every alternate must be the user's, else `Untrusted(ForeignOwner)`.
+  - A symlinked `.git` is refused, and so is a plain `.git` directory with a `commondir`: `Unavailable(Redirected)`.
+  - A gitfile is followed only to:
+    - a linked worktree's git dir `<common>/worktrees/<name>`, whose `commondir` must lead back to `<common>`;
+    - a submodule git dir under an enclosing `.git/modules/`;
+    - a directory inside the worktree.
+  - Alternates are followed when each line names an existing directory the user owns, chained at most four deep; the quoted form is not followed.
+  - So linked worktrees and `clone --shared` repositories are read, under the same isolated, reduced-trust open (n2), and anything else is `Redirected`.
+  - `extensions.objectFormat` other than `sha1`, and `extensions.refStorage` other than `files`, are read raw from the common dir's config and answer `Unavailable(Unsupported)` (m2).
+- **The open:** `gix::open_opts(worktree, Options::isolated().with(Trust::Reduced))`. Afterwards (C1, I1):
+  - `git_dir_trust() == Reduced`, and no section of source kind `Repository` has full trust, else `Unavailable(TrustPromoted)`.
+  - The git dir, common dir and workdir gix resolved must equal what `check_layout` accepted, else `Unavailable(Redirected)`. This also makes a fully trusted open that honoured `core.worktree` fail closed (mutation M1 of the report).
+- **The status (C12, n3):**
+  - `index_worktree_status` with `FastEq`, our `NoopSubmodules` (records the gitlink, answers "no change", opens nothing) and `EmissionMode::Matching`.
+  - Then `tree_index_status` with `TrackRenames::Disabled`, so no similarity work runs and no budget comes from repository config. A staged rename's destination is an Addition, so it is New, as before.
+  - Never `Repository::status()`. Swapping gix's `BuiltinSubmoduleStatus` back in made the nested default-options open read a system-config FIFO, and `submodule_entry_reads_no_global_config_and_spawns_nothing` failed (mutation M4).
+  - The pathspec is `:(top,literal)<prefix>`.
+  - `NeedsUpdate` and deletions give no badge. `Outcome::write_changes` is never called, so the index bytes are unchanged (`index_is_never_written`).
+  - More than `max_entries` paths answers `Unavailable(Failed(…))`, never a partial map: a missing badge would read as clean.
+- **Unknown overrides** win over every other badge. `Unknown` is ranked Submodule > Dataless > Filtered, then Conflicted > New > Modified.
+  - **Filtered (C2):** our own probe, `attributes_only` plus `selected_attribute_matches(["filter"])`, runs over every tracked path and every changed one. `filter` set or valued gives `Unknown(Filtered)`, even when the path is clean, since an LFS pointer's bytes are not what the index compares. `-filter` does not count. A failed lookup counts as filtered.
+  - **Submodule:** every gitlink under the prefix, what the no-op handler saw, and an untracked nested repository.
+  - **Dataless:** `SF_DATALESS` (macOS), `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | …_RECALL_ON_OPEN` (Windows), from `lstat`.
+- **Keys** are library-relative and spelled as the disk spells them, byte for byte, so they equal the scanner's `RelPath` (R-T1a-2). Each component is matched against its directory's listing, exactly first and then by NFC equality (`gix::utils::str::precompose`): macOS keeps an NFD name while the index holds NFC (`nfd_named_modified_file_has_badge`). A path not on the disk has no badge, nor has a name that is not UTF-8.
+- Error texts say "repository", never the bare word (R-T1a-1). Nothing is logged.
+
+### Deviation: dataless paths leave the index copy, not the pathspec
+
+`alg/28` HV-SCRIPT-11 step 6 named `:(exclude,top,literal)` pathspecs. With 20,000 of them the walk became quadratic and ran past the 5 s budget (`status_with_20k_excludes_under_1s`, U-05).
+
+Task 7 instead removes those entries from an in-memory copy of the index (`State::remove_entries`, plus the cache-tree extension), which is never written. gix then neither compares nor hashes them. The walk sees an untracked name (an `lstat`, no open), and the precedence turns that back into `Unknown(Dataless)`.
+
+- Measured on macOS, debug build: 297 ms for 20,000 dataless paths, 131 ms for a 10,000-file status with 100 changes.
+- [Observed]: such a path is never read (`excluded_path_is_never_opened_by_status`: a file that must be hashed is unreadable; not flagged, the call fails with `Unavailable(Failed)`; flagged, it is `Ready` with `Unknown(Dataless)`; a mode-000 file on Unix, a share-nothing handle on Windows, n7).
+- [Inferred]: that this keeps the OS from downloading the file (n6).
+- `GitError` has no `Io` variant. A whole-call I/O failure is `Failed(<message>)`, and the message never holds file contents.
+
+### Test seam
+
+`hacivat_git::testing::status_treating_as_dataless` (doc-hidden) adds library-relative paths to the dataless set. It can only add `Unknown(Dataless)` answers and index removals, so it cannot weaken a status. It exists because no test can make a real cloud placeholder.
+
+### Rejected
+
+- `:(exclude)` pathspecs for dataless paths: quadratic, as above.
+- Running `git status` with protective flags: Q4, ADR D2.
+- `parallel`: R-T0-1 holds; 10,000 files take 131 ms without it.

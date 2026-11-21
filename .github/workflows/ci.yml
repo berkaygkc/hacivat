@@ -121,6 +121,14 @@ jobs:
       - name: Build
         run: cargo build --workspace --release --locked
 
+      # ## m4b-t07-git: `hacivat-git`'s differential test needs the CLI at >= 2.30 (it builds
+      # fixtures and the oracle; the product never runs it). Its `HV-FACT t07 git_version=…`
+      # line, and the `HV-FACT t07 hostile … detector=…` line of the spawn detector (U-01, U-02),
+      # are checked against this version on each OS.
+      - name: CLI version for the repository status tests (M4b T7)
+        run: git --version
+      # ## m4b-t07-git
+
       # Full test set, lines 1-4 (F2). Line 5 is the nightly release-tests job.
       - name: Test (1/4) workspace
         run: cargo test --workspace --locked
