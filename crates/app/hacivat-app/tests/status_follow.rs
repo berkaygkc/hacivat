@@ -606,6 +606,59 @@ fn cursor_open_segment_closes_the_cursor(cx: &mut TestAppContext) {
     stop_core_runtime_test(cx);
 }
 
+// ## m4-t33d (R-T33-1, M3a NOTES surface 6 "Keyboard": Cursor open is a button, a Tab stop in
+// the status bar's focus group; Enter or Space closes the cursor).
+#[gpui::test]
+fn cursor_open_segment_is_a_tab_stop_and_enter_closes(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging_id = profile_id(vcx, STAGING);
+    let (h, _fake) = session_over(
+        vcx,
+        staging_id,
+        pg().tracks_transactions()
+            .queries(vec![select("SELECT", 1_000_000)]),
+    );
+    let console = register_test_console(vcx, staging_id, h.clone());
+    focus_console(vcx, console);
+    let _ticket = run_one(&h, "SELECT * FROM big", true);
+    poll_until("the cursor to open", || snapshot(&h).cursor.is_some());
+    wait_until(vcx, "the cursor segment", |vcx| {
+        status(vcx).contains("Cursor open")
+    });
+    let segment = handle_of(vcx, "button-status-cursor");
+    assert!(
+        snapshot(&h).cursor.is_some(),
+        "learning the handle clicked nothing"
+    );
+    assert!(
+        tab_order(vcx).contains(&segment),
+        "Cursor open is a Tab stop"
+    );
+    in_window(vcx, |window, cx| window.focus(&segment, cx));
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    wait_until(vcx, "the cursor to close", |_| {
+        snapshot(&h).cursor.is_none()
+    });
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the segment goes with the cursor; the focus lands on
+    // the active pane's default (the console's editor), not on the undrawn segment.
+    wait_until(vcx, "the segment to go", |vcx| {
+        !status(vcx).contains("Cursor open")
+    });
+    redraw_full(vcx);
+    let editor = vcx.cx.read(|cx| {
+        Consoles::get(cx, console)
+            .and_then(|s| s.editor.clone())
+            .expect("the console has an editor")
+            .read(cx)
+            .focus_handle(cx)
+    });
+    assert_focus_on(vcx, "the console's editor", &editor);
+    stop_core_runtime_test(cx);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The narrow window
 
@@ -1098,10 +1151,13 @@ fn bounds_of(
     vcx.debug_bounds(selector)
 }
 
-/// Whether the last frame drew the label `#id`, visible and painted.
+/// Whether the window shows the label `#id`, visible and painted.
+/// ## m4-t33-flaky3: read from a frame that renders every view ([`full_frame`]): the last
+/// frame alone lacks the texts of a cached view it reused (the console's editor), so the
+/// placeholder could go missing for good after a late status update.
 fn drawn(vcx: &VisualTestContext, id: &str) -> bool {
     let needle = format!("#{id}");
-    registry_frame(vcx)
+    full_frame(vcx)
         .iter()
         .any(|r| r.path.ends_with(&needle) && r.visible && r.painted_px > 0.0)
 }
@@ -1379,7 +1435,16 @@ fn empty_console_draws_its_placeholder(cx: &mut TestAppContext) {
     wait_until(vcx, "the placeholder", |vcx| {
         drawn(vcx, "editor-placeholder")
     });
-    let text = text_of(vcx, "editor-placeholder").expect("the placeholder");
+    // ## m4-t33-flaky3: a frame that renders the shell again but reuses the editor's cached
+    // view (a late session or status update draws one) still shows the placeholder.
+    with_ws(vcx, |_, _, cx| cx.notify());
+    vcx.run_until_parked();
+    assert!(drawn(vcx, "editor-placeholder"));
+    let text = full_frame(vcx)
+        .into_iter()
+        .find(|r| r.path.ends_with("#editor-placeholder"))
+        .map(|r| r.text.to_string())
+        .expect("the placeholder");
     assert!(text.starts_with("Write SQL here."), "{text}");
     // Narrow: it wraps inside the text area, never cut.
     vcx.simulate_resize(gpui::size(gpui::px(700.0), gpui::px(600.0)));
@@ -1387,9 +1452,7 @@ fn empty_console_draws_its_placeholder(cx: &mut TestAppContext) {
     // resize places it (the editor asks for it). ## m4-t32-shots (named exception; T32 flake
     // carry): under load that frame comes later, so wait for a frame that draws it whole.
     wait_until(vcx, "the placeholder placed after the resize", |vcx| {
-        in_window(vcx, |window, _| window.refresh());
-        vcx.run_until_parked();
-        registry_frame(vcx)
+        full_frame(vcx)
             .into_iter()
             .find(|r| r.path.ends_with("#editor-placeholder"))
             .is_some_and(|r| !r.clipped && !r.truncated)

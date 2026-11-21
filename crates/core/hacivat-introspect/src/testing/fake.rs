@@ -230,6 +230,10 @@ struct State {
     // ## m4-t33a-hygiene (named exception; T25 m-7 carry)
     /// The scripted facet rows per kind ([`FakeIntrospector::put_facet`]).
     facets: BTreeMap<FacetKind, FacetRows>,
+    // ## m4-t33-flaky (named exception)
+    /// What every pass reports through the engine's progress sink before it reads
+    /// ([`FakeIntrospector::set_report`]).
+    report: Option<(crate::engine::Phase, u64, Option<u64>)>,
 }
 
 /// A scripted introspector for tests.
@@ -373,6 +377,14 @@ impl FakeIntrospector {
     /// The server identity `identity` answers (`None`: `Unknown`). Default: a fixed one.
     pub fn set_identity(&self, fp: Option<u128>) {
         self.lock().identity = fp;
+    }
+
+    // ## m4-t33-flaky (named exception)
+    /// Every pass reports `report` (its phase, done and total) through the engine's progress
+    /// sink once, before it reads (and before a gate holds it), as a real pass does; `None`
+    /// (the default) reports nothing.
+    pub fn set_report(&self, report: Option<(crate::engine::Phase, u64, Option<u64>)>) {
+        self.lock().report = report;
     }
 
     // ## m4-t17-mysql (named exception; review I-2)
@@ -807,6 +819,11 @@ impl Introspector for FakeIntrospector {
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
         Box::pin(async move {
             self.lock().filters.push(filter.text().to_owned());
+            // ## m4-t33-flaky (named exception)
+            let report = self.lock().report;
+            if let Some((phase, done, total)) = report {
+                crate::introspector::report_progress(phase, done, total);
+            }
             let call = FakeCall::Introspect {
                 ns: ns.clone(),
                 mode,

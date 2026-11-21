@@ -553,6 +553,10 @@ pub struct ValueViewer {
     middle_scroll: ScrollHandle,
     /// Re-run's focus, so a focused Re-run is scrolled into view.
     rerun_focus: FocusHandle,
+    // ## m4-t33d (R-T33-1, NOTES 22): Copy raw value's (a Tab stop) and the ×'s (not one),
+    // owned here so the tests can name them.
+    copy_focus: FocusHandle,
+    close_focus: FocusHandle,
     /// What had the focus at the last frame: 0 nothing here, 1 the well, 2 Re-run, 3 the
     /// refusal.
     seen_focus: Cell<u8>,
@@ -790,6 +794,18 @@ pub fn focused_part(console: ConsoleId, cx: &App) -> u8 {
     viewer(console, cx).map_or(0, |v| v.read(cx).seen_focus.get())
 }
 
+// ## m4-t33d (R-T33-1)
+/// The open viewer's Re-run, Copy raw value and × focus handles (tests: the Tab order).
+pub fn tab_handles(console: ConsoleId, cx: &App) -> Option<[FocusHandle; 3]> {
+    let v = viewer(console, cx)?;
+    let v = v.read(cx);
+    Some([
+        v.rerun_focus.clone(),
+        v.copy_focus.clone(),
+        v.close_focus.clone(),
+    ])
+}
+
 pub fn is_open(console: ConsoleId, cx: &App) -> bool {
     viewer(console, cx).is_some_and(|v| v.read(cx).open)
 }
@@ -926,6 +942,9 @@ impl ValueViewer {
             advance: Cell::new(None),
             middle_scroll: ScrollHandle::new(),
             rerun_focus: cx.focus_handle().tab_stop(true),
+            copy_focus: cx.focus_handle().tab_stop(true),
+            // ## m4-t33d-fr1 (T33d review m2): NOTES 22 "Header": the × is no Tab stop.
+            close_focus: cx.focus_handle().tab_stop(false),
             seen_focus: Cell::new(0),
             refused_focus: cx.focus_handle().tab_stop(true),
             focus_refusal: false,
@@ -1303,6 +1322,12 @@ impl Render for ValueViewer {
             .icon(IconName::X)
             .compact(short)
             .on_raised(true)
+            // ## m4-t33d (R-T33-1, NOTES M3b surface 22 "Header"): the × is not a Tab stop,
+            // like T2a's dialogs (Escape closes); Copy raw value is one, as NOTES "Keyboard"
+            // lists it.
+            // ## m4-t33d-fr1 (T33d review m2): the handle is made no stop where it is created
+            // (`close_focus`); a `.tab_stop(false)` here only rewrote that handle's flag.
+            .focus_handle(self.close_focus.clone())
             .on_click(move |_, _, cx| e.update(cx, |v, cx| v.close(cx)))
         };
         let mut control = div()
@@ -1658,6 +1683,8 @@ impl Render for ValueViewer {
             .icon(IconName::Copy)
             .compact(short)
             .on_raised(true)
+            // ## m4-t33d (R-T33-1)
+            .focus_handle(self.copy_focus.clone())
             .disabled(!view.can_copy)
             .on_click(move |_, _, cx| e.update(cx, |v, cx| v.copy_raw(cx)));
         body = body.child(

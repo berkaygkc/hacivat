@@ -190,8 +190,9 @@ impl Tile {
     }
 
     fn redraw(&self) {
-        in_window(self.vcx, |window, _| window.refresh());
-        self.vcx.run_until_parked();
+        // ## m4-t33d (T33 flaky3 follow-up): the last frame renders every view (a frame
+        // after `run_until_parked` may reuse a cached view, which records no texts).
+        redraw_full(self.vcx);
     }
 
     fn request(&self, grid: &Entity<GridView>, spec: SortSpec) {
@@ -297,6 +298,28 @@ fn partial_result_shows_sorted_locally(cx: &mut TestAppContext) {
     t.sort_by(&grid, 0, true);
     assert_eq!(t.shown(&grid), [0, 2, 1]);
     assert_eq!(t.note(), None);
+}
+
+// ## m4-t33d-fr1 (ruling R-T33d-5): Enter on the note's Clear sort takes the note (and the
+// button) away; the focus lands on the grid, the results tile's primary.
+#[gpui::test]
+fn clearing_the_sort_by_keyboard_lands_the_focus_on_the_grid(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let (store, _writer) = live_store(
+        vec![row(3, "c"), row(1, "a"), row(2, "b")],
+        Completeness::Suspended(cursor()),
+    );
+    let grid = t.show(store);
+    t.sort_by(&grid, 0, false);
+    assert!(t.note().is_some(), "the note shows");
+    let clear = handle_of(t.vcx, "button-results-sort-clear");
+    press_key(t.vcx, "enter");
+    t.redraw();
+    assert_eq!(t.note(), None, "Enter cleared the sort");
+    assert!(t.vcx.cx.read(|cx| grid.read(cx).sort().is_empty()));
+    assert_ne!(focused(t.vcx), Some(clear));
+    let grid_focus = t.vcx.cx.read(|cx| grid.read(cx).focus_handle(cx));
+    assert_focus_on(t.vcx, "the grid", &grid_focus);
 }
 
 /// Rows that arrive during or after a sort join the unsorted tail behind a dashed line: on a

@@ -960,6 +960,33 @@ fn filter_no_match_shows_the_empty_state(cx: &mut TestAppContext) {
     assert_eq!(lines(vcx), ["DEV [1]", "shop [PostgreSQL]"]);
 }
 
+// ## m4-t33d (R-T33-1, M4 NOTES surface 4 "No match"): Clear filter is a Tab stop, and Enter
+// on it clears the filter.
+#[gpui::test]
+fn the_no_match_clear_filter_is_a_tab_stop(cx: &mut TestAppContext) {
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    show(vcx, profile_id(vcx, "shop"), Some(pg_shop()));
+    filter(vcx, "zzz");
+    enable_registry(vcx);
+    let clear = handle_of(vcx, "button-explorer-filter-clear");
+    assert!(
+        text_of(vcx, "explorer-filter-none").is_some(),
+        "nothing clicked"
+    );
+    assert!(
+        tab_order(vcx).contains(&clear),
+        "Clear filter is a Tab stop"
+    );
+    in_window(vcx, |window, cx| window.focus(&clear, cx));
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    vcx.run_until_parked();
+    assert_eq!(text_of(vcx, "explorer-filter-none"), None);
+    assert_eq!(lines(vcx), ["DEV [1]", "shop [PostgreSQL]"]);
+}
+
 /// A catalog with `İSTANBUL_ŞUBE`.
 fn istanbul() -> Arc<CatalogSnapshot> {
     catalog(

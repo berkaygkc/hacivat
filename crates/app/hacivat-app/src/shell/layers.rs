@@ -2,6 +2,7 @@
 //! The workspace owns the stack; Escape pops the topmost layer unless the layer's view handles
 //! it first, and popping restores the focus the layer recorded.
 
+use hacivat_ui::focus_home::{HomeSlot, first_stop_home};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, EntityId, FocusHandle, InteractiveElement, IntoElement, ParentElement,
     Styled, Subscription, div, px,
@@ -31,6 +32,9 @@ pub struct Layer {
 
 struct Entry {
     layer: Layer,
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the layer is a focus home; its primary is its first
+    // Tab stop (a dialog's first field or button).
+    home: HomeSlot,
     /// Keeps the host's subscription to the layer's events alive while it is open.
     _subscription: Option<Subscription>,
 }
@@ -45,6 +49,7 @@ impl Layers {
     pub fn push(&mut self, layer: Layer, subscription: Option<Subscription>) {
         self.stack.push(Entry {
             layer,
+            home: HomeSlot::new(),
             _subscription: subscription,
         });
     }
@@ -143,7 +148,9 @@ impl Layers {
                         .bg(scrim)
                         .occlude();
                 }
-                overlay.child(layer.view.clone()).into_any_element()
+                overlay
+                    .child(first_stop_home(&entry.home, layer.view.clone()))
+                    .into_any_element()
             })
             .collect()
     }

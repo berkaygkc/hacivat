@@ -948,6 +948,55 @@ fn progress_phases_are_a_closed_enum_with_counts() {
     });
 }
 
+// ## m4-t33-flaky (named exception in Task 15's file)
+/// A pass's own report (the introspector's `report_progress`) stays on its entry while other
+/// tasks start and finish around it. The actor's progress updates used to rebuild every entry
+/// from the batch counts, so a pass that reported once and then read for a long time showed
+/// the batch's "tables" count instead of its own phase and counts (the flaky explorer tests
+/// `the_progress_row_shows_the_passes_own_counts` and
+/// `a_loaded_namespace_read_again_shows_its_progress_on_its_row`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_passes_own_report_survives_other_tasks_starting_and_finishing() {
+    let (a, b) = (ns("public"), ns("sales"));
+    let fake = FakeIntrospector::default();
+    fake.put_ns(a.clone(), FakeIntrospector::tables(3));
+    fake.put_ns(b.clone(), FakeIntrospector::tables(2));
+    let own = (Phase::Columns, 3, Some(7));
+    fake.set_report(Some(own));
+    let gate = fake.gate(is_introspect_of(&a, Mode::Full));
+    let r = rig_with(fake, RigOpts::default());
+    let entry_of = |p: &Progress, n: &NsKey| {
+        p.tasks
+            .iter()
+            .find(|t| &t.ns == n)
+            .map(|t| (t.phase, t.done, t.total))
+    };
+    let mut rx = r.handle.progress();
+    let pass = r
+        .handle
+        .refresh(Target::Namespace(a.clone()), Trigger::User);
+    bounded(gate.entered()).await;
+    // Reported before the gate held the pass: shown however the report and the actor's first
+    // update of the entry interleaved.
+    drop(bounded(rx.wait_for(|p| entry_of(p, &a) == Some(own))).await);
+    // Another task starts and finishes while the pass is held.
+    let other = r
+        .handle
+        .refresh(Target::Namespace(b.clone()), Trigger::User);
+    bounded(other).await.expect("the other pass");
+    drop(bounded(rx.wait_for(|p| entry_of(p, &b).is_none())).await);
+    let now = rx.borrow().clone();
+    assert_eq!(
+        entry_of(&now, &a),
+        Some(own),
+        "the pass's own count: {now:?}"
+    );
+    gate.release();
+    bounded(pass).await.expect("the pass");
+    idle(&r.handle).await;
+}
+// ## m4-t33-flaky
+
 // ---- tickets ---------------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

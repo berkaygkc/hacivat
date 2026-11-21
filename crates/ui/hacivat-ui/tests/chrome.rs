@@ -210,6 +210,57 @@ fn button_click_fires_and_disabled_button_does_not(cx: &mut TestAppContext) {
     assert_eq!(hits.get(), 1, "a disabled button never runs its handler");
 }
 
+// ## m4-t33d (R-T33-1): a Button is a Tab stop by default (HTML parity); `.tab_stop(false)`
+// opts out; a disabled button is never a stop; a handle the owner passes keeps its own flag.
+#[gpui::test]
+fn a_button_is_a_tab_stop_unless_it_opts_out(cx: &mut TestAppContext) {
+    use std::cell::RefCell;
+    let log = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let plain = cx.update(|cx| cx.focus_handle());
+    let sink = log.clone();
+    let vcx = host(cx, move |_, _| {
+        let button = |id: &'static str| {
+            let sink = sink.clone();
+            Button::new(id, id.into()).on_click(move |_, _, _| sink.borrow_mut().push(id))
+        };
+        div()
+            .flex()
+            .child(button("first"))
+            .child(button("out").tab_stop(false))
+            .child(button("off").disabled(true))
+            .child(button("passed").focus_handle(plain.clone()))
+            .child(button("last"))
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    let enter = |vcx: &mut VisualTestContext| {
+        vcx.simulate_keystrokes("enter");
+        vcx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        vcx.run_until_parked();
+    };
+    let next = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| window.focus_next(cx));
+        vcx.run_until_parked();
+    };
+    next(vcx);
+    enter(vcx);
+    next(vcx);
+    enter(vcx);
+    next(vcx);
+    enter(vcx);
+    assert_eq!(
+        *log.borrow(),
+        vec!["first", "last", "first"],
+        "Tab visits the default buttons only, and wraps"
+    );
+    vcx.update(|window, cx| window.focus_prev(cx));
+    vcx.run_until_parked();
+    enter(vcx);
+    assert_eq!(log.borrow().last(), Some(&"last"), "Shift-Tab goes back");
+}
+
 #[gpui::test]
 fn the_tab_strip_reports_activation_and_close(cx: &mut TestAppContext) {
     let log = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
@@ -322,6 +373,117 @@ fn toasts_show_three_at_a_time_and_expire_after_six_seconds(cx: &mut TestAppCont
         );
         assert_eq!(ToastQueue::waiting(cx), 0);
     });
+}
+
+// ## m4-t33d (R-T33-1): a toast's buttons are out of the window's Tab order until the focus is
+// in the toast (F6, `focus_newest_sticky`); then Tab walks its actions and its ✕, and goes on
+// out of it.
+#[gpui::test]
+fn a_toast_is_in_the_tab_order_only_once_it_has_the_focus(cx: &mut TestAppContext) {
+    use hacivat_ui::toast::{ToastAction, ToastQueue, ToastStack, focus_newest_sticky};
+    use std::cell::RefCell;
+    let log = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let sink = log.clone();
+    cx.update(|cx| {
+        let mut t = toast("sticky");
+        t.sticky = true;
+        t.actions = ["one", "two"]
+            .into_iter()
+            .map(|name| {
+                let sink = sink.clone();
+                ToastAction {
+                    label: Rc::new(move |_: &gpui::App| name.into()),
+                    run: Rc::new(move |_, _| sink.borrow_mut().push(name)),
+                }
+            })
+            .collect();
+        ToastQueue::push(cx, t);
+    });
+    let sink = log.clone();
+    let vcx = host(cx, move |_, _| {
+        let sink = sink.clone();
+        div()
+            .size_full()
+            .child(
+                Button::new("outside", "Outside".into())
+                    .on_click(move |_, _, _| sink.borrow_mut().push("outside")),
+            )
+            .child(ToastStack::new())
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    let enter = |vcx: &mut VisualTestContext| {
+        vcx.simulate_keystrokes("enter");
+        vcx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        vcx.run_until_parked();
+    };
+    let next = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| window.focus_next(cx));
+        vcx.run_until_parked();
+    };
+    // Out of the toast, Tab only knows the outside button.
+    next(vcx);
+    next(vcx);
+    enter(vcx);
+    assert_eq!(
+        *log.borrow(),
+        vec!["outside"],
+        "the toast is not a Tab stop"
+    );
+    // F6: the first action; Tab, Tab: the second, then the ✕ (Enter dismisses, no action).
+    vcx.update(|window, cx| assert!(focus_newest_sticky(window, cx)));
+    vcx.run_until_parked();
+    next(vcx);
+    next(vcx);
+    enter(vcx);
+    assert_eq!(*log.borrow(), vec!["outside"], "no action ran");
+    assert!(
+        vcx.update(|_, cx| ToastQueue::visible_ids(cx).is_empty()),
+        "Tab, Tab from the first action is the ✕"
+    );
+}
+
+// ## m4-t33d (R-T33-1): Tab from a toast's first action is its second.
+#[gpui::test]
+fn tab_moves_between_a_focused_toasts_actions(cx: &mut TestAppContext) {
+    use hacivat_ui::toast::{ToastAction, ToastQueue, ToastStack, focus_newest_sticky};
+    use std::cell::RefCell;
+    let log = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let sink = log.clone();
+    cx.update(|cx| {
+        let mut t = toast("sticky");
+        t.sticky = true;
+        t.actions = ["one", "two"]
+            .into_iter()
+            .map(|name| {
+                let sink = sink.clone();
+                ToastAction {
+                    label: Rc::new(move |_: &gpui::App| name.into()),
+                    run: Rc::new(move |_, _| sink.borrow_mut().push(name)),
+                }
+            })
+            .collect();
+        ToastQueue::push(cx, t);
+    });
+    let vcx = host(cx, move |_, _| {
+        div()
+            .size_full()
+            .child(ToastStack::new())
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| assert!(focus_newest_sticky(window, cx)));
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.focus_next(cx));
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    vcx.run_until_parked();
+    assert_eq!(*log.borrow(), vec!["two"]);
 }
 
 #[gpui::test]

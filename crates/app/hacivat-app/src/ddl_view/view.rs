@@ -34,6 +34,8 @@
 //! (review I-3). Comparisons regenerate with the schema the shown text was made with, so a
 //! console switch never reads as a server change (review m-3).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -51,6 +53,7 @@ use hacivat_sql_editor::SqlLanguageService;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::env_swatch_on_raised;
 use hacivat_ui::checkbox::Checkbox;
+use hacivat_ui::focus_home::{HomeSlot, focus_home};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::popover::Tip;
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
@@ -187,6 +190,18 @@ pub struct DdlView {
     seen: Option<Arc<CatalogSnapshot>>,
     // ## m4-t33b-carries (T25 review m-5): the notices' Reload button.
     reload_focus: FocusHandle,
+    // ## m4-t33d (T33 flaky2 review I1, NOTES surface 11 "Keyboard"): the "no longer exists"
+    // notice's Close tab, a Tab stop the tests can name.
+    close_focus: FocusHandle,
+    // ## m4-t33-flaky2 (NOTES surface 10 "Keyboard": the toolbar and the strip are Tab stops
+    // in visual order; surface 11 "Keyboard": the notice's button is the first Tab stop after
+    // the toolbar)
+    /// The toolbar's buttons: Refresh, Copy, Open in console, and each provided action's (by
+    /// command). The view owns them so focus survives a re-render and the tests can name them
+    /// (a Button's own handle is a Tab stop too since T33d, R-T33-1).
+    toolbar_focus: ToolbarFocus,
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the view is a focus home (`focus_target`).
+    home: HomeSlot,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -274,7 +289,15 @@ impl DdlView {
             grants_pending: false,
             check_seq: 0,
             seen: None,
-            reload_focus: cx.focus_handle(),
+            reload_focus: tab_stop(cx),
+            close_focus: tab_stop(cx),
+            toolbar_focus: ToolbarFocus {
+                refresh: tab_stop(cx),
+                copy: tab_stop(cx),
+                console: tab_stop(cx),
+                provided: RefCell::default(),
+            },
+            home: HomeSlot::new(),
             _subscriptions: subscriptions,
         };
         view.load(Why::Show, cx);
@@ -290,6 +313,44 @@ impl DdlView {
     /// The notices' Reload button (tests: its place in the Tab order).
     pub fn reload_focus(&self) -> &FocusHandle {
         &self.reload_focus
+    }
+
+    // ## m4-t33-flaky2
+    /// The toolbar's Open in console button (tests: its place in the Tab order).
+    pub fn console_focus(&self) -> &FocusHandle {
+        &self.toolbar_focus.console
+    }
+
+    // ## m4-t33d (T33 flaky2 review m1)
+    /// The toolbar's Refresh button (tests: its place in the Tab order).
+    pub fn refresh_focus(&self) -> &FocusHandle {
+        &self.toolbar_focus.refresh
+    }
+
+    // ## m4-t33d (T33 flaky2 review m1)
+    /// The toolbar's Copy button (tests: its place in the Tab order).
+    pub fn copy_focus(&self) -> &FocusHandle {
+        &self.toolbar_focus.copy
+    }
+
+    // ## m4-t33d (T33 flaky2 review I1)
+    /// The "no longer exists" notice's Close tab button (tests: its place in the Tab order).
+    pub fn close_focus(&self) -> &FocusHandle {
+        &self.close_focus
+    }
+
+    // ## m4-t33d (T33 flaky2 review I2, ruling R-T33d-4); m4-t33d-fr1 (ruling R-T33d-5): the
+    // view's focus home primary. A focused control this frame no longer draws (Reload once its
+    // notice is gone, Copy or Open in console once disabled, a provided action once disabled,
+    // a toolbar item that overflowed into ⋯) hands the focus here (`hacivat_ui::focus_home`):
+    // the code area when the text is shown (it is drawn whenever the text is, F5 and Tab work
+    // there), else Refresh.
+    fn focus_target(&self, cx: &App) -> FocusHandle {
+        if self.body == Body::Script {
+            self.editor.focus_handle(cx)
+        } else {
+            self.toolbar_focus.refresh.clone()
+        }
     }
 
     /// The object shown (its key follows a rename).
@@ -952,6 +1013,7 @@ impl DdlView {
             let id = a.id;
             let enabled = a.enabled;
             let l2 = label.clone();
+            let focus = self.toolbar_focus.provided(id, cx);
             bar = bar.item(
                 ToolbarItem::new(
                     35,
@@ -960,6 +1022,7 @@ impl DdlView {
                             .kind(ButtonKind::Ghost)
                             .compact(true)
                             .on_raised(true)
+                            .focus_handle(focus.clone())
                             .disabled(!enabled)
                             .on_click(move |_, window, cx| {
                                 hacivat_ui::actions::ActionRegistry::run(id, window, cx);
@@ -975,6 +1038,7 @@ impl DdlView {
         }
         let can = self.can_copy();
         let w = weak.clone();
+        let focus = self.toolbar_focus.refresh.clone();
         bar = bar.trailing(
             ToolbarItem::new(
                 30,
@@ -984,6 +1048,7 @@ impl DdlView {
                         .icon(IconName::RefreshCw)
                         .compact(true)
                         .on_raised(true)
+                        .focus_handle(focus.clone())
                         .on_click(on_view(&w, |v, _, cx| v.refresh(cx)))
                         .into_any_element()
                 }),
@@ -997,6 +1062,7 @@ impl DdlView {
             }),
         );
         let w = weak.clone();
+        let focus = self.toolbar_focus.copy.clone();
         bar = bar.trailing(
             ToolbarItem::new(
                 60,
@@ -1005,6 +1071,7 @@ impl DdlView {
                         .icon(IconName::Copy)
                         .compact(true)
                         .on_raised(true)
+                        .focus_handle(focus.clone())
                         .disabled(!can)
                         .on_click(on_view(&w, |v, window, cx| v.copy(window, cx)))
                         .into_any_element()
@@ -1019,6 +1086,7 @@ impl DdlView {
             }),
         );
         let w = weak.clone();
+        let focus = self.toolbar_focus.console.clone();
         bar.trailing(
             ToolbarItem::new(
                 40,
@@ -1030,6 +1098,7 @@ impl DdlView {
                     .icon(IconName::Terminal)
                     .compact(true)
                     .on_raised(true)
+                    .focus_handle(focus.clone())
                     .disabled(!can)
                     .on_click(on_view(&w, |v, window, cx| v.open_in_console(window, cx)))
                     .into_any_element()
@@ -1306,6 +1375,8 @@ impl DdlView {
                     Some(
                         Button::new("ddl-close", tr(cx, ids::hv::DDL_VIEW_CLOSE_TAB, NoArgs))
                             .compact(true)
+                            // ## m4-t33d (T33 flaky2 review I1, NOTES surface 11 "Keyboard")
+                            .focus_handle(self.close_focus.clone())
                             .on_click(on_view(&w, |v, window, cx| v.close_tab(window, cx))),
                     ),
                     "ddl-gone",
@@ -1445,14 +1516,14 @@ impl DdlView {
 }
 
 impl Render for DdlView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let c = &theme.tokens.colors;
         let weak = cx.entity().downgrade();
         let toolbar = self.toolbar(&weak, cx);
         let strip = self.strip(&weak, cx);
         let notices = self.notices(&weak, cx);
-        div()
+        let root = div()
             .id("ddl-view")
             .size_full()
             .flex()
@@ -1465,10 +1536,12 @@ impl Render for DdlView {
                     .border_color(c.seam.to_hsla())
                     .child(toolbar),
             )
-            // ## m4-t33b-carries (T25 review m-5, NOTES surface 11 "Keyboard"): the notices'
-            // buttons are the first Tab stops after the toolbar, though they are drawn below
-            // the options strip. Tab follows paint order, so the notices come first in the
-            // tree and a reversed column draws the strip above them.
+            // ## m4-t33b-carries (T25 review m-5, NOTES surface 11 "Keyboard": the notice's
+            // button is the first Tab stop after the toolbar; surface 10 "Keyboard": the
+            // toolbar and the strip are Tab stops in visual order): the notices' buttons come
+            // right after the toolbar, though they are drawn below the options strip. Tab
+            // follows paint order, so the notices come first in the tree and a reversed column
+            // draws the strip above them.
             .child(
                 div()
                     .flex()
@@ -1481,7 +1554,9 @@ impl Render for DdlView {
                             .child(strip),
                     ),
             )
-            .child(self.code(cx))
+            .child(self.code(cx));
+        // ## m4-t33d-fr1 (ruling R-T33d-5)
+        focus_home(&self.home, self.focus_target(cx), root)
     }
 }
 
@@ -1496,6 +1571,31 @@ struct Toggle {
     fixed: bool,
     msg: hacivat_l10n::MsgRef<NoArgs>,
     priority: u8,
+}
+
+// ## m4-t33-flaky2
+/// The toolbar's Tab stops (the view's `toolbar_focus`).
+struct ToolbarFocus {
+    refresh: FocusHandle,
+    copy: FocusHandle,
+    console: FocusHandle,
+    /// By command, made the first time the action is drawn.
+    provided: RefCell<HashMap<&'static str, FocusHandle>>,
+}
+
+impl ToolbarFocus {
+    fn provided(&self, id: &'static str, cx: &App) -> FocusHandle {
+        self.provided
+            .borrow_mut()
+            .entry(id)
+            .or_insert_with(|| tab_stop(cx))
+            .clone()
+    }
+}
+
+/// A focus handle that is a Tab stop.
+fn tab_stop(cx: &App) -> FocusHandle {
+    cx.focus_handle().tab_stop(true)
 }
 
 /// The Reload button of the stale and couldn't-check notices.

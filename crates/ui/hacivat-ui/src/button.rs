@@ -65,6 +65,9 @@ pub struct Button {
     // ## m3c-t41 (named exception): any kind drawn as its icon alone (N1: Run and Stop in a
     // narrow pane); the label is its tooltip and accessible name.
     glyph_only: bool,
+    // ## m4-t33d (R-T33-1): `None` = the default (its own handle is a stop; a passed handle
+    // keeps its flag).
+    tab_stop: Option<bool>,
 }
 
 impl Button {
@@ -86,6 +89,7 @@ impl Button {
             compact: false,
             min_width: None,
             glyph_only: false,
+            tab_stop: None,
         }
     }
 
@@ -131,9 +135,29 @@ impl Button {
         self
     }
 
-    /// Uses `handle` as this button's focus handle (a dialog focuses its buttons itself).
+    /// Uses `handle` as this button's focus handle (a dialog focuses its buttons itself). The
+    /// handle's own Tab-stop flag decides whether the button is a Tab stop, unless
+    /// [`Button::tab_stop`] sets it.
     pub fn focus_handle(mut self, handle: FocusHandle) -> Self {
         self.focus = Some(handle);
+        self
+    }
+
+    // ## m4-t33d (R-T33-1)
+    /// Whether the button is a Tab stop. A button is one by default (HTML parity), on the
+    /// handle it keeps itself; `false` takes it out of the Tab order where a surface's NOTES
+    /// say so (the record inspector's ▲ ▼). On a handle passed with [`Button::focus_handle`]
+    /// this sets that handle's flag; without this call a passed handle keeps its own. A
+    /// disabled or inert button is never a stop.
+    ///
+    /// ## m4-t33d-fr1 (T33d review m2): GPUI keeps the flag on the handle, not on the button:
+    /// on a passed handle this mutates that handle, for every clone of it and after the button
+    /// is gone (the handle is a stop or not wherever else it is tracked). An owner that passes
+    /// its own handle makes it a stop or not where it creates it (`cx.focus_handle().tab_stop(..)`)
+    /// and leaves this call to buttons on their own handle, or to a flag that is the owner's to
+    /// set each frame (a toast's buttons).
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = Some(tab_stop);
         self
     }
 
@@ -388,11 +412,19 @@ impl Button {
             compact,
             min_width,
             glyph_only,
+            tab_stop,
         } = self;
 
         // Hover and focus state live with the element across frames.
         let (hover, keyed_focus) = interaction_state(&id, window, cx);
-        let handle = focus.unwrap_or(keyed_focus);
+        // ## m4-t33d (R-T33-1): the button's own handle is a Tab stop unless it opts out; a
+        // handle its owner passes carries its own flag (a dialog that orders or traps Tab).
+        // GPUI reads the flag from the tracked handle, never from the element.
+        let handle = match (focus, tab_stop) {
+            (Some(passed), None) => passed,
+            (Some(passed), Some(stop)) => passed.tab_stop(stop),
+            (None, stop) => keyed_focus.tab_stop(stop.unwrap_or(true)),
+        };
         let focused = !disabled && focus_visible(&handle, window);
         let hot =
             !disabled && !inert && (*hover.read(cx) || (kind == ButtonKind::Danger && focused));
@@ -490,7 +522,7 @@ impl Button {
         let body = body
             .relative()
             .child(crate::follow::focus_probe(handle.clone()));
-        let mut body = focus_outline(body.track_focus(&handle).tab_stop(true), &theme, focused)
+        let mut body = focus_outline(body.track_focus(&handle), &theme, focused)
             .declare_full(decl)
             .cursor_pointer()
             .on_hover(hover_listener(hover));

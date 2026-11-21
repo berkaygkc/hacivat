@@ -266,6 +266,27 @@ fn restart_now_asks_first_and_flushes_before_restarting(cx: &mut TestAppContext)
     assert!(read(paths.settings_toml()).contains("text_rendering = \"standard\""));
 }
 
+// ## m4-t33d (R-T33-1, M4 NOTES surface 13 "Keyboard": as the shipped page, Tab through rows):
+// the restart row's Restart now is a Tab stop, and Enter on it asks first.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn restart_now_is_a_tab_stop(cx: &mut TestAppContext) {
+    let (vcx, _paths) = settings_tab(cx);
+    click_segment(vcx, "ui.text_rendering", "standard");
+    let restart = handle_of(vcx, "button-settings-restart-now");
+    assert!(
+        layer_ids(vcx).is_empty(),
+        "learning the handle asked nothing"
+    );
+    assert!(
+        tab_order(vcx).contains(&restart),
+        "Restart now is a Tab stop"
+    );
+    vcx.update(|window, cx| window.focus(&restart, cx));
+    press_enter(vcx);
+    assert_eq!(dialog_title(vcx), "Restart Hacivat?");
+}
+
 #[gpui::test]
 fn a_restart_flushes_the_pending_settings_and_layout_writes(cx: &mut TestAppContext) {
     let (vcx, paths) = settings_tab(cx);

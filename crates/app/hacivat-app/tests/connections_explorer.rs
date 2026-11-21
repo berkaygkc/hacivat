@@ -680,6 +680,64 @@ fn home_entry_points_are_buttons(cx: &mut TestAppContext) {
     assert_eq!(connect_calls(vcx), ["a"]);
 }
 
+// ## m4-t33d (R-T33-1): the home entries are Tab stops in their visual order (the comment at
+// `connections/home.rs` said so; before T33d a Button's own handle was no stop).
+#[gpui::test]
+fn home_entry_points_are_tab_stops_in_order(cx: &mut TestAppContext) {
+    let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    let new = handle_of(vcx, "button-home-new");
+    let paste = handle_of(vcx, "button-home-paste");
+    let palette = handle_of(vcx, "button-home-palette");
+    // Nothing selected: Connect is disabled, so Tab skips it.
+    let order = tab_order(vcx);
+    assert_consecutive(
+        &order,
+        &[
+            ("New connection", &new),
+            ("Paste", &paste),
+            ("Palette", &palette),
+        ],
+    );
+    focus_list(vcx); // selects a: Connect is enabled
+    let connect = handle_of(vcx, "button-home-connect");
+    assert!(
+        layer_ids(vcx).is_empty(),
+        "learning the handles opened nothing"
+    );
+    assert!(connect_calls(vcx).is_empty(), "nor connected");
+    let order = tab_order(vcx);
+    assert_consecutive(
+        &order,
+        &[
+            ("New connection", &new),
+            ("Paste", &paste),
+            ("Connect", &connect),
+            ("Palette", &palette),
+        ],
+    );
+}
+
+// ## m4-t33d-fr1 (ruling R-T33d-5): a focused Connect that turns disabled (the selection
+// cleared) is no longer tracked; the focus lands on the active pane's default, the home's
+// first entry, and Tab goes on from there.
+#[gpui::test]
+fn a_focused_connect_that_turns_disabled_hands_the_focus_to_the_first_entry(
+    cx: &mut TestAppContext,
+) {
+    let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    let new = handle_of(vcx, "button-home-new");
+    let paste = handle_of(vcx, "button-home-paste");
+    focus_list(vcx); // selects a: Connect is enabled
+    let connect = handle_of(vcx, "button-home-connect");
+    assert_focus_on(vcx, "Connect", &connect);
+    vcx.update(|_, cx| ConnectionsModel::select(cx, None));
+    redraw_full(vcx);
+    assert_ne!(focused(vcx), Some(connect), "Connect is disabled");
+    assert_focus_on(vcx, "New connection (the pane's first stop)", &new);
+    in_window(vcx, |window, cx| window.focus_next(cx));
+    assert_focus_on(vcx, "Paste (Tab goes on)", &paste);
+}
+
 // ## m2a-t21-shots
 
 #[gpui::test]

@@ -40,6 +40,7 @@ use hacivat_session::LiveState;
 use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::button::{Button, ButtonKind};
+use hacivat_ui::focus_home::{HomeSlot, focus_home};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::input::{InputEvent, TextInput};
 use hacivat_ui::menu::MenuItemSpec;
@@ -128,6 +129,8 @@ pub struct ExplorerView {
     loads: HashMap<TreeKey, ContributedLoad>,
     // ## m4-t24-live (named exception): the expanded rows last noted for `workspace.json`.
     expanded_seen: KeySet,
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the explorer is a focus home; its primary is the tree.
+    home: HomeSlot,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -646,6 +649,7 @@ impl ExplorerView {
             loads: HashMap::new(),
             // ## m4-t24-live (named exception)
             expanded_seen: KeySet::default(),
+            home: HomeSlot::new(),
             _subscriptions: subscriptions,
         };
         view.refresh(cx);
@@ -1466,7 +1470,7 @@ impl Render for ExplorerView {
         if let Some(text) = crate::explorer::live::offline_note(cx) {
             hint.push(self.offline_line(&theme, text));
         }
-        div()
+        let root = div()
             .flex()
             .flex_col()
             .size_full()
@@ -1478,8 +1482,9 @@ impl Render for ExplorerView {
             )))
             .child(filter_row)
             .children(hint)
-            .child(body)
-            .into_any_element()
+            .child(body);
+        // ## m4-t33d-fr1 (ruling R-T33d-5)
+        focus_home(&self.home, self.list_focus(cx), root).into_any_element()
     }
 }
 

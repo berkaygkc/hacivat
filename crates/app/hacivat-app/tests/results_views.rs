@@ -229,8 +229,9 @@ impl Tile {
     }
 
     fn redraw(&self) {
-        in_window(self.vcx, |window, _| window.refresh());
-        self.vcx.run_until_parked();
+        // ## m4-t33d (T33 flaky3 follow-up): the last frame renders every view (a frame
+        // after `run_until_parked` may reuse a cached view, which records no texts).
+        redraw_full(self.vcx);
     }
 
     fn set_mode(&self, mode: ViewMode) -> bool {
@@ -588,6 +589,42 @@ fn text_view_pretty_table_and_line_copy(cx: &mut TestAppContext) {
     );
 }
 
+// ## m4-t33d-fr1 (ruling R-T33d-5): the text view's prompts from the keyboard. Back to the
+// table takes the prompt away and the focus lands on the grid; Show as text builds the text
+// and the focus lands on the text view (the results tile's primary is the view shown).
+#[gpui::test]
+fn the_text_views_prompts_by_keyboard_land_the_focus_on_the_view_shown(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let grid = t.show(store(schema(), numbered(100_001)));
+    t.redraw();
+    assert!(t.set_mode(ViewMode::Text));
+    let back = handle_of(t.vcx, "button-text-big-back");
+    press_key(t.vcx, "enter");
+    t.redraw();
+    assert_eq!(t.mode(), ViewMode::Table, "Enter went back to the table");
+    assert_ne!(support::focused(t.vcx), Some(back));
+    let grid_focus = t.vcx.cx.read(|cx| grid.read(cx).focus_handle(cx));
+    assert_focus_on(t.vcx, "the grid", &grid_focus);
+
+    assert!(t.set_mode(ViewMode::Text));
+    let ok = handle_of(t.vcx, "button-text-big-ok");
+    press_key(t.vcx, "enter");
+    t.redraw();
+    t.redraw();
+    assert_eq!(
+        t.vcx.cx.read(|cx| views::text_state(t.console, cx)),
+        Some(TextState::Ready),
+        "Enter built the text"
+    );
+    assert_ne!(support::focused(t.vcx), Some(ok));
+    let text = t
+        .vcx
+        .cx
+        .read(|cx| views::text_focus(t.console, cx))
+        .expect("the text view");
+    assert_focus_on(t.vcx, "the text view", &text);
+}
+
 /// JSON Pretty is display only: Copy raw value copies the server's text unchanged, Pretty or
 /// not. A value that is not JSON keeps Raw (Pretty is refused); bytes show as hex.
 #[gpui::test]
@@ -762,6 +799,74 @@ fn truncated_value_offers_a_rerun_with_the_raised_limit(cx: &mut TestAppContext)
     assert_eq!((v.truncated, v.rerun), (None, None));
 }
 
+// ## m4-t33d (R-T33-1, M3b NOTES surface 22): "Keyboard" lists Re-run → Copy raw value in the
+// viewer's Tab cycle; "Header" keeps the × out of it (like T2a's dialogs; Escape closes).
+#[gpui::test]
+fn the_value_viewer_tabs_to_copy_and_never_to_its_close_button(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let cut = Value::Truncated(Box::new(TruncatedVal {
+        prefix: Value::Text("a".repeat(1 << 20).into()),
+        total_len: Some(5 << 20),
+        unit: LenUnit::Bytes,
+    }));
+    let _grid = t.show(store(one("note", text(), pg(25, "text")), vec![vec![cut]]));
+    in_window(t.vcx, |_, cx| value_viewer::open(t.console, cell(0, 0), cx));
+    t.redraw();
+    t.redraw();
+    let [rerun, copy, close] = t
+        .vcx
+        .cx
+        .read(|cx| value_viewer::tab_handles(t.console, cx))
+        .expect("the viewer");
+    let order = tab_order(t.vcx);
+    assert_consecutive(&order, &[("Re-run", &rerun), ("Copy raw value", &copy)]);
+    assert_not_a_stop(&order, "the viewer's ×", &close);
+    // ## m4-t33d-fr1 (T33d review m2): the × handle says so itself (the button no longer
+    // rewrites it), and Tab round the whole window never lands on it.
+    assert!(!close.tab_stop, "the × handle is no Tab stop");
+    for _ in 0..=order.len() {
+        in_window(t.vcx, |window, cx| window.focus_next(cx));
+        assert_ne!(
+            support::focused(t.vcx).as_ref(),
+            Some(&close),
+            "Tab never lands on the ×"
+        );
+    }
+}
+
+// ## m4-t33d-fr1 (T33d review I2, hostile test H3): the record inspector's per-field Show more
+// and its ▲ ▼ are no Tab stops: opening it on a row of 30 clamped fields adds none.
+#[gpui::test]
+fn the_record_inspector_adds_no_tab_stops(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let cols: Vec<ColumnMeta> = (0..30)
+        .map(|i| column(&format!("c{i}"), text(), pg(25, "text")))
+        .collect();
+    let schema = Arc::new(ResultSchema {
+        columns: Arc::from(cols),
+    });
+    let row: Vec<Value> = (0..30)
+        .map(|_| Value::Text("x".repeat(2000).into()))
+        .collect();
+    let grid = t.show(store(schema, vec![row]));
+    t.focus(&grid, 0, 0);
+    let before = tab_order(t.vcx).len();
+    in_window(t.vcx, views::toggle_record);
+    t.redraw();
+    t.focus(&grid, 0, 0);
+    assert!(
+        t.vcx.debug_bounds("button-record-next").is_some(),
+        "the inspector is open"
+    );
+    let after = tab_order(t.vcx).len();
+    assert_eq!(
+        after,
+        before,
+        "opening the inspector added {} Tab stops ({before} -> {after})",
+        after.saturating_sub(before)
+    );
+}
+
 // ---- the re-run over a session ----------------------------------------------------------------
 
 /// `answer` for the SQL-context probes of a PostgreSQL console.
@@ -918,8 +1023,9 @@ impl Console {
     }
 
     fn redraw(&self) {
-        in_window(self.vcx, |window, _| window.refresh());
-        self.vcx.run_until_parked();
+        // ## m4-t33d (T33 flaky3 follow-up): the last frame renders every view (a frame
+        // after `run_until_parked` may reuse a cached view, which records no texts).
+        redraw_full(self.vcx);
     }
 
     /// Waits for the result tab, shows it, and opens the viewer on its first cell.

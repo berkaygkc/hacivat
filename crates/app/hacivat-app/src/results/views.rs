@@ -2146,6 +2146,10 @@ fn field_element(
                 )
                 .kind(ButtonKind::Ghost)
                 .compact(true)
+                // ## m4-t33d-fr1 (T33d review I2): one per clamped field, up to 200 drawn: as
+                // Tab stops they would sit between the grid and the strip (M3a NOTES surface
+                // 11). The keyboard reaches the value viewer with ⇧↵ on the focused cell.
+                .tab_stop(false)
                 .on_click(move |_, _, cx| {
                     let row = active(console, cx).and_then(|(g, _)| record_row(console, &g, cx));
                     if let Some(row) = row {
@@ -2193,6 +2197,10 @@ pub(crate) fn inspector(
         Button::new(id, message(cx, msg, vec![]))
             .kind(ButtonKind::Icon)
             .icon(icon)
+            // ## m4-t33d-fr1 (T33d review I2): ▲ ▼ have their keys (Alt+↑ / Alt+↓, M3b NOTES
+            // "Record inspector") and NOTES makes them no Tab stops; as stops they would sit
+            // between the grid and the strip (M3a NOTES surface 11).
+            .tab_stop(false)
             .on_click(move |_, _, cx| record_step(console, back, cx))
     };
     // ## m3c-shotfix F6: the title and "Row 4 of 184" share one line while both fit; a longer

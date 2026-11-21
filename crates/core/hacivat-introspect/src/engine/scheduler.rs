@@ -242,6 +242,10 @@ impl Job {
 struct Running {
     job: Job,
     cancel: CancellationToken,
+    // ## m4-t33-flaky (named exception in Task 15's file)
+    /// What the task reported through its progress sink (shown instead of the batch count).
+    reported: work::Reported,
+    // ## m4-t33-flaky
 }
 
 /// A merge the mass-deletion guard held back (D-039).
@@ -999,6 +1003,8 @@ impl Actor {
         }
         let check = matches!(job.work, Work::CheckState { .. }).then(|| snap.clone());
         let marks = std::mem::take(&mut job.marks);
+        // ## m4-t33-flaky (named exception)
+        let reported = work::Reported::default();
         let spec = Spec {
             work: job.work.clone(),
             prev,
@@ -1019,6 +1025,8 @@ impl Actor {
                     .unwrap_or_default(),
                 _ => Vec::new(),
             },
+            // ## m4-t33-flaky (named exception)
+            reported: reported.clone(),
         };
         let cancel = self.root_cancel.child_token();
         let (id, ctx, done) = (job.id, self.ctx.clone(), self.done_tx.clone());
@@ -1031,7 +1039,14 @@ impl Actor {
         if matches!(job.work, Work::Facet { .. }) {
             self.facet_started.insert(id, self.facet_epoch);
         }
-        self.running.insert(id, Running { job, cancel });
+        self.running.insert(
+            id,
+            Running {
+                job,
+                cancel,
+                reported,
+            },
+        );
         self.update_progress();
     }
 
@@ -1052,7 +1067,9 @@ impl Actor {
     /// The running tasks' progress. A pass or scope refresh counts the tasks of the current
     /// batch (finished of finished + running + queued, since the engine was last idle); a
     /// fragment or a state check counts its objects (review m11; a count inside one pass needs
-    /// a progress sink in the introspector seam, carried to Tasks 16–18).
+    /// a progress sink in the introspector seam, carried to Tasks 16–18). A pass or fragment
+    /// that reported its own phase and counts through that sink shows those instead, until it
+    /// ends (m4-t33-flaky: [`work::Reported`]).
     ///
     /// ## m4-t33a-hygiene (fix round 1, review M5)
     /// Progress is consistent at step ends only: the loop publishes it after `pump`, so a
@@ -1100,8 +1117,32 @@ impl Actor {
             done: 0,
             total: None,
         }));
-        tasks.sort_by(|a, b| a.ns.cmp(&b.ns));
+        // ## m4-t33-flaky (named exception): each entry with its task's reported slot (the same
+        // order: the maps are not changed in between), read under the channel's lock below,
+        // where the sink writes it too.
+        let slots = self
+            .running
+            .values()
+            .map(|r| Some(&r.reported))
+            .chain(self.republishing.iter().map(|_| None));
+        let mut tasks: Vec<(TaskProgress, Option<&work::Reported>)> =
+            tasks.into_iter().zip(slots).collect();
+        tasks.sort_by(|a, b| a.0.ns.cmp(&b.0.ns));
         self.progress.send_if_modified(|p| {
+            // A task's own report outlives the actor's updates: it is lost neither when it came
+            // before the entry existed nor at the next update (another task starting or ending).
+            let tasks: Vec<TaskProgress> = tasks
+                .into_iter()
+                .map(|(mut t, reported)| {
+                    let own =
+                        reported.and_then(|r| *r.lock().unwrap_or_else(PoisonError::into_inner));
+                    if let Some((phase, done, total)) = own {
+                        (t.phase, t.done, t.total) = (phase, done, total);
+                    }
+                    t
+                })
+                .collect();
+            // ## m4-t33-flaky
             let changed = p.tasks != tasks;
             p.tasks = tasks;
             changed
@@ -1747,7 +1788,7 @@ impl Actor {
     // ---- answers ----------------------------------------------------------------------------
 
     fn on_done(&mut self, id: u64, out: Output) {
-        let Some(Running { job, cancel }) = self.running.remove(&id) else {
+        let Some(Running { job, cancel, .. }) = self.running.remove(&id) else {
             return;
         };
         self.batch.done += 1;
