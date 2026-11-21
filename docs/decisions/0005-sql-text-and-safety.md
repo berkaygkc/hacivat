@@ -1986,60 +1986,126 @@ field since `fb98cf1`).
 ## m4b-t08 — stream hold
 
 Closes the M3 open item "the stream holds unbounded text on MySQL/MariaDB" (m3b-t05 fix round 1;
-M3 ledger MUST-FIX for "Run as script"), under R-M4b-46 (controller ruling U-3; the PO confirms
-it at the gate).
+M3 ledger MUST-FIX for "Run as script"). Rulings: R-M4b-46 (the eager policy) and **R-M4b-47**
+(two passes), which replaces R-M4b-46's trade-off (controller ruling U-3).
 
 **Why the hold could not simply be lifted.** The stray-`END` backstop refuses every statement
-back to the last block-tracked one (or to the script's start), after the fact. The default
-stream equals the whole split for every chunking only because it holds that far back. A run that
-has already sent a statement cannot take it back, so a constant-memory stream cannot equal the
-whole split on a script whose blocks do not match.
+back to the last block-tracked one (or to the script's start), after the fact. M3 built it for
+blocks the splitter cannot see. M3's corpus names such blocks: `R1-my-stray-end`, and MariaDB
+`sql_mode=ORACLE` anonymous blocks and routines, which are valid SQL. The default stream equals
+the whole split for every chunking only because it holds that far back. A run that has already
+sent a statement cannot take it back, so a constant-memory stream cannot equal the whole split
+on such a script.
 
-**Decision: an opt-in policy; the default is unchanged.** `StreamPolicy::{Exact, Eager}`
-(`sql_split::stream`), `StreamSplitter::with_policy(ctx, flavor, policy)`. `new` is `Exact`:
-the same code path, the same items, and the equality property (`tests/stream.rs`, unchanged,
-plus `exact_policy_is_unchanged`). Every M3 caller, and the editor, keep it.
+**Decision: an opt-in policy; the default is unchanged.**
+- The types are `StreamPolicy::{Exact, Eager}` (`sql_split::stream`) and
+  `StreamSplitter::with_policy(ctx, flavor, policy)`.
+- `new` is `Exact`, and `Exact` keeps the M3 code path, the same items for every feed, and the
+  equality property (`tests/stream.rs`, unchanged, plus `exact_policy_is_unchanged`). The T8
+  review compared it feed by feed against the base build over 200,000 cases.
+- Every M3 caller, and the editor, keep `Exact`.
 
-Under `Eager`, on MySQL/MariaDB only (other families never held for blocks, so `Eager` is
-`Exact` there):
-- **No block hold.** Items before the latest anchor are given out whether or not a block-tracked
-  statement is held; the executable-comment and psql `\if` rules stay. Held text is bounded by
-  the longest statement plus one chunk (plus at most `ANCHOR_SCAN` items when anchors are rare):
-  on a generated 150 MB dump of 1 KiB `INSERT`s in 64 KiB chunks the held text never passes
-  1,024 bytes, and peak RSS stays about 4.5 MB at 15, 150 and 600 MB (the default policy: 43 MB
-  at 15 MB, 410 MB at 150 MB; `rss_probe`, debug build, macOS `/usr/bin/time -l`).
-- **Stop at the first block mismatch.** When the pass over the held text finds an
-  `UnknownBlock`, the text before the anchor is split on its own. Without a mismatch there, the
-  one found lies in text still held (its refusal of earlier statements is the backstop's
-  reach-back, which is exactly what `Eager` gives up), and the items before the anchor go out
-  from that clean pass. With one, the stream finds the first statement that brings a mismatch:
-  a binary search over prefixes that end where an item starts, which always lands on a prefix
-  with a mismatch whose predecessor has none. It gives out the items of that predecessor's pass,
-  then one `StreamItem::Ambiguous { offset, reason: UnknownBlock }` at the mismatch (the
-  `END` of a stray `END`, the `END IF` that closes a `LOOP`), and stops: the mismatching
-  statement and everything after it are never given out; later `feed`s and `finish` give out
-  nothing, and the held text is dropped. This is the same stop as `TooLong`.
-- **What it costs.** On a malformed script the statements before the mismatch have run (each one
-  classified, gated and confirmed as usual: the splitter only splits, the runner's gate is
-  unchanged). The whole split would have refused them all.
+**`Eager`, on MySQL/MariaDB.**
+- **No block hold.** Items before the latest anchor are given out whether or not a
+  block-tracked statement is held. The executable-comment and psql `\if` rules stay.
+- **It stops at the first block mismatch.**
+  - When the pass over the held text finds an `UnknownBlock`, the text before the anchor is
+    split on its own.
+  - If that pass has no mismatch, the one found lies in text still held, and its refusal of
+    earlier statements is the backstop's reach-back. The items before the anchor go out from
+    the clean pass. This costs one more pass per feed while the mismatch stays in the unsettled
+    tail.
+  - If that pass has a mismatch too, the stream binary-searches over prefixes that end where an
+    item starts. The search always lands on a prefix with a mismatch whose predecessor has
+    none. The stream gives out the items of that predecessor's pass, then one
+    `StreamItem::Ambiguous { offset, reason: UnknownBlock }` at the mismatch, and stops.
+    Nothing after it is given out. The search runs at most once per stream: O(n log n) on the
+    held text, and then the stream ends.
+
+**`Eager`, on every dialect: bounded memory (fix round 1, T8 review I2).**
+- **Anchors.** An anchor is looked for at the latest item that starts a line, among all the
+  items held (`Exact` looks at the last 256 only). The search walks back over blanks, so it is
+  linear in the items.
+- **A lone `\r` ends a line for the anchor.** The pass itself reads only `\n` as a line break
+  for client commands, so such an anchor is taken only after a check: the pass from that line
+  must give exactly the items, commands, boundaries and delimiter that the pass over the held
+  text gives there, and nothing the pass read may run past the break.
+- **The caps.** At most `STREAM_HELD_MAX` = 16 MiB of text and `STREAM_HELD_ITEMS_MAX` = 65,536
+  unsettled items are held.
+  - A statement still open past the byte cap gives out what precedes it, then `TooLong`.
+  - Anything else gives one `StreamItem::NoBoundary { offset }` at the held text's start:
+    statements with no line start between them, an unterminated `/*`, comments only, and,
+    after a lone `\r`, statements the check refuses.
+  - A complete statement longer than 16 MiB is `TooLong`.
+  - Every one of these stops the stream.
+- **Why 16 MiB.** mysqldump writes an extended `INSERT` no longer than its
+  `--net-buffer-length`, about 1 MiB by default. A pass over held text costs about 4× its size
+  for long statements and a few hundred bytes per item for short ones. The item cap bounds the
+  second: one line of 16 MiB of short statements cost about 600 MB of RSS before it, and now
+  stops at about 1 MB of text.
+- **The bound.** What is held once a feed returns is at most the caps. During one `feed` it is
+  at most the caps plus that chunk.
+- **Measured peak RSS** (debug build, macOS `/usr/bin/time -l`, the tests named in the table):
+  - 150 MB of 1 KiB `INSERT` lines: held text peaks at 1,024 bytes, and RSS is about 4.5 MB at
+    15, 150 and 600 MB. The default policy holds all of it: 43 MB at 15 MB, 410 MB at 150 MB.
+  - Past the cap (18 MiB, fed in 64 KiB chunks):
+
+    | Input | Peak held | Result | RSS |
+    |---|---|---|---|
+    | One line of short statements | 960 KiB | `NoBoundary` at the item cap | — |
+    | One line of 4 KB statements | 16 MiB | `NoBoundary` at the byte cap | — |
+    | (both lines above, one test) | | | 45 MB |
+    | 1,000 statements per line | 11,898 B | settles | 11 MB |
+    | Lone `\r` line ends | 62 B | settles | 8 MB |
+    | `SELECT 1;` then an unterminated `/*` | 16 MiB | `NoBoundary` | 24 MB |
+    | Comments only | 16 MiB | `NoBoundary` | 77 MB |
+    | One open statement | 16 MiB | `TooLong` | 57 MB |
+
+**R-M4b-47: how "Run as script" uses it (Task 12).**
+- On MySQL/MariaDB, "Run as script" reads the file twice.
+  - **Pass 1** streams the whole file through `Eager` and executes nothing. If any item refuses,
+    the whole file is refused, as M3's whole split refuses it. An item refuses when
+    `StreamItem::refuses` is true: an `Ambiguous`, a `TooLong`, a `NoBoundary`, or a statement
+    that is not `Exact`. `stream::has_stop(&items)` checks a batch, and pass 1 checks every
+    `feed` and the `finish`. `StreamSplitter::stopped()` says that the stream ended early. A
+    stop always gives out a refusing item.
+  - **Pass 2** runs only after a clean pass 1. It re-reads the file and streams it through
+    `Eager` to execute. Task 12 checks the file's stamp before pass 2 and for every chunk.
+- **What this rests on.** For every input and every chunking, the eager stream either gives out
+  an item that refuses, or equals the whole split exactly. It refuses exactly when the whole
+  split does, except past the caps, where it refuses on its own.
+  - So no statement of a script that M3 would refuse is ever executed, including the body
+    `DELETE` of a block the splitter missed, which the stop alone would have given out first.
+  - Memory stays constant.
+- **The cost.** A file is read twice. A file past the caps is refused with a clear reason,
+  `TooLong` or `NoBoundary`; T12 reports "no statement boundary within 16 MiB".
 
 **What holds, and how it is proved (`tests/stream.rs`, `## m4b-t08-stream-hold`).**
-- Where the whole split has no `UnknownBlock`, the eager stream equals the default stream and
-  the whole split for every chunking: the property `eager_stream_equals_default_stream_when_
-  blocks_match` over MySQL pieces (blocks, `DELIMITER` changes and `DELIMITER` in comments,
-  stray and matched `END`s, executable comments) and the M3 pieces, all six setups; and
-  `eager_equals_whole_split_when_blocks_match` over the corpora (the split cases, the MySQL and
-  MariaDB profile fixtures, `FX-SPLIT-MY-01..05`, the read corpora: 352 texts compared, 18 with a
-  mismatch skipped) in chunks of 1, 7, 64 KiB and 3/1/17 bytes.
-- Where it has one, the eager stream is the same for every chunking, ends with its only
-  `UnknownBlock`, which the whole split reports too, and its statements and client commands are
-  a prefix of the whole split's before that point: it never moves a boundary, it only stops.
-- The property's draws reach both branches (about 60 % matched, 40 % mismatched).
+- **`check_eager`** holds these invariants for every chunking and in one chunk:
+  - the stream is the same for every chunking;
+  - it gives out a stop or equals the whole split;
+  - it refuses exactly when the whole split refuses;
+  - without a block mismatch, or off MySQL/MariaDB, it equals the whole split and the default
+    stream;
+  - with a mismatch, it ends with its only `UnknownBlock`, which the whole split reports too,
+    and its statements and client commands are a prefix of the whole split's.
+- **Where it runs:**
+  - the property over generated scripts (blocks, `DELIMITER` changes and `DELIMITER` in
+    comments, stray and matched `END`s, ORACLE blocks set in the script, lone `\r`, quoting)
+    under 24 contexts: MySQL and MariaDB with default modes, `no_backslash_escapes`,
+    `ansi_quotes` and `mariadb_oracle_mode`, MySQL 5.7, MariaDB 10.3, with and without the mysql
+    client, and the other families;
+  - the corpora, in 6 chunkings: the split cases, the MySQL and MariaDB profile fixtures,
+    `FX-SPLIT-MY-01..05`, the read corpora, `lex/mysql.toml` under each case's own modes, and
+    the datagrip MySQL rows. Of these, 650 texts equal the whole split and 18 stop.
+- **`a_misread_block_is_a_stop_or_the_whole_split`** pins R-M4b-47's property on
+  `R1-my-stray-end`, `R2-stray-end-refuses-to-start`, and an ORACLE anonymous block and routine,
+  with ORACLE mode both set by the session and set by the script. It runs in 28 chunkings and
+  simulates pass 1.
+- The caps have one test per shape in the table above. Each measures `held_len()` after every
+  feed.
 
-**Interfaces for Task 12.** `StreamPolicy` is reached as `sql_split::stream::StreamPolicy` (the
-crate root's re-export list is not in this task's files). `held_len()` is `#[doc(hidden)]`, for
-the memory test only.
-
-**Limits.** A script with many statements on one line has no anchors inside that line, so the
-line is held until it ends (as under `Exact` on every dialect). The prefix search runs once per
-stream, only on a script with a mismatch: O(n log n) on the held text, then the stream ends.
+**Interfaces for Task 12.** `StreamPolicy`, `has_stop`, `STREAM_HELD_MAX` and
+`STREAM_HELD_ITEMS_MAX` are reached through `sql_split::stream` (the crate root's re-export list
+is not in this task's files). `StreamItem::NoBoundary` is new. `held_len()` is `#[doc(hidden)]`,
+for the memory tests only.
