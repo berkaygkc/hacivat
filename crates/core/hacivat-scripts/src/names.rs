@@ -64,7 +64,6 @@ impl LogicalDb {
         &self.0
     }
 
-    /// The binding comparison ([`same_db`]).
     /// The name as a UI shows it (fix round 1, review m8): every invisible or reordering
     /// character as `<U+XXXX>`. A name may hold zero-width or format characters (only controls
     /// and bidi controls are refused), so a raw display could pass for another name.
@@ -72,6 +71,7 @@ impl LogicalDb {
         escape_untrusted(&self.0, usize::MAX)
     }
 
+    /// The binding comparison ([`same_db`]).
     pub fn same_db(&self, other: &LogicalDb) -> bool {
         same_db(self.as_str(), other.as_str())
     }

@@ -587,6 +587,18 @@ fn deeply_nested_manifest_is_refused_without_overflow() {
     let r = read_text_small_stack(text);
     assert_eq!(r.db.unwrap().as_str(), open(20));
     assert!(!r.diags.contains(&Diag::TooDeep), "{:?}", r.diags);
+    // Re-review n1: a second BOM (the reader strips one, the lexer one more) is skipped like
+    // `toml_parser` skips it, so the first token is still a string: its brackets do not count,
+    // and a deep file behind two BOMs is still refused.
+    let two_boms = format!(
+        "\u{FEFF}\u{FEFF}\"{}\" = 1\nformat = 1\ndatabase = \"orders\"\n",
+        open(20)
+    );
+    let r = read_text_small_stack(two_boms);
+    assert_eq!(r.db.unwrap().as_str(), "orders");
+    assert!(!r.diags.contains(&Diag::TooDeep), "{:?}", r.diags);
+    let deep_two_boms = format!("\u{FEFF}\u{FEFF}format = 1\nx = {}", open(room));
+    assert_eq!(read_text_small_stack(deep_two_boms).diags, [Diag::TooDeep]);
 }
 
 /// carries-w1 T3: when the volume has no hard links (exFAT, FAT, SMB), the fallback still never

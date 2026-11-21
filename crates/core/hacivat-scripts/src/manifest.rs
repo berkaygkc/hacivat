@@ -399,7 +399,10 @@ fn create_in_place(h: &Dir, bytes: &[u8]) -> Result<(), WriteError> {
 /// bump of `toml_parser` must re-check these rules (the `deeply_nested…` test pins them).
 pub(crate) fn nesting_depth(text: &str) -> usize {
     const ATOM_END: &[u8] = b".=,[]{} \t#\r\n";
+    // Re-review n1: the lexer skips one leading BOM (`Lexer::new`), so this does too; a
+    // second BOM is an atom for both.
     let b = text.as_bytes();
+    let b = b.strip_prefix(BOM).unwrap_or(b);
     let (mut i, mut depth, mut max) = (0, 0usize, 0usize);
     while i < b.len() {
         i = match b[i] {

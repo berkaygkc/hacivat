@@ -389,6 +389,25 @@ fn registry_load_of_garbage_sets_it_aside() {
     let a = app();
     a.write(&format!("version = 1\nx = {}", "[".repeat(200_000)));
     assert!(matches!(a.load().1.as_slice(), [RegistryDiag::SetAside(_)]));
+    // Re-review n1, on a 256 KiB thread: behind one BOM, the first token is still a string
+    // (its brackets do not count, so the file loads), and a deep file is still set aside.
+    let small_stack_load = |text: String| {
+        let a = app();
+        a.write(&text);
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || a.load().1)
+            .unwrap()
+            .join()
+            .unwrap()
+    };
+    let bom_key = format!("\u{FEFF}\"{}\" = 1\nversion = 1\n", "[".repeat(20));
+    assert_eq!(small_stack_load(bom_key), []);
+    let bom_deep = format!("\u{FEFF}version = 1\nx = {}", "[".repeat(200_000));
+    assert!(matches!(
+        small_stack_load(bom_deep).as_slice(),
+        [RegistryDiag::SetAside(_)]
+    ));
     // Not UTF-8.
     let a = app();
     fs::create_dir_all(&a.paths.config).unwrap();
