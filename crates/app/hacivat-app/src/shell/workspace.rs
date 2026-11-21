@@ -58,7 +58,12 @@ use hacivat_proto::ProfileId;
 use hacivat_ui_core::gpui_surface::FluentBuilder as _;
 
 /// The `workspace.json` format version this build writes and reads.
-pub const WORKSPACE_STATE_VERSION: u32 = 1;
+// ## m4b-t01b-seams (named line, R-M4b-29): version 2 adds the script tab kind. A version-1
+// file loads unchanged (it has no script tabs); an older build sets a version-2 file aside
+// (`workspace_state::load`, `*.newer-<ts>`).
+pub const WORKSPACE_STATE_VERSION: u32 = 2;
+// ## m4b-t01b-seams (R-M4b-29): the first version that saves script tabs.
+const SCRIPT_TABS_SINCE: u64 = 2;
 /// How long a layout change waits before it is saved; a later change restarts the wait.
 pub const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// The workspace's own key context, the bottom of every context stack.
@@ -101,6 +106,17 @@ enum SavedKind {
     },
     Registered {
         name: String,
+    },
+    // ## m4b-t01b-seams (named lines, R-M4b-22, R-M4b-29): a script tab (version 2). The file
+    // holds the binding itself; `interned` is the restored tab's handle, set by `restore`
+    // (never saved).
+    Script {
+        library: String,
+        rel_path: String,
+        profile: Option<String>,
+        database: Option<String>,
+        #[serde(skip)]
+        interned: Option<crate::scripts::ScriptTabId>,
     },
 }
 
@@ -267,21 +283,36 @@ impl Workspace {
     /// aside (`*.corrupt-<ts>`) before anything overwrites it.
     // ## m4-t24-live (named lines): answers the file's `explorer` part (the expanded rows),
     // when the file was restored.
-    fn restore(&mut self, bounds: TileBounds, cx: &App) -> Option<serde_json::Value> {
+    // ## m4b-t01b-seams (named exception, R-M4b-29): `cx` is mutable, so a restored script tab
+    // gets its handle (`scripts::tabs::intern`) before the state is checked.
+    fn restore(&mut self, bounds: TileBounds, cx: &mut App) -> Option<serde_json::Value> {
         let path = self.state_path.as_ref()?;
         let value = workspace_state::load(path, WORKSPACE_STATE_VERSION)?;
         let explorer = value.get("explorer").cloned();
+        // ## m4b-t01b-seams (R-M4b-29): script tabs are read from version 2 on; a tab of that
+        // kind in an older file, or one whose binding does not parse, closes like a tab of a
+        // kind nobody registered.
+        let scripts = value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|v| v >= SCRIPT_TABS_SINCE);
+        let saved = serde_json::from_value::<SavedState>(value).map(|mut saved| {
+            if scripts {
+                for tab in &mut saved.tabs {
+                    intern_script_tab(&mut tab.kind, cx);
+                }
+            }
+            saved
+        });
         let registry = cx.try_global::<TabContentRegistry>();
-        let restored = serde_json::from_value::<SavedState>(value)
-            .map_err(|e| e.to_string())
-            .and_then(|saved| {
-                validate(
-                    saved,
-                    |name| registry.and_then(|r| r.kind_named(name)),
-                    bounds,
-                )
-                .map_err(str::to_string)
-            });
+        let restored = saved.map_err(|e| e.to_string()).and_then(|saved| {
+            validate(
+                saved,
+                |name| registry.and_then(|r| r.kind_named(name)),
+                bounds,
+            )
+            .map_err(str::to_string)
+        });
         let restored = match restored {
             Ok(restored) => restored,
             Err(reason) => {
@@ -300,12 +331,20 @@ impl Workspace {
         explorer
     }
 
-    fn saved_state(&self) -> SavedState {
+    // ## m4b-t01b-seams (named exception, R-M4b-29): `cx` reads a script tab's binding.
+    fn saved_state(&self, cx: &App) -> SavedState {
         // ## m4-t01b-seams (ruling R-W0-1, named exception): DDL view tabs are not saved; the
         // saved panes leave them out as if they were closed.
         let mut panes = self.panes.clone();
         for (id, kind) in &self.tabs {
-            if matches!(kind, TabKind::DdlView { .. }) {
+            // ## m4b-t01b-seams: a script tab whose handle names nothing (never in practice)
+            // is left out the same way, so the saved panes name only saved tabs.
+            let unsaved = match kind {
+                TabKind::DdlView { .. } => true,
+                TabKind::Script { script } => crate::scripts::tabs::spec(*script, cx).is_none(),
+                _ => false,
+            };
+            if unsaved {
                 let holders: Vec<PaneId> = panes
                     .panes
                     .iter()
@@ -335,6 +374,17 @@ impl Workspace {
                                 name: (*name).to_string(),
                             },
                             TabKind::DdlView { .. } => return None,
+                            // ## m4b-t01b-seams (R-M4b-22): the binding itself, never a handle.
+                            TabKind::Script { script } => {
+                                let tab = crate::scripts::tabs::spec(*script, cx)?;
+                                SavedKind::Script {
+                                    library: tab.library.to_string(),
+                                    rel_path: tab.rel.as_str().to_string(),
+                                    profile: tab.profile.map(|p| p.to_string()),
+                                    database: tab.database.map(|d| d.as_str().to_string()),
+                                    interned: None,
+                                }
+                            }
                         },
                     })
                 })
@@ -359,7 +409,7 @@ impl Workspace {
         let Some(path) = self.state_path.clone() else {
             return;
         };
-        let Ok(mut value) = serde_json::to_value(self.saved_state()) else {
+        let Ok(mut value) = serde_json::to_value(self.saved_state(cx)) else {
             return;
         };
         // ## m4-t24-live (named line): the explorer's expanded rows.
@@ -424,7 +474,8 @@ impl Workspace {
             .filter_map(|k| match k {
                 TabKind::Console { n, .. } => Some(*n),
                 // ## m4-t01b-seams (ruling R-W0-1, named exception)
-                TabKind::Registered(_) | TabKind::DdlView { .. } => None,
+                // ## m4b-t01b-seams (named exception): a script tab has no console number.
+                TabKind::Registered(_) | TabKind::DdlView { .. } | TabKind::Script { .. } => None,
             })
             .max()
             .map_or(1, |n| n.saturating_add(1))
@@ -622,6 +673,41 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<TabId> {
         let kind = TabKind::DdlView { profile, object };
+        let existing = self
+            .tabs
+            .iter()
+            .find(|(_, k)| **k == kind)
+            .map(|(id, _)| *id);
+        let tab = match existing {
+            Some(tab) => {
+                let found = self.panes.panes.iter().find_map(|(pane, p)| {
+                    p.tabs.iter().position(|t| *t == tab).map(|i| (*pane, i))
+                });
+                if let Some((pane, idx)) = found {
+                    self.panes.activate(pane, idx);
+                }
+                tab
+            }
+            None => {
+                let tab = self.fresh_tab(kind)?;
+                self.add_to_focused(tab);
+                tab
+            }
+        };
+        self.layout_changed(cx);
+        Some(tab)
+    }
+
+    // ## m4b-t01b-seams (named lines, R-M4b-4, R-M4b-29)
+    /// Activates the script tab of `script` (the same library, file, connection and database),
+    /// or opens one in the focused pane: one tab per (file, connection). Returns the tab
+    /// (`None` only when the tab IDs are used up). Task 14's `open_script` is its caller.
+    pub fn open_script_tab(
+        &mut self,
+        script: crate::scripts::ScriptTabId,
+        cx: &mut Context<Self>,
+    ) -> Option<TabId> {
+        let kind = TabKind::Script { script };
         let existing = self
             .tabs
             .iter()
@@ -915,6 +1001,8 @@ impl Workspace {
             TabKind::Registered(name) => self.kind_contexts.get(name).copied(),
             // ## m4-t01b-seams (ruling R-W0-1, named exception)
             TabKind::DdlView { .. } => Some(crate::ddl_view::DDL_VIEW_CONTEXT),
+            // ## m4b-t01b-seams (named exception, R-M4b-37)
+            TabKind::Script { .. } => Some(crate::scripts::SCRIPT_TAB_CONTEXT),
         }
     }
 
@@ -1000,6 +1088,37 @@ fn write_state((path, value): &(PathBuf, serde_json::Value)) {
     }
 }
 
+// ## m4b-t01b-seams (R-M4b-22, R-M4b-29)
+/// Gives a saved script tab its handle when its binding parses: a library ID, a valid path in
+/// the library, and a profile that is a UUID (an unreadable profile restores the tab unbound,
+/// as for a console; it is never bound to another connection). Anything else leaves it without
+/// one, and it closes.
+fn intern_script_tab(kind: &mut SavedKind, cx: &mut App) {
+    let SavedKind::Script {
+        library,
+        rel_path,
+        profile,
+        database,
+        interned,
+    } = kind
+    else {
+        return;
+    };
+    let (Some(library), Ok(rel)) = (
+        crate::scripts::parse_library_id(library),
+        crate::scripts::RelPath::parse(rel_path),
+    ) else {
+        return;
+    };
+    let tab = crate::scripts::ScriptTab {
+        library,
+        rel,
+        profile: profile.as_deref().and_then(|p| p.parse().ok()),
+        database: database.as_deref().map(crate::scripts::DatabaseName::new),
+    };
+    *interned = Some(crate::scripts::tabs::intern(tab, cx));
+}
+
 /// A restored workspace, consistent and within the window.
 #[derive(Debug, Clone, PartialEq)]
 struct Restored {
@@ -1040,6 +1159,8 @@ fn validate(
                 profile: profile.and_then(|p| p.parse().ok()),
             }),
             SavedKind::Registered { name } => registered(&name).map(TabKind::Registered),
+            // ## m4b-t01b-seams (R-M4b-29): its handle, when `restore` gave it one.
+            SavedKind::Script { interned, .. } => interned.map(|script| TabKind::Script { script }),
         };
         if described.insert(tab.id, kind).is_some() {
             return Err("a tab is listed twice");
@@ -1557,6 +1678,9 @@ impl Workspace {
                     None => editor_empty(theme, cx),
                 }
             }
+            // ## m4b-t01b-seams (named exception, R-M4b-29): a script tab shows nothing and runs
+            // nothing until Task 14 builds its console view.
+            Some(TabKind::Script { .. }) => editor_empty(theme, cx),
             None => editor_empty(theme, cx),
         }
     }

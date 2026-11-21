@@ -14,6 +14,13 @@
 //! generation moves); their rows come from [`ExplorerContributor::child_node`]. The filter
 //! matches [`ContributedNode::filter_text`] of every node it knows (loaded names only, as for
 //! catalog objects).
+//!
+//! ## m4b-t01b-seams (R-M4b-34): the explorer calls the owner of a contributed node: Enter or a
+//! double click on a node that does not expand calls its [`ExplorerContributor::activate`] (an
+//! expandable node still toggles), its menu is its [`ExplorerContributor::context_menu`], and
+//! [`contributors_changed`] redraws the explorer. A node's owner is the contributor that listed
+//! it ([`ExplorerContributor::database_children`], or the owner of the node it was listed
+//! under); no other contributor is ever asked about its key.
 
 use std::fmt;
 use std::rc::Rc;
@@ -81,10 +88,21 @@ pub trait ExplorerContributor: 'static {
 }
 
 /// The registered contributors, in registration order.
+// ## m4b-t01b-seams (named exception, R-M4b-34 (3)): public so the explorer observes it; its
+// list stays private.
 #[derive(Default, Clone)]
-struct Contributors(Vec<Rc<dyn ExplorerContributor>>);
+pub struct Contributors(Vec<Rc<dyn ExplorerContributor>>);
 
 impl Global for Contributors {}
+
+// ## m4b-t01b-seams (named lines, R-M4b-34 (3); C-M4-7)
+/// A contributor's answers changed (its [`ExplorerContributor::generation`] moved): the
+/// explorer re-reads its nodes and redraws, with no other event (M4b's Task 13 calls it once
+/// per coalesced batch of library events).
+pub fn contributors_changed(cx: &mut App) {
+    // Touching the global notifies its observers (`ExplorerView::new` observes it).
+    cx.default_global::<Contributors>();
+}
 
 /// Registers a contributor (M4b's Task 1; M4 registers none).
 pub fn register_contributor(contributor: Rc<dyn ExplorerContributor>, cx: &mut App) {

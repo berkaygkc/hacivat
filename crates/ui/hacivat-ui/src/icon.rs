@@ -138,6 +138,14 @@ icon_names! {
     Server => "icons/lucide/server.svg",
     Terminal => "icons/lucide/terminal.svg",
     RefreshCw => "icons/lucide/refresh-cw.svg",
+    // ## m4b-t01b-seams: the M4b script workspace (design/m4b-scripts/NOTES.md "New primitives",
+    // "For the controller" 1): a library or folder row, a Markdown note, a dataless file and the
+    // changed-on-disk notice (Tasks 13, 14, 17 draw them). `folder` and `file-text` are new
+    // SVGs; `download` and `file-diff` already ship.
+    Folder => "icons/lucide/folder.svg",
+    FileText => "icons/lucide/file-text.svg",
+    Download => "icons/lucide/download.svg",
+    FileDiff => "icons/lucide/file-diff.svg",
     /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
     HvMark => "icons/hacivat/hv-mark.svg",
 }
@@ -340,6 +348,7 @@ mod tests {
         // ## m3c-t33-find (named exception): the find bar uses the same `ArrowDown` (one variant).
         // ## m3c-t38 (named exception): the view switch's two and the record toggle's.
         // ## m4-t01b-seams (named exception): the fifteen M4 icons.
-        assert_eq!(IconName::ALL.len(), 88);
+        // ## m4b-t01b-seams (named exception): the four M4b icons.
+        assert_eq!(IconName::ALL.len(), 92);
     }
 }

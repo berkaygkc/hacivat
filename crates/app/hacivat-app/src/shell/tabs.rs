@@ -27,6 +27,8 @@ pub fn title_of(kind: TabKind, cx: &App) -> SharedString {
         },
         // ## m4-t01b-seams (ruling R-W0-1, named exception)
         TabKind::DdlView { profile, object } => crate::ddl_view::tab_title(profile, object, cx),
+        // ## m4b-t01b-seams (named exception, R-M4b-29)
+        TabKind::Script { script } => crate::scripts::tabs::tab_title(script, cx),
     }
 }
 
@@ -37,6 +39,8 @@ pub fn context_of(kind: TabKind, cx: &App) -> Option<&'static str> {
         TabKind::Registered(name) => registered(cx, name).map(|c| c.context),
         // ## m4-t01b-seams (ruling R-W0-1, named exception)
         TabKind::DdlView { .. } => Some(crate::ddl_view::DDL_VIEW_CONTEXT),
+        // ## m4b-t01b-seams (named exception, R-M4b-37): `file.save` is bound in it only.
+        TabKind::Script { .. } => Some(crate::scripts::SCRIPT_TAB_CONTEXT),
     }
 }
 
