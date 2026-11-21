@@ -8,6 +8,7 @@
 //!
 //! ## m4b-t05-fileio
 //! Task 5: the reader, the saver and the "Run as script" stream (HV-SCRIPT-07, -12 step 4).
+//! Fix round 1 changes are marked `(fr1 …)` with the review finding.
 //!
 //! - **Exact round trip.** [`read`] sniffs a BOM (UTF-8, UTF-16LE/BE), else takes strict
 //!   UTF-8, else answers [`ReadError::NeedsEncoding`] (the app asks, then calls [`read_with`]),
@@ -16,51 +17,65 @@
 //!   (the text holds them as they are; [`FileMeta::line_ending`] is the dominant one, ties
 //!   LF). [`read_with`] also re-encodes what it decoded and refuses with [`ReadError::Lossy`]
 //!   when that would not give the same bytes back (Shift_JIS's duplicate NEC/IBM rows), so an
-//!   unchanged save never rewrites a file. [`save`] encodes in the file's encoding and BOM and
-//!   refuses a character the encoding cannot hold ([`SaveError::Unencodable`]), before it
-//!   touches the disk.
+//!   unchanged save never rewrites a file; a preview in a chosen encoding gets the same check
+//!   (fr1 m8). [`save`] encodes in the file's encoding and BOM and refuses a character the
+//!   encoding cannot hold ([`SaveError::Unencodable`]), before it touches the disk.
 //! - **Tiers** (UI-EDIT-23): [`tier_for`] by size and line count, plus Reduced for a line over
 //!   64 KiB; above 20 MiB the read is a preview of the first 2.5 MiB cut after the last line
-//!   break, and its stamp is still the whole file's (hashed streaming, in constant memory).
-//! - **Paths** (HV-SCRIPT-03 step 8). Every call walks the [`RelPath`] from the library's
-//!   canonical root one folder at a time, each opened as a handle without following a link
-//!   and re-checked around every operation (the same no-`unsafe` approach as Task 3's manifest
-//!   writer, ruling R-T3-1: on Linux the operations go through `/proc/self/fd/<n>/`, on macOS
-//!   the opens use `O_NOFOLLOW_ANY`, on Windows the folder handles are held without
-//!   `FILE_SHARE_DELETE`). A link or junction in a folder position, a folder or other non-file
-//!   at the end, a component starting with `.` (never listed, C11; it keeps `.git/` and
-//!   `.hacivat/` out of reach) and, on Windows, a device or stream name are refused. A link at
-//!   the end (an `InsideLink`) is resolved once and followed only to a regular file inside the
-//!   root with no hidden component; the save then writes the target and the link stays.
-//! - **Save** (HV-SCRIPT-07 step 3): with `expect`, the file's current stamp must equal it
-//!   ([`SaveError::ChangedOnDisk`] carries the one on disk; a vanished file is
-//!   [`SaveError::DeletedOnDisk`]); the file must be writable as it is (a read-only file is
-//!   refused, never replaced). The bytes go into `.<name>.hv-<uuid v4>.tmp` in the same folder
-//!   (a dot name, so the scanner never lists it; never the process id, R-T1a-4), created
-//!   without following a link, 0600 until it takes the original's permission bits and owner,
-//!   written and synced; the stamp is re-checked, the echo is reported
-//!   ([`save_with_echo`], step 4), and the temp is renamed over the name relative to the
-//!   folder handle (n8), and the folder synced. Any failure removes the temp and leaves the
-//!   original as it was. A file with more than one hard link, or one whose owner the temp
-//!   cannot take, is written in place instead (write, truncate, sync), so the link and the
-//!   owner survive; that write is not atomic (alg/28 §3 item 4).
+//!   break, and its stamp is still the whole file's (hashed streaming, in constant memory). A
+//!   preview cannot be saved: [`Decoded::save_text`] is `None` for it (fr1 I4).
+//! - **Paths** (HV-SCRIPT-03 step 8; fr1 I2, ruling R-T5-2). Every call first asks
+//!   [`pathsafe::join`] (Task 4): the name rules (hidden and skipped names, Windows device
+//!   names, streams and 8.3 aliases), the root check, no link on the way, and a final link
+//!   resolved **as text inside the root** (`resolve_link`); this module never canonicalizes
+//!   and never resolves a link itself. The `_scoped` forms also re-apply the environment scope
+//!   to what `join` resolved (`envscope::visible_at`; a script tab uses them). Then the path
+//!   that `join` answered (the link's target for an `InsideLink`) is walked again from the
+//!   canonical root with the shared folder handles of [`dir`] (Task 3's, ruling R-T3-1: on
+//!   Linux through `/proc/self/fd/<n>/`, refusing writes without procfs; on macOS with
+//!   `O_NOFOLLOW_ANY`; on Windows held without `FILE_SHARE_DELETE`), refusing anything that is
+//!   a link now, so a swap after `join` is refused rather than followed.
+//! - **Save** (HV-SCRIPT-07 step 3): with `expect`, the file's current stamp (hashed
+//!   streaming, fr1 m5) must equal it ([`SaveError::ChangedOnDisk`] carries the one on disk; a
+//!   vanished file is [`SaveError::DeletedOnDisk`]); the file must be writable as it is (a
+//!   read-only file is refused, never replaced). The bytes go into `.<name>.hv-<uuid v4>.tmp`
+//!   in the same folder (a dot name, so the scanner never lists it; never the process id,
+//!   R-T1a-4), created without following a link, 0600 until it takes the original's
+//!   permission bits and owner, written and synced; the stamp is re-checked, the echo is
+//!   reported ([`save_with_echo`], step 4), and the temp is renamed over the name relative to
+//!   the folder handle (n8), and the folder synced. A new file is published with a hard link,
+//!   which never replaces a file that appeared meanwhile (fr1 m4). Our own temps older than a
+//!   minute are swept from the folder first (fr1 m2). Any failure removes the temp and leaves
+//!   the original as it was.
+//! - **In place** (fr1 I1, ruling R-T5-1). A file with more than one hard link, or one whose
+//!   owner the temp cannot take, is written through its own handle so the links and the owner
+//!   survive. Right before, the handle is re-checked against the stamp (fr1 m3) and the
+//!   original bytes are kept; on any error they are written back (with the original mtime)
+//!   and verified, so the file is as it was. Only when that restore fails too is the answer
+//!   [`SaveError::Damaged`], and the caller keeps the new text in a recovery copy.
 //! - **Stream** ([`open_stream`]): one handle for the whole run, 64 KiB reads decoded
 //!   incrementally (a character cut by a read waits for the next one), and after every read
 //!   the handle's and the path's stamps are compared with the ones at open; a change answers
 //!   [`ChunkError::Changed`] and nothing read after it is handed out.
 
+// ## m4b-t05-fileio fix round 1 (review m1, m4, m12): Task 3's folder handles, shared.
+pub(crate) mod dir;
+
 use std::fmt;
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::fs::{File, FileTimes, Metadata};
 use std::io::{self, Read, Seek, Write};
-use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hacivat_proto::EnvTag;
 use twox_hash::XxHash3_128;
 
 use crate::encoding::{self, StreamDecoder};
-use crate::pathsafe::RelPath;
+use crate::envscope;
+use crate::pathsafe::{self, JoinedKind, PathError, RelPath};
 use crate::registry::LibraryRoot;
+use crate::scan::{self, EntryKind};
 use crate::service::{ChunkError, ScriptChunks};
+use dir::{Dir, FsError, is_link};
 
 /// What a file looked like on disk when it was read or written: `(len, mtime)` plus the
 /// XXH3-128 of its bytes (`twox-hash`).
@@ -168,9 +183,13 @@ impl fmt::Debug for SaveText {
 pub enum ReadError {
     /// A stub that reads nothing (the service's, until Task 10).
     NotImplemented,
-    /// The path failed the re-validation (HV-SCRIPT-03 step 8): a link or junction on the way,
-    /// a link out of the library, a folder or other non-file, or a hidden component.
+    /// The path failed the re-validation (HV-SCRIPT-03 step 8, [`pathsafe::join`]): a name the
+    /// scan never lists, a link or junction on the way, a link out of the library, a folder or
+    /// other non-file, a root that moved.
     PathRefused,
+    /// ## m4b-t05-fileio fix round 1 (I2): the `_scoped` forms: what the path resolves to now
+    /// is not shown under this connection's environment.
+    OutOfScope,
     /// No BOM, not UTF-8 and no remembered choice: the user picks one ([`read_with`]).
     NeedsEncoding {
         guess: Option<TextEncoding>,
@@ -187,19 +206,22 @@ pub enum ReadError {
     Io(io::ErrorKind),
 }
 
-/// Why a save failed. The file on disk is unchanged in every case but an I/O error in the
-/// middle of an in-place write (a hard-linked file, or one whose owner a new file cannot take).
+/// Why a save failed. The file on disk is unchanged in every case but [`SaveError::Damaged`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SaveError {
     /// A stub that writes nothing (the service's, until Task 10).
     NotImplemented,
     /// The file is not what the editor last read (HV-SCRIPT-08); carries the stamp on disk.
     ChangedOnDisk(DiskStamp),
-    /// The path became a link or another kind of file since it was validated.
+    /// The path became a link or another kind of file since it was validated, or resolves out
+    /// of the library.
     PathChanged,
-    /// The path is not one a script may have: a hidden component (never listed, C11) or, on
-    /// Windows, a device or stream name.
+    /// The path is not one a script may have: a name the scan never lists (a hidden component,
+    /// C11; `node_modules`), a Windows device or stream name, an 8.3 alias.
     PathRefused,
+    /// ## m4b-t05-fileio fix round 1 (I2): the `_scoped` forms: not shown under this
+    /// connection's environment.
+    OutOfScope,
     /// `expect` was given, and the file is gone ("Deleted on disk — Save to recreate" saves
     /// with no `expect`).
     DeletedOnDisk,
@@ -207,17 +229,30 @@ pub enum SaveError {
     Unencodable {
         first_offset: usize,
     },
+    /// ## m4b-t05-fileio fix round 1 (I1, ruling R-T5-1): an in-place write failed and the
+    /// original bytes could not be written back: the file holds neither version. The caller
+    /// keeps the new text in a recovery copy (`recovery::CopyMeta::damaged`).
+    Damaged,
     Io(io::ErrorKind),
 }
 
-impl From<&Decoded> for SaveText {
-    /// The decoded text as read, to be saved the way it was read.
-    fn from(d: &Decoded) -> Self {
-        SaveText {
-            text: d.text.clone(),
-            meta: d.meta,
-        }
+impl Decoded {
+    /// ## m4b-t05-fileio fix round 1 (I4): the text as read, to be saved the way it was read;
+    /// `None` for a [`SizeTier::Preview`], which holds only the start of the file and must never
+    /// be saved over it.
+    pub fn save_text(&self) -> Option<SaveText> {
+        (self.tier != SizeTier::Preview).then(|| SaveText {
+            text: self.text.clone(),
+            meta: self.meta,
+        })
     }
+}
+
+/// The encoding a WHATWG label names (`"windows-1254"`, `"ISO-8859-9"`, `"Shift_JIS"`), as
+/// [`read_with`] takes it; `None` for an unknown label and for `replacement`. For the app's
+/// encoding chooser and the recovery sidecar.
+pub fn lookup_encoding(label: &str) -> Option<TextEncoding> {
+    encoding::lookup(label)
 }
 
 /// The largest file in the Full tier (UI-EDIT-23 T0).
@@ -228,7 +263,8 @@ pub const FULL_MAX_LINES: usize = 100_000;
 pub const FULL_MAX_LINE_BYTES: usize = 64 << 10;
 /// The largest file read whole without being asked (UI-EDIT-23 T1).
 pub const REDUCED_MAX_BYTES: u64 = 20 << 20;
-/// The largest file read whole when asked ([`ReadLimits::whole`], UI-EDIT-23 "Open anyway").
+/// The largest file read whole when asked ([`ReadLimits::whole`], UI-EDIT-23 "Open anyway"),
+/// and the largest one written in place (its original is kept in memory, fr1 I1).
 pub const WHOLE_MAX_BYTES: u64 = 64 << 20;
 /// How much of a file a preview reads: 2.5 MiB.
 pub const PREVIEW_BYTES: usize = 5 << 19;
@@ -242,6 +278,8 @@ const TEMP_MARK: &str = ".hv-";
 const TEMP_SUFFIX: &str = ".tmp";
 /// The random part of a temp name: a v4 UUID in simple form.
 const TEMP_RANDOM_LEN: usize = 32;
+/// One read of a streaming hash.
+const HASH_CHUNK_BYTES: usize = 1 << 20;
 
 /// The tier of a file of `len` bytes and `lines` lines (UI-EDIT-23 step 1: Full up to 4 MiB
 /// and 100,000 lines, Reduced up to 20 MiB, Preview above).
@@ -255,11 +293,41 @@ pub fn tier_for(len: u64, lines: usize) -> SizeTier {
     }
 }
 
+/// Whose environment a read or save is checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// No connection (tests, the library's own maintenance): path rules only.
+    Unchecked,
+    /// A script tab under a connection of this environment (fr1 I2).
+    Env(Option<EnvTag>),
+}
+
 /// Reads and decodes `rel` under `root` (UI-EDIT-02 step 1): a BOM names the encoding, else
 /// strict UTF-8, else [`ReadError::NeedsEncoding`]. Above 20 MiB (64 MiB with
-/// [`ReadLimits::whole`]) it reads a preview.
+/// [`ReadLimits::whole`]) it reads a preview. Path rules only; a script tab uses
+/// [`read_scoped`].
 pub fn read(root: &LibraryRoot, rel: &RelPath, limits: ReadLimits) -> Result<Decoded, ReadError> {
-    let opened = open_for_read(root, rel)?;
+    read_in(root, rel, Scope::Unchecked, limits)
+}
+
+/// [`read`] for a tab under a connection whose environment is `env`: what the path resolves
+/// to must be shown there (`envscope::visible_at`), else [`ReadError::OutOfScope`].
+pub fn read_scoped(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    limits: ReadLimits,
+) -> Result<Decoded, ReadError> {
+    read_in(root, rel, Scope::Env(env), limits)
+}
+
+fn read_in(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    scope: Scope,
+    limits: ReadLimits,
+) -> Result<Decoded, ReadError> {
+    let opened = open_for_read(root, rel, scope)?;
     let cap = if limits.whole {
         WHOLE_MAX_BYTES
     } else {
@@ -277,8 +345,27 @@ pub fn read(root: &LibraryRoot, rel: &RelPath, limits: ReadLimits) -> Result<Dec
 /// Reads `rel` in the encoding the user chose by its WHATWG label (`"windows-1254"`), after
 /// [`ReadError::NeedsEncoding`]. The encoding's own BOM, if present, is kept for the save.
 pub fn read_with(root: &LibraryRoot, rel: &RelPath, encoding: &str) -> Result<Decoded, ReadError> {
+    read_with_in(root, rel, Scope::Unchecked, encoding)
+}
+
+/// [`read_with`] for a tab under a connection whose environment is `env`.
+pub fn read_with_scoped(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    encoding: &str,
+) -> Result<Decoded, ReadError> {
+    read_with_in(root, rel, Scope::Env(env), encoding)
+}
+
+fn read_with_in(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    scope: Scope,
+    encoding: &str,
+) -> Result<Decoded, ReadError> {
     let enc = encoding::lookup(encoding).ok_or(ReadError::UnknownEncoding)?;
-    let opened = open_for_read(root, rel)?;
+    let opened = open_for_read(root, rel, scope)?;
     if opened.meta.len() > REDUCED_MAX_BYTES {
         return read_preview(opened, Some(enc));
     }
@@ -302,14 +389,15 @@ pub fn read_with(root: &LibraryRoot, rel: &RelPath, encoding: &str) -> Result<De
 }
 
 /// Saves `text` to `rel` under `root`; with `expect`, only if the file still has that stamp.
-/// Returns the stamp of what is now on disk (HV-SCRIPT-07 step 3).
+/// Returns the stamp of what is now on disk (HV-SCRIPT-07 step 3). Path rules only; a script
+/// tab uses [`save_scoped`].
 pub fn save(
     root: &LibraryRoot,
     rel: &RelPath,
     text: SaveText,
     expect: Option<DiskStamp>,
 ) -> Result<DiskStamp, SaveError> {
-    save_with_echo(root, rel, text, expect, &mut |_| {})
+    save_in(root, rel, Scope::Unchecked, text, expect, &mut |_| {})
 }
 
 /// [`save`], calling `echo` with the stamp of the new file before it replaces the old one
@@ -322,45 +410,67 @@ pub fn save_with_echo(
     expect: Option<DiskStamp>,
     echo: &mut dyn FnMut(&DiskStamp),
 ) -> Result<DiskStamp, SaveError> {
+    save_in(root, rel, Scope::Unchecked, text, expect, echo)
+}
+
+/// [`save_with_echo`] for a tab under a connection whose environment is `env`: what the path
+/// resolves to must be shown there, else [`SaveError::OutOfScope`].
+pub fn save_scoped(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    text: SaveText,
+    expect: Option<DiskStamp>,
+    echo: &mut dyn FnMut(&DiskStamp),
+) -> Result<DiskStamp, SaveError> {
+    save_in(root, rel, Scope::Env(env), text, expect, echo)
+}
+
+fn save_in(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    scope: Scope,
+    text: SaveText,
+    expect: Option<DiskStamp>,
+    echo: &mut dyn FnMut(&DiskStamp),
+) -> Result<DiskStamp, SaveError> {
     let bytes = encoding::encode_exact(text.meta.encoding, text.meta.bom, &text.text)
         .map_err(|first_offset| SaveError::Unencodable { first_offset })?;
     drop(text);
-    match locate(root, rel).map_err(save_error)? {
+    let target = locate(root, rel, scope).map_err(Refusal::for_save)?;
+    let dir = target.dir();
+    dir.sweep_stale_temps(&is_temp_name);
+    match target {
         Target::Missing { dir, name } => {
             if expect.is_some() {
                 return Err(SaveError::DeletedOnDisk);
             }
-            match replace(&dir, &name, &bytes, None, echo) {
-                Ok(stamp) => Ok(stamp),
-                Err(Replace::Failed(e)) => Err(e),
-                // Only an existing file has an owner to keep.
-                Err(Replace::OwnerNotKept) => Err(SaveError::Io(io::ErrorKind::PermissionDenied)),
-            }
+            publish_new(&dir, &name, &bytes, echo)
         }
         Target::Existing { dir, name, lstat } => {
-            let current = stamp_of_file(&dir, &name, &lstat)?;
+            let current = stamp_streaming(&dir, &name, &lstat)?;
             if let Some(expected) = expect
                 && expected != current
             {
                 return Err(SaveError::ChangedOnDisk(current));
             }
             // Writable as it is: a read-only file is refused, never replaced.
-            let writer = dir.open_write(&name, &lstat).map_err(save_error)?;
+            let writer = dir.open_write(&name, &lstat).map_err(fs_save_error)?;
             let original = Original {
                 meta: &lstat,
                 stamp: current,
             };
             if hard_links(&lstat) > 1 {
-                return in_place(&dir, writer, &bytes, echo);
+                return in_place(&dir, &name, writer, &original, &bytes, echo);
             }
             // Not held across the rename (Windows replaces only a file nobody holds).
             drop(writer);
-            match replace(&dir, &name, &bytes, Some(&original), echo) {
+            match replace(&dir, &name, &bytes, &original, echo) {
                 Ok(stamp) => Ok(stamp),
                 Err(Replace::Failed(e)) => Err(e),
                 Err(Replace::OwnerNotKept) => {
-                    let writer = dir.open_write(&name, &lstat).map_err(save_error)?;
-                    in_place(&dir, writer, &bytes, echo)
+                    let writer = dir.open_write(&name, &lstat).map_err(fs_save_error)?;
+                    in_place(&dir, &name, writer, &original, &bytes, echo)
                 }
             }
         }
@@ -368,14 +478,34 @@ pub fn save_with_echo(
 }
 
 /// A chunked UTF-8 reader of `rel` in `encoding` for "Run as script" (HV-SCRIPT-12): the
-/// source behind `LibraryService::open_stream` (Task 10 wires it). Its BOM is dropped.
+/// source behind `LibraryService::open_stream` (Task 10 wires it). Its BOM is dropped. Path
+/// rules only; a script tab uses [`open_stream_scoped`].
 pub fn open_stream(
     root: &LibraryRoot,
     rel: &RelPath,
     encoding: TextEncoding,
 ) -> Result<Box<dyn ScriptChunks>, ReadError> {
+    open_stream_in(root, rel, Scope::Unchecked, encoding)
+}
+
+/// [`open_stream`] for a tab under a connection whose environment is `env`.
+pub fn open_stream_scoped(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    encoding: TextEncoding,
+) -> Result<Box<dyn ScriptChunks>, ReadError> {
+    open_stream_in(root, rel, Scope::Env(env), encoding)
+}
+
+fn open_stream_in(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    scope: Scope,
+    encoding: TextEncoding,
+) -> Result<Box<dyn ScriptChunks>, ReadError> {
     let decoder = StreamDecoder::new(encoding).ok_or(ReadError::UnknownEncoding)?;
-    let opened = open_for_read(root, rel)?;
+    let opened = open_for_read(root, rel, scope)?;
     Ok(Box::new(FileStream {
         at_open: Fingerprint::of(&opened.meta),
         dir: opened.dir,
@@ -402,15 +532,19 @@ pub fn temp_name_for(name: &str) -> String {
     )
 }
 
-/// Whether `name` has the shape of [`temp_name_for`] (the watcher's expected transient,
-/// HV-SCRIPT-07 step 4).
+/// Whether `name` is exactly a [`temp_name_for`] name: a leading `.`, then `.hv-`, 32
+/// lowercase hex digits and `.tmp` (the watcher's expected transient, HV-SCRIPT-07 step 4, and
+/// the stale-temp sweep, fr1 m2).
 pub fn is_temp_name(name: &str) -> bool {
     name.starts_with('.')
         && name
             .strip_suffix(TEMP_SUFFIX)
             .and_then(|s| s.rsplit_once(TEMP_MARK))
             .is_some_and(|(_, random)| {
-                random.len() == TEMP_RANDOM_LEN && random.bytes().all(|b| b.is_ascii_hexdigit())
+                random.len() == TEMP_RANDOM_LEN
+                    && random
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             })
 }
 
@@ -421,12 +555,17 @@ pub mod faults {
     use std::cell::{Cell, RefCell};
     use std::io;
 
-    /// A step of the atomic save.
+    /// A step of a save.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Fault {
+        /// Before any byte is written.
         Write,
+        /// ## fix round 1 (I1): after this many bytes are written (an ENOSPC or EFBIG stand-in).
+        WriteAfter(usize),
         Sync,
         Rename,
+        /// ## fix round 1 (I1): the write-back of the original after a failed in-place write.
+        Restore,
     }
 
     thread_local! {
@@ -439,17 +578,60 @@ pub mod faults {
         NEXT.set(Some(f));
     }
 
+    /// Two faults: `first` fires at its step, then `then` at its own (a failed write whose
+    /// restore fails too).
+    pub fn inject_both(first: Fault, then: Fault) {
+        NEXT.set(Some(first));
+        AFTER.set(Some(then));
+    }
+
+    thread_local! {
+        static AFTER: Cell<Option<Fault>> = const { Cell::new(None) };
+    }
+
+    thread_local! {
+        static BEFORE_PUBLISH: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `f` once, on this thread, in the last window of a save: between the stamp check
+    /// and an in-place write (fix round 1 m3), or between the re-check and the publish of a new
+    /// file (m4). Another writer acts there.
+    pub fn before_publish(f: impl FnOnce() + 'static) {
+        BEFORE_PUBLISH.set(Some(Box::new(f)));
+    }
+
+    pub(super) fn run_before_publish() {
+        if let Some(f) = BEFORE_PUBLISH.take() {
+            f();
+        }
+    }
+
     /// The temp name the last save on this thread created.
     pub fn last_temp() -> Option<String> {
         LAST_TEMP.with_borrow(Clone::clone)
     }
 
+    fn fire() {
+        NEXT.set(AFTER.take());
+    }
+
     pub(super) fn hit(at: Fault) -> io::Result<()> {
         if NEXT.get() == Some(at) {
-            NEXT.set(None);
+            fire();
             return Err(io::Error::other("injected fault"));
         }
         Ok(())
+    }
+
+    /// How many bytes of a write go through before an injected `WriteAfter` fault.
+    pub(super) fn write_budget() -> Option<usize> {
+        match NEXT.get() {
+            Some(Fault::WriteAfter(n)) => {
+                fire();
+                Some(n)
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn record_temp(name: &str) {
@@ -466,19 +648,176 @@ mod faults {
         Write,
         Sync,
         Rename,
+        Restore,
     }
 
     #[inline]
     pub(super) fn hit(at: Fault) -> io::Result<()> {
-        let (Fault::Write | Fault::Sync | Fault::Rename) = at;
+        let (Fault::Write | Fault::Sync | Fault::Rename | Fault::Restore) = at;
         Ok(())
     }
 
     #[inline]
+    pub(super) fn write_budget() -> Option<usize> {
+        None
+    }
+
+    #[inline]
     pub(super) fn record_temp(_: &str) {}
+
+    #[inline]
+    pub(super) fn run_before_publish() {}
 }
 
 use faults::Fault;
+
+/// `write_all`, unless a fault says otherwise (a `WriteAfter(n)` writes `n` bytes and fails).
+fn write_faulted(mut file: &File, bytes: &[u8]) -> io::Result<()> {
+    faults::hit(Fault::Write)?;
+    if let Some(n) = faults::write_budget() {
+        file.write_all(&bytes[..n.min(bytes.len())])?;
+        return Err(io::Error::other("injected partial write"));
+    }
+    file.write_all(bytes)
+}
+
+// ---- paths -------------------------------------------------------------------------------------
+
+/// Why a path was not opened.
+#[derive(Debug)]
+enum Refusal {
+    Path(PathError),
+    Fs(FsError),
+    OutOfScope,
+}
+
+impl From<PathError> for Refusal {
+    fn from(e: PathError) -> Self {
+        Refusal::Path(e)
+    }
+}
+
+impl From<FsError> for Refusal {
+    fn from(e: FsError) -> Self {
+        Refusal::Fs(e)
+    }
+}
+
+impl Refusal {
+    fn for_read(self) -> ReadError {
+        match self {
+            Refusal::Path(PathError::Io(k)) => ReadError::Io(k),
+            Refusal::Fs(FsError::Io(e)) => ReadError::Io(e.kind()),
+            Refusal::OutOfScope => ReadError::OutOfScope,
+            Refusal::Path(_) | Refusal::Fs(_) => ReadError::PathRefused,
+        }
+    }
+
+    fn for_save(self) -> SaveError {
+        match self {
+            Refusal::Path(e) => match e {
+                PathError::Io(k) => SaveError::Io(k),
+                PathError::Malformed
+                | PathError::Name(_)
+                | PathError::Alias
+                | PathError::RootInEnvFolder => SaveError::PathRefused,
+                PathError::LinkOnPath
+                | PathError::NotAFolder
+                | PathError::NotAFile
+                | PathError::OutsideRoot
+                | PathError::RootChanged
+                | PathError::Changed => SaveError::PathChanged,
+            },
+            Refusal::Fs(e) => fs_save_error(e),
+            Refusal::OutOfScope => SaveError::OutOfScope,
+        }
+    }
+}
+
+fn fs_save_error(e: FsError) -> SaveError {
+    match e {
+        FsError::Io(e) => SaveError::Io(e.kind()),
+        FsError::Link
+        | FsError::NotDir
+        | FsError::NotFile
+        | FsError::TooLarge
+        | FsError::Changed => SaveError::PathChanged,
+    }
+}
+
+fn fs_read_error(e: FsError) -> ReadError {
+    Refusal::Fs(e).for_read()
+}
+
+/// Where a path ends, under its folder handle: an existing regular file, or nothing yet.
+enum Target {
+    Existing {
+        dir: Dir,
+        name: String,
+        lstat: Metadata,
+    },
+    Missing {
+        dir: Dir,
+        name: String,
+    },
+}
+
+impl Target {
+    fn dir(&self) -> &Dir {
+        match self {
+            Target::Existing { dir, .. } | Target::Missing { dir, .. } => dir,
+        }
+    }
+}
+
+/// `pathsafe::join` decides (fr1 I2: the link, if any, resolved as text inside the root); then
+/// the path it answered is walked with no-follow folder handles, and anything that is a link
+/// now is refused.
+fn locate(root: &LibraryRoot, rel: &RelPath, scope: Scope) -> Result<Target, Refusal> {
+    let joined = pathsafe::join(root, rel)?;
+    if let Scope::Env(env) = scope {
+        let kind = match joined.kind {
+            JoinedKind::Folder => EntryKind::Folder,
+            JoinedKind::File | JoinedKind::Absent => {
+                scan::script_kind(rel.name()).unwrap_or(EntryKind::Sql)
+            }
+        };
+        if !envscope::visible_at(rel, kind, joined.target.as_ref(), env) {
+            return Err(Refusal::OutOfScope);
+        }
+    }
+    if joined.kind == JoinedKind::Folder {
+        return Err(Refusal::Fs(FsError::NotFile));
+    }
+    let open = joined.target.as_ref().unwrap_or(rel);
+    let mut dir = Dir::open_canonical(&root.canonical)?;
+    let parts: Vec<&str> = open.components().collect();
+    let Some((last, folders)) = parts.split_last() else {
+        return Err(Refusal::Path(PathError::Malformed));
+    };
+    for folder in folders {
+        dir = dir.subdir(folder)?;
+    }
+    let name = (*last).to_owned();
+    let lstat = match dir.lstat(&name) {
+        Ok(m) => m,
+        Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+            // A link's target that vanished is not a place to create a file.
+            if joined.target.is_some() {
+                return Err(Refusal::Path(PathError::Changed));
+            }
+            return Ok(Target::Missing { dir, name });
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if is_link(&lstat) {
+        return Err(Refusal::Path(PathError::Changed));
+    }
+    if !lstat.is_file() {
+        return Err(Refusal::Fs(FsError::NotFile));
+    }
+    Ok(Target::Existing { dir, name, lstat })
+}
 
 // ---- reading -------------------------------------------------------------------------------
 
@@ -490,11 +829,11 @@ struct Opened {
     meta: Metadata,
 }
 
-fn open_for_read(root: &LibraryRoot, rel: &RelPath) -> Result<Opened, ReadError> {
-    match locate(root, rel).map_err(read_error)? {
+fn open_for_read(root: &LibraryRoot, rel: &RelPath, scope: Scope) -> Result<Opened, ReadError> {
+    match locate(root, rel, scope).map_err(Refusal::for_read)? {
         Target::Missing { .. } => Err(ReadError::Io(io::ErrorKind::NotFound)),
         Target::Existing { dir, name, lstat } => {
-            let file = dir.open_read(&name, &lstat).map_err(read_error)?;
+            let file = dir.open_read(&name, &lstat).map_err(fs_read_error)?;
             let meta = file.metadata().map_err(|e| ReadError::Io(e.kind()))?;
             Ok(Opened {
                 dir,
@@ -581,6 +920,11 @@ fn read_preview(opened: Opened, chosen: Option<TextEncoding>) -> Result<Decoded,
         });
     };
     text.truncate(preview_cut(&text));
+    // fr1 m8: the preview must encode back to the bytes it came from, as `read_with` checks.
+    match encoding::encode_exact(enc, bom, &text) {
+        Ok(back) if prefix.starts_with(&back) => {}
+        _ => return Err(ReadError::Lossy),
+    }
     let meta = FileMeta {
         encoding: enc,
         bom,
@@ -742,52 +1086,157 @@ impl From<io::Error> for Replace {
     }
 }
 
-/// The current stamp of the regular file `name`, read through a no-follow handle.
-fn stamp_of_file(dir: &Dir, name: &str, lstat: &Metadata) -> Result<DiskStamp, SaveError> {
-    let file = dir.open_read(name, lstat).map_err(save_error)?;
-    let mut bytes = Vec::new();
-    (&file)
-        .read_to_end(&mut bytes)
-        .map_err(|e| SaveError::Io(e.kind()))?;
-    let meta = file.metadata().map_err(|e| SaveError::Io(e.kind()))?;
-    Ok(stamp_from(
-        &meta,
-        bytes.len() as u64,
-        XxHash3_128::oneshot(&bytes),
-    ))
+impl From<FsError> for Replace {
+    fn from(e: FsError) -> Self {
+        Replace::Failed(fs_save_error(e))
+    }
 }
 
-/// The atomic save: a same-folder temp, synced, renamed over `name`.
+/// The XXH3-128 of everything `file` holds from its start, read in 1 MiB pieces (fr1 m5: a
+/// file swapped for a huge one is never read into memory), and the byte count.
+fn hash_streaming(mut file: &File) -> io::Result<(u128, u64)> {
+    file.seek(io::SeekFrom::Start(0))?;
+    let mut hasher = XxHash3_128::new();
+    let mut buf = vec![0u8; HASH_CHUNK_BYTES];
+    let mut total = 0u64;
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => return Ok((hasher.finish_128(), total)),
+            Ok(n) => {
+                hasher.write(&buf[..n]);
+                total += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// The current stamp of the regular file `name`, read through a no-follow handle.
+fn stamp_streaming(dir: &Dir, name: &str, lstat: &Metadata) -> Result<DiskStamp, SaveError> {
+    let file = dir.open_read(name, lstat).map_err(fs_save_error)?;
+    let (hash, len) = hash_streaming(&file).map_err(|e| SaveError::Io(e.kind()))?;
+    let meta = file.metadata().map_err(|e| SaveError::Io(e.kind()))?;
+    Ok(stamp_from(&meta, len, hash))
+}
+
+/// The atomic save over an existing file: a same-folder temp that takes the original's mode
+/// and owner, synced, renamed over `name`.
 fn replace(
     dir: &Dir,
     name: &str,
     bytes: &[u8],
-    original: Option<&Original<'_>>,
+    original: &Original<'_>,
     echo: &mut dyn FnMut(&DiskStamp),
 ) -> Result<DiskStamp, Replace> {
     let tmp = temp_name_for(name);
     faults::record_temp(&tmp);
-    let file = dir
-        .create_new(&tmp, original.is_some())
-        .map_err(save_error)?;
-    let written = write_temp(&file, bytes, original);
+    let file = dir.create_temp(&tmp, true)?;
+    let written = write_temp(&file, bytes, Some(original));
     drop(file);
     let published = written.and_then(|stamp| {
-        recheck(dir, name, original)?;
+        recheck(dir, name, Some(original))?;
         echo(&stamp);
         faults::hit(Fault::Rename)?;
-        dir.rename(&tmp, name).map_err(save_error)?;
+        dir.rename(&tmp, name)?;
         dir.sync();
         Ok(stamp)
     });
     if published.is_err() {
-        let _ = dir.remove_file(&tmp);
+        dir.discard_temp(&tmp);
     }
     published
 }
 
+/// A new file: the temp, synced, is published with a hard link, which fails when the name
+/// exists, so a file that appeared meanwhile is never replaced (fr1 m4, T3's publish). On a
+/// volume without hard links (exFAT, FAT, SMB) the name itself is created with `create_new`,
+/// which never replaces one either.
+fn publish_new(
+    dir: &Dir,
+    name: &str,
+    bytes: &[u8],
+    echo: &mut dyn FnMut(&DiskStamp),
+) -> Result<DiskStamp, SaveError> {
+    let tmp = temp_name_for(name);
+    faults::record_temp(&tmp);
+    let file = dir.create_temp(&tmp, false).map_err(fs_save_error)?;
+    let written = write_temp(&file, bytes, None);
+    drop(file);
+    let linked = match written {
+        Ok(stamp) => recheck(dir, name, None)
+            .and_then(|()| {
+                echo(&stamp);
+                faults::run_before_publish();
+                faults::hit(Fault::Rename).map_err(|e| SaveError::Io(e.kind()))
+            })
+            .map(|()| (stamp, dir.hard_link(&tmp, name))),
+        Err(Replace::Failed(e)) => Err(e),
+        Err(Replace::OwnerNotKept) => Err(SaveError::Io(io::ErrorKind::PermissionDenied)),
+    };
+    dir.discard_temp(&tmp);
+    let (stamp, linked) = linked?;
+    match linked {
+        Ok(()) => {
+            dir.sync();
+            Ok(stamp)
+        }
+        Err(FsError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => Err(appeared(dir, name)),
+        // No hard links on this volume (`EPERM`, `ENOTSUP`): the no-replace fallback.
+        Err(FsError::Io(_)) => create_in_place(dir, name, bytes),
+        Err(e) => Err(fs_save_error(e)),
+    }
+}
+
+/// What a name that appeared during a new-file save holds now.
+fn appeared(dir: &Dir, name: &str) -> SaveError {
+    match dir.lstat(name) {
+        Ok(m) if m.is_file() && !is_link(&m) => match stamp_streaming(dir, name, &m) {
+            Ok(stamp) => SaveError::ChangedOnDisk(stamp),
+            Err(e) => e,
+        },
+        Ok(_) => SaveError::PathChanged,
+        Err(e) => fs_save_error(e),
+    }
+}
+
+/// The no-hard-link fallback: the name created with `create_new` and written; a partial file
+/// it created is removed again while the name still is that file (T3's `create_in_place`).
+fn create_in_place(dir: &Dir, name: &str, bytes: &[u8]) -> Result<DiskStamp, SaveError> {
+    let file = dir.create_new(name).map_err(|e| match e {
+        FsError::Io(e) if e.kind() == io::ErrorKind::AlreadyExists => appeared(dir, name),
+        e => fs_save_error(e),
+    })?;
+    let written = (|| -> io::Result<DiskStamp> {
+        write_faulted(&file, bytes)?;
+        file.sync_all()?;
+        Ok(stamp_from(
+            &file.metadata()?,
+            bytes.len() as u64,
+            XxHash3_128::oneshot(bytes),
+        ))
+    })();
+    match written {
+        Ok(stamp) => {
+            dir.sync();
+            Ok(stamp)
+        }
+        Err(e) => {
+            let ours = file.metadata().ok().map(|m| dir::identity(&m));
+            drop(file);
+            if let (Some(ours), Ok(now)) = (ours, dir.lstat(name))
+                && !is_link(&now)
+                && dir::identity(&now) == ours
+            {
+                let _ = dir.remove_file(name);
+            }
+            Err(SaveError::Io(e.kind()))
+        }
+    }
+}
+
 fn write_temp(
-    mut file: &File,
+    file: &File,
     bytes: &[u8],
     original: Option<&Original<'_>>,
 ) -> Result<DiskStamp, Replace> {
@@ -797,8 +1246,7 @@ fn write_temp(
             return Err(Replace::OwnerNotKept);
         }
     }
-    faults::hit(Fault::Write)?;
-    file.write_all(bytes)?;
+    write_faulted(file, bytes)?;
     faults::hit(Fault::Sync)?;
     file.sync_all()?;
     let meta = file.metadata()?;
@@ -809,12 +1257,12 @@ fn write_temp(
     ))
 }
 
-/// Right before the rename: the name still holds the file that was checked (or still nothing).
+/// Right before the publish: the name still holds the file that was checked (or still nothing).
 fn recheck(dir: &Dir, name: &str, original: Option<&Original<'_>>) -> Result<(), SaveError> {
     let now = match dir.lstat(name) {
         Ok(m) => Some(m),
         Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(save_error(e)),
+        Err(e) => return Err(fs_save_error(e)),
     };
     match (original, now) {
         (None, None) => Ok(()),
@@ -826,38 +1274,93 @@ fn recheck(dir: &Dir, name: &str, original: Option<&Original<'_>>) -> Result<(),
             Ok(())
         }
         (_, Some(m)) if m.is_file() && !is_link(&m) => {
-            Err(SaveError::ChangedOnDisk(stamp_of_file(dir, name, &m)?))
+            Err(SaveError::ChangedOnDisk(stamp_streaming(dir, name, &m)?))
         }
         (Some(_), None) => Err(SaveError::DeletedOnDisk),
         (_, Some(_)) => Err(SaveError::PathChanged),
     }
 }
 
-/// Writes over the file through its own handle: the inode, its other names and its owner stay.
+/// Writes over the file through its own handle, so the inode, its other names and its owner
+/// stay (fr1 I1, ruling R-T5-1): the handle is re-checked against the stamp right before (m3),
+/// the original bytes are kept, and on any error they are written back with the original
+/// mtime and verified. [`SaveError::Damaged`] only when that restore fails too.
 fn in_place(
     dir: &Dir,
-    mut file: File,
+    name: &str,
+    file: File,
+    original: &Original<'_>,
     bytes: &[u8],
     echo: &mut dyn FnMut(&DiskStamp),
 ) -> Result<DiskStamp, SaveError> {
     let io_err = |e: io::Error| SaveError::Io(e.kind());
-    faults::hit(Fault::Write).map_err(io_err)?;
-    file.seek(io::SeekFrom::Start(0)).map_err(io_err)?;
-    file.write_all(bytes).map_err(io_err)?;
-    file.set_len(bytes.len() as u64).map_err(io_err)?;
-    faults::hit(Fault::Sync).map_err(io_err)?;
-    file.sync_all().map_err(io_err)?;
-    let meta = file.metadata().map_err(io_err)?;
-    let stamp = stamp_from(&meta, bytes.len() as u64, XxHash3_128::oneshot(bytes));
-    echo(&stamp);
-    dir.verify().map_err(save_error)?;
-    Ok(stamp)
+    if original.stamp.len > WHOLE_MAX_BYTES {
+        return Err(SaveError::Io(io::ErrorKind::FileTooLarge));
+    }
+    faults::run_before_publish();
+    // m3: still the file the stamp was taken of, unchanged since.
+    let now = file.metadata().map_err(io_err)?;
+    let mut kept = Vec::with_capacity(usize::try_from(original.stamp.len).unwrap_or(0));
+    (&file).seek(io::SeekFrom::Start(0)).map_err(io_err)?;
+    (&file).read_to_end(&mut kept).map_err(io_err)?;
+    let unchanged = Fingerprint::of(&now) == Fingerprint::of(original.meta)
+        && kept.len() as u64 == original.stamp.len
+        && XxHash3_128::oneshot(&kept) == original.stamp.hash;
+    if !unchanged {
+        return Err(match dir.lstat(name) {
+            Ok(m) if m.is_file() && !is_link(&m) => match stamp_streaming(dir, name, &m) {
+                Ok(stamp) => SaveError::ChangedOnDisk(stamp),
+                Err(e) => e,
+            },
+            _ => SaveError::PathChanged,
+        });
+    }
+    match write_over(&file, bytes, false) {
+        Ok(()) => {
+            let meta = file.metadata().map_err(io_err)?;
+            let stamp = stamp_from(&meta, bytes.len() as u64, XxHash3_128::oneshot(bytes));
+            echo(&stamp);
+            dir.verify().map_err(fs_save_error)?;
+            Ok(stamp)
+        }
+        Err(e) => {
+            // The content decides; the mtime is put back too where the file system can hold
+            // it, so the editor's stamp still matches.
+            let restored = write_over(&file, &kept, true).and_then(|()| {
+                let _ = file.set_times(FileTimes::new().set_modified(original.stamp.mtime));
+                let _ = file.sync_all();
+                let (hash, len) = hash_streaming(&file)?;
+                Ok(len == original.stamp.len && hash == original.stamp.hash)
+            });
+            match restored {
+                Ok(true) => Err(SaveError::Io(e.kind())),
+                Ok(false) | Err(_) => Err(SaveError::Damaged),
+            }
+        }
+    }
+}
+
+/// `bytes` over the whole file through `file`: from the start, then the length cut, then synced.
+/// `restoring` marks the write-back of the original (a fault point of its own).
+fn write_over(mut file: &File, bytes: &[u8], restoring: bool) -> io::Result<()> {
+    file.seek(io::SeekFrom::Start(0))?;
+    if restoring {
+        faults::hit(Fault::Restore)?;
+        file.write_all(bytes)?;
+    } else {
+        write_faulted(file, bytes)?;
+    }
+    file.set_len(bytes.len() as u64)?;
+    if !restoring {
+        faults::hit(Fault::Sync)?;
+    }
+    file.sync_all()
 }
 
 #[cfg(unix)]
 fn keep_mode(file: &File, original: &Metadata) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(
+    file.set_permissions(std::fs::Permissions::from_mode(
         original.permissions().mode() & 0o777,
     ))
 }
@@ -886,8 +1389,9 @@ fn hard_links(meta: &Metadata) -> u64 {
 
 #[cfg(not(unix))]
 fn hard_links(_: &Metadata) -> u64 {
-    // `std` exposes no link count on Windows (`number_of_links` is unstable); a rename there
-    // replaces the name, as Notepad's save does.
+    // fr1 m11: `std` exposes no link count on Windows (`MetadataExt::number_of_links` is
+    // unstable, `windows_by_handle`), and this crate has no `windows-sys`; a rename there
+    // replaces the name, as Notepad's save does (ADR 0009, a recorded residual).
     1
 }
 
@@ -988,453 +1492,6 @@ impl ScriptChunks for FileStream {
         }
         None
     }
-}
-
-// ---- paths and folder handles ----------------------------------------------------------------
-
-/// Where a path ends: an existing regular file, or nothing yet.
-enum Target {
-    Existing {
-        dir: Dir,
-        name: String,
-        lstat: Metadata,
-    },
-    Missing {
-        dir: Dir,
-        name: String,
-    },
-}
-
-/// Walks `rel` from the canonical root; a link at the end is followed once, only to a regular
-/// file inside the root.
-fn locate(root: &LibraryRoot, rel: &RelPath) -> Result<Target, FsError> {
-    check_rel(rel)?;
-    let (dir, name, lstat) = walk(root, rel)?;
-    match lstat {
-        None => Ok(Target::Missing { dir, name }),
-        Some(l) if is_link(&l) => {
-            let target = resolve_inside(root, &dir, &name)?;
-            if check_rel(&target).is_err() {
-                return Err(FsError::Outside);
-            }
-            match walk(root, &target)? {
-                (dir, name, Some(l)) if l.is_file() && !is_link(&l) => Ok(Target::Existing {
-                    dir,
-                    name,
-                    lstat: l,
-                }),
-                _ => Err(FsError::Outside),
-            }
-        }
-        Some(l) if l.is_file() => Ok(Target::Existing {
-            dir,
-            name,
-            lstat: l,
-        }),
-        Some(_) => Err(FsError::NotFile),
-    }
-}
-
-fn walk(root: &LibraryRoot, rel: &RelPath) -> Result<(Dir, String, Option<Metadata>), FsError> {
-    let mut dir = Dir::open_root(&root.canonical)?;
-    let parts: Vec<&str> = rel.components().collect();
-    let Some((last, folders)) = parts.split_last() else {
-        return Err(FsError::Refused);
-    };
-    for folder in folders {
-        dir = dir.subdir(folder)?;
-    }
-    let lstat = match dir.lstat(last) {
-        Ok(m) => Some(m),
-        Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
-    Ok((dir, (*last).to_owned(), lstat))
-}
-
-/// The library-relative path a link at `name` resolves to, if it stays inside the root.
-fn resolve_inside(root: &LibraryRoot, dir: &Dir, name: &str) -> Result<RelPath, FsError> {
-    let real = fs::canonicalize(dir.child(name)).map_err(|_| FsError::Outside)?;
-    let inside = real
-        .strip_prefix(&root.canonical)
-        .map_err(|_| FsError::Outside)?;
-    let mut parts = Vec::new();
-    for c in inside.components() {
-        match c {
-            Component::Normal(p) => parts.push(p.to_str().ok_or(FsError::Outside)?),
-            _ => return Err(FsError::Outside),
-        }
-    }
-    RelPath::parse(&parts.join("/")).map_err(|_| FsError::Outside)
-}
-
-/// The names a script path may hold here: never a hidden component (C11), and on Windows no
-/// device name, stream, reserved character or trailing dot or space.
-fn check_rel(rel: &RelPath) -> Result<(), FsError> {
-    for c in rel.components() {
-        if c.starts_with('.') || !portable(c) {
-            return Err(FsError::Refused);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn portable(name: &str) -> bool {
-    const DEVICES: [&str; 22] = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    ];
-    let stem = name.split('.').next().unwrap_or(name).trim_end();
-    !name.ends_with(['.', ' '])
-        && !name.contains([':', '<', '>', '"', '|', '?', '*'])
-        && !DEVICES.iter().any(|d| d.eq_ignore_ascii_case(stem))
-}
-
-#[cfg(not(windows))]
-fn portable(_: &str) -> bool {
-    true
-}
-
-/// What went wrong under a [`Dir`].
-#[derive(Debug)]
-enum FsError {
-    /// A name a script path may not hold ([`check_rel`]).
-    Refused,
-    /// A link (or junction) where a folder or file was expected.
-    Link,
-    NotDir,
-    NotFile,
-    /// A link that leaves the root, dangles, loops, or ends on something other than a script.
-    Outside,
-    /// The path no longer names the folder that was opened.
-    Changed,
-    Io(io::Error),
-}
-
-impl From<io::Error> for FsError {
-    fn from(e: io::Error) -> Self {
-        #[cfg(unix)]
-        {
-            match e.raw_os_error() {
-                Some(libc::ELOOP) => return FsError::Link,
-                Some(libc::ENOTDIR) => return FsError::NotDir,
-                _ => {}
-            }
-        }
-        FsError::Io(e)
-    }
-}
-
-fn read_error(e: FsError) -> ReadError {
-    match e {
-        FsError::Io(e) => ReadError::Io(e.kind()),
-        FsError::Refused
-        | FsError::Link
-        | FsError::NotDir
-        | FsError::NotFile
-        | FsError::Outside
-        | FsError::Changed => ReadError::PathRefused,
-    }
-}
-
-fn save_error(e: FsError) -> SaveError {
-    match e {
-        FsError::Io(e) => SaveError::Io(e.kind()),
-        FsError::Refused => SaveError::PathRefused,
-        FsError::Link
-        | FsError::NotDir
-        | FsError::NotFile
-        | FsError::Outside
-        | FsError::Changed => SaveError::PathChanged,
-    }
-}
-
-fn is_link(meta: &Metadata) -> bool {
-    meta.file_type().is_symlink()
-}
-
-/// A file's identity: device and inode on Unix. Windows has no stable equivalent in `std`; the
-/// folder handles there are held without `FILE_SHARE_DELETE`, so a folder cannot change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Identity(u64, u64);
-
-#[cfg(unix)]
-fn identity(meta: &Metadata) -> Identity {
-    use std::os::unix::fs::MetadataExt;
-    Identity(meta.dev(), meta.ino())
-}
-
-#[cfg(not(unix))]
-fn identity(_: &Metadata) -> Identity {
-    Identity(0, 0)
-}
-
-/// A folder opened without following a link, with the folders from the root down to it and
-/// their identities, re-checked around every operation (Task 3's approach, R-T3-1; kept local
-/// until the controller reconciles the two copies).
-#[derive(Debug)]
-struct Dir {
-    path: PathBuf,
-    /// Held for the whole operation (on Windows without `FILE_SHARE_DELETE`).
-    handle: File,
-    chain: Vec<(PathBuf, Identity)>,
-    /// Linux: `/proc/self/fd/<n>`, the handle as a path prefix.
-    #[cfg(target_os = "linux")]
-    proc: Option<PathBuf>,
-}
-
-impl Dir {
-    /// The library root by its canonical path, never canonicalized again here: a root that
-    /// became a link is refused, not followed.
-    fn open_root(canonical: &Path) -> Result<Dir, FsError> {
-        if !canonical.is_absolute() {
-            return Err(FsError::Changed);
-        }
-        let lstat = fs::symlink_metadata(canonical)?;
-        Dir::open(canonical.to_path_buf(), canonical, &lstat, Vec::new())
-    }
-
-    fn open(
-        path: PathBuf,
-        via: &Path,
-        lstat: &Metadata,
-        mut chain: Vec<(PathBuf, Identity)>,
-    ) -> Result<Dir, FsError> {
-        if is_link(lstat) {
-            return Err(FsError::Link);
-        }
-        if !lstat.is_dir() {
-            return Err(FsError::NotDir);
-        }
-        let handle = open_dir_handle(via)?;
-        let meta = handle.metadata()?;
-        if is_link(&meta) {
-            return Err(FsError::Link);
-        }
-        if !meta.is_dir() {
-            return Err(FsError::NotDir);
-        }
-        if identity(&meta) != identity(lstat) {
-            return Err(FsError::Changed);
-        }
-        chain.push((path.clone(), identity(&meta)));
-        #[cfg(target_os = "linux")]
-        let proc = {
-            use std::os::fd::AsRawFd;
-            let p = PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
-            fs::metadata(&p)
-                .ok()
-                .filter(|m| identity(m) == identity(&meta))
-                .map(|_| p)
-        };
-        Ok(Dir {
-            path,
-            handle,
-            chain,
-            #[cfg(target_os = "linux")]
-            proc,
-        })
-    }
-
-    /// The path an operation on `name` uses.
-    fn child(&self, name: &str) -> PathBuf {
-        #[cfg(target_os = "linux")]
-        if let Some(p) = &self.proc {
-            return p.join(name);
-        }
-        self.path.join(name)
-    }
-
-    /// Every folder from the root down still is the one that was opened.
-    fn verify(&self) -> Result<(), FsError> {
-        for (path, id) in &self.chain {
-            let m = fs::symlink_metadata(path).map_err(|_| FsError::Changed)?;
-            if is_link(&m) || !m.is_dir() || identity(&m) != *id {
-                return Err(FsError::Changed);
-            }
-        }
-        Ok(())
-    }
-
-    /// Runs `op` between two [`Dir::verify`]s.
-    fn checked<T>(&self, op: impl FnOnce() -> io::Result<T>) -> Result<T, FsError> {
-        self.verify()?;
-        let out = op()?;
-        self.verify()?;
-        Ok(out)
-    }
-
-    fn lstat(&self, name: &str) -> Result<Metadata, FsError> {
-        self.checked(|| fs::symlink_metadata(self.child(name)))
-    }
-
-    /// The folder `name` under this one; a link or a non-folder is refused.
-    fn subdir(&self, name: &str) -> Result<Dir, FsError> {
-        let lstat = self.lstat(name)?;
-        let dir = Dir::open(
-            self.path.join(name),
-            &self.child(name),
-            &lstat,
-            self.chain.clone(),
-        )?;
-        self.verify()?;
-        Ok(dir)
-    }
-
-    /// `name` opened with `opts` plus the no-follow flags (and, on Unix, `O_NONBLOCK`, so a
-    /// FIFO swapped in never blocks), checked to be the regular file `lstat` saw.
-    fn open_file(
-        &self,
-        name: &str,
-        opts: &mut OpenOptions,
-        lstat: &Metadata,
-    ) -> Result<File, FsError> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.custom_flags(no_follow_flags() | libc::O_NONBLOCK);
-        }
-        #[cfg(not(unix))]
-        no_follow(opts);
-        let f = self.checked(|| opts.open(self.child(name)))?;
-        let meta = f.metadata()?;
-        if is_link(&meta) {
-            return Err(FsError::Link);
-        }
-        if !meta.is_file() {
-            return Err(FsError::NotFile);
-        }
-        if identity(&meta) != identity(lstat) {
-            return Err(FsError::Changed);
-        }
-        Ok(f)
-    }
-
-    fn open_read(&self, name: &str, lstat: &Metadata) -> Result<File, FsError> {
-        self.open_file(name, OpenOptions::new().read(true), lstat)
-    }
-
-    /// For writing, without truncating or creating: the writable check and the in-place write.
-    fn open_write(&self, name: &str, lstat: &Metadata) -> Result<File, FsError> {
-        self.open_file(name, OpenOptions::new().write(true), lstat)
-    }
-
-    /// A new file `name` (never an existing one, never through a link): 0600 when `private`,
-    /// else the umask's mode.
-    fn create_new(&self, name: &str, private: bool) -> Result<File, FsError> {
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        no_follow(&mut opts);
-        #[cfg(unix)]
-        if private {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        #[cfg(not(unix))]
-        let _ = private;
-        self.checked(|| opts.open(self.child(name)))
-    }
-
-    fn rename(&self, from: &str, to: &str) -> Result<(), FsError> {
-        self.checked(|| rename_retrying(&self.child(from), &self.child(to)))
-    }
-
-    fn remove_file(&self, name: &str) -> Result<(), FsError> {
-        self.checked(|| fs::remove_file(self.child(name)))
-    }
-
-    /// Flushes the folder's entries (Unix; best effort: the file is already in place).
-    fn sync(&self) {
-        #[cfg(unix)]
-        let _ = self.handle.sync_all();
-        #[cfg(not(unix))]
-        let _ = &self.handle;
-    }
-}
-
-/// Windows: a rename over a file another program holds open can fail with a sharing violation
-/// for a moment (an indexer, a virus scanner); three retries with backoff (alg/28 edge case).
-#[cfg(windows)]
-fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
-    let mut wait = std::time::Duration::from_millis(50);
-    for _ in 0..3 {
-        match fs::rename(from, to) {
-            // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
-            Err(e) if matches!(e.raw_os_error(), Some(5 | 32 | 33)) => {
-                std::thread::sleep(wait);
-                wait *= 2;
-            }
-            other => return other,
-        }
-    }
-    fs::rename(from, to)
-}
-
-#[cfg(not(windows))]
-fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
-    fs::rename(from, to)
-}
-
-#[cfg(unix)]
-fn no_follow_flags() -> i32 {
-    // No link in any component, the last one included (macOS 11+); it implies `O_NOFOLLOW`.
-    #[cfg(target_vendor = "apple")]
-    {
-        libc::O_NOFOLLOW_ANY
-    }
-    #[cfg(not(target_vendor = "apple"))]
-    {
-        libc::O_NOFOLLOW
-    }
-}
-
-#[cfg(unix)]
-fn no_follow(opts: &mut OpenOptions) {
-    use std::os::unix::fs::OpenOptionsExt;
-    opts.custom_flags(no_follow_flags());
-}
-
-#[cfg(windows)]
-fn no_follow(opts: &mut OpenOptions) {
-    use std::os::windows::fs::OpenOptionsExt;
-    opts.custom_flags(win::FILE_FLAG_OPEN_REPARSE_POINT);
-}
-
-#[cfg(not(any(unix, windows)))]
-fn no_follow(_: &mut OpenOptions) {}
-
-#[cfg(unix)]
-fn open_dir_handle(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | no_follow_flags())
-        .open(path)
-}
-
-#[cfg(windows)]
-fn open_dir_handle(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .share_mode(win::FILE_SHARE_READ | win::FILE_SHARE_WRITE)
-        .custom_flags(win::FILE_FLAG_BACKUP_SEMANTICS | win::FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_dir_handle(path: &Path) -> io::Result<File> {
-    File::open(path)
-}
-
-/// Win32 constants (`winnt.h`, `winbase.h`), written as shifts.
-#[cfg(windows)]
-mod win {
-    pub const FILE_SHARE_READ: u32 = 1;
-    pub const FILE_SHARE_WRITE: u32 = 1 << 1;
-    pub const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 1 << 21;
-    pub const FILE_FLAG_BACKUP_SEMANTICS: u32 = 1 << 25;
 }
 
 #[cfg(test)]

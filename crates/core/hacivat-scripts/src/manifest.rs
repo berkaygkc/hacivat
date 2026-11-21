@@ -38,11 +38,14 @@
 //!   writes through a hard link; the file's mode is kept.
 
 use std::ffi::OsStr;
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Serialize;
+
+// ## m4b-t05-fileio fix round 1 (review m12): one shared copy of T3's folder handles.
+use crate::fileio::dir::{Dir, FsError, identity, is_link};
 
 use crate::names::{LogicalDb, NameError, escape_untrusted};
 
@@ -323,14 +326,14 @@ pub fn write_new_without_hard_links(root: &Path, manifest: &ManifestV1) -> Resul
 fn write_new_with(root: &Path, manifest: &ManifestV1, hard_links: bool) -> Result<(), WriteError> {
     let text = manifest.checked_text()?;
     let root = Dir::open_root(root).map_err(write_error)?;
-    let h = root.hacivat_creating().map_err(write_error)?;
-    h.sweep_stale_temps();
+    let h = hacivat_creating(&root).map_err(write_error)?;
+    h.sweep_stale_temps(&is_our_temp);
     match h.lstat(MANIFEST) {
         Ok(_) => return Err(WriteError::Exists),
         Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(write_error(e)),
     }
-    let (tmp, mut f) = h.create_temp().map_err(write_error)?;
+    let (tmp, mut f) = create_temp(&h).map_err(write_error)?;
     let written = write_synced(&mut f, text.as_bytes());
     drop(f);
     let linked = written.map_err(FsError::Io).and_then(|()| {
@@ -484,36 +487,9 @@ fn multi_line_end(b: &[u8], mut k: usize, q: u8) -> usize {
     b.len()
 }
 
-// ## m4b-t03-registry fix round 1 (review m2): the injectable probe of "no procfs".
+// ## m4b-t05-fileio fix round 1 (review m12): the procfs probe lives with the shared `Dir`.
 #[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static NO_PROCFS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Runs `f` as if this were Linux without procfs, on this thread only: every folder handle
-/// opened inside refuses writes (`Unsupported`), as the real code does there. For tests.
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn with_procfs_absent<R>(f: impl FnOnce() -> R) -> R {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            NO_PROCFS.with(|c| c.set(self.0));
-        }
-    }
-    let _restore = Restore(NO_PROCFS.with(|c| c.replace(true)));
-    f()
-}
-
-#[cfg(any(test, feature = "test-support"))]
-fn procfs_forced_absent() -> bool {
-    NO_PROCFS.with(std::cell::Cell::get)
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-fn procfs_forced_absent() -> bool {
-    false
-}
+pub use crate::fileio::dir::with_procfs_absent;
 
 /// Appends `alias` to the manifest's `aliases` through `toml_edit`, keeping comments, layout,
 /// line endings and the BOM (R-M4b-8's "Also add … as an alias for everyone"). Nothing changes
@@ -525,7 +501,7 @@ pub fn add_alias(root: &Path, alias: &LogicalDb) -> Result<(), WriteError> {
         FsError::Io(e) if e.kind() == io::ErrorKind::NotFound => WriteError::NoManifest,
         e => write_error(e),
     })?;
-    h.sweep_stale_temps();
+    h.sweep_stale_temps(&is_our_temp);
     let (bytes, meta) = read_manifest_file(&h).map_err(|e| match e {
         FsError::Io(e) if e.kind() == io::ErrorKind::NotFound => WriteError::NoManifest,
         e => WriteError::Unreadable(read_diag(e)),
@@ -601,7 +577,7 @@ fn refuses_edit(d: &Diag) -> bool {
 /// Replaces the manifest with `bytes` through a same-folder temp file and a rename (never
 /// writing through a hard link), keeping the old file's mode.
 fn replace(h: &Dir, bytes: &[u8], old: &Metadata) -> Result<(), WriteError> {
-    let (tmp, mut f) = h.create_temp().map_err(write_error)?;
+    let (tmp, mut f) = create_temp(h).map_err(write_error)?;
     let written = keep_mode(&f, old).and_then(|()| write_synced(&mut f, bytes));
     drop(f);
     let renamed = written
@@ -660,33 +636,6 @@ fn read_manifest_file(h: &Dir) -> Result<(Vec<u8>, Metadata), FsError> {
     Ok((bytes, meta))
 }
 
-/// What went wrong under a [`Dir`].
-#[derive(Debug)]
-enum FsError {
-    /// A link (or junction) where a folder or file was expected.
-    Link,
-    NotDir,
-    NotFile,
-    TooLarge,
-    /// The path no longer names the folder that was opened.
-    Changed,
-    Io(io::Error),
-}
-
-impl From<io::Error> for FsError {
-    fn from(e: io::Error) -> Self {
-        #[cfg(unix)]
-        {
-            match e.raw_os_error() {
-                Some(libc::ELOOP) => return FsError::Link,
-                Some(libc::ENOTDIR) => return FsError::NotDir,
-                _ => {}
-            }
-        }
-        FsError::Io(e)
-    }
-}
-
 fn read_diag(e: FsError) -> Diag {
     match e {
         FsError::Link => Diag::LinkIgnored,
@@ -708,314 +657,6 @@ fn write_error(e: FsError) -> WriteError {
     }
 }
 
-fn is_link(meta: &Metadata) -> bool {
-    meta.file_type().is_symlink()
-}
-
-/// A file's identity: device and inode on Unix. Windows has no stable equivalent in `std`; the
-/// handles there are held without `FILE_SHARE_DELETE` instead, so the folder cannot change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Identity(u64, u64);
-
-#[cfg(unix)]
-fn identity(meta: &Metadata) -> Identity {
-    use std::os::unix::fs::MetadataExt;
-    Identity(meta.dev(), meta.ino())
-}
-
-#[cfg(not(unix))]
-fn identity(_: &Metadata) -> Identity {
-    Identity(0, 0)
-}
-
-/// A folder opened without following a link, with the folders from the root down to it and
-/// their identities, re-checked around every operation.
-#[derive(Debug)]
-struct Dir {
-    path: PathBuf,
-    /// Held for the whole operation (on Windows without `FILE_SHARE_DELETE`).
-    handle: File,
-    chain: Vec<(PathBuf, Identity)>,
-    reach: Reach,
-}
-
-/// How operations under a [`Dir`] name their files.
-#[derive(Debug)]
-enum Reach {
-    /// The folder's path, between identity checks (macOS with `O_NOFOLLOW_ANY` opens; Windows,
-    /// where the held handles keep the folders in place).
-    #[cfg_attr(
-        target_os = "linux",
-        expect(dead_code, reason = "Linux always goes through the handle or refuses")
-    )]
-    Path,
-    /// Linux: `/proc/self/fd/<n>`, the handle as a path prefix.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(dead_code, reason = "only Linux has a handle-relative path")
-    )]
-    Handle(PathBuf),
-    /// Linux without procfs (fix round 1, review m2): nothing can be relative to the handle,
-    /// so writes refuse (`Unsupported`) instead of falling back to plain paths; reads (which
-    /// re-check the file's identity) still work.
-    WritesRefused,
-}
-
-impl Dir {
-    /// The library root, canonicalized first (the opens below refuse every link).
-    fn open_root(path: &Path) -> Result<Dir, FsError> {
-        let path = fs::canonicalize(path)?;
-        let lstat = fs::symlink_metadata(&path)?;
-        Dir::open(path.clone(), &path, &lstat, Vec::new())
-    }
-
-    /// Opens the folder at `via` (on Linux possibly a `/proc/self/fd` path), known as `path`,
-    /// which `lstat` described.
-    fn open(
-        path: PathBuf,
-        via: &Path,
-        lstat: &Metadata,
-        mut chain: Vec<(PathBuf, Identity)>,
-    ) -> Result<Dir, FsError> {
-        if is_link(lstat) {
-            return Err(FsError::Link);
-        }
-        if !lstat.is_dir() {
-            return Err(FsError::NotDir);
-        }
-        let handle = open_dir_handle(via)?;
-        let meta = handle.metadata()?;
-        if is_link(&meta) {
-            return Err(FsError::Link);
-        }
-        if !meta.is_dir() {
-            return Err(FsError::NotDir);
-        }
-        if identity(&meta) != identity(lstat) {
-            return Err(FsError::Changed);
-        }
-        chain.push((path.clone(), identity(&meta)));
-        let reach = if procfs_forced_absent() {
-            Reach::WritesRefused
-        } else {
-            platform_reach(&handle, &meta)
-        };
-        Ok(Dir {
-            path,
-            handle,
-            chain,
-            reach,
-        })
-    }
-
-    /// The path an operation on `name` uses.
-    fn child(&self, name: &str) -> PathBuf {
-        match &self.reach {
-            Reach::Handle(p) => p.join(name),
-            Reach::Path | Reach::WritesRefused => self.path.join(name),
-        }
-    }
-
-    /// Whether this folder may be written (review m2: never through plain paths on Linux).
-    fn writable(&self) -> Result<(), FsError> {
-        match self.reach {
-            Reach::WritesRefused => Err(FsError::Io(io::ErrorKind::Unsupported.into())),
-            Reach::Path | Reach::Handle(_) => Ok(()),
-        }
-    }
-
-    /// Runs the write `op` between two [`Dir::verify`]s, if this folder may be written.
-    fn write_checked<T>(&self, op: impl FnOnce() -> io::Result<T>) -> Result<T, FsError> {
-        self.writable()?;
-        self.checked(op)
-    }
-
-    /// A new temp file with a random name. Removed again if the after-check fails, so no temp
-    /// is left in a committed folder by that path (review m4).
-    fn create_temp(&self) -> Result<(String, File), FsError> {
-        let name = temp_name();
-        self.writable()?;
-        self.verify()?;
-        let f = self.new_file_options().open(self.child(&name))?;
-        if let Err(e) = self.verify() {
-            drop(f);
-            self.discard_temp(&name);
-            return Err(e);
-        }
-        Ok((name, f))
-    }
-
-    /// Removes a temp file this code made, on every path, without the identity checks: its
-    /// random name can only ever be ours, wherever the folder now is.
-    fn discard_temp(&self, name: &str) {
-        if self.writable().is_ok() {
-            let _ = fs::remove_file(self.child(name));
-        }
-    }
-
-    /// Removes temp files a crash left (review m4): exactly `.workspace.toml.hv-<32 lowercase
-    /// hex>.tmp`, regular files older than [`STALE_TEMP_AGE`]. A younger one may be another
-    /// writer's. Best effort, at most [`SWEEP_MAX_ENTRIES`] entries looked at.
-    fn sweep_stale_temps(&self) {
-        if self.writable().is_err() || self.verify().is_err() {
-            return;
-        }
-        let Ok(entries) = fs::read_dir(self.child("")) else {
-            return;
-        };
-        for entry in entries.take(SWEEP_MAX_ENTRIES).flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str().filter(|n| is_our_temp(n)) else {
-                continue;
-            };
-            let stale = fs::symlink_metadata(self.child(name)).is_ok_and(|m| {
-                m.is_file()
-                    && m.modified()
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age >= STALE_TEMP_AGE)
-            });
-            if stale {
-                self.discard_temp(name);
-            }
-        }
-    }
-
-    fn new_file_options(&self) -> OpenOptions {
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        no_follow(&mut opts);
-        opts
-    }
-
-    /// Every folder from the root down still is the one that was opened.
-    fn verify(&self) -> Result<(), FsError> {
-        for (path, id) in &self.chain {
-            let m = fs::symlink_metadata(path).map_err(|_| FsError::Changed)?;
-            if is_link(&m) || !m.is_dir() || identity(&m) != *id {
-                return Err(FsError::Changed);
-            }
-        }
-        Ok(())
-    }
-
-    /// Runs `op` between two [`Dir::verify`]s.
-    fn checked<T>(&self, op: impl FnOnce() -> io::Result<T>) -> Result<T, FsError> {
-        self.verify()?;
-        let out = op()?;
-        self.verify()?;
-        Ok(out)
-    }
-
-    fn lstat(&self, name: &str) -> Result<Metadata, FsError> {
-        self.checked(|| fs::symlink_metadata(self.child(name)))
-    }
-
-    /// The folder `name` under this one; a link or a non-folder is refused.
-    fn subdir(&self, name: &str) -> Result<Dir, FsError> {
-        let lstat = self.lstat(name)?;
-        let dir = Dir::open(
-            self.path.join(name),
-            &self.child(name),
-            &lstat,
-            self.chain.clone(),
-        )?;
-        self.verify()?;
-        Ok(dir)
-    }
-
-    /// `.hacivat`, created with default permissions when absent (R-M4b-42).
-    fn hacivat_creating(&self) -> Result<Dir, FsError> {
-        match self.lstat(HACIVAT) {
-            Ok(_) => {}
-            Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
-                match self.write_checked(|| fs::DirBuilder::new().create(self.child(HACIVAT))) {
-                    Ok(()) => {}
-                    Err(FsError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            Err(e) => return Err(e),
-        }
-        self.subdir(HACIVAT)
-    }
-
-    /// A new file `name` (never an existing one, never through a link), mode from the umask.
-    fn create_new(&self, name: &str) -> Result<File, FsError> {
-        let opts = self.new_file_options();
-        self.write_checked(|| opts.open(self.child(name)))
-    }
-
-    /// `name` for reading: not through a link, never blocking on a FIFO, and the same file
-    /// `lstat` saw.
-    fn open_read(&self, name: &str, lstat: &Metadata) -> Result<File, FsError> {
-        let mut opts = OpenOptions::new();
-        opts.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.custom_flags(no_follow_flags() | libc::O_NONBLOCK);
-        }
-        #[cfg(not(unix))]
-        no_follow(&mut opts);
-        let f = self.checked(|| opts.open(self.child(name)))?;
-        let meta = f.metadata()?;
-        if is_link(&meta) {
-            return Err(FsError::Link);
-        }
-        if !meta.is_file() {
-            return Err(FsError::NotFile);
-        }
-        if identity(&meta) != identity(lstat) {
-            return Err(FsError::Changed);
-        }
-        Ok(f)
-    }
-
-    /// `linkat`: fails when `to` exists, so nothing is ever replaced.
-    fn hard_link(&self, from: &str, to: &str) -> Result<(), FsError> {
-        self.write_checked(|| fs::hard_link(self.child(from), self.child(to)))
-    }
-
-    fn rename(&self, from: &str, to: &str) -> Result<(), FsError> {
-        self.write_checked(|| fs::rename(self.child(from), self.child(to)))
-    }
-
-    fn remove_file(&self, name: &str) -> Result<(), FsError> {
-        self.write_checked(|| fs::remove_file(self.child(name)))
-    }
-
-    /// Flushes the folder's entries (Unix; best effort: the file is already in place).
-    fn sync(&self) {
-        #[cfg(unix)]
-        let _ = self.handle.sync_all();
-        #[cfg(not(unix))]
-        let _ = &self.handle;
-    }
-}
-
-/// Linux: the handle as a path prefix when procfs answers for it (and names this very folder);
-/// otherwise writes are refused.
-#[cfg(target_os = "linux")]
-fn platform_reach(handle: &File, meta: &Metadata) -> Reach {
-    use std::os::fd::AsRawFd;
-    let p = PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
-    match fs::metadata(&p) {
-        Ok(m) if m.is_dir() && identity(&m) == identity(meta) => Reach::Handle(p),
-        _ => Reach::WritesRefused,
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn platform_reach(_: &File, _: &Metadata) -> Reach {
-    Reach::Path
-}
-
-/// How old a leftover temp file must be before a write sweeps it.
-const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60);
-/// The most `.hacivat/` entries a sweep looks at.
-const SWEEP_MAX_ENTRIES: usize = 4096;
-
 /// Whether `name` is exactly a temp name [`temp_name`] makes.
 fn is_our_temp(name: &str) -> bool {
     name.strip_prefix(&format!(".{MANIFEST}.hv-"))
@@ -1028,65 +669,30 @@ fn is_our_temp(name: &str) -> bool {
         })
 }
 
-#[cfg(unix)]
-fn no_follow_flags() -> i32 {
-    // No link in any component, the last one included (macOS 11+). The kernel refuses it
-    // together with `O_NOFOLLOW` (`EINVAL`), and it implies it.
-    #[cfg(target_vendor = "apple")]
-    {
-        libc::O_NOFOLLOW_ANY
+// ## m4b-t05-fileio fix round 1 (review m12): the `Dir` methods that only the manifest uses,
+// over the shared `crate::fileio::dir::Dir`.
+
+/// A new temp file with a random name, mode from the umask (R-M4b-42).
+fn create_temp(h: &Dir) -> Result<(String, File), FsError> {
+    let name = temp_name();
+    let f = h.create_temp(&name, false)?;
+    Ok((name, f))
+}
+
+/// `.hacivat` under `root`, created with default permissions when absent (R-M4b-42).
+fn hacivat_creating(root: &Dir) -> Result<Dir, FsError> {
+    match root.lstat(HACIVAT) {
+        Ok(_) => {}
+        Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+            match root.write_checked(|| fs::DirBuilder::new().create(root.child(HACIVAT))) {
+                Ok(()) => {}
+                Err(FsError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Err(e) => return Err(e),
     }
-    #[cfg(not(target_vendor = "apple"))]
-    {
-        libc::O_NOFOLLOW
-    }
+    root.subdir(HACIVAT)
 }
 
-#[cfg(unix)]
-fn no_follow(opts: &mut OpenOptions) {
-    use std::os::unix::fs::OpenOptionsExt;
-    opts.custom_flags(no_follow_flags());
-}
-
-#[cfg(windows)]
-fn no_follow(opts: &mut OpenOptions) {
-    use std::os::windows::fs::OpenOptionsExt;
-    opts.custom_flags(win::FILE_FLAG_OPEN_REPARSE_POINT);
-}
-
-#[cfg(not(any(unix, windows)))]
-fn no_follow(_: &mut OpenOptions) {}
-
-#[cfg(unix)]
-fn open_dir_handle(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | no_follow_flags())
-        .open(path)
-}
-
-#[cfg(windows)]
-fn open_dir_handle(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .share_mode(win::FILE_SHARE_READ | win::FILE_SHARE_WRITE)
-        .custom_flags(win::FILE_FLAG_BACKUP_SEMANTICS | win::FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_dir_handle(path: &Path) -> io::Result<File> {
-    File::open(path)
-}
-
-/// Win32 constants (`winnt.h`, `winbase.h`), written as shifts.
-#[cfg(windows)]
-mod win {
-    pub const FILE_SHARE_READ: u32 = 1;
-    pub const FILE_SHARE_WRITE: u32 = 1 << 1;
-    pub const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 1 << 21;
-    pub const FILE_FLAG_BACKUP_SEMANTICS: u32 = 1 << 25;
-}
 // ## m4b-t01a-seams

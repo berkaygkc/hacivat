@@ -180,8 +180,13 @@ fn fileio_round_trip_table() {
         );
         assert_eq!(r.stamp.len, bytes.len() as u64, "{name}");
         assert_eq!(r.stamp.hash, xxh3(&bytes), "{name}");
-        save(&root(&d), &rel("f.sql"), SaveText::from(&r), Some(r.stamp))
-            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        save(
+            &root(&d),
+            &rel("f.sql"),
+            r.save_text().unwrap(),
+            Some(r.stamp),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(fs::read(d.path().join("f.sql")).unwrap(), bytes, "{name}");
         assert_eq!(
             names_under(d.path()),
@@ -208,11 +213,17 @@ fn windows_1254_needs_an_encoding_then_round_trips() {
     // ISO-8859-9 is the same encoding to WHATWG.
     let iso = read_with(&root(&d), &rel("tr.sql"), "ISO-8859-9").unwrap();
     assert_eq!(iso.meta.encoding.name(), "windows-1254");
-    save(&root(&d), &rel("tr.sql"), SaveText::from(&r), Some(r.stamp)).unwrap();
+    save(
+        &root(&d),
+        &rel("tr.sql"),
+        r.save_text().unwrap(),
+        Some(r.stamp),
+    )
+    .unwrap();
     assert_eq!(fs::read(d.path().join("tr.sql")).unwrap(), bytes);
     // An edit is encoded back in the file's encoding, never as UTF-8.
     let r = read_with(&root(&d), &rel("tr.sql"), "windows-1254").unwrap();
-    let mut edited = SaveText::from(&r);
+    let mut edited = r.save_text().unwrap();
     edited.text.push_str("-- Ş\r\n");
     save(&root(&d), &rel("tr.sql"), edited, Some(r.stamp)).unwrap();
     assert_eq!(
@@ -253,7 +264,7 @@ fn unencodable_character_refuses_the_save() {
     let bytes = cp1254("SELECT 'İ';\n");
     let d = lib_with_bytes("tr.sql", &bytes);
     let r = read_with(&root(&d), &rel("tr.sql"), "windows-1254").unwrap();
-    let mut edited = SaveText::from(&r);
+    let mut edited = r.save_text().unwrap();
     edited.text = "SELECT 'İ';\n-- 漢\n".into();
     assert_eq!(
         save(&root(&d), &rel("tr.sql"), edited, Some(r.stamp)),
@@ -637,6 +648,189 @@ fn open_stream_reports_a_change_on_disk() {
     );
 }
 
+// ## m4b-t05-fileio fix round 1
+
+/// I4: a preview holds only the start of the file and can never be saved over it.
+#[test]
+fn preview_cannot_be_saved() {
+    let line = format!("SELECT {};\n", "1".repeat(90));
+    let bytes = line.repeat(230_000).into_bytes();
+    assert!(bytes.len() as u64 > 20 << 20);
+    let d = lib_with_bytes("dump.sql", &bytes);
+    let r = read_default(&d, "dump.sql");
+    assert_eq!(r.tier, SizeTier::Preview);
+    assert!(r.save_text().is_none());
+    // A whole read of the same file can be.
+    let whole = read(&root(&d), &rel("dump.sql"), ReadLimits { whole: true }).unwrap();
+    assert!(whole.save_text().is_some());
+    assert_eq!(
+        fs::read(d.path().join("dump.sql")).unwrap().len(),
+        bytes.len()
+    );
+}
+
+/// I1 (R-T5-1) on the rename path: a write that stops part-way (the ENOSPC stand-in) leaves the
+/// original and no temp.
+#[test]
+fn partial_write_on_the_rename_path_leaves_original() {
+    let d = lib_with_bytes("f.sql", b"SELECT 1;\n");
+    let r = read_default(&d, "f.sql");
+    faults::inject(faults::Fault::WriteAfter(5));
+    let got = save(
+        &root(&d),
+        &rel("f.sql"),
+        text("DELETE FROM t WHERE id = 1;\n"),
+        Some(r.stamp),
+    );
+    assert!(matches!(got, Err(SaveError::Io(_))), "{got:?}");
+    assert_eq!(fs::read(d.path().join("f.sql")).unwrap(), b"SELECT 1;\n");
+    assert_eq!(names_under(d.path()), ["f.sql"]);
+}
+
+/// R-T5-1: a new file whose write stops part-way leaves nothing behind.
+#[test]
+fn partial_write_of_a_new_file_leaves_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    faults::inject(faults::Fault::WriteAfter(3));
+    assert!(matches!(
+        save(&root(&d), &rel("new.sql"), text("SELECT 1;"), None),
+        Err(SaveError::Io(_))
+    ));
+    assert!(names_under(d.path()).is_empty());
+}
+
+/// m2: our own temps a crash left, older than a minute, are swept on the next save in that
+/// folder; a younger one, and names that only look similar, stay.
+#[test]
+fn stale_temps_are_swept_on_save() {
+    let d = lib_with_bytes("f.sql", b"a");
+    let old = format!(".f.sql.hv-{}.tmp", "00112233445566778899aabbccddeeff");
+    let young = format!(".f.sql.hv-{}.tmp", "fedcba9876543210".repeat(2));
+    let upper = format!(".f.sql.hv-{}.tmp", "0123456789ABCDEF".repeat(2));
+    let short = ".f.sql.hv-12.tmp".to_owned();
+    for n in [&old, &young, &upper, &short] {
+        fs::write(d.path().join(n), b"x").unwrap();
+    }
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+    for n in [&old, &upper, &short] {
+        fs::File::options()
+            .write(true)
+            .open(d.path().join(n))
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+    }
+    let r = read_default(&d, "f.sql");
+    save(&root(&d), &rel("f.sql"), text("b"), Some(r.stamp)).unwrap();
+    let left = names_under(d.path());
+    assert!(!left.contains(&old), "{left:?}");
+    for kept in [&young, &upper, &short] {
+        assert!(left.contains(kept), "{kept}: {left:?}");
+    }
+    assert_eq!(left.len(), 4);
+}
+
+/// alg/28 `temp_file_is_never_listed`: the scanner never lists a temp a save makes.
+#[test]
+fn temp_file_is_never_listed() {
+    let d = lib_with_bytes("a.sql", b"SELECT 1;");
+    fs::write(d.path().join(fileio::temp_name_for("a.sql")), b"x").unwrap();
+    fs::write(d.path().join(fileio::temp_name_for("b.md")), b"x").unwrap();
+    let listed = hacivat_scripts::scan::scan(
+        &root(&d),
+        &hacivat_scripts::scan::Limits::default(),
+        &hacivat_scripts::scan::RealFs,
+    );
+    let rels: Vec<&str> = listed.entries.iter().map(|e| e.rel.as_str()).collect();
+    assert_eq!(rels, ["a.sql"]);
+}
+
+/// I2: the `_scoped` forms re-apply the environment scope to what the path resolves to.
+#[test]
+fn scoped_forms_refuse_what_the_environment_does_not_show() {
+    use hacivat_proto::EnvTag;
+    let d = lib_with_bytes("@production/purge.sql", b"DELETE FROM t;");
+    let r = root(&d);
+    let p = rel("@production/purge.sql");
+    assert_eq!(
+        fileio::read_scoped(&r, &p, Some(EnvTag::Dev), ReadLimits::default()).unwrap_err(),
+        ReadError::OutOfScope
+    );
+    assert_eq!(
+        fileio::read_scoped(&r, &p, None, ReadLimits::default()).unwrap_err(),
+        ReadError::OutOfScope
+    );
+    let ok = fileio::read_scoped(&r, &p, Some(EnvTag::Production), ReadLimits::default()).unwrap();
+    assert_eq!(
+        fileio::save_scoped(
+            &r,
+            &p,
+            Some(EnvTag::Dev),
+            text("x"),
+            Some(ok.stamp),
+            &mut |_| {}
+        ),
+        Err(SaveError::OutOfScope)
+    );
+    let enc = hacivat_scripts::TextEncoding::UTF_8;
+    assert!(fileio::open_stream_scoped(&r, &p, Some(EnvTag::Staging), enc).is_err());
+    assert_eq!(
+        fs::read(d.path().join("@production/purge.sql")).unwrap(),
+        b"DELETE FROM t;"
+    );
+    let env = Some(EnvTag::Production);
+    fileio::save_scoped(&r, &p, env, text("x"), Some(ok.stamp), &mut |_| {}).unwrap();
+}
+
+/// m8: a preview read in a chosen encoding gets the same loss check as a whole read.
+#[test]
+fn preview_in_a_chosen_encoding_is_checked_for_loss() {
+    let mut bytes = vec![b'a', 0x87, 0x90, b'\n'];
+    bytes.extend(b"SELECT 1;\n".repeat(2_200_000));
+    assert!(bytes.len() as u64 > 20 << 20);
+    let d = lib_with_bytes("sj.sql", &bytes);
+    assert_eq!(
+        read_with(&root(&d), &rel("sj.sql"), "Shift_JIS").unwrap_err(),
+        ReadError::Lossy
+    );
+    // Without the NEC row, the preview reads.
+    let d = lib_with_bytes("ok.sql", &bytes[4..]);
+    let r = read_with(&root(&d), &rel("ok.sql"), "Shift_JIS").unwrap();
+    assert_eq!(r.tier, SizeTier::Preview);
+}
+
+/// m4: a new-file save never replaces a file that appeared after its check.
+#[test]
+fn new_file_save_never_replaces_one_that_appeared() {
+    let d = tempfile::tempdir().unwrap();
+    let theirs = d.path().join("new.sql");
+    faults::before_publish(move || fs::write(theirs, b"theirs").unwrap());
+    assert!(matches!(
+        save(&root(&d), &rel("new.sql"), text("mine"), None),
+        Err(SaveError::ChangedOnDisk(now)) if now.hash == xxh3(b"theirs")
+    ));
+    assert_eq!(fs::read(d.path().join("new.sql")).unwrap(), b"theirs");
+    assert_eq!(names_under(d.path()), ["new.sql"]);
+}
+
+/// m1: Linux without procfs refuses every write (T3's rule), and still reads.
+#[test]
+fn without_procfs_saves_refuse_and_reads_work() {
+    let d = lib_with_bytes("f.sql", b"SELECT 1;");
+    let r = read_default(&d, "f.sql");
+    let got = hacivat_scripts::manifest::with_procfs_absent(|| {
+        (
+            save(&root(&d), &rel("f.sql"), text("x"), Some(r.stamp)),
+            save(&root(&d), &rel("new.sql"), text("x"), None),
+            read(&root(&d), &rel("f.sql"), ReadLimits::default()).map(|r| r.text),
+        )
+    });
+    assert_eq!(got.0, Err(SaveError::Io(std::io::ErrorKind::Unsupported)));
+    assert_eq!(got.1, Err(SaveError::Io(std::io::ErrorKind::Unsupported)));
+    assert_eq!(got.2.unwrap(), "SELECT 1;");
+    assert_eq!(names_under(d.path()), ["f.sql"]);
+}
+
 #[cfg(unix)]
 mod unix {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -685,9 +879,14 @@ mod unix {
         )
         .unwrap();
         assert_eq!(fs::read(d.path().join("real.sql")).unwrap(), b"SELECT 4;");
-        // A new file takes the umask's mode, never the 0600 of the temp.
+        // A new file takes the umask's mode, never the 0600 of the temp (fr1 m9: compared
+        // with a file the same umask made, so the test holds under any umask).
         save(&root(&d), &rel("new.sql"), text("x"), None).unwrap();
-        assert_ne!(mode(&d.path().join("new.sql")), 0o600);
+        fs::write(d.path().join("probe.txt"), b"").unwrap();
+        assert_eq!(
+            mode(&d.path().join("new.sql")),
+            mode(&d.path().join("probe.txt"))
+        );
     }
 
     #[test]
@@ -899,8 +1098,8 @@ mod unix {
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
-        // macOS APFS keeps the bytes as given; the save reused them.
-        assert_eq!(names.len(), 1);
+        // The save reused the name's bytes: still NFD, not composed (fr1 m9).
+        assert_eq!(names, [nfd.to_owned()]);
         assert_eq!(fs::read(d.path().join(nfd)).unwrap(), b"SELECT 2;");
     }
 
@@ -910,8 +1109,104 @@ mod unix {
         fs::hard_link(d.path().join("a.sql"), d.path().join("b.sql")).unwrap();
         fs::set_permissions(d.path().join("a.sql"), fs::Permissions::from_mode(0o640)).unwrap();
         let r = read_default(&d, "a.sql");
+        let before = fs::metadata(d.path().join("a.sql")).unwrap();
         save(&root(&d), &rel("a.sql"), text("y"), Some(r.stamp)).unwrap();
+        let after = fs::metadata(d.path().join("b.sql")).unwrap();
         assert_eq!(mode(&d.path().join("b.sql")), 0o640);
+        // fr1 m9: the owner too (the same inode, written in place).
+        assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
+        assert_eq!(after.ino(), before.ino());
+    }
+
+    /// I1 (R-T5-1): a hard-linked file whose in-place write stops part-way is written back:
+    /// every name holds the original bytes, and the stamp still matches.
+    #[test]
+    fn partial_in_place_write_restores_the_original() {
+        let original = b"DELETE FROM t WHERE id = 1;\n".to_vec();
+        let d = lib_with_bytes("a.sql", &original);
+        fs::hard_link(d.path().join("a.sql"), d.path().join("b.sql")).unwrap();
+        let r = read_default(&d, "a.sql");
+        faults::inject(faults::Fault::WriteAfter(8));
+        let got = save(
+            &root(&d),
+            &rel("a.sql"),
+            text("SELECT 'a much longer replacement text';\n"),
+            Some(r.stamp),
+        );
+        assert!(matches!(got, Err(SaveError::Io(_))), "{got:?}");
+        for n in ["a.sql", "b.sql"] {
+            assert_eq!(fs::read(d.path().join(n)).unwrap(), original, "{n}");
+        }
+        // The editor's stamp still matches, so the next save goes through.
+        assert_eq!(read_default(&d, "a.sql").stamp, r.stamp);
+        save(&root(&d), &rel("a.sql"), text("SELECT 2;"), Some(r.stamp)).unwrap();
+        assert_eq!(fs::read(d.path().join("b.sql")).unwrap(), b"SELECT 2;");
+        assert_eq!(names_under(d.path()), ["a.sql", "b.sql"]);
+    }
+
+    /// R-T5-1: when the write-back fails too, the answer is `Damaged`, never a plain error.
+    #[test]
+    fn failed_restore_reports_damage() {
+        let d = lib_with_bytes("a.sql", b"SELECT 1;\n");
+        fs::hard_link(d.path().join("a.sql"), d.path().join("b.sql")).unwrap();
+        let r = read_default(&d, "a.sql");
+        faults::inject_both(faults::Fault::WriteAfter(4), faults::Fault::Restore);
+        assert_eq!(
+            save(
+                &root(&d),
+                &rel("a.sql"),
+                text("DROP TABLE t;\n"),
+                Some(r.stamp)
+            ),
+            Err(SaveError::Damaged)
+        );
+    }
+
+    /// m3: the in-place path re-checks the file right before it writes.
+    #[test]
+    fn in_place_save_refuses_a_change_since_the_check() {
+        let d = lib_with_bytes("a.sql", b"SELECT 1;");
+        fs::hard_link(d.path().join("a.sql"), d.path().join("b.sql")).unwrap();
+        let r = read_default(&d, "a.sql");
+        // Another writer changes the file after the stamp check, before the write (same
+        // length, so only the hash and the times tell).
+        let other = d.path().join("b.sql");
+        faults::before_publish(move || fs::write(other, b"SELECT 9;").unwrap());
+        assert!(matches!(
+            save(&root(&d), &rel("a.sql"), text("mine"), Some(r.stamp)),
+            Err(SaveError::ChangedOnDisk(now)) if now.hash == xxh3(b"SELECT 9;")
+        ));
+        assert_eq!(fs::read(d.path().join("a.sql")).unwrap(), b"SELECT 9;");
+    }
+
+    /// I2 (R-T5-2): the reviewer's bounce link leaves the root and comes back; it is refused
+    /// and nothing outside is touched.
+    #[test]
+    fn link_that_leaves_the_root_and_returns_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let lib = base.path().join("lib");
+        let out = base.path().join("out");
+        fs::create_dir(&lib).unwrap();
+        fs::create_dir(&out).unwrap();
+        fs::write(lib.join("real.sql"), b"inside").unwrap();
+        let canonical = lib.canonicalize().unwrap();
+        symlink(canonical.join("real.sql"), out.join("bounce.sql")).unwrap();
+        symlink("../out/bounce.sql", lib.join("l.sql")).unwrap();
+        let r = LibraryRoot {
+            id: LibraryId::new(),
+            path: lib.clone(),
+            canonical,
+        };
+        assert_eq!(
+            read(&r, &rel("l.sql"), ReadLimits::default()).unwrap_err(),
+            ReadError::PathRefused
+        );
+        assert_eq!(
+            save(&r, &rel("l.sql"), text("pwned"), None),
+            Err(SaveError::PathChanged)
+        );
+        assert_eq!(fs::read(lib.join("real.sql")).unwrap(), b"inside");
+        assert_eq!(names_under(&out), ["bounce.sql"]);
     }
 }
 
@@ -960,5 +1255,19 @@ mod windows {
             );
         }
         assert!(names_under(d.path()).is_empty());
+    }
+
+    /// I2: an absolute UNC link target is refused as text, without a network call.
+    #[test]
+    fn unc_link_target_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let target = r"\\hv-unreachable.invalid\share\x.sql";
+        if std::os::windows::fs::symlink_file(target, d.path().join("l.sql")).is_err() {
+            return; // file links need Developer Mode or the privilege on this runner
+        }
+        assert_eq!(
+            read(&root(&d), &rel("l.sql"), ReadLimits::default()).unwrap_err(),
+            ReadError::PathRefused
+        );
     }
 }

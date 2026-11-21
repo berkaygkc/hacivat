@@ -30,6 +30,12 @@
 //! [`pathsafe::join`] now apply the real rules, and [`scan::scan`] lists a library (ADR 0009
 //! `m4b-t04`).
 //!
+//! ## m4b-t05-fileio (named exception, fix round 1 m10)
+//! Task 5 replaced the [`fileio::read`] and [`fileio::save`] stubs: they read and save for
+//! real (exact encodings, atomic or restoring saves), and [`recovery`] keeps the unsaved-text
+//! copies (ADR 0009 `m4b-t05`). The service's own `read`/`save`/`open_stream` stay stubs until
+//! Task 10.
+//!
 //! Module owners: `registry`, `manifest`, `binding`, `names` (Task 3); `scan`, `pathsafe`,
 //! `envscope`, `tree`, `dataless` (Task 4); `fileio`, `encoding`, `recovery` (Task 5); `secrets`
 //! (Task 6); `watch` (Task 9); `service`, `index`, `events` (Task 10).
