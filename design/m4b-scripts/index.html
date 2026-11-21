@@ -1546,7 +1546,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 /* ───────── Scripts node and its rows (surface 1) ─────────
    The shipped row order (hacivat_ui::tree TreeRowData): chevron · icon · name · type text · badge · flags · status · pill · meta.
    The git status slot (RowStatus) is a mono glyph after the flags; it never shrinks and is never red. */
-.xr .gst { flex:none; font:600 11px/14px "Fragment Mono", monospace; min-width:8px; text-align:center; cursor:default; }
+.xr .gst { flex:none; font:400 11px/14px "Fragment Mono", monospace; min-width:8px; text-align:center; cursor:default; }
 .xr .gst.m, .xr .gst.n { color:var(--amber); }          /* an uncommitted change: Pending Amber */
 .xr .gst.c { color:var(--text); }                        /* a conflict: ink, like every refusal */
 .xr .gst.u { color:var(--text-3); }                      /* unknown: never guessed */
@@ -1567,7 +1567,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 .xtip .tl { display:flex; gap:6px; align-items:baseline; }
 .xtip .tl + .tl { margin-top:3px; }
 .xtip .tl .mono { overflow-wrap:anywhere; }
-.xtip .gl { font:600 11px "Fragment Mono", monospace; flex:none; }
+.xtip .gl { font:400 11px "Fragment Mono", monospace; flex:none; }
 .xtip .gl.m, .xtip .gl.n { color:var(--amber); }
 .xtip .gl.c { color:var(--text); }
 .xtip .envl { display:inline-flex; align-items:center; gap:5px; }
@@ -1586,10 +1586,13 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 .tab .ttl .tf { overflow:hidden; text-overflow:ellipsis; min-width:4ch; }
 .tab .ttl .tc { flex:none; }
 .tab.io .ttl, .tab.io .dot { display:none; }
+/* Danger isolation (DESIGN: 28 px plus a seam): a Danger button stands alone at the footer's far left */
+.dlg .dfoot .dangergrp { display:flex; align-items:center; padding-right:28px; margin-right:0; border-right:1px solid var(--seam); }
 .etabs .tabs .tab.on { flex:0 0 auto; }
 .tab .sub { color:var(--text-2); }
 /* The tab tooltip: the explanation popover anatomy, mono path first */
-.xtip .pth { font:400 11.5px/16px "Fragment Mono", monospace; color:var(--text); overflow-wrap:anywhere; margin-bottom:3px; }
+.xtip .pth { font:400 11.5px/16px "Fragment Mono", monospace; color:var(--text); word-break:break-all; margin-bottom:3px; }
+.xtip .tl2 + .tl2 { margin-top:3px; }
 .qbar .rds { display:flex; align-items:center; gap:6px; color:var(--text-2); font-size:12.5px; flex:none; }
 .qbar .btn[disabled] { pointer-events:auto; }
 
@@ -1685,8 +1688,9 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 .lrow .lmain { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
 .lrow .lname { display:flex; align-items:center; gap:8px; min-width:0; }
 .lrow .lname .mono { font-size:12px; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
-.lrow .lname .bind { color:var(--text-2); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1000 auto; }
-.lrow .lname .bind .mono { font-size:11.5px; color:var(--text); }
+.lrow .lbind { color:var(--text-2); font-size:12px; line-height:1.35; }
+.lrow .lbind .mono { font-size:11.5px; color:var(--text); overflow-wrap:anywhere; }
+
 .lrow .lpath { font:400 11px "Fragment Mono", monospace; color:var(--text-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .lrow .lst { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-2); flex-wrap:wrap; }
 .lrow .lst .s1 { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }
@@ -1720,6 +1724,15 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 /* Status bar: the encoding segment (a button that opens its menu) and the one-line message */
 .status .s.msg svg { color:var(--text-2); }
 .status button.s.encs { gap:6px; }
+#sheet .ph .id { overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.palette.mag { flex:none; width:26px; min-width:26px; padding:0; justify-content:center; }
+.palette.mag span, .palette.mag kbd { display:none; }
+#capslot { flex:0 1 auto; }
+.capsule.squeeze { flex:0 1 auto; min-width:0; }
+.capsule.squeeze .cp-name { min-width:0; flex:0 1 auto; }
+.capsule.squeeze .cp-name b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.capsule.squeeze .cp-name .dim { display:none; }
+.etabs .tabs .tab.script.on { flex:none; }
 .status button.s.encs .mono { font-size:11px; }
 
 </style>
@@ -2542,9 +2555,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
  "en": {
   "hv-scripts-node": "Scripts",
   "hv-scripts-node-shared": "shared",
-  "hv-scripts-node-shared-tip": "Also under {conns}. The same files show under every connection with a database of this name.",
-  "hv-scripts-node-count-tip": "{n} scripts listed under this connection",
-  "hv-scripts-node-count-tip#one": "{n} script listed under this connection",
+  "hv-scripts-node-shared-tip": "Also under {conns}: every connection with a database of this name shows the same files.",
   "hv-scripts-lib-tip": "Folder {path}. Binds to the database {database}.",
   "hv-scripts-env-folder-tip": "Only connections tagged {env} see this folder.",
   "hv-scripts-git-modified": "M",
@@ -2560,7 +2571,6 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-scripts-git-contains-tip": "Contains changed files",
   "hv-scripts-outside-link-tip": "Points outside the library, so Hacivat never opens it.",
   "hv-scripts-dataless": "not downloaded",
-  "hv-scripts-dataless-tip": "Kept in the cloud. Opening it downloads it first.",
   "hv-scripts-downloading": "Downloading…",
   "hv-scripts-diag-row": "{n} problems",
   "hv-scripts-diag-row#one": "{n} problem",
@@ -2789,13 +2799,19 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-scripts-unsaved-save": "Save",
   "hv-scripts-unsaved-discard": "Don't save",
   "hv-scripts-downloading-tab": "Downloading {file}…",
-  "hv-scripts-downloading-body": "It is kept in the cloud; the text shows when the download ends. Nothing runs until then."
+  "hv-scripts-downloading-body": "It is kept in the cloud; the text shows when the download ends. Nothing runs until then.",
+  "hv-scripts-menu-open-under-none": "No other connection shows this file",
+  "hv-scripts-remove-body-none": "The folder and its files stay as they are, including .hacivat/workspace.toml. Its Scripts nodes go away.",
+  "hv-scripts-node-row-tip": "{n} scripts listed under this connection.",
+  "hv-scripts-node-row-tip#one": "{n} script listed under this connection.",
+  "hv-scripts-choose-hint-close": "Close",
+  "hv-scripts-dataless-row-tip": "Kept in the cloud, not downloaded. Opening it downloads it first.",
+  "hv-scripts-downloading-row-tip": "Downloading… The tab shows the text when the download ends."
  },
  "tr": {
   "hv-scripts-node": "Betikler",
   "hv-scripts-node-shared": "paylaşılan",
-  "hv-scripts-node-shared-tip": "Ayrıca şunların altında: {conns}. Aynı dosyalar, bu adda veritabanı olan her bağlantının altında görünür.",
-  "hv-scripts-node-count-tip": "Bu bağlantının altında {n} betik listeleniyor",
+  "hv-scripts-node-shared-tip": "Ayrıca şunların altında: {conns}. Bu adda veritabanı olan her bağlantı aynı dosyaları gösterir.",
   "hv-scripts-lib-tip": "Klasör: {path}. {database} veritabanına bağlanır.",
   "hv-scripts-env-folder-tip": "Bu klasörü yalnızca {env} etiketli bağlantılar görür.",
   "hv-scripts-git-modified": "M",
@@ -2809,9 +2825,8 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-scripts-git-unknown-tip#dataless": "Git durumu bilinmiyor: dosya indirilmedi; Hacivat karşılaştırmak için onu indirmez.",
   "hv-scripts-git-contains": "•",
   "hv-scripts-git-contains-tip": "Değişmiş dosyalar içeriyor",
-  "hv-scripts-outside-link-tip": "Kitaplığın dışını gösteriyor; Hacivat bunu hiç açmaz.",
+  "hv-scripts-outside-link-tip": "Kitaplığın dışına işaret ediyor; Hacivat bunu hiç açmaz.",
   "hv-scripts-dataless": "indirilmedi",
-  "hv-scripts-dataless-tip": "Bulutta tutuluyor. Açınca önce indirilir.",
   "hv-scripts-downloading": "İndiriliyor…",
   "hv-scripts-diag-row": "{n} sorun",
   "hv-scripts-missing-row": "Klasör bulunamadı",
@@ -2832,7 +2847,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-scripts-menu-copy-path": "Yolu kopyala",
   "hv-scripts-menu-copy-rel": "Göreli yolu kopyala",
   "hv-scripts-menu-settings": "Betik kitaplığı ayarları…",
-  "hv-scripts-menu-outside-tip": "Kitaplığın dışını gösteriyor",
+  "hv-scripts-menu-outside-tip": "Kitaplığın dışına işaret ediyor",
   "hv-scripts-new-name": "adsız.sql",
   "hv-scripts-new-folder-name": "yeni klasör",
   "hv-scripts-name-err": "Bir ad yazın.",
@@ -3016,7 +3031,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-scripts-recover-dismiss": "Kapat",
   "hv-scripts-recover-tab": "{date} tarihli kaydedilmemiş değişiklikler kurtarıldı.",
   "hv-scripts-recover-tab-body": "Kaydet onları korur. At, diskteki dosyaya geri döner.",
-  "hv-scripts-recover-discard": "At…",
+  "hv-scripts-recover-discard": "Değişiklikleri at…",
   "hv-scripts-recover-missing": "{file} artık kitaplıkta yok.",
   "hv-scripts-recover-missing#library": "{library} kitaplığı artık bağlı değil.",
   "hv-scripts-recover-missing-body": "Kurtarılan metniniz bu sekmede. Kaydet onu aynı yere geri yazar.",
@@ -3031,7 +3046,13 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-scripts-unsaved-save": "Kaydet",
   "hv-scripts-unsaved-discard": "Kaydetme",
   "hv-scripts-downloading-tab": "{file} indiriliyor…",
-  "hv-scripts-downloading-body": "Bulutta tutuluyor; indirme bitince metin görünür. O zamana dek hiçbir şey çalışmaz."
+  "hv-scripts-downloading-body": "Bulutta tutuluyor; indirme bitince metin görünür. O zamana dek hiçbir şey çalışmaz.",
+  "hv-scripts-menu-open-under-none": "Bu dosyayı gösteren başka bağlantı yok",
+  "hv-scripts-remove-body-none": "Klasör ve dosyaları, .hacivat/workspace.toml dahil, olduğu gibi kalır. Betikler düğümleri kaldırılır.",
+  "hv-scripts-node-row-tip": "Bu bağlantının altında {n} betik listeleniyor.",
+  "hv-scripts-choose-hint-close": "Kapat",
+  "hv-scripts-dataless-row-tip": "Bulutta tutuluyor, indirilmedi. Açınca önce indirilir.",
+  "hv-scripts-downloading-row-tip": "İndiriliyor… İndirme bitince sekme metni gösterir."
  }
 }
 </script>
@@ -3085,8 +3106,8 @@ const coll = () => (COLL[LANG] ??= new Intl.Collator(LANG === "tr" ? "tr" : "en"
 const LISTF = {};
 const listOf = a => (LISTF[LANG] ??= new Intl.ListFormat(LANG === "tr" ? "tr" : "en", { type:"conjunction", style:"long" })).format(a);
 const OS = "macos";                                        /* the mock shows macOS words and chords; NOTES has the Windows/Linux rows */
-/* R-M4b-37: Go to script ⇧⌘O, Save ⌘S (script tab context), Save all ⌥⌘S (macOS only); Reveal, Rename, Move to Trash and Copy path have no chord */
-const KEY = { goto:"⇧⌘O", save:"⌘S", saveAll:"⌥⌘S", refresh:"F5", open:"↵", menu:"⇧F10", run:"⌘↵", close:"⌘W" };
+/* R-M4b-37: Go to script ⇧⌘O, Save ⌘S (script tab context), Save all ⌥⌘S (macOS only); controller ruling (c): F2 renames; Reveal, Move to Trash and Copy path have no chord */
+const KEY = { goto:"⇧⌘O", save:"⌘S", saveAll:"⌥⌘S", rename:"F2", refresh:"F5", open:"↵", menu:"⇧F10", run:"⌘↵", close:"⌘W" };
 
 /* ═════════════ Connections (M2 profiles; fictional, .example hosts) ═════════════ */
 const ENG = { pg:{ label:"PostgreSQL", short:"PG" }, mysql:{ label:"MySQL", short:"MySQL" }, sqlite:{ label:"SQLite", short:"SQLite" } };
@@ -3296,10 +3317,10 @@ const RH = 23;
 const GIT = { M:["m", "modified"], N:["n", "new"], C:["c", "conflicted"], "?":["u", "unknown"] };
 function gitHTML(n) {
   const L = n.lib && lib(n.lib); if (!L || L.git !== "ok") return "";
-  if (n.kind === "folder" && n.dot) return `<span class="gst d" data-tip="git" data-k="${esc(n.k)}" aria-label="${te("hv-scripts-git-contains-tip")}">${te("hv-scripts-git-contains")}</span>`;
+  if (n.kind === "folder" && n.dot) return `<span class="gst d" aria-label="${te("hv-scripts-git-contains-tip")}">${te("hv-scripts-git-contains")}</span>`;
   if (n.kind !== "file" || !n.g) return "";
   const [cls, id] = GIT[n.g];
-  return `<span class="gst ${cls}" data-tip="git" data-k="${esc(n.k)}" aria-label="${esc(gitTip(n))}">${te("hv-scripts-git-" + id)}</span>`;
+  return `<span class="gst ${cls}" aria-label="${esc(gitTip(n))}">${te("hv-scripts-git-" + id)}</span>`;
 }
 const gitTip = n => n.kind === "folder" ? t("hv-scripts-git-contains-tip") : t("hv-scripts-git-" + GIT[n.g][1] + "-tip", n.g === "?" ? { reason:n.why } : undefined);
 const KIND_IC = { profile:"database", db:"cylinder", schema:"folder-tree", table:"table-2", view:"eye", column:"columns-3", builtin:"library", scripts:"scroll-text", lib:"folder", folder:"folder" };
@@ -3309,10 +3330,11 @@ function metaHTML(n) {
     if (live === "connected") return `<span class="meta">${ic("check","i12 ok")}<span class="mt">${esc(t("hv-capsule-latency", { ms:nf(c.lat ?? 0) }))}</span></span>`;
     return `<span class="meta"><span class="mt">${esc(ENG[c.engine].short)} ${esc(String(c.ver).split(".")[0])}</span></span>`;
   }
-  if (n.kind === "scripts" && !n.state) return `<span class="meta" data-tip="count" data-k="${esc(n.k)}"><span class="mt">${esc(nf(n.n))}</span></span>`;
-  if (n.kind === "lib") return `<span class="meta" data-tip="lib" data-k="${esc(n.k)}"><span class="mt">${esc(nf(n.n))}</span></span>`;
-  if (n.kind === "file" && n.dataless) return W.downloading === n.k ? `<span class="meta"><i class="run"></i><span class="mt">${te("hv-scripts-downloading")}</span></span>`
-    : `<span class="meta" data-tip="dataless" data-k="${esc(n.k)}">${ic("download","i12")}<span class="mt">${te("hv-scripts-dataless")}</span></span>`;
+  if (n.kind === "scripts" && !n.state) return `<span class="meta"><span class="mt">${esc(nf(n.n))}</span></span>`;
+  if (n.kind === "lib") return `<span class="meta"><span class="mt">${esc(nf(n.n))}</span></span>`;
+  /* MetaMark only (Running / Glyph(Download)): the words live in the row tooltip, so nothing in the meta can be cut */
+  if (n.kind === "file" && n.dataless) return W.downloading === n.k ? `<span class="meta" aria-label="${te("hv-scripts-downloading")}"><i class="run"></i></span>`
+    : `<span class="meta" aria-label="${te("hv-scripts-dataless")}">${ic("download","i12")}</span>`;
   if (n.kind === "file" && n.size) return `<span class="meta"><span class="mt">${esc(mb(n.size))}</span></span>`;
   return "";
 }
@@ -3342,19 +3364,38 @@ function rowHTML(r, i) {
   const link = n.kind === "file" && n.link;
   const cls = ["xr", W.sel === n.k ? "sel" : "", cur.trim(), n.dim ? "dim" : "", link ? "lnk" : ""].filter(Boolean).join(" ");
   const icon = n.kind === "profile" ? (n.conn.engine === "sqlite" ? "file-code-2" : "database") : n.kind === "file" ? (link ? "link" : isMd(n.rel) ? "file-text" : "file-code-2") : KIND_IC[n.kind] || "circle";
-  const tipAttr = link ? ` data-tip="outside"` : n.kind === "lib" ? ` data-tip="lib"` : n.envTag ? ` data-tip="envf"` : n.kind === "file" && n.dataless ? ` data-tip="dataless"` : "";
+  /* One row tooltip (TreeRowData::tooltip) carries every fact a cell would: shared, count, git, env, cloud, link */
+  const tipAttr = rowTip(n) ? ` data-tip="row"` : "";
   let h = `<div class="${cls}" style="${top};${pad}" data-k="${esc(n.k)}" role="treeitem" aria-level="${d + 1}" aria-selected="${W.sel === n.k}"${kids ? ` aria-expanded="${open}"` : ""}${link ? ` aria-disabled="true"` : ""}${tipAttr}>${chev}`;
   h += ic(icon, "i12 ki");
   const longLbl = [...dispLabel(n)].length > 7 ? ` style="min-width:7ch"` : "";
   h += `<span class="lbl${n.kind === "profile" && W.live[n.conn.id] === "connected" ? " on" : ""}"${longLbl}>${labelHTML(n)}</span>`;
-  if (n.kind === "scripts" && n.shared.length) h += `<span class="xb" data-tip="shared" data-k="${esc(n.k)}"><span class="bt">${te("hv-scripts-node-shared")}</span></span>`;
+  if (n.kind === "scripts" && n.shared.length) h += `<span class="xb"><span class="bt">${te("hv-scripts-node-shared")}</span></span>`;
   if (n.kind === "builtin") h += `<span class="xb"><span class="bt">${te("hv-explorer-builtin-badge", { version:n.ver })}</span></span>`;
   if (n.kind === "profile") h += `<span class="flags">${mark(n.conn.env)}</span>`;
-  if (n.kind === "folder" && n.envTag) h += `<span class="flags" data-tip="envf" data-k="${esc(n.k)}" aria-label="${esc(t("hv-scripts-env-folder-tip", { env:t("env-" + n.envTag) }))}">${mark(n.envTag)}</span>`;
+  if (n.kind === "folder" && n.envTag) h += `<span class="flags" aria-label="${esc(t("hv-scripts-env-folder-tip", { env:t("env-" + n.envTag) }))}">${mark(n.envTag)}</span>`;
   h += gitHTML(n);
   if (n.pill) h += `<button class="pill" tabindex="-1">${te("hv-explorer-pill-" + n.pill.lvl)}</button>`;
   h += `<span class="grow"></span>${metaHTML(n)}`;
   return h + `</div>`;
+}
+/* The row tooltip's lines (HTML), or "" for a row without one */
+function rowTip(n) {
+  const L = n.lib && lib(n.lib), lines = [];
+  const gitLine = () => L && L.git === "ok" && ((n.kind === "file" && n.g) || (n.kind === "folder" && n.dot))
+    ? `<div class="tl tl2"><span class="gl ${n.kind === "folder" ? "" : GIT[n.g][0]}">${esc(n.kind === "folder" ? t("hv-scripts-git-contains") : t("hv-scripts-git-" + GIT[n.g][1]))}</span><span>${esc(gitTip(n))}</span></div>` : "";
+  switch (n.kind) {
+    case "scripts": if (n.state) return "";
+      lines.push(te("hv-scripts-node-row-tip", { n:nf(n.n) })); if (n.shared.length) lines.push(te("hv-scripts-node-shared-tip", { conns:listOf(n.shared) })); break;
+    case "lib": lines.push(th("hv-scripts-lib-tip", { path:mono(L.path), database:mono(L.db) })); break;
+    case "folder": if (n.envTag) lines.push(th("hv-scripts-env-folder-tip", { env:`<span class="envl">${mark(n.envTag)}<span>${esc(t("env-" + n.envTag))}</span></span>` })); break;
+    case "file":
+      if (n.link) lines.push(te("hv-scripts-outside-link-tip"));
+      if (n.dataless) lines.push(te(W.downloading === n.k ? "hv-scripts-downloading-row-tip" : "hv-scripts-dataless-row-tip")); break;
+    default: return "";
+  }
+  const g = gitLine();
+  return lines.map(l => `<div class="tl2">${l}</div>`).join("") + g;
 }
 function editRowHTML(n, top, pad, lead) {
   const E = W.edit;
@@ -3412,7 +3453,16 @@ function capsuleHTML() {
   const path = c.engine === "sqlite" ? "" : `<span class="cp-path">${ic("arrow-left-right","i12 direct")}<span class="lb">${te("path-direct")}</span><span class="mono">${esc(t("hv-capsule-latency", { ms:nf(c.lat) }))}</span></span>`;
   return `<button class="capsule" id="capsule" tabindex="-1">${envSeg}${name}${acc}${path}<span class="cp-chev">${ic("chevrons-up-down","i12")}</span></button>`;
 }
-function renderTitle() { $("capslot").innerHTML = capsuleHTML(); const tb = $("titlebar"), cap = $("capsule"); if (cap && (tb.scrollWidth > tb.clientWidth + 0.5 || winRect().width <= 1000)) cap.querySelectorAll(".cp-path .lb").forEach(e => e.hidden = true); }
+/* DESIGN Minimum window (M2b, m4-m3carry): the path word goes first, then the palette field collapses to its magnifier, then the
+   capsule's connection name (data) ellipsizes; the environment and access words never give way */
+function renderTitle() {
+  $("capslot").innerHTML = capsuleHTML(); const tb = $("titlebar"), cap = $("capsule"), pal = tb.querySelector(".palette"); pal.classList.remove("mag");
+  if (!cap) return;
+  if (tb.scrollWidth > tb.clientWidth + 0.5 || winRect().width <= 1000) cap.querySelectorAll(".cp-path .lb").forEach(e => e.hidden = true);
+  const over = () => cap.getBoundingClientRect().right > pal.getBoundingClientRect().left - 4;
+  if (over()) pal.classList.add("mag");
+  if (over()) cap.classList.add("squeeze");
+}
 function renderSheet() {
   const sel = W.sel && findKey(W.sel), p = sel ? profileOf(sel) : null, c = p ? p.conn : capConn();
   if (!c) { $("sheet").innerHTML = `<div class="ph"><span class="meta">${te("sheet-meta")}</span></div>`; return; }
@@ -3440,7 +3490,7 @@ function renderStatus() {
   if (W.msg) h += seg("msg", `${ic(W.msg.icon || "info","i12")}<span>${W.msg.html}</span>`, "msg", `role="status"`);
   h += `<span class="grow"></span>`;
   h += seg("lncol", `<span>${esc(t("hv-editor-lncol", { line:"3", col:"1" }))}</span>`, "r");
-  if (T && T.kind === "script" && !T.encPrompt) h += `<button class="s r encs" data-act="encMenu" data-seg="enc" title="${te("hv-scripts-enc-seg-tip")}" aria-haspopup="menu">${esc(encLabel(T))}<span>·</span><span class="mono">${esc(T.eol)}</span></button>`;
+  if (T && T.kind === "script" && !T.encPrompt) h += `<button class="s r encs" data-act="encMenu" data-seg="enc" tabindex="-1" title="${te("hv-scripts-enc-seg-tip")}" aria-haspopup="menu">${esc(encLabel(T))}<span>·</span><span class="mono">${esc(T.eol)}</span></button>`;
   if (c) h += seg("ver", `${esc(ENG[c.engine].label)} <span class="mono">${esc(c.ver)}</span>`, "r");
   h += `<button class="s r lang" data-act="toggleLang" tabindex="-1">${ic("languages","i12")}<span>${LANG === "en" ? "<b>EN</b> / TR" : "EN / <b>TR</b>"}</span></button>`;
   const st = $("status"); st.innerHTML = h;
@@ -3605,6 +3655,15 @@ function renderCenter() {
 function fitTabs() {
   const strip = document.querySelector("#edpanel .etabs .tabs"); if (!strip) return;
   for (const tb of [...strip.querySelectorAll(".tab.script:not(.on)")].reverse()) { if (strip.scrollWidth <= strip.clientWidth + 0.5) break; tb.classList.add("io"); }
+  /* The active script tab: its file name gives way first (down to 4 characters); controller ruling (d): when the connection alone
+     still overflows, it is shortened in the middle (both ends kept); the full name stays in the tooltip, the accessible name,
+     the capsule, the crumb and the status segment */
+  const tabOn = strip.querySelector(".tab.on.script"), tf = tabOn && tabOn.querySelector(".tf"), tc = tabOn && tabOn.querySelector(".tc"); if (!tc) return;
+  const over = () => tabOn.getBoundingClientRect().right - strip.getBoundingClientRect().right;
+  if (over() > 0.5 && tf) { tf.style.flex = "none"; tf.style.width = Math.max(0, tf.getBoundingClientRect().width - over()) + "px"; }
+  const full = tc.textContent; let keep = full.length;
+  while (over() > 0.5 && keep > 12) {
+    keep -= 1; const h = Math.ceil(keep / 2), tl = keep - h; tc.textContent = full.slice(0, h) + "…" + full.slice(full.length - tl); tc.dataset.mid = full; }
 }
 /* Settings › Script libraries (the shipped page anatomy) */
 function settingsHTML() {
@@ -3617,7 +3676,7 @@ function settingsHTML() {
     return `<span class="s1${st === "unavailable" || st === "limit" ? " ink" : ""}"${tip}>${ic(icon,"i12")}<span>${te("hv-scripts-set-status", { state:st, n:nf(20000) })}</span></span>`;
   };
   const shown = LIBS.filter(L => !q || matchRange(L.name, q, true) || matchRange(L.path, q, true) || matchRange(L.db, q, true));
-  const rows = shown.map(L => `<div class="lrow">${ic("folder","i12")}<div class="lmain"><div class="lname"><span class="mono">${esc(L.name)}</span><span class="bind">${th("hv-scripts-map-binds", { database:mono(L.db) })}${L.aliases.length ? " · " + th("hv-scripts-set-aliases", { aliases:mono(L.aliases.join(", ")) }) : ""}</span></div>
+  const rows = shown.map(L => `<div class="lrow">${ic("folder","i12")}<div class="lmain"><div class="lname"><span class="mono">${esc(L.name)}</span></div><div class="lbind">${th("hv-scripts-map-binds", { database:mono(L.db) })}${L.aliases.length ? " · " + th("hv-scripts-set-aliases", { aliases:mono(L.aliases.join(", ")) }) : ""}</div>
     <div class="lpath">${esc(L.path)}</div><div class="lst">${status(L)}<span>·</span><span>${te("hv-scripts-set-files", { n:nf(L.limit ? 20000 : L.files.filter(f => !f.link).length) })}</span>${L.git ? `<span>·</span><span>${te(L.git === "ok" ? "hv-scripts-set-git" : "hv-scripts-set-git-off")}</span>` : ""}</div></div>
     <div class="lacts"><button class="btn ghost" data-act="noop" ${L.missingFolder ? "disabled" : ""}>${te("hv-scripts-menu-reveal", { os:OS })}</button><button class="btn" data-act="removeLib" data-lib="${L.id}">${te("hv-scripts-set-remove")}</button></div></div>`).join("");
   const maps = MAPS.map(m => `<div class="mrow2">${mark(conn(m.conn).env)}<span class="mono">${esc(m.conn)}</span>${ic("chevron-right","i12")}<span class="mono">${esc(m.db)}</span><span class="d">${te("hv-scripts-set-mapping-shows")}</span><span class="mono">${esc(lib(m.lib).name)}</span><button class="btn" data-act="noop">${te("hv-scripts-set-mapping-remove")}</button></div>`).join("");
@@ -3630,9 +3689,9 @@ function settingsHTML() {
 
 /* ═════════════ Go to script and the connection chooser (HV-SCRIPT-09): the shipped palette surface ═════════════ */
 /* Candidates for a file: every (connection, database) node where the file is listed (binding + environment scope; R-M4b-9) */
-function candidates(L, f) {
+function candidates(L, f, exclude) {
   const out = [];
-  for (const c of CONNS) for (const d of dbsOf(c)) if (libsFor(c, d).includes(L) && visibleUnder(f, c.env)) out.push({ c, d });
+  for (const c of CONNS) for (const d of dbsOf(c)) if (c.id !== exclude && libsFor(c, d).includes(L) && visibleUnder(f, c.env)) out.push({ c, d });
   return out;
 }
 function orderCands(cands, focused) {
@@ -3660,7 +3719,7 @@ function palHTML() {
     return `<div class="pal" id="pal" role="dialog" aria-label="${te("hv-cmd-scripts-goto")}"><div class="pin"><label class="in">${ic("search","i12")}<input id="palq" value="${esc(P.q)}" placeholder="${te("hv-scripts-goto-ph")}" role="combobox" aria-expanded="true" spellcheck="false"></label></div>
       <div class="plist" role="listbox">${rows}</div>${foot([["↑↓", t("hui-palette-hint-navigate")], ["↵", t("hv-scripts-goto-hint-open")], ["esc", t("hui-palette-hint-close")]])}</div>`;
   }
-  const L = lib(P.lib), f = L.files.find(x => x.rel === P.rel), list = orderCands(candidates(L, f), P.focused);
+  const L = lib(P.lib), f = L.files.find(x => x.rel === P.rel), list = orderCands(candidates(L, f, P.exclude), P.focused);
   const anyProd = list.some(x => x.c.env === "production" && x.c.id !== P.focused);
   P.list = list;
   const rows = !list.length
@@ -3669,14 +3728,14 @@ function palHTML() {
   const head = list.length ? th("hv-scripts-choose-title", { file:mono(baseName(f.rel)) }) : th("hv-scripts-choose-none", {});
   P.note = anyProd ? t("hv-scripts-choose-prod-note") : "";
   return `<div class="pal" id="pal" role="dialog" aria-label="${esc(untag(head))}"><div class="phead">${ic("file-code-2","i12")}<span>${head}</span></div>
-    <div class="plist" role="listbox" aria-activedescendant="${P.active >= 0 ? "pr" + P.active : ""}">${rows}</div>${foot([["↑↓", t("hui-palette-hint-navigate")], ["↵", t("hv-scripts-choose-hint-choose")], ["esc", t("hv-scripts-choose-hint-back")]])}</div>`;
+    <div class="plist" role="listbox" aria-activedescendant="${P.active >= 0 ? "pr" + P.active : ""}">${rows}</div>${foot([["↑↓", t("hui-palette-hint-navigate")], ["↵", t("hv-scripts-choose-hint-choose")], ["esc", t(P.fromGoto ? "hv-scripts-choose-hint-back" : "hv-scripts-choose-hint-close")]])}</div>`;
 }
 
 /* ═════════════ Menus (the shipped PopupMenu: no icon column; disabled rows keep their reason as the hint) ═════════════ */
 function winRect() { return $("win").getBoundingClientRect(); }
 function rowEl(k) { return document.querySelector(`#xspace .xr[data-k="${CSS.escape(k)}"]`); }
 const sep = { sep:true };
-const fileOps = n => [{ lab:t("hv-scripts-menu-rename"), act:"rename" }, { lab:t("hv-scripts-menu-trash", { os:OS }), act:"trash" }];
+const fileOps = n => [{ lab:t("hv-scripts-menu-rename"), k:KEY.rename, act:"rename" }, { lab:t("hv-scripts-menu-trash", { os:OS }), act:"trash" }];
 const pathOps = (rel = true) => [{ lab:t("hv-scripts-menu-reveal", { os:OS }), act:"reveal" }, { lab:t("hv-scripts-menu-copy-path"), act:"copyPath" }, ...(rel ? [{ lab:t("hv-scripts-menu-copy-rel"), act:"copyRel" }] : [])];
 const newOps = () => [{ lab:t("hv-scripts-menu-new-script"), act:"newScript" }, { lab:t("hv-scripts-menu-new-folder"), act:"newFolder" }];
 const refresh = () => ({ lab:t("hv-explorer-menu-refresh"), k:KEY.refresh, act:"refresh" });
@@ -3691,19 +3750,19 @@ function menuItems(n) {
       const base = [{ lab:t("hv-conn-menu-disconnect"), k:"↵", act:"noop" }, { lab:t("hv-conn-menu-edit"), k:"⌘E", act:"noop" }, { lab:t("hv-conn-menu-dup"), k:"⌘D", act:"noop" }, sep, refresh(), { lab:t("hv-explorer-menu-collapse-children"), act:"collapseChildren" }];
       return c.engine === "sqlite" ? [...base, sep, ...attachOps(c, dbsOf(c)[0]), sep, { lab:t("hv-conn-menu-delete"), k:"⌫", act:"noop", danger:true }] : [...base, sep, { lab:t("hv-conn-menu-delete"), k:"⌫", act:"noop", danger:true }];
     }
-    case "db": return [refresh(), { lab:t("hv-explorer-menu-edit-scope"), act:"noop" }, { lab:t("hv-explorer-menu-level"), sub:"level", act:"noop" }, sep, ...attachOps(c, n.label), sep,
-      { lab:t("hv-explorer-menu-copy-name"), k:"⌥⌘C", act:"noop" }, { lab:t("hv-explorer-menu-expand-all"), act:"noop" }, { lab:t("hv-explorer-menu-collapse-children"), act:"collapseChildren" }];
+    case "db": return [refresh(), { lab:t("hv-explorer-menu-edit-scope"), act:"noop" }, { lab:t("hv-explorer-menu-level"), sub:"level", act:"noop" }, sep,
+      { lab:t("hv-explorer-menu-copy-name"), k:"⌥⌘C", act:"noop" }, { lab:t("hv-explorer-menu-expand-all"), act:"noop" }, { lab:t("hv-explorer-menu-collapse-children"), act:"collapseChildren" }, sep, ...attachOps(c, n.label)];
     case "scripts": return n.libs.length > 1 ? [refresh(), { lab:t("hv-scripts-menu-settings"), act:"settings" }, sep, { lab:t("hv-explorer-menu-collapse-children"), act:"collapseChildren" }]
       : [...newOps(), sep, refresh(), ...pathOps(false), sep, { lab:t("hv-scripts-menu-settings"), act:"settings" }, { lab:t("hv-explorer-menu-collapse-children"), act:"collapseChildren" }];
     case "lib": return [...newOps(), sep, refresh(), ...pathOps(false), sep, { lab:t("hv-scripts-menu-settings"), act:"settings" }];
     case "folder": return [...newOps(), sep, ...fileOps(n), sep, ...pathOps(), sep, refresh()];
     case "file": if (n.link) return [{ lab:t("hv-scripts-menu-open"), dis:true, tip:t("hv-scripts-menu-outside-tip") }, sep, ...pathOps()];
-      return [{ lab:t("hv-scripts-menu-open"), k:KEY.open, act:"open" }, { lab:t("hv-scripts-menu-open-under"), act:"openUnderNode" }, sep, ...fileOps(n), sep, ...pathOps()];
+      return [{ lab:t("hv-scripts-menu-open"), k:KEY.open, act:"open" }, otherCands(n.lib, n.rel, c.id).length ? { lab:t("hv-scripts-menu-open-under"), act:"openUnderNode" } : { lab:t("hv-scripts-menu-open-under"), dis:true, tip:t("hv-scripts-menu-open-under-none") }, sep, ...fileOps(n), sep, ...pathOps()];
     default: return [refresh()];
   }
 }
 const tabMenuItems = () => [{ lab:t("hv-scripts-tab-save"), k:KEY.save, act:"saveTab" }, { lab:t("hv-scripts-tab-save-all"), k:KEY.saveAll, act:"saveTab" }, sep,
-  { lab:t("hv-scripts-menu-open-under"), act:"openUnder" }, sep, ...pathOps(false), sep, { lab:t("hui-tab-close"), k:KEY.close, act:"noop" }];
+  (() => { const T = actTab(); return T && T.lib && otherCands(T.lib, T.rel, T.conn).length ? { lab:t("hv-scripts-menu-open-under"), act:"openUnder" } : { lab:t("hv-scripts-menu-open-under"), dis:true, tip:t("hv-scripts-menu-open-under-none") }; })(), sep, ...pathOps(false), sep, { lab:t("hui-tab-close"), k:KEY.close, act:"noop" }];
 const ENCS = ["windows-1254", "iso-8859-9", "windows-1252", "utf-16le"];
 const encMenuItems = T => [{ head:t("hv-scripts-enc-menu-head", { encoding:encLabel(T) }) }, { lab:t("hv-scripts-enc-reopen"), act:"encReopen" }, { lab:t("hv-scripts-enc-save-with"), act:"noop" }, sep,
   { lab:"LF", ck:T.eol === "LF", act:"eolLF", mono:true }, { lab:"CRLF", ck:T.eol === "CRLF", act:"eolCRLF", mono:true }];
@@ -3751,13 +3810,7 @@ function placeMenus() {
 function tipHTML(kind, k, el) {
   const n = k && !k.startsWith("tab:") ? findKey(k) : null;
   switch (kind) {
-    case "shared": return te("hv-scripts-node-shared-tip", { conns:listOf(n.shared) });
-    case "count": return te("hv-scripts-node-count-tip", { n:nf(n.n) });
-    case "lib": { const L = lib(n.lib); return th("hv-scripts-lib-tip", { path:mono(L.path), database:mono(L.db) }); }
-    case "envf": return th("hv-scripts-env-folder-tip", { env:`<span class="envl">${mark(n.envTag)}<span>${esc(t("env-" + n.envTag))}</span></span>` });
-    case "git": return `<div class="tl"><span class="gl ${n.kind === "folder" ? "" : GIT[n.g][0]}">${esc(n.kind === "folder" ? t("hv-scripts-git-contains") : t("hv-scripts-git-" + GIT[n.g][1]))}</span><span>${esc(gitTip(n))}</span></div>`;
-    case "outside": return te("hv-scripts-outside-link-tip");
-    case "dataless": return te("hv-scripts-dataless-tip") + (n.g === "?" ? `<div class="tl" style="margin-top:4px"><span class="gl">?</span><span>${te("hv-scripts-git-unknown-tip", { reason:"dataless" })}</span></div>` : "");
+    case "row": return rowTip(n);
     case "missing": return th("hv-scripts-diag-missing", { path:mono(lib("L1").path) });
     case "tab": { const T = W.tabs[+k.split(":")[1]]; if (!T || T.kind !== "script") return "";
       const runs = T.conn ? th("hv-scripts-tab-tip-runs", { conn:mono(T.conn), database:mono(T.db) }) : te("hv-scripts-tab-tip-unbound");
@@ -3769,7 +3822,7 @@ function tipHTML(kind, k, el) {
 function showTip(kind, k, el) {
   const html = tipHTML(kind, k, el); if (!html) return;
   const sel = k && k.startsWith("tab:") ? `.etabs [data-k="${k}"]` : kind === "secret" ? `.gut [data-line="${el?.dataset.line}"]` : null;
-  W.tip = { kind, k, html, anchor:() => sel ? document.querySelector(sel) : (document.querySelector(`#xspace .xr[data-k="${CSS.escape(k)}"] [data-tip="${kind}"]`) || rowEl(k)) };
+  W.tip = { kind, k, html, anchor:() => sel ? document.querySelector(sel) : rowEl(k) };
   renderMenus();
 }
 
@@ -3833,12 +3886,12 @@ function layerHTML(L) {
         `<button class="btn" data-act="attachFromMap">${te("hv-scripts-map-other")}</button><span class="grow"></span><button class="btn" data-act="closeLayer">${te("dlg-cancel")}</button><button class="btn primary" data-act="mapDo" data-fk="safe0">${te("hv-scripts-map-btn")}</button>`);
     }
     case "remove": { const Lb = lib(L.lib), n = MAPS.filter(m => m.lib === Lb.id).length;
-      return dlgShell("w420", te("hv-scripts-remove-title", { library:Lb.name }), `<span class="mono" style="font-size:11.5px">${esc(Lb.path)}</span>`, `<p>${te("hv-scripts-remove-body", { n:nf(n) })}</p>`,
+      return dlgShell("w420", te("hv-scripts-remove-title", { library:Lb.name }), `<span class="mono" style="font-size:11.5px">${esc(Lb.path)}</span>`, `<p>${n ? te("hv-scripts-remove-body", { n:nf(n) }) : te("hv-scripts-remove-body-none")}</p>`,
         `<span class="grow"></span><button class="btn" data-act="removeDo">${te("hv-scripts-remove-btn")}</button>${cancel}`, true); }
     case "reload": return dlgShell("w420", th("hv-scripts-disk-reload-title", { file:esc(tabFile(actTab())) }), subConn(actTab().conn, actTab().db), `<p>${te("hv-scripts-disk-reload-body")}</p>`,
-      `<span class="grow"></span><button class="btn danger" data-act="reloadDo">${ic("rotate-cw","i12")}<span>${te("hv-scripts-disk-reload-yes")}</span></button>${cancel}`, true);
+      `<span class="dangergrp"><button class="btn danger" data-act="reloadDo">${ic("rotate-cw","i12")}<span>${te("hv-scripts-disk-reload-yes")}</span></button></span><span class="grow"></span>${cancel}`, true);
     case "overwrite": return dlgShell("w420", te("hv-scripts-disk-overwrite-title"), `<span class="mono" style="font-size:11.5px">${esc(tabFile(actTab()))}</span><span>·</span>${subConn(actTab().conn, actTab().db)}`, `<p>${te("hv-scripts-disk-overwrite-body")}</p>`,
-      `<span class="grow"></span><button class="btn danger" data-act="overwriteDo">${te("hv-scripts-disk-overwrite")}</button>${cancel}`, true);
+      `<span class="dangergrp"><button class="btn danger" data-act="overwriteDo">${te("hv-scripts-disk-overwrite")}</button></span><span class="grow"></span>${cancel}`, true);
     case "secret": {
       const T = actTab(), kinds = SECRETS;
       const body = `<p>${te("hv-scripts-secret-body")}</p><ul class="seclist">${kinds.map(s => `<li>${ic("key-round","i12")}<span class="mono">${esc(t("hv-scripts-secret-line", { line:nraw(s.line) }))}</span><span>${te("hv-scripts-secret-gutter", { kind:s.kind })}</span></li>`).join("")}</ul>
@@ -3881,11 +3934,11 @@ function renderAll() {
 
 /* ═════════════ Mock bar + notes (mock only) ═════════════ */
 const SURF = [
-  { id:"node", label:"Scripts node", sc:[["prod", "Under orders-prod"], ["staging", "Under orders-staging"], ["several", "Two libraries"], ["disabled", "Outside link, downloading"], ["shared", "Shared tooltip"], ["git", "Git tooltip"], ["mysql", "MySQL: every database"], ["sqlite", "SQLite: above main"], ["kb", "Keyboard"], ["count", "Count tooltip"], ["tr960", "960 · TR"]] },
+  { id:"node", label:"Scripts node", sc:[["prod", "Under orders-prod"], ["staging", "Under orders-staging"], ["several", "Two libraries"], ["disabled", "Outside link, downloading"], ["shared", "Scripts row tooltip"], ["git", "File row tooltip"], ["mysql", "MySQL: every database"], ["sqlite", "SQLite: above main"], ["kb", "Keyboard"], ["envtip", "Folder row tooltip"], ["tr960", "960 · TR"]] },
   { id:"menus", label:"Context menus", sc:[["db", "Database"], ["sqlite", "SQLite root"], ["scripts", "Scripts node"], ["folder", "Folder"], ["file", "File"], ["outside", "Outside link"], ["new", "New script (inline)"], ["rename", "Rename · invalid"], ["trashed", "Moved to Trash"], ["tr960", "960 · TR"]] },
   { id:"attach", label:"Attach dialog", sc:[["new", "New library"], ["aliases", "With aliases"], ["found", "Found workspace.toml"], ["error", "Invalid name"], ["mapping", "Manual mapping"], ["alias", "Mapping · share as alias"], ["tr960", "960 · TR"]] },
   { id:"settings", label:"Settings", sc:[["list", "Script libraries"], ["mappings", "With a mapping"], ["remove", "Remove…"], ["search", "Search"], ["empty", "No libraries"], ["tr960", "960 · TR"]] },
-  { id:"tab", label:"Script tab", sc:[["prod", "Under orders-prod"], ["two", "Two tabs, one file"], ["dirty", "Unsaved"], ["tooltip", "Tab tooltip"], ["tabmenu", "Tab menu"], ["mysql", "MySQL · USE"], ["unbound", "Connection deleted"], ["md", "Markdown"], ["refused", "Run refused (MySQL)"], ["refusedpg", "Run refused (edited)"], ["tr960", "960 · TR"]] },
+  { id:"tab", label:"Script tab", sc:[["prod", "Under orders-prod"], ["two", "Two tabs, one file"], ["dirty", "Unsaved"], ["tooltip", "Tab tooltip"], ["tabmenu", "Tab menu"], ["mysql", "MySQL · USE"], ["unbound", "Connection deleted"], ["md", "Markdown"], ["refused", "Run refused (MySQL)"], ["refusedpg", "Run refused (edited)"], ["long", "Long connection name"], ["tr960", "960 · TR"]] },
   { id:"disk", label:"Changes on disk", sc:[["changed", "Changed on disk"], ["reloadask", "Reload asks"], ["silent", "Silent reload"], ["renamed", "Renamed"], ["deleted", "Deleted on disk"], ["overwrite", "Overwrite?"], ["unlisted", "No longer listed"], ["tr960", "960 · TR"]] },
   { id:"unsaved", n:"6b", label:"Unsaved changes", sc:[["close", "Close a tab"], ["quit", "Quit with two"], ["tr960", "960 · TR"]] },
   { id:"goto", label:"Go to script", sc:[["query", "Results"], ["recent", "Empty query"], ["none", "No match"], ["chooser", "Chooser"], ["focused", "Chooser · prod focused"], ["prodonly", "Chooser · production only"], ["nocand", "No candidate"], ["tr960", "960 · TR"]] },
@@ -3909,21 +3962,21 @@ function renderMockbar() {
 }
 const NOTES = {
   node:{ intent:"A bound library shows as a Scripts node directly under the database node, above the schemas, under every connection that shows that database (R-M4b-7, R-M4b-19, R-M4b-25).",
-    points:["The shipped 23 px row: scroll-text icon, 'Scripts', the outlined 'shared' badge (it is under more than one connection; tooltip 'Also under …'), the file count as mono meta. No Scripts node without a bound library (Q9).", "One library: its folders and files directly. Several: one folder row per library with its own count; its tooltip names the folder and the database it binds to.", "Folders first, then files, each by the UI collation. Only .sql and .md, and folders that hold one (Q12). @environment folders carry their environment mark; an unknown @name (@prod) is not listed at all: its files are hidden everywhere and the problems row says so.", "Git status is the shipped status slot after the flags: M and N in amber (an uncommitted change), C in ink, ? in text-3, and a • on a folder that contains changes. Never red. Clean and ignored files show nothing.", "A symbolic link that points outside the library is listed dim with the link icon and never opens. A cloud placeholder (iCloud, OneDrive) says 'not downloaded'; opening it shows the run marker and 'Downloading…' until the read returns.", "The problems row ('2 problems') is the library's first child and a cursor stop; ↵ or a click opens the diagnostics popover (surface 11).", "PostgreSQL: only the connected database gets a Scripts node (R-M4b-25). MySQL/MariaDB: every listed database. SQLite: under the profile root above main, as M4 shipped the seam (asked with the database name main; R-M4b-3 binds it by the file stem)."] },
+    points:["The shipped 23 px row: scroll-text icon, 'Scripts', the outlined lowercase 'shared' badge (it is under more than one connection), the file count as mono meta. One row tooltip carries the count and 'Also under …' (the shipped row has no per-cell tooltips). No Scripts node without a bound library (Q9).", "One library: its folders and files directly. Several: one folder row per library with its own count; its tooltip names the folder and the database it binds to.", "Folders first, then files, each by the UI collation. Only .sql and .md, and folders that hold one (Q12). @environment folders carry their environment mark; an unknown @name (@prod) is not listed at all: its files are hidden everywhere and the problems row says so.", "Git status is the shipped status slot after the flags, mono 11 at weight 400: M and N in amber (an uncommitted change), C in ink, ? in text-3, and a • on a folder that contains changes; its text is a line of the row tooltip. Never red. Clean and ignored files show nothing.", "A symbolic link that points outside the library is listed dim with the link icon and never opens. A cloud placeholder (iCloud, OneDrive) shows only the download glyph as its meta mark, and the run marker alone while downloading; the words are in the row tooltip, so nothing in the meta is cut.", "The problems row ('2 problems') is the library's first child and a cursor stop; ↵ or a click opens the diagnostics popover (surface 11).", "PostgreSQL: only the connected database gets a Scripts node (R-M4b-25). MySQL/MariaDB: every listed database. SQLite: under the profile root above main, as M4 shipped the seam (asked with the database name main; R-M4b-3 binds it by the file stem)."] },
   menus:{ intent:"File operations in the tree (R-M4b-18), and the database menu's way in (R-M4b-19).",
-    points:["Database: Attach script library… and Show an attached library here… join the shipped menu after Introspection level (disabled with 'No other library is attached' when there is none). On SQLite they sit on the profile root's menu.", "Scripts node / library row: New script, New folder | Refresh, Reveal in Finder, Copy path | Script library settings…, Collapse all children.", "Folder: New script, New folder | Rename F2, Move to Trash ⌘⌫ | Reveal ⌥⌘R, Copy path ⌥⌘C, Copy relative path | Refresh. File: Open ↵, Open under another connection… | Rename, Move to Trash | Reveal, Copy path, Copy relative path.", "Move to Trash is not red: it is recoverable from the OS Trash, and the menu has no in-app delete (Q11). A tab open on the file then shows Deleted on disk.", "New script and Rename edit the name in the row (a 19 px mono field). A bad name keeps the field and shows the reason under it in ink; ↵ commits, Escape cancels and returns the focus to the row.", "A link outside the library: Open is disabled with its reason; Reveal and Copy path stay (they name the link inside the library)."] },
+    points:["Database: Attach script library… and Map to a script library… are appended after all of M4's items and a separator (R-M4b-34); Map… is disabled with 'No other library is attached' when there is none. On the SQLite root they come after the M2a items and before Delete…, which stays last.", "Scripts node / library row: New script, New folder | Refresh, Reveal in Finder, Copy path | Script library settings…, Collapse all children.", "Folder: New script, New folder | Rename F2, Move to Trash ⌘⌫ | Reveal ⌥⌘R, Copy path ⌥⌘C, Copy relative path | Refresh. File: Open ↵, Open under another connection… | Rename, Move to Trash | Reveal, Copy path, Copy relative path.", "Move to Trash is not red: it is recoverable from the OS Trash, and the menu has no in-app delete (Q11). A tab open on the file then shows Deleted on disk.", "New script and Rename edit the name in the row (a 19 px mono field). A bad name keeps the field and shows the reason under it in ink; ↵ commits, Escape cancels and returns the focus to the row.", "A link outside the library: Open is disabled with its reason; Reveal and Copy path stay (they name the link inside the library)."] },
   attach:{ intent:"Attaching a folder writes .hacivat/workspace.toml once, after the user has seen its exact content and path (R-M4b-8, Q6).",
     points:["480 form dialog. Folder (the OS chooser's result, mono, Change…), Database (prefilled with the database the menu was opened on), Aliases (comma-separated), then the exact file text in a mono inset with its full path, and 'Shows under' with every connection that will list it.", "The file is three keys: format, database, aliases. The note says it never holds a connection, a host or a password.", "Found: when the folder already has .hacivat/workspace.toml, its content is shown read-only ('Found … — binds to orders'), and Hacivat never rewrites it.", "Invalid name: the field border turns text-2, an ink line says why, Attach is disabled.", "Manual mapping (Q5): from a database whose name differs (orders_p), pick an attached library; the mapping lives in libraries.toml on this computer. 'Also add orders_p as an alias for everyone…' is unchecked; checked, the inset shows the line it adds."] },
   settings:{ intent:"Settings › Script libraries lists every library with its binding and its watcher state; Remove never touches the folder.",
     points:["Each row: the folder name (mono), 'binds to orders' (and aliases), the path, the state (Watching / Checking every 2 seconds / Folder not found / Stopped at 20,000 files), the script count and git, Reveal and Remove….", "Local mappings list under its own small-caps title.", "Remove… asks in a 420 alertdialog on Cancel; Remove is Default, not Danger: nothing on disk changes.", "Search filters by name, path and database, Turkish-tolerant."] },
   tab:{ intent:"A script tab is a console whose text comes from a file, bound to the connection and database it was opened under for its whole life (R-M4b-4, Q2).",
-    points:["Title 'orders_report.sql · orders-prod' in mono, the production mark on production tabs, the dirty dot (the close icon on hover), and the M3 capsule, hairline and crumb unchanged.", "Two tabs of one file under two connections are two buffers, each titled with its connection; a save in one is an external change for the other.", "The tab tooltip: the full path, the library, 'Runs on orders-prod, database orders', and 'Unsaved changes'.", "The tab menu: Save ⌘S, Save all ⌥⌘S | Open under another connection… | Reveal, Copy path | Close tab. There is no way to switch a tab's connection.", "MySQL: a tab under kampanya (not the profile's api) shows the database in its title and switches its own session once with USE; Run waits for it (the run marker and 'Switching to kampanya…').", "Connection deleted: the tab keeps its text, the capsule says No connection, Run is disabled with its reason, and Open under another connection… is offered. Markdown: Run is disabled ('Markdown notes do not run')."] },
+    points:["Title 'orders_report.sql · orders-prod' in mono, the production mark on production tabs, the dirty dot (the close icon on hover), and the M3 capsule, hairline and crumb unchanged.", "Two tabs of one file under two connections are two buffers, each titled with its connection; a save in one is an external change for the other.", "The tab tooltip: the full path, the library, 'Runs on orders-prod, database orders', and 'Unsaved changes'.", "The tab menu: Save ⌘S, Save all ⌥⌘S | Open under another connection… | Reveal, Copy path | Close tab. There is no way to switch a tab's connection. Open under another connection… never offers the tab's own connection, and a connection where the file is already open focuses that tab (one tab per file and connection).", "MySQL: a tab under kampanya (not the profile's api) shows the database in its title and switches its own session once with USE; Run waits for it (the run marker and 'Switching to kampanya…').", "Connection deleted: the tab keeps its text, the capsule says No connection, Run is disabled with its reason, and Open under another connection… is offered. Markdown: Run is disabled ('Markdown notes do not run')."] },
   unsaved:{ intent:"Closing a dirty script tab, or quitting with dirty script tabs, asks before anything is lost (R-M4b-5, R-M4b-39; new in M4b).",
     points:["A 420 px alertdialog per dirty script tab, one at a time, after any open-transaction prompt: 'Save changes to orders_report.sql?', the connection and database in the subtitle (and '1 of 2 unsaved scripts' when quitting with several), 'Your changes are lost if you don't save them.'", "Don't save (Default, far left) · Save (Default) · Cancel (Primary, focused). Escape and the window's close answer Cancel. Don't save is not red: it is an everyday answer, and Cancel protects the text.", "Save runs the normal save: the secret warning and Overwrite? can follow it. Cancel stops the close or the quit; the focus returns to the tab's code area.", "Focus order: Don't save, Save, Cancel (all Tab stops, trapped in the card)."] },
   disk:{ intent:"External edits reach the tab without a reload button, and never cost the user their text (R-M4b-16, Q17).",
     points:["Clean tab: reloaded in place, caret and selection kept; one status-bar message for 3 s ('Reloaded orders_report.sql: it changed on disk'). A rename that is followed says so the same way.", "Dirty tab: the Changed on disk notice under the toolbar with Reload and Keep mine (both Tab stops, after the toolbar). Reload asks in a 420 alertdialog on Cancel; 'Discard and reload' is Danger (it discards edits).", "Keep mine removes the notice; the focus returns to the code area. The next save asks 'The file changed on disk since you opened it. Overwrite?' (Overwrite is Danger, Cancel focused).", "Deleted on disk: the text stays; Save writes the file again; Close tab.", "No longer listed under this connection: the file moved into @production/ while open under staging; the tab stays bound to staging and says so."] },
   goto:{ intent:"Go to script finds any script by name, then asks which connection to open it under; production is never preselected (R-M4b-9, Q14).",
-    points:["The shipped palette surface (536 px) in its own mode with its own placeholder; no '>' prefix. Rows: file icon, the name (match underlined in blue, Turkish-tolerant: musteri finds müşteri_segment.sql), the library-relative folder with its environment mark, the library.", "↵ on a file: one non-production candidate opens directly; production or two or more ask with the chooser in the same surface.", "Chooser: the focused tab's connection first (tagged 'current'), then the least severe environment first, then name. Each row: mark, connection, database, engine.", "Production is never the active row unless it is the focused connection. With only production candidates no row is active, and ↵ does nothing until the user moves to it.", "No candidate: 'Open without a connection' opens an unbound tab that runs nothing.", "Escape goes back to the results, then closes."] },
+    points:["The shipped palette surface (536 px) in its own mode with its own placeholder; no '>' prefix. Rows: file icon, the name (match underlined in blue, Turkish-tolerant: musteri finds müşteri_segment.sql), the library-relative folder with its environment mark, the library.", "↵ on a file: one non-production candidate opens directly; production or two or more ask with the chooser in the same surface.", "Chooser: the active tab's connection first (tagged 'current'), then the least severe environment first, then name. Each row: mark, connection, database, engine. The focused connection is always the active tab's, never a tree row's; Open under another connection… leaves out the connection it starts from.", "Production is never the active row unless it is the focused connection. With only production candidates no row is active, and ↵ does nothing until the user moves to it.", "No candidate: 'Open without a connection' opens an unbound tab that runs nothing.", "Escape goes back to the results, then closes."] },
   secret:{ intent:"Warn before a password or token is saved into a shared folder, without ever showing the value (R-M4b-17, Q7).",
     points:["While typing: a key glyph (text-2) in the gutter's mark column; its tooltip says what it looks like ('Looks like a password') and how to silence the line.", "On save: a 480 alertdialog titled '3 lines in create_reader.sql look like secrets', the lines and kinds in a field well, never the values; the git sentence; the hacivat:allow-secret hint; 'Save anyway is remembered for this tab until you quit.'", "Cancel is the primary and the initial focus; Escape cancels; Save anyway is Default.", "The allow comment on line 9 silences that line only."] },
   large:{ intent:"Files over 20 MB open as a read-only preview, run as a stream, and big pastes ask first (R-M4b-20; the M3a sketch).",
@@ -3961,7 +4014,7 @@ function setup(id, sc) {
   if (id === "node" && sc === "several") LIBS.push(L2());
   if (id === "diag" || (id === "node" && sc === "tr960")) {
     const L1 = lib("L1");
-    if (sc === "toml") L1.diags = [{ k:"toml", reason:"invalid", parser:"TOML parse error at line 3, column 12\n  |\n3 | database = orders\n  |            ^\nexpected a value" }, { k:"toml-keys", keys:["host", "password"] }];
+    if (sc === "toml") L1.diags = [{ k:"toml", reason:"invalid", parser:"TOML parse error at line 3, column 12: expected a value" }, { k:"toml-keys", keys:["host", "password"] }];
     if (sc === "git") { L1.git = "untrusted"; L1.diags = [{ k:"untrusted" }]; }
     if (sc === "limits") { L1.limit = true; L1.status = "polling"; L1.why = "watches"; L1.diags = [{ k:"limit", limit:"files", n:20000 }, { k:"polling", reason:"watches" }, { k:"contradict", path:"@production/@staging/" }]; }
     if (sc === "missing") { L1.missingFolder = true; L1.diags = [{ k:"missing" }]; }
@@ -3969,20 +4022,20 @@ function setup(id, sc) {
   }
   if (id === "settings" && sc === "empty") LIBS = [];
   if (id === "settings" && (sc === "mappings" || sc === "remove" || tr960)) MAPS = [{ conn:"orders-legacy", db:"orders_p", lib:"L1" }];
-  if (id === "settings" && (sc === "list" || sc === "search" || tr960 || sc === "mappings")) { LIBS.push(L2()); lib("L3").missingFolder = true; }
+  if (id === "settings" && (sc === "list" || sc === "search" || tr960 || sc === "mappings")) { LIBS.push(L2()); lib("L3").missingFolder = true; lib("L4").limit = true; }
   buildRoots();
   const sel = (...p) => { W.sel = keyOf(...p); };
   const openFolders = (base, ...fs) => { openPath(...base); for (const f of fs) openPath(...base, ...f.split("/")); };
   W.tabs = [consoleTab("orders-prod")]; W.act = 0;
   switch (id) {
     case "node":
-      if (sc === "prod" || sc === "kb" || sc === "shared" || sc === "git" || sc === "count" || tr960) { openFolders(PROD, "reports", "@production"); sel(...PROD, "reports", "orders_report.sql");
-        if (sc === "shared") W.pinTip = ["shared", keyOf(...PROD)]; if (sc === "git") W.pinTip = ["git", fileKey(PROD, "reports/orders_report.sql")]; if (sc === "count") W.pinTip = ["count", keyOf(...PROD)];
+      if (sc === "prod" || sc === "kb" || sc === "shared" || sc === "git" || sc === "envtip" || tr960) { openFolders(PROD, "reports", "@production"); sel(...PROD, "reports", "orders_report.sql");
+        if (sc === "shared") W.pinTip = ["row", keyOf(...PROD)]; if (sc === "git") W.pinTip = ["row", fileKey(PROD, "reports/orders_report.sql")]; if (sc === "envtip") { W.sel = keyOf(...PROD, "@production"); W.pinTip = ["row", keyOf(...PROD, "@production")]; }
         if (sc === "kb") { W.cur = keyOf(...PROD); W.kb = true; W.sel = keyOf(...PROD); }
-        if (tr960) { W.sel = keyOf(...PROD); W.pinTip = ["shared", keyOf(...PROD)]; } }
+        if (tr960) { W.sel = keyOf(...PROD); W.pinTip = ["row", keyOf(...PROD)]; } }
       if (sc === "staging") { W.tabs = [consoleTab("orders-staging")]; openFolders(STG, "reports", "@staging"); sel(...STG, "@staging", "seed_test_orders.sql"); W.scrollTo = keyOf("orders-staging"); W.scrollAt = 0; }
-      if (sc === "several") { openPath(...PROD); openPath(...PROD, "lib:L1"); openPath(...PROD, "lib:L2"); openPath(...PROD, "lib:L2", "@production"); sel(...PROD, "lib:L2"); W.pinTip = ["lib", keyOf(...PROD, "lib:L2")]; }
-      if (sc === "disabled") { openFolders(PROD, "exports", "links"); W.downloading = fileKey(PROD, "exports/2025_archive.sql"); sel(...PROD, "links", "prod_creds.sql"); W.pinTip = ["outside", fileKey(PROD, "links/prod_creds.sql")];
+      if (sc === "several") { openPath(...PROD); openPath(...PROD, "lib:L1"); openPath(...PROD, "lib:L2"); openPath(...PROD, "lib:L2", "@production"); sel(...PROD, "lib:L2"); W.pinTip = ["row", keyOf(...PROD, "lib:L2")]; }
+      if (sc === "disabled") { openFolders(PROD, "exports", "links"); W.downloading = fileKey(PROD, "exports/2025_archive.sql"); sel(...PROD, "links", "prod_creds.sql"); W.pinTip = ["row", fileKey(PROD, "links/prod_creds.sql")];
         openTab(scriptTab("L1", "exports/2025_archive.sql", "orders-prod"), { downloadingTab:true }); }
       if (sc === "mysql") { W.tabs = [consoleTab("api-dev")]; openPath("api-dev", "kampanya", "scripts"); sel("api-dev", "kampanya", "scripts", "kampanya_özet.sql"); W.scrollTo = keyOf("api-dev"); W.scrollAt = 0; }
       if (sc === "sqlite") { W.tabs = [consoleTab("app.db")]; openPath("app.db", "scripts"); openPath("app.db", "main"); sel("app.db", "scripts", "notlar.md"); W.scrollTo = keyOf("app.db"); W.scrollAt = 0; }
@@ -4022,6 +4075,9 @@ function setup(id, sc) {
       if (sc === "unbound") { W.tabs = [consoleTab("orders-prod"), scriptTab("L1", "reports/orders_report.sql", null, { bar:"unbound", db:null })]; W.act = 1; }
       if (sc === "refused") { W.tabs = [consoleTab("api-dev")]; openPath("api-dev", "kampanya", "scripts"); sel("api-dev", "kampanya", "scripts", "kampanya_özet.sql"); W.scrollTo = keyOf("api-dev"); W.scrollAt = 0;
         openTab(scriptTab("L3", "kampanya_özet.sql", "api-dev", { db:"kampanya", refused:"mysql", refusedOn:"api" })); W.log = [{ tm:"14:31:05", ic:"circle-alert", html:th("hv-scripts-run-refused", { bound:mono("kampanya"), current:mono("api") }) }]; }
+      if (sc === "long") { const LC = { id:"orders-reporting-replica-eu-west-1-read-staging", env:"staging", engine:"pg", ver:"17.2", host:"pg-replica.example", port:5432, db:"orders", user:"report", lat:41 };
+        CONNS = [...CONNS0, LC]; W.live[LC.id] = "connected"; buildRoots(); W.open.clear(); openPath(LC.id, "orders", "scripts", "reports"); sel(LC.id, "orders", "scripts", "reports", "orders_report.sql"); W.scrollTo = keyOf(LC.id); W.scrollAt = 0;
+        W.tabs = [consoleTab("orders-dev"), scriptTab("L1", "reports/orders_report.sql", "orders-staging"), scriptTab("L1", "reports/müşteri_segment_raporu_aylık_özet.sql", LC.id, { dirty:true })]; W.act = 2; }
       if (sc === "refusedpg") { W.tabs = [consoleTab("orders-prod")]; openTab(scriptTab("L1", "reports/orders_report.sql", "orders-prod", { refused:"edited", refusedOn:"orders_v2" })); }
       if (sc === "md") { W.tabs = [consoleTab("orders-prod")]; openTab(scriptTab("L1", "README.md", "orders-prod")); sel(...PROD, "README.md"); }
       break; }
@@ -4052,7 +4108,7 @@ function setup(id, sc) {
       if (sc === "focused") { W.tabs = [consoleTab("orders-prod")]; W.pal = { mode:"choose", lib:"L1", rel:"reports/daily_revenue.sql", focused:"orders-prod" }; }
       if (sc === "prodonly") W.pal = { mode:"choose", lib:"L1", rel:"@production/hotfix_refund.sql", focused:"orders-dev" };
       if (sc === "nocand") { lib("L1").files.push(F("@test/yük_testi.sql")); W.pal = { mode:"choose", lib:"L1", rel:"@test/yük_testi.sql", focused:"orders-dev" }; CONNS = CONNS.filter(c => c.id !== "orders-legacy"); buildRoots(); openFolders(PROD, "reports"); }
-      if (W.pal && W.pal.mode === "choose") { const L = lib(W.pal.lib), f = L.files.find(x => x.rel === W.pal.rel); const list = orderCands(candidates(L, f), W.pal.focused); W.pal.active = list.length ? firstSafe(list, W.pal.focused) : 0; }
+      if (W.pal && W.pal.mode === "choose") { const P0 = W.pal; openChooserFor(P0.lib, P0.rel, P0.exclude); Object.assign(W.pal, { fromGoto:P0.fromGoto, backQ:P0.backQ }); }
       break;
     case "secret": {
       openFolders(DEVP, "maintenance"); sel(...DEVP, "maintenance", "create_reader.sql"); W.scrollTo = keyOf("orders-dev"); W.scrollAt = 0; W.tabs = [consoleTab("orders-dev")];
@@ -4140,10 +4196,11 @@ function activate(n) {
   if (n.kind === "diag") { W.pop = { k:n.k, lib:n.lib }; renderMenus(); $("popBtn")?.focus(); return; }
   if (hasKids(n)) toggle(n.k);
 }
-function openChooserFor(libId, rel, focused) {
-  const L = lib(libId), f = L.files.find(x => x.rel === rel), list = orderCands(candidates(L, f), focused);
-  W.pal = { mode:"choose", lib:libId, rel, focused, active:list.length ? firstSafe(list, focused) : 0 };
-  renderMenus();
+/* The focused connection is always the active tab's (never a tree row's); "Open under another connection…" excludes the
+   connection it starts from (R-M4b-4, R-M4b-9) */
+function openChooserFor(libId, rel, exclude) {
+  const focused = capConn()?.id, L = lib(libId), f = L.files.find(x => x.rel === rel), list = orderCands(candidates(L, f, exclude), focused);
+  W.pal = { mode:"choose", lib:libId, rel, focused, exclude, active:list.length ? firstSafe(list, focused) : 0 };
 }
 const ACT = {
   surf:a => go(+a.dataset.i), scen:a => go(S.surface, a.dataset.k),
@@ -4169,7 +4226,7 @@ const ACT = {
   unsavedSave:() => { const L = W.layers.pop(); W.tabs[L.tab].dirty = false; renderAll(); focusMain(); },
   refusedRetry:() => { const T = actTab(); T.refused = null; renderCenter(); focusMain(); },
   pastePreview:() => { W.layers = []; renderLayers(); focusMain(); },
-  openUnder:() => { const T = actTab(); W.menu = null; openChooserFor(T.lib, T.rel, T.conn); afterRender(); },
+  openUnder:() => { const T = actTab(); W.menu = null; if (!otherCands(T.lib, T.rel, T.conn).length) return; openChooserFor(T.lib, T.rel, T.conn); afterRender(); },
   openUnderNode:() => {},
   encOpen:() => { const T = actTab(); T.encPrompt = false; T.enc = "Windows-1254"; T.eol = "CRLF"; T.lines = ["-- Müşteri raporu (Windows-1254)", "SELECT ad, şehir FROM müşteri", "WHERE şehir = 'İSTANBUL';"]; renderCenter(); renderStatus(); focusMain(); },
   encRo:() => { const T = actTab(); T.encPrompt = false; T.ro = true; renderCenter(); renderStatus(); focusMain(); },
@@ -4195,16 +4252,23 @@ const ACT = {
   noop:() => {},
 };
 /* ↵ in the palette: a file with one non-production candidate opens directly; production or several ask (Q14) */
+/* One tab per (file, connection) (R-M4b-4): an open one takes the focus instead of a second buffer */
+function openOrFocus(libId, rel, connId, db) {
+  const ex = W.tabs.findIndex(T => T.kind === "script" && T.lib === libId && T.rel === rel && T.conn === connId);
+  W.pal = null; if (ex >= 0) W.act = ex; else openTab(scriptTab(libId, rel, connId, { db }));
+  renderAll(); afterRender();
+}
+const otherCands = (libId, rel, exclude) => { const L = lib(libId), f = L && L.files.find(x => x.rel === rel); return f ? candidates(L, f, exclude) : []; };
 function pickPal() {
   const P = W.pal;
   if (P.mode === "goto") {
     const res = gotoResults(P.q.trim()), x = res[P.active]; if (!x) return;
     const list = orderCands(candidates(x.L, x.f), capConn()?.id);
-    if (list.length === 1 && list[0].c.env !== "production") { W.pal = null; openTab(scriptTab(x.L.id, x.f.rel, list[0].c.id, { db:list[0].d })); renderAll(); afterRender(); return; }
-    openChooserFor(x.L.id, x.f.rel, capConn()?.id); W.pal.fromGoto = true; W.pal.backQ = P.q; afterRender(); return;
+    if (list.length === 1 && list[0].c.env !== "production") return openOrFocus(x.L.id, x.f.rel, list[0].c.id, list[0].d);
+    openChooserFor(x.L.id, x.f.rel); W.pal.fromGoto = true; W.pal.backQ = P.q; afterRender(); return;
   }
   const x = P.list?.[P.active]; if (!x) return;
-  W.pal = null; openTab(scriptTab(P.lib, P.rel, x.c.id, { db:x.d })); renderAll(); afterRender();
+  openOrFocus(P.lib, P.rel, x.c.id, x.d);
 }
 function pickMenu(id, i) {
   const M = W.menu, it = M.items[i]; if (!it || it.dis || it.sep || it.head) return;
@@ -4219,7 +4283,7 @@ function pickMenu(id, i) {
   if (it.act === "map") { W.layers = [{ type:"map", conn:profileOf(n).conn.id, db:dbOf(n), lib:LIBS.find(L => !libsFor(profileOf(n).conn, dbOf(n)).includes(L)).id }]; renderLayers(); focusInitial(); return; }
   if (it.act === "rename") { W.edit = { kind:"rename", k:n.k, value:n.label }; renderSlice(); afterRender(); return; }
   if (it.act === "newScript") { W.open.add(n.k); W.edit = { kind:"new", parent:n.k, value:t("hv-scripts-new-name") }; renderTree(); afterRender(); return; }
-  if (it.act === "trash") { const L = lib(n.lib); L.files = L.files.filter(f => n.kind === "file" ? f.rel !== n.rel : !f.rel.startsWith(n.rel + "/")); toast(`<div>${th("hv-scripts-trashed", { os:OS, name:mono(n.label) })}</div>`, { icon:"trash-2" }); buildRoots(); renderTree(); $("xtree").focus(); return; }
+  if (it.act === "trash") { const sib = kidsOf(n.parent) || [], i = sib.indexOf(n), next = sib[i + 1] || sib[i - 1] || n.parent, nextPath = next.k; const L = lib(n.lib); L.files = L.files.filter(f => n.kind === "file" ? f.rel !== n.rel : !f.rel.startsWith(n.rel + "/")); toast(`<div>${th("hv-scripts-trashed", { os:OS, name:mono(n.label) })}</div>`, { icon:"trash-2" }); buildRoots(); renderTree(); W.cur = W.sel = findKey(nextPath) ? nextPath : n.parent.k; renderSlice(); $("xtree").focus(); return; }
   if (it.act === "copyPath" || it.act === "copyRel") return toast(`<div>${th("hv-explorer-copied", { name:mono(it.act === "copyRel" ? n.rel || "" : lib(n.lib || "L1").path + (n.rel ? "/" + n.rel : "")) })}</div>`, { icon:"copy-check", ok:true });
   if (it.act === "collapseChildren") { for (const k of [...W.open]) if (k.startsWith(n.k + "/")) W.open.delete(k); renderTree(); return; }
   if (it.act === "settings") return ACT.settings();
@@ -4279,6 +4343,7 @@ function treeKey(e) {
   if (e.key === "ArrowRight") { e.preventDefault(); if (hasKids(n) && !W.open.has(n.k)) { W.open.add(n.k); renderTree(); } W.kb = true; renderSlice(); return true; }
   if (e.key === "ArrowLeft") { e.preventDefault(); if (W.open.has(n.k)) { W.open.delete(n.k); renderTree(); } else if (n.parent) { flatten(); go2(ROWS.findIndex(r => r.n.k === n.parent.k)); } W.kb = true; renderSlice(); return true; }
   if (e.key === "Enter" && !e.repeat) { e.preventDefault(); activate(n); return true; }
+  if (e.key === "F2" && (n.kind === "file" || n.kind === "folder")) { e.preventDefault(); W.edit = { kind:"rename", k:n.k, value:n.label }; renderSlice(); afterRender(); return true; }
   if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") { e.preventDefault(); const r = rowEl(n.k).getBoundingClientRect(), W0 = winRect(); openMenu(n.k, r.left - W0.left + 20, r.bottom - W0.top, { kb:true }); return true; }
   return false;
 }
@@ -4344,7 +4409,7 @@ function syncUrl() {
 /* ═════════════ Verification pass (mock only): ?check=all renders every scenario × EN/TR × dark/light × 1440/960 and lists findings ═════════════ */
 function rgb(hex) { const n = parseInt(hex.slice(1), 16); return `rgb(${n >> 16}, ${(n >> 8) & 255}, ${n & 255})`; }
 function bgOf(el) { for (let e = el; e; e = e.parentElement) { const b = getComputedStyle(e).backgroundColor; if (b && b !== "rgba(0, 0, 0, 0)" && b !== "transparent") return b; } return ""; }
-const DATA_SEL = ".xr:not(.st) .lbl, .xr:not(.st) .lbl *, .ty, .mt, .mono, .crumb *, .static, .tab span, .notes *, .mockbar *, .mocknote, .fname, .fname *, .fold, .fold *, .lib, .cn, .dbn, .lpath, .bind, .bind *, .pth, .v, .v *, .pn";
+const DATA_SEL = ".xr:not(.st) .lbl, .xr:not(.st) .lbl *, .ty, .mono, .crumb *, .static, .tab .tf, .tab .tt, .notes *, .mockbar *, .mocknote, .fname, .fname *, .fold, .fold *, .lib, .cn, .dbn, .lpath, .pth, .v .mono, .pn, .sheet dd .mono";
 /* Red is production and destruction only (Hue Is Meaning): every element drawn in a red token must sit in one of these */
 const RED_OK = ".env.production, .cp-env, .cp-env *, .status .envseg:not(.np), .status .envseg:not(.np) *, .btn.danger, .btn.danger *, .menu .mi.danger, .menu .mi.danger *, .kv .r, .tab .env.production, .panel.prod";
 const SECRET_VALUES = () => ["hv_test_pw", TOKEN(), "app_reader:hv_test_pw", "'dev'"];
@@ -4396,7 +4461,20 @@ function checkPage() {
   /* Toast buttons are Tab stops only after F6 */
   if (!W.toastFocus && win.querySelector('#toasts button:not([tabindex="-1"])')) F.push("toast button tabbable before F6");
   /* The chooser never preselects production unless it is the focused connection */
-  if (W.pal && W.pal.mode === "choose" && W.pal.list && W.pal.active >= 0) { const x = W.pal.list[W.pal.active]; if (x && x.c.env === "production" && x.c.id !== W.pal.focused) F.push("chooser preselects production"); }
+  if (W.pal && W.pal.mode === "choose" && W.pal.list && W.pal.active >= 0) { const x = W.pal.list[W.pal.active]; if (x && x.c.env === "production" && x.c.id !== capConn()?.id) F.push("chooser preselects production"); }
+  /* Danger isolation: 28 px plus a seam from any other button of its footer */
+  win.querySelectorAll(".dlg .dfoot .btn.danger").forEach(dg => { if (!vis(dg)) return; const r = dg.getBoundingClientRect();
+    dg.closest(".dfoot").querySelectorAll(".btn").forEach(o => { if (o === dg || !vis(o)) return; const q = o.getBoundingClientRect(); const gap = q.left >= r.right ? q.left - r.right : r.left - q.right;
+      if (gap < 28) F.push(`danger not isolated: "${dg.textContent.trim().slice(0, 20)}" ${Math.round(gap)}px from "${o.textContent.trim().slice(0, 20)}"`); }); });
+  /* The capsule never runs under the palette field */
+  { const cap = $("capsule"), pal = document.querySelector(".titlebar .palette"); if (cap && pal && cap.getBoundingClientRect().right > pal.getBoundingClientRect().left + 0.5) F.push("capsule under the palette field"); }
+  /* A connection is shortened only after the file name reached its floor */
+  win.querySelectorAll(".etabs .tab .tc[data-mid]").forEach(el => { const tf = el.closest(".ttl").querySelector(".tf"); if (tf && tf.scrollWidth <= tf.clientWidth + 0.5) F.push("connection shortened before the file name gave way"); });
+  /* A connection shortened in the middle keeps both ends (ruling d) */
+  win.querySelectorAll(".etabs .tab .tc[data-mid]").forEach(el => { const full = el.dataset.mid, v = el.textContent;
+    if (!v.startsWith(full.slice(0, 6)) || !v.endsWith(full.slice(-6)) || !v.includes("…")) F.push(`connection not shortened in the middle: "${v}"`); });
+  /* No per-cell tooltip in the tree: the shipped row has one tooltip (carry T2 item 1) */
+  if (win.querySelector("#xspace .xr [data-tip]")) F.push("per-cell tooltip in a tree row");
   /* No secret value in any dialog, toast, tooltip or menu */
   const floating = [...win.querySelectorAll(".dlg, .toast, .xtip, .menu, .pop, .status")].map(e => e.textContent).join("\n");
   for (const v of SECRET_VALUES()) if (floating.includes(v)) F.push(`secret value echoed: ${v.slice(0, 6)}…`);
@@ -4406,7 +4484,7 @@ async function runChecks() {
   S.check = true; S.shot = true; S.bar = false;
   if (document.fonts) await document.fonts.ready;
   const out = []; let renders = 0;
-  for (let si = 0; si < SURF.length; si++) for (const [sc] of SURF[si].sc) for (const lang of ["en", "tr"]) for (const theme of ["dark", "light"]) for (const size of ["1440", "960"]) {
+  for (let si = 0; si < SURF.length; si++) for (const [sc] of SURF[si].sc) for (const lang of ["en", "tr"]) for (const theme of ["dark", "light"]) for (const size of ["1440", "1280", "960"]) {
     if (sc.startsWith("tr960") && (lang !== "tr" || size !== "960")) continue;
     LANG = lang; S.theme = theme; S.size = size;
     try { go(si, sc, true); } catch (err) { out.push({ s:SURF[si].id, sc, lang, theme, size, f:["exception: " + err.message + " " + (err.stack || "").split("\n")[1]] }); continue; }
@@ -4437,7 +4515,7 @@ async function runProbes() {
   ok("the Scripts count is the files listed there", nodeAt(...STG).n === countVisible(lib("L1"), "staging"));
   ok("the Scripts node sits above the schemas", kidsOf(nodeAt("orders-staging", "orders"))[0].kind === "scripts");
   go(S_("node"), "prod", true); await tick();
-  ok("the shared badge's tooltip names the other connections", tipHTML("shared", keyOf(...PROD)).includes("orders-staging") && tipHTML("shared", keyOf(...PROD)).includes("orders-dev"));
+  ok("the Scripts row tooltip carries the count and names the other connections", /13/.test(tipHTML("row", keyOf(...PROD))) && tipHTML("row", keyOf(...PROD)).includes("orders-staging") && tipHTML("row", keyOf(...PROD)).includes("orders-dev"));
   /* Where you open a script decides where it runs (R-M4b-4; gate E1) */
   openFileNode(nodeAt(...PROD, "reports", "orders_report.sql")); await tick();
   const capProd = !!document.querySelector(".capsule .cp-env");
@@ -4449,6 +4527,27 @@ async function runProbes() {
   const before = W.tabs.length, bound = actTab().conn; ACT.openUnder(); await tick();
   const pick = W.pal.list.findIndex(x => x.c.id === "orders-dev"); W.pal.active = pick; pickPal(); await tick();
   ok("Open under another connection… opens a new tab and leaves the first bound", W.tabs.length === before + 1 && actTab().conn === "orders-dev" && W.tabs[before - 1].conn === bound);
+  /* Fix round 1, Critical 1: the tree's Open under another connection… with the active tab on orders-dev and a file row under orders-prod */
+  go(S_("node"), "prod", true); await tick();
+  W.tabs = [consoleTab("orders-dev")]; W.act = 0; renderAll(); await tick();
+  const rowN = nodeAt(...PROD, "reports", "daily_revenue.sql"); openMenu(rowN.k, 100, 300);
+  W.menu.active = W.menu.items.findIndex(i => i.act === "openUnderNode"); $("xtree").focus(); key("Enter"); await tick();
+  ok("tree Open under another connection… (tab on dev, row under prod): production is not preselected", W.pal && W.pal.list[W.pal.active]?.c.env !== "production" && capConn().id === "orders-dev");
+  ok("…and the row's own connection is not offered", W.pal && !W.pal.list.some(x => x.c.id === "orders-prod"));
+  /* Fix round 1, Important 1: one tab per (file, connection) */
+  go(S_("tab"), "two", true); await tick();
+  const nTabs = W.tabs.length; ACT.openUnder(); await tick();
+  ok("a tab's Open under another connection… never offers the tab's own connection", W.pal && !W.pal.list.some(x => x.c.id === "orders-prod"));
+  W.pal.active = W.pal.list.findIndex(x => x.c.id === "orders-staging"); pickPal(); await tick();
+  ok("choosing a connection that already has the file open focuses that tab, no duplicate", W.tabs.length === nTabs && actTab().conn === "orders-staging" && W.tabs.filter(T => T.rel === "reports/orders_report.sql" && T.conn === "orders-staging").length === 1);
+  go(S_("menus"), "db", true); await tick();
+  const it = W.menu.items, ai = it.findIndex(i => i.act === "attach"), ci = it.findIndex(i => i.act === "collapseChildren");
+  ok("the database menu appends the Scripts items after all of M4's items (R-M4b-34)", ai > ci && it[ai - 1].sep);
+  go(S_("tab"), "long", true); await tick();
+  ok("a 40+ character connection stays whole on the tab at 1440 and 960 (the file name gives way) and in the capsule", !document.querySelector(".tab.on .tc[data-mid]") && /orders-reporting-replica-eu-west-1-read-staging/.test($("capslot").textContent) && document.querySelector(".tab.on .tc").textContent.includes("orders-reporting-replica-eu-west-1-read-staging"));
+  const strip = document.querySelector("#edpanel .etabs .tabs"); strip.style.width = "440px"; strip.style.flex = "none"; fitTabs(); await tick();
+  const tcm = document.querySelector(".tab.on .tc"), tfm = document.querySelector(".tab.on .tf");
+  ok("in a pane too narrow even for that, the connection is shortened in the middle, both ends kept, after the file name reached its floor", tcm.dataset.mid && tcm.textContent.startsWith("orders-rep") && tcm.textContent.endsWith("staging") && tcm.textContent.length > 20 && tcm.textContent.includes("…") && tfm.scrollWidth > tfm.clientWidth);
   /* Chooser (R-M4b-9, Q14) */
   go(S_("goto"), "chooser", true); await tick();
   ok("the chooser lists the focused connection first and never preselects production", W.pal.list[0].c.id === "orders-dev" && W.pal.list[W.pal.active].c.env !== "production" && W.pal.list.at(-1).c.env === "production");
@@ -4483,7 +4582,7 @@ async function runProbes() {
   /* Changes on disk (R-M4b-16) */
   go(S_("disk"), "changed", true); await tick();
   document.querySelector('[data-act="diskReload"]').click(); await tick();
-  ok("Reload asks first, focused on Cancel; Discard and reload is Danger", W.layers[0]?.type === "reload" && document.activeElement?.dataset.fk === "safe" && !!document.querySelector(".dlg .btn.danger"));
+  ok("Reload asks first, focused on Cancel; Discard and reload is Danger, isolated at the far left", W.layers[0]?.type === "reload" && document.activeElement?.dataset.fk === "safe" && !!document.querySelector(".dlg .btn.danger"));
   key("Escape"); await tick(); ok("Escape keeps the edits", actTab().dirty && actTab().bar === "changed");
   document.querySelector('[data-act="diskKeep"]').click(); await tick();
   ok("Keep mine removes the notice and the focus returns to the code", !actTab().bar && document.activeElement?.id === "code");

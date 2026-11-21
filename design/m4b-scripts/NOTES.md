@@ -1,6 +1,6 @@
 # M4b "Script workspace (local)": design notes
 
-**Status: awaiting review.** Task 2 Steps 1–2 (mocks and these notes) are done; the controller reviews against DESIGN.md (PO away) and the PO signs off at the gate. Tasks 13–18 and 21 build from these notes once approved (plan "New UI surfaces": "binding for every UI task once the controller or the PO approves").
+**Status: awaiting review (fix round 1 applied).** Task 2 Steps 1–2 (mocks and these notes) are done, and the design review's findings and the controller's rulings (a)–(e) are in (see "Fix round 1" under Open questions and rulings); the controller reviews against DESIGN.md (PO away) and the PO signs off at the gate. Tasks 13–18 and 21 build from these notes once approved (plan "New UI surfaces": "binding for every UI task once the controller or the PO approves").
 
 Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface switcher). It is the M4 mock's world, unchanged: the same CSS (copied, with the M4b additions after it), the same Lucide 0.460 sprite (ISC) plus two icons, the same mock bar, Notes drawer, toggles and deep links. It runs with no network except Google Fonts. The M2a/M2b strings (`i18n-prior`), the shipped Fluent strings (`i18n-app`, `i18n-app-m4b`) and the M4 copy table (`i18n-m4`, shipped in `locales/`) are reused verbatim; M4b never redefines an earlier Fluent id.
 
@@ -14,7 +14,7 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 
 **Flows that run**
 - **Tree.** Click selects; chevron or double-click toggles; ↵ or a double-click on a file opens a script tab bound to the connection and database the row is under; ↵ on the problems row opens the diagnostics popover (Escape returns to the row). Right-click (or ⇧F10) opens the menus; Rename and New script edit the name in the row with live validation; Move to Trash removes the file and says so.
-- **Tabs.** Click switches (the capsule, hairline, crumb and status bar follow); right-click opens the tab menu; closing a dirty tab asks (6b); "Open under another connection…" opens the chooser and then a **new** tab.
+- **Tabs.** Click switches (the capsule, hairline, crumb and status bar follow); right-click opens the tab menu; closing a dirty tab asks (6b); "Open under another connection…" opens the chooser without the tab's own connection, then opens the script under the chosen one in its own tab (or focuses the tab already open there).
 - **Changes on disk.** Reload asks first; Keep mine removes the notice and the next ⌘S asks Overwrite?; Save on a tab with secrets asks first.
 - **Go to script.** ⇧⌘O opens it; type (Turkish-tolerant); ↓↑ ↵; Escape goes back from the chooser to the results, then closes.
 - **Attach.** Typing the database name or aliases rewrites the file shown; an empty name disables Attach. The mapping dialog's "share as alias" box shows the line it would add.
@@ -34,8 +34,8 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 2. **No ambient motion.** The watcher never animates anything; a reload is a one-line status message for 3 s; progress is the static run marker and counts.
 3. **The Raised Ink Rule holds.** Menus, tooltips, toasts, dialogs, the palette, toolbars and strips map text-3 to text-2; the explorer and the notices' field wells keep text-3 where allowed. Disabled items use the shipped `text-disabled`.
 4. **Names are user data.** File, folder, library and connection names are shown verbatim (NFC for display, bidi-isolated, invisible characters escaped as `<U+XXXX>`, R-M4b-23), in mono where they are literal; Turkish names (`müşteri_segment.sql`, `haftalık_rapor.sql`) sort by the UI collator; counts are Number arguments formatted in the format locale.
-5. **Where you open a script decides where it runs.** Every surface that shows a script tab names its connection: the tab title (whose connection part never ellipsizes), the crumb, the capsule, the status segment, the tab tooltip, every dialog subtitle. No surface offers to switch a tab's connection; "Open under another connection…" always opens a new tab.
-6. **Production is never chosen for the user.** The chooser never preselects it unless it is the focused connection; a file that only production shows opens nothing on ↵ until the user moves onto it.
+5. **Where you open a script decides where it runs.** Every surface that shows a script tab names its connection: the tab title (whose connection part never truncates, ruling d), the crumb, the capsule, the status segment, the tab tooltip, every dialog subtitle. No surface offers to switch a tab's connection. One tab per (file, connection) (R-M4b-4): every path that opens a script under a connection where it is already open focuses that tab instead of opening a second buffer.
+6. **Production is never chosen for the user.** The chooser never preselects it unless it is the **active tab's** connection (the "focused connection" is always the active tab's, never a tree row's); "Open under another connection…" never offers the connection it starts from; a file that only production shows opens nothing on ↵ until the user moves onto it.
 7. **The safe answer is the default.** Every alertdialog opens on Cancel (Primary): reload, overwrite, secret warning, paste, remove, unsaved changes. A notice's buttons are Default.
 8. **Focus (R-T33-1, R-M4b-43).** Buttons are Tab stops (notices, strips, dialogs, popovers, settings rows); toast buttons only after F6. When a pressed control disappears (a notice's button that removes the notice, a strip's Close, a dismissed toast, a closed dialog), the focus returns to the surface's main area: the tab's code area, or the tree for tree surfaces. Every notice's focus home is the code area of its tab.
 9. **GPUI-reproducible.** Solid fills, 1 px borders, radii 0/3/4/6, the popover shadow only; no transforms, filters, blur or masks. Every tree row is the shipped 23 px row.
@@ -49,16 +49,17 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 **Purpose.** A bound library shows as a Scripts node under every connection that shows its database, so where the user opens a script is where it runs (L14).
 
 **Anatomy** (the shipped row, `TreeRowData`: chevron · icon · name · type text · badge · flags · status · pill · spacer · meta mark + meta).
-- **Scripts row:** icon `scroll-text`; label "Scripts" (Fluent); **badge** "shared" (outlined, micro 11.5, text-2; only when the library shows under at least one other connection node; tooltip "Also under orders-staging and orders-dev. The same files show under every connection with a database of this name."); **meta** the file count in mono (`13`; tooltip "13 scripts listed under this connection"). No pill, no status.
+- **One row tooltip** (`TreeRowData::tooltip`, carry T2 item 1): the shipped row has no per-cell tooltips (a badge showing its text has none, `RowStatus.text` is an accessible description, `RowFlag::Env` has no text), so every fact a cell carries is folded into the row's one tooltip, which is also its accessible description.
+- **Scripts row:** icon `scroll-text`; label "Scripts" (Fluent); **badge** "shared" (outlined, micro 11.5, text-2, lowercase: controller ruling b; only when the library shows under at least one other connection node); **meta** the file count in mono (`13`). No pill, no status. Row tooltip: "13 scripts listed under this connection." / "Also under orders-staging and orders-dev: every connection with a database of this name shows the same files."
 - **Placement** (R-M4b-25, -31, -32): first child of a PostgreSQL database row (only the session's or profile's database), of every MySQL/MariaDB database row, and of a SQLite profile root above `main` (never under an attached database). A profile without a catalog yet shows none (Go to script still offers it).
-- **One library:** its folders and files directly. **Several:** one folder row per library (icon `folder`, the folder name, its own count as meta; tooltip "Folder ~/work/… . Binds to the database orders.").
-- **Folders** (icon `folder`) before files, each sorted by the UI collator. An `@<tag>` folder carries its environment mark in **flags** (red square only for `@production`); tooltip "Only connections tagged production see this folder." Folders that hold no listed script are not shown; an unknown `@name` is never listed.
-- **Files:** `file-code-2` for `.sql`, `file-text` for `.md`. **Status** (`RowStatus { kind, glyph, text }`): M (modified) and N (new) in amber, C (conflicted) in ink, ? (unknown) in text-3, mono 11 weight 600; a folder that contains changes shows `•` in text-2. The text alternative is the tooltip ("Modified: differs from the last commit"). Clean and ignored files have none.
-- **Disabled rows** (`dim`): a link pointing outside the library (icon `link`, text-3; tooltip "Points outside the library, so Hacivat never opens it."; Open disabled). A cloud placeholder: meta `download` glyph + "not downloaded" (tooltip "Kept in the cloud. Opening it downloads it first."; git `?`); while downloading, the run marker + "Downloading…" as meta, and its tab shows the downloading notice instead of text (Run disabled).
+- **One library:** its folders and files directly. **Several:** one folder row per library (icon `folder`, the folder name, its own count as meta; row tooltip "Folder ~/work/… . Binds to the database orders.").
+- **Folders** (icon `folder`) before files, each sorted by the UI collator. An `@<tag>` folder carries its environment mark in **flags** (red square only for `@production`); row tooltip "Only connections tagged production see this folder." Folders that hold no listed script are not shown; an unknown `@name` is never listed.
+- **Files:** `file-code-2` for `.sql`, `file-text` for `.md`. **Status** (`RowStatus { kind, glyph, text }`): M (modified) and N (new) in amber, C (conflicted) in ink, ? (unknown) in text-3, `mono_micro` 11 at weight 400 (controller ruling a); a folder that contains changes shows `•` in text-2. The text alternative is the row's accessible description and a line of the row tooltip ("M Modified: differs from the last commit"). Clean and ignored files have none.
+- **Disabled rows** (`dim`): a link pointing outside the library (icon `link`, text-3; row tooltip "Points outside the library, so Hacivat never opens it."; Open disabled). A cloud placeholder: the meta mark only, `MetaMark::Glyph(Download)` (row tooltip "Kept in the cloud, not downloaded. Opening it downloads it first." plus the git `?` line); while downloading, `MetaMark::Running` only (row tooltip "Downloading… The tab shows the text when the download ends."), and its tab shows the downloading notice instead of text (Run disabled). **No words in the meta slot** (review I4): the shipped meta ellipsizes first, so a state word there would be cut.
 - **Problems row:** the library's first child when it has diagnostics: the ink `circle-alert` and "2 problems"; a cursor stop; ↵ or a click opens surface 11's popover.
 - **Folder missing:** the Scripts node's child is the shipped failed row "Folder not found" with the Retry icon (tooltip names the path).
 
-**States.** Under orders-prod (`@production` listed) · under orders-staging (`@staging` listed, `@production` not) · two libraries · outside link + downloading · shared tooltip · git tooltip · MySQL (under `kampanya`, not the default `api`) · SQLite (above `main`) · keyboard cursor · count tooltip · 960 × 600 in Turkish.
+**States.** Under orders-prod (`@production` listed) · under orders-staging (`@staging` listed, `@production` not) · two libraries (library row tooltip) · outside link + downloading (link row tooltip) · Scripts row tooltip · file row tooltip · MySQL (under `kampanya`, not the default `api`) · SQLite (above `main`) · keyboard cursor · folder row tooltip (`@production`) · 960 × 600 in Turkish.
 
 **Keyboard.** The shipped tree keys: ↑ ↓, → expands or enters, ← collapses or goes to the parent, ↵ opens a file (or the popover), ⇧F10 / the menu key opens the menu, F5 refreshes. Type-ahead and the filter match file names (`ContributedNode::filter_text`). No new chord (R-M4b-37).
 
@@ -70,17 +71,18 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 **Purpose.** The ways in (attach, map) on the database node, and the file operations in the tree.
 
 **Anatomy** (the shipped PopupMenu: no icon column; a disabled row keeps its reason as the hint; no chords except the shipped ones).
-- **Database row** (PG and MySQL/MariaDB): M4's items unchanged (Refresh F5, Edit scope…, Introspection level ›, | Copy qualified name ⌥⌘C, Expand all children, Collapse all children), then appended: | **Attach script library…**, **Map to a script library…** (disabled with "No other library is attached" when every library already shows here). **SQLite root:** the M2a connection items, then the same two before Delete….
+- **Database row** (PG and MySQL/MariaDB): M4's items unchanged (Refresh F5, Edit scope…, Introspection level › | Copy qualified name ⌥⌘C, Expand all children, Collapse all children), then, after all of them and a separator (R-M4b-34): **Attach script library…**, **Map to a script library…** (disabled with "No other library is attached" when every library already shows here). **SQLite root:** the M2a connection items, then a separator and the same two, then Delete… last (ruling 17: the destructive row stays last; R-M4b-34's "append" reads "before the destructive group" for the SQLite root).
 - **Scripts node / library row:** New script, New folder | Refresh F5, Reveal in Finder, Copy path | Script library settings…, Collapse all children. With several libraries the Scripts node keeps only Refresh, settings and Collapse; New… lives on each library row.
 - **Folder:** New script, New folder | Rename, Move to Trash | Reveal in Finder, Copy path, Copy relative path | Refresh.
-- **File:** Open ↵, Open under another connection… | Rename, Move to Trash | Reveal in Finder, Copy path, Copy relative path. **Link outside:** Open (disabled: "Points outside the library") | Reveal, Copy path, Copy relative path.
+- **File:** Open ↵, Open under another connection… | Rename F2, Move to Trash | Reveal in Finder, Copy path, Copy relative path. **Link outside:** Open (disabled: "Points outside the library") | Reveal, Copy path, Copy relative path.
+- **Open under another connection…** (review Critical 1, I1): the chooser's focused connection is the **active tab's**, never the row's; the connection the row is under is **not offered**; production is preselected only when it is the active tab's connection. When no other connection shows the file, the item is disabled with "No other connection shows this file". Picking a connection where the file is already open focuses that tab.
 - Words per host through an `$os` selector: "Reveal in Finder" / "Reveal in File Explorer" / "Open Containing Folder"; "Move to Trash" / "Move to Recycle Bin".
-- **Move to Trash is not red** and asks nothing: the OS trash restores it (Q11); a tab on the file then shows Deleted on disk; a toast says where it went.
+- **Move to Trash is not red** (Default, controller ruling e) and asks nothing: the OS trash restores it (Q11); a tab on the file then shows Deleted on disk; a toast says where it went. The tree cursor moves to the next sibling, else the previous one, else the parent (review Minor 9).
 - **New script / Rename** edit in the row: a 19 px mono field with the blue focus ring, the name selected without its extension. A bad name keeps the field, turns its border text-2 and shows the reason under it in the tooltip anatomy with the ink alert (slash, reserved Windows name, `.`/`..`/trailing dot or space, already exists, missing `.sql`/`.md` for a new script). ↵ commits; Escape cancels and returns the focus to the row.
 
 **States.** Database · SQLite root · Scripts node · folder · file · outside link · New script inline · Rename invalid · Moved to Trash · 960 × 600 in Turkish.
 
-**Keyboard.** ⇧F10 / menu key opens the menu on its first enabled row; ↑ ↓ ↵ Escape (shipped). Rename, Move to Trash and Copy path have no default chord (R-M4b-37 lists none; open question 9).
+**Keyboard.** ⇧F10 / menu key opens the menu on its first enabled row; ↑ ↓ ↵ Escape (shipped). **F2 renames** a script file or folder row (all hosts, `ExplorerTree`; controller ruling c). Move to Trash and Copy path have no default chord in M4b (menu and palette only; a Trash chord is a PO item).
 
 **Focus order.** Menu rows (shipped). The inline field takes the focus while editing; Escape/↵ return it to the tree row.
 
@@ -99,16 +101,16 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 
 **States.** New library · with aliases · found workspace.toml · invalid name · mapping · mapping with share-as-alias · 960 × 600 in Turkish.
 
-**Keyboard and focus order.** Tab is trapped in the card. New: Database (initial focus) → Aliases → Change… → Cancel → Attach. Found: Change… → Cancel → Attach (initial focus on Attach: nothing is written into the folder). Mapping: Library → the checkbox (Space) → Attach another folder… → Cancel → Show here (initial focus). Escape cancels; ↵ on a focused button presses it.
+**Keyboard and focus order.** Tab is trapped in the card; the header's close × is not a Tab stop (Escape closes, as every M2–M4 dialog). New: Change… → Database (initial focus) → Aliases → Cancel → Attach (document order). Found: Change… → Cancel → Attach (initial focus on Attach: nothing is written into the folder). Mapping: Library → the checkbox (Space) → Attach another folder… → Cancel → Show here (initial focus). Escape cancels; ↵ on a focused button presses it.
 
 ### 4 · Settings › Script libraries
 **Purpose.** Every library in one place, with its binding and its watcher state; removing never touches the folder.
 
-**Anatomy.** The shipped Settings page; a new navigation entry "Script libraries" and its small-caps section title; the note "A library is a folder of .sql and .md files. Removing one never changes the folder or its files." with **Attach a folder…** (Default). A bordered list (1 px seam-strong, 4 px radius, rows divided by seam): folder icon, the name (mono), "binds to orders" (and "aliases orders_p"), the path (mono 11 text-2), the state line — Watching for changes (`eye`) · Checking every 2 seconds (`timer`, tooltip why: network drive / low watch limit) · Folder not found (`circle-alert`, ink) · Stopped at 20,000 files (`triangle-alert`, ink) — the script count and "git repository" / "git status off"; **Reveal in Finder** (ghost; disabled when the folder is missing) and **Remove…** (Default). **Local mappings** follow under their own small-caps title: env mark, connection › database, "shows", the library, Remove.
-- **Remove…** opens a 420 alertdialog: "Remove orders-scripts from Hacivat?", the path as subtitle, "The folder and its files stay as they are, including .hacivat/workspace.toml. Its Scripts nodes go away, and so do its 1 local mapping." **Remove** is Default (not Danger: nothing on disk changes); **Cancel** is Primary and focused.
+**Anatomy.** The shipped Settings page; a new navigation entry "Script libraries" and its small-caps section title; the note "A library is a folder of .sql and .md files. Removing one never changes the folder or its files." with **Attach a folder…** (Default). A bordered list (1 px seam-strong, 4 px radius, rows divided by seam): folder icon, the name (mono), then on its own line "binds to orders" (and "· aliases orders_p"; this line wraps, never ellipsizes: review I4), the path (mono 11 text-2), the state line — Watching for changes (`eye`) · Checking every 2 seconds (`timer`, tooltip why: network drive / low watch limit) · Folder not found (`circle-alert`, ink) · Stopped at 20,000 files (`triangle-alert`, ink) — the script count and "git repository" / "git status off"; **Reveal in Finder** (ghost; disabled when the folder is missing) and **Remove…** (Default). **Local mappings** follow under their own small-caps title: env mark, connection › database, "shows", the library, Remove.
+- **Remove…** opens a 420 alertdialog: "Remove orders-scripts from Hacivat?", the path as subtitle, "The folder and its files stay as they are, including .hacivat/workspace.toml. Its Scripts nodes go away, and so does its 1 local mapping." (without mappings the last clause is left out: `hv-scripts-remove-body-none`). **Remove** is Default (not Danger: nothing on disk changes); **Cancel** is Primary and focused.
 - Search filters by name, path and database (Turkish-tolerant).
 
-**States.** List · with a mapping · Remove… · search · no libraries · 960 × 600 in Turkish.
+**States.** List (watching, polling, folder not found, stopped at 20,000 files) · with a mapping · Remove… · search · no libraries · 960 × 600 in Turkish.
 
 **Focus order.** Search → Attach a folder… → per row Reveal, Remove… → per mapping Remove. Removing a row returns the focus to the search field's next stop (the list's first button), never to a vanished button.
 
@@ -116,16 +118,16 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 **Purpose.** A console whose text comes from a file, bound to the connection and database it was opened under, for its whole life.
 
 **Anatomy.**
-- **Tab:** `file-code-2` (or `file-text`), the title "orders_report.sql · orders-prod" in mono (one Fluent message; the file name ellipsizes down to four characters, **the connection never does**; an inactive script tab that still doesn't fit collapses to its icon, its title in the tooltip and the accessible name), the production mark on production tabs, the dirty dot (the close icon on hover). Under a MySQL database other than the profile's: "kampanya_özet.sql · api-dev · kampanya".
+- **Tab:** `file-code-2` (or `file-text`), the title "orders_report.sql · orders-prod" in mono (one Fluent message; the file name ellipsizes down to four characters, **the connection never truncates**; an inactive script tab that still doesn't fit collapses to its icon, its title in the tooltip and the accessible name; controller ruling (d): if the **active** tab's connection alone still overflows once the file name is at its floor, the connection is shortened **in the middle**, both ends kept (`orders-rep…read-staging`), its full name in the tooltip, the accessible name, the capsule, the crumb and the status segment), the production mark on production tabs, the dirty dot (the close icon on hover). Under a MySQL database other than the profile's: "kampanya_özet.sql · api-dev · kampanya".
 - **Tooltip:** the full path (mono), "From the library orders-scripts", the env mark and "Runs on orders-prod, database orders", "Unsaved changes".
 - **Toolbar, capsule, hairline, crumb, status bar:** M3's, unchanged; they follow the active tab. The status bar adds the encoding segment (surface 10).
-- **Tab menu:** Save ⌘S, Save all ⌥⌘S | Open under another connection… | Reveal in Finder, Copy path | Close tab ⌘W. There is no way to switch the tab's connection; "Open under another connection…" opens the chooser (surface 7) and then a **new** tab.
+- **Tab menu:** Save ⌘S, Save all ⌥⌘S | Open under another connection… | Reveal in Finder, Copy path | Close tab ⌘W. There is no way to switch the tab's connection. "Open under another connection…" opens the chooser (surface 7) **without the tab's own connection**, then opens the script under the chosen connection in its own tab, or focuses the tab already open there (R-M4b-4); with no other candidate it is disabled ("No other connection shows this file").
 - **MySQL under another database:** the tab opens its own session and switches it with `USE`; until the switch is read back, Run is disabled and the toolbar shows the run marker and "Switching to kampanya…"; Output logs "This tab's session now uses kampanya  USE kampanya".
 - **Run refused (R-M4b-27):** before every Run the tab checks its session's database. MySQL: one switch back; if that fails, an alert notice under the toolbar: "Run refused: this tab runs on kampanya, but its session is on api." / "Hacivat switched the session back once and it still isn't on kampanya. Nothing was sent. Try again, or open the script under another connection." with **Switch to kampanya and run** and **Open under another connection…**; Output logs the refusal. PostgreSQL/SQLite (the profile was edited to another database): "orders-prod now opens orders_v2: the connection was edited. Nothing was sent. Open the script under the connection that shows orders." with Open under another connection….
 - **Connection deleted / unbound (R-M4b-30):** capsule "No connection", title "… · no connection", Run disabled (tooltip "This tab's connection was deleted, so it runs nothing. Open it under another connection."), and the notice "The connection this tab was opened under was deleted." / "The text is kept. It runs nowhere until you open it under a connection." with Open under another connection…. A connect never binds it.
 - **Markdown:** Run disabled, "Markdown notes do not run".
 
-**States.** Under orders-prod · two tabs, one file · unsaved (+ the "Saved daily_revenue.sql" status message) · tab tooltip · tab menu · MySQL USE · connection deleted · Markdown · Run refused (MySQL) · Run refused (edited) · 960 × 600 in Turkish.
+**States.** Under orders-prod · two tabs, one file · unsaved (+ the "Saved daily_revenue.sql" status message) · tab tooltip · tab menu · MySQL USE · connection deleted · Markdown · Run refused (MySQL) · Run refused (edited) · long connection name (a 47-character connection: the file name gives way, the connection stays whole; the capsule's name ellipsizes after the palette field collapses to its magnifier) · 960 × 600 in Turkish.
 
 **Keyboard.** ⌘S / Ctrl+S save (script tab context), ⌥⌘S save all (macOS; Windows/Linux palette and menu only), ⌘W close (asks when dirty, 6b), ⌘↵ Run (unchanged).
 
@@ -137,41 +139,41 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 **Anatomy** (every bar is the inline notice under the toolbar; its focus home is the tab's code area).
 - **Clean tab:** reloaded in place (caret and selection mapped, undo cleared, held during an IME composition); one status-bar message for 3 s: "Reloaded orders_report.sql: it changed on disk". A followed rename: "orders_report.sql was renamed to haftalık_rapor.sql; this tab follows it".
 - **Changed on disk** (dirty): `file-diff` glyph, "orders_report.sql changed on disk." (strong) / "Your edits in this tab aren't saved. Reload discards them; Keep mine keeps them, and saving then asks before it overwrites." — **Reload**, **Keep mine** (Default).
-- **Reload** asks: 420 alertdialog "Discard your edits and reload orders_report.sql?", subtitle connection · database, "The file on disk replaces the text in this tab. Your edits are discarded." — **Discard and reload** (Danger: it destroys edits) · **Cancel** (Primary, focused).
-- **Keep mine** removes the notice (focus → code); the next save asks **Overwrite?**: "The file changed on disk since you opened it. Overwrite?" / "Saving replaces the version on disk, including the changes made outside Hacivat." — **Overwrite** (Danger) · **Cancel** (Primary, focused).
+- **Reload** asks: 420 alertdialog "Discard your edits and reload orders_report.sql?", subtitle connection · database, "The file on disk replaces the text in this tab. Your edits are discarded." — **Discard and reload** (Danger: it destroys edits; alone at the footer's far left, 28 px plus a seam from the rest: DESIGN's isolation) · **Cancel** (Primary, focused, far right).
+- **Keep mine** removes the notice (focus → code); the next save asks **Overwrite?**: "The file changed on disk since you opened it. Overwrite?" / "Saving replaces the version on disk, including the changes made outside Hacivat." — **Overwrite** (Danger, isolated the same way: it destroys the changes made outside Hacivat) · **Cancel** (Primary, focused).
 - **Deleted on disk:** "orders_report.sql was deleted on disk." / "The text stays in this tab. Save writes the file again." — **Save ⌘S**, **Close tab**.
 - **No longer listed:** "orders_report.sql is no longer listed under orders-staging." / "It moved into @production/, a folder for another environment. This tab still runs only on orders-staging." (or "Its library no longer binds to this database.") — **Open under another connection…**.
 
 **States.** Changed on disk · Reload asks · silent reload · renamed · deleted · Overwrite? · no longer listed · 960 × 600 in Turkish.
 
-**Focus order.** Toolbar → the notice's buttons → code. Dialogs: Danger → Cancel (initial), trapped.
+**Focus order.** Toolbar → the notice's buttons → code. Dialogs: Danger → Cancel (initial), trapped; the header's close × is not a Tab stop (Escape answers Cancel).
 
 ### 6b · Unsaved changes (R-M4b-5, R-M4b-39; new in M4b)
 **Purpose.** Closing a dirty script tab, or quitting or restarting with dirty script tabs, asks before anything is lost. M3's close prompt asks only about open transactions; this one runs after it in the same guard chain.
 
 **Anatomy.** A 420 alertdialog per dirty script tab, one at a time: title "Save changes to orders_report.sql?" (file in mono); subtitle the env mark, connection and database, and "1 of 2 unsaved scripts" when several wait; body "Your changes are lost if you don't save them." Footer: **Don't save** (Default, far left) · **Save** (Default) · **Cancel** (Primary, focused). Escape and the window's close button answer Cancel. Save runs the normal save, so the secret warning (8) or Overwrite? (6) can follow it; Cancel stops the close or the quit.
 
-**Ruling:** Don't save is not Danger. It is an everyday answer and Cancel protects the text; the red outline belongs to confirmations of a destructive action ("Discard and reload"). *Cost if wrong:* one button variant.
+**Ruling (controller ruling e):** Don't save is Default, not Danger: the answers to an app-raised question are never Danger (M3 ruling 6), Cancel protects the text, and it is the platform convention; the red outline belongs to the affirmative of a confirmation for a destructive action the user chose ("Discard and reload", "Overwrite", the recovered tab's "Discard…").
 
 **States.** Closing one tab · quitting with two · 960 × 600 in Turkish.
 
-**Focus order.** Don't save → Save → Cancel (initial), trapped in the card; after the prompt the focus returns to the tab's code area (or the next prompt).
+**Focus order.** Don't save → Save → Cancel (initial), trapped in the card (the header × is not a Tab stop); after the prompt the focus returns to the tab's code area (or the next prompt).
 
 ### 7 · Go to script and the connection chooser (HV-SCRIPT-09, R-M4b-9, Q14)
 **Purpose.** Find any script by name, then choose where it runs; production is never chosen for the user.
 
 **Anatomy.**
 - **Its own palette layer** over the shipped `Palette` (536 px, 8 px from the title bar, raised, 6 px radius, popover shadow), not a `>` mode of the command palette. Placeholder "Go to a script by name". Rows (23 px): file icon, the name in mono 12 with the match underlined in blue (Turkish-tolerant: `musteri` finds `müşteri_segment.sql`), the library-relative folder in mono 11 text-2 with its environment mark, and the library at the right in text-2. Empty query: recent/first scripts. No match: "No script matches". No library: "No script libraries yet" + how to attach one. Files under an unknown `@name` never appear.
-- **↵ on a file:** one non-production candidate opens at once; production or two or more open the **chooser** in the same surface.
-- **Chooser:** a header "Open daily_revenue.sql under" (file in mono); rows: env mark, connection (mono 12), database (mono 11 text-2), "current" (outlined) on the focused tab's connection, the engine at the right. Order: the focused connection first, then local, dev, test, staging, production, then untagged, then name. The active row is never production unless production is the focused connection; with only production candidates **no row is active** and ↵ does nothing until the user moves onto it. The footer adds "Production is never chosen for you." when a production row is listed.
+- **↵ on a file:** one non-production candidate opens at once (or focuses its open tab); production or two or more open the **chooser** in the same surface.
+- **Chooser:** a header "Open daily_revenue.sql under" (file in mono); rows: env mark, connection (mono 12), database (mono 11 text-2), "current" (outlined) on the active tab's connection, the engine at the right. Order: the active tab's connection first, then local, dev, test, staging, production, then untagged, then name. **The focused connection is always the active tab's** (`capConn`), whichever path opened the chooser (Go to script, the tree's or the tab's "Open under another connection…"). The active row is never production unless production is the active tab's connection; opened by "Open under another connection…", the chooser **leaves out the connection it starts from** (the row's or the tab's: R-M4b-4), and picking a connection where the file is already open focuses that tab; with only production candidates **no row is active** and ↵ does nothing until the user moves onto it. The footer adds "Production is never chosen for you." when a production row is listed.
 - **No candidate:** "No connection shows this file." and the single row **Open without a connection** ("It opens unbound and runs nothing until you open it under a connection.").
-- Footer (24 px, head tone): ↑↓ Navigate · ↵ Open/Choose · esc Close/Back.
+- Footer (24 px, head tone): ↑↓ Navigate · ↵ Open/Choose · esc Back (opened from Go to script's results) or esc Close (opened from a menu).
 
 **States.** Results · empty query · no match · chooser · chooser with production focused · production only · no candidate · 960 × 600 in Turkish.
 
 **Keyboard.** ⇧⌘O / Ctrl+Shift+O opens it (R-M4b-37); ↑ ↓ ↵; Escape: chooser → results → closed (focus back where it was). No binding fires during an IME composition.
 
-**Focus order.** The query field holds the focus; rows are an active-descendant list (the shipped palette's model).
+**Focus order.** The query field holds the focus; rows are an active-descendant list (the shipped palette's model); the palette has no buttons.
 
 ### 8 · Secret warning (HV-SCRIPT-10, R-M4b-17, Q7)
 **Purpose.** Warn before a password or token is saved into a folder others read, without ever showing the value.
@@ -205,7 +207,7 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 **Anatomy.**
 - **Unknown encoding:** in place of the text, the notice "tr_rapor.sql isn't UTF-8 text." / "Choose the encoding it was saved in, or open it read-only to look first.", an **Encoding** Select (Windows-1254 (Turkish), ISO-8859-9 (Turkish), Windows-1252 (Western), UTF-16 LE …; a Turkish locale lists the Turkish ones first), **Open** and **Open read-only**. Run is disabled until the text is shown.
 - **Read-only:** the text decoded as UTF-8 with � in text-2 where bytes can't be read, the read-only chip in the toolbar, and the notice "Shown as UTF-8; characters it can't read show as �. Reopen with an encoding to edit." with Reopen with encoding….
-- **Status segment** (right group, a button): "Windows-1254 · CRLF" (`UTF-8 with BOM` when there is one); tooltip "Encoding and line endings. Saving keeps both."; its menu (above it): "Encoding: Windows-1254" header, Reopen with encoding…, Save with encoding…, then LF / CRLF with the current one checked (M3c's line-ending rows).
+- **Status segment** (right group, a pointer button; **not a Tab stop**, like every shipped status-bar segment; its commands are in the palette: Reopen with encoding…, Save with encoding…, Normalize line endings): "Windows-1254 · CRLF" (`UTF-8 with BOM` when there is one); tooltip "Encoding and line endings. Saving keeps both."; its menu (above it): "Encoding: Windows-1254" header, Reopen with encoding…, Save with encoding…, then LF / CRLF with the current one checked (M3c's line-ending rows).
 - **Can't encode:** a wide alert toast "Couldn't save tr_rapor.sql" / "漢 on line 4 can't be written in Windows-1254. Remove it, or use Save with encoding…."; the file on disk is unchanged and the tab stays dirty.
 
 **States.** Unknown encoding · encoding Select open · read-only · status segment menu · can't encode · 960 × 600 in Turkish.
@@ -218,7 +220,7 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 **Anatomy.** The explanation popover (raised, seam-strong, 6 px radius, popover shadow), 320 px, under the problems row; title "2 problems in orders-scripts" after the ink alert glyph; one item per problem with a text-2 glyph:
 - unknown `@` folder: "@prod is not an environment tag — files under it are hidden (did you mean @production?)" + "Environment folders are @local, @dev, @test, @staging and @production.";
 - contradictory scopes: "@production/@staging/ names two environments, so the files under it are hidden everywhere.";
-- workspace.toml: unknown keys named in a mono box (names only, never values), invalid TOML with the parser's message in its own mono box ("Parser message"), written by a newer Hacivat, larger than 64 KB — each "so the library binds by its folder name, orders-scripts";
+- workspace.toml: unknown keys named in a mono box (names only, never values), invalid TOML with the parser's line, column and message in its own mono box ("Parser message"; never the source line, so a mistyped `password = "…` is not echoed), written by a newer Hacivat, larger than 64 KB — each "so the library binds by its folder name, orders-scripts";
 - limits ("Listing stopped at 20,000 files…", "Folders deeper than 32 levels aren't listed."), polling (network drive / low watch limit);
 - repository owned by another user: "Git status is off: the repository belongs to another user." + the safe.directory sentence;
 - folder missing (also the tree's failed row and Settings).
@@ -233,7 +235,7 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 
 **Anatomy.**
 - **On launch:** a wide sticky toast (`history` glyph) "Recovered unsaved changes to 2 scripts" / "Hacivat closed before they were saved. Their tabs are open again with your changes; save to keep them.", the tabs as a list (mono "orders_report.sql · orders-prod"), **Show** · **Dismiss**. Its buttons are Tab stops only after F6.
-- **Recovered tab:** dirty, with the notice "Recovered unsaved changes from Nov 21, 14:05." / "Save keeps them. Discard goes back to the file on disk." — **Save ⌘S**, **Discard…** (asks like Reload).
+- **Recovered tab:** dirty, with the notice "Recovered unsaved changes from Nov 21, 14:05." / "Save keeps them. Discard goes back to the file on disk." — **Save ⌘S**, **Discard…** (Default here; it asks with Reload's confirmation, whose "Discard and reload" is Danger and isolated).
 - **File or library gone:** "eski_rapor.sql isn't in the library any more." or "The library shared-reports isn't attached any more." / "Your recovered text is in this tab. Save writes it back to the same place." — **Save**.
 
 **States.** On launch · recovered tab · file missing · library missing · 960 × 600 in Turkish.
@@ -252,7 +254,8 @@ Checked against the AltGr layers in `crates/ui/hacivat-ui/keymaps/altgr/` (TR-Q,
 | Save (`file.save`, script tab context) | ⌘S | Ctrl+S | today bound only in `ConnectionDialog` |
 | Save all (`file.save_all`) | ⌥⌘S | palette and menu only | `ctrl-alt-s` is AltGr+S = "ś" on PL; Ctrl+Shift+S is VS Code's Save As; Ctrl+K S starts with the palette chord (Q22) |
 | Reveal (`scripts.reveal`) | palette and menu only | palette and menu only | R-M4b-37 |
-| Rename, Move to Trash, Copy path, Copy relative path, New script, New folder | menu and palette only | menu and palette only | open question 9 proposes F2 and ⌘⌫ / Delete |
+| Rename (`scripts.rename`, `ExplorerTree`, script file and folder rows only) | F2 | F2 | controller ruling c; free in all three shipped keymaps |
+| Move to Trash, Copy path, Copy relative path, New script, New folder | menu and palette only | menu and palette only | controller ruling c: a Trash chord is a PO item |
 | Open / activate | ↵ | Enter | shipped tree key |
 | Context menu | ⇧F10, menu key | Shift+F10, menu key | shipped |
 | Refresh (Explorer) | F5 | F5 | shipped |
@@ -264,10 +267,12 @@ Checked against the AltGr layers in `crates/ui/hacivat-ui/keymaps/altgr/` (TR-Q,
 ## New primitives
 
 All from existing tokens; DESIGN.md rows are Task 21's.
-- **Git status glyph** in the tree's status slot: mono 11 weight 600, M/N amber, C ink, ? text-3, the folder `•` text-2; never red; its text alternative is required (the shipped `RowStatus`).
+- **Git status glyph** in the tree's status slot: `mono_micro` 11 at weight 400, M/N amber, C ink, ? text-3, the folder `•` text-2; never red; its text alternative is required (the shipped `RowStatus`).
 - **Inline name field** in a tree row (19 px, mono 12, 3 px radius, the blue focus ring) and its **error tip** (the tooltip anatomy pinned under the field, ink alert glyph).
 - **Problems row:** a tree row with the ink alert glyph instead of a kind icon; a cursor stop that opens a popover.
-- **Script tab title** in two parts: the file name ellipsizes (≥ 4 characters), the separator and the connection never do; an inactive script tab that still doesn't fit collapses to its icon.
+- **Script tab title** in two parts: the file name ellipsizes (≥ 4 characters), the separator and the connection never do; an inactive script tab that still doesn't fit collapses to its icon; the active tab's connection alone too long is shortened in the middle (ruling d).
+- **Row tooltip** composed of lines: the facts of the row's cells (count, shared, env, link, cloud) and the git line (glyph + its text alternative).
+- **Danger footer group:** a Danger button alone at the footer's far left, then 28 px and a seam before the rest (DESIGN's isolation).
 - **Editor notices** for script states (changed, deleted, unlisted, unbound, Run refused, recovered, downloading, encoding, read-only, T2): the shipped inline notice under the toolbar with a strong first line and Default buttons in its action row.
 - **Run-as-script strip:** the cursor-strip anatomy (26 px, raised) under the toolbar, wrapping when it reports a stop.
 - **Go to script palette rows** (file + folder + library) and **chooser rows** (mark + connection + database + "current" outline tag + engine), with the palette's footer gaining a note.
@@ -279,7 +284,13 @@ All from existing tokens; DESIGN.md rows are Task 21's.
 
 ## Open questions and rulings
 
-Each is ruled so the build is not blocked; the PO can overrule any. Items 1–4 are conflicts with the shipped M4 code.
+Each is ruled so the build is not blocked; the PO can overrule any. Items 1–4 are conflicts with the shipped M4 code. **Controller rulings (fix round 1) override items 1, 2, 5, 6, 9 and 10:**
+- **(a) Git colours:** New is amber and Conflicted is ink; Task 13 changes `crates/ui/hacivat-ui/src/tree/view/row.rs:528-531` (and its doc line) as a named exception, the glyph at `mono_micro` weight 400.
+- **(b) "shared":** stays lowercase and outlined (the shipped badge); its tooltip moves into the row tooltip.
+- **(c) Chords:** F2 renames (script file and folder rows, `ExplorerTree`, all hosts). Move to Trash has no chord in M4b (menu and palette only); a Trash chord is a PO item (if the PO wants it: ⌘⌫ on macOS, never plain ⌫; Delete on Windows/Linux; script rows only; a test that a profile root still routes to `connection.delete`). The earlier collision note is withdrawn: `Explorer` is pushed only on a profile root, plain `backspace` is also `connection.delete` on macOS and `cmd-backspace` is `Editor`-only; the risk is semantic (the same key with two weights a cursor step apart).
+- **(d) Tab titles:** a script tab's connection name does not truncate; if the active tab's connection alone overflows at the file name's 4-character floor, it is shortened in the middle, both ends kept, with the full name in the tooltip (fixture: `orders-reporting-replica-eu-west-1-read-staging`, 47 characters, surface 5 "Long connection name").
+- **(e) Button variants:** Danger: "Discard and reload", "Overwrite" and the recovered tab's "Discard…" confirm (all with DESIGN's 28 px isolation); Default: "Don't save", "Remove" and "Move to Trash".
+
 
 1. **Git "New" is amber, not green** (conflict: `crates/ui/hacivat-ui/src/tree/view/row.rs:528-531` draws `StatusKind::New` green and `Conflicted` amber). *Ruling:* Modified and New are amber (Pending Amber: "uncommitted edits"; a new file is an uncommitted change, not a success), Conflicted is ink (a refusal-like state: Errors Without A New Hue), Unknown text-3, ContainsChanges text-2. *Cost:* two match arms in `row.rs` and one shot each (a named exception in Task 13).
 2. **The "shared" badge is the shipped outlined badge, lowercase** (the plan says small-caps "SHARED"). `TreeRowData::badge` has no small-caps variant, and small caps at the badge's 11.5 px draw 8 px capitals, under the 11 px floor in spirit; M4's precedent badges are lowercase ("partial", "version 17"). *Ruling:* "shared" / "paylaşılan", outlined, glyph-less (so on a crowded row it gives way whole, as the shipped widget does). *Cost if wrong:* a small-caps badge variant in the tree widget.
@@ -289,25 +300,30 @@ Each is ruled so the build is not blocked; the PO can overrule any. Items 1–4 
 6. **Remove a library is Default, not Danger:** nothing on disk changes. **Don't save** (6b) is Default too; **Discard and reload** and **Overwrite** are Danger (they confirm destroying text). *Cost if wrong:* button variants.
 7. **The problems row is the library's first child** (not last), so it is visible without scrolling; it is a cursor stop. *Cost if wrong:* row order.
 8. **Run as script replaces Run on a T2 preview** (one primary per toolbar) and has no ⌘↵, so a reflex never streams 148 MB. *Cost if wrong:* a key row.
-9. **No chord for Rename, Move to Trash and Copy path** (R-M4b-37 names none). *Proposed for the PO:* F2 for Rename (all hosts; free) and ⌘⌫ / Delete for Move to Trash in `ExplorerTree` on a script node only (Delete is `connection.delete` in the `Explorer` context today, so the contexts must be ordered). *Cost:* keymap rows and a context-precedence test.
-10. **A script tab's connection never ellipsizes** (the file name gives way; an inactive tab that still doesn't fit collapses to its icon). This narrows DESIGN's F12 rule for script tabs, whose connection is what tells two tabs of one file apart. *Cost if wrong:* the tab title layout.
+9. **Chords for Rename and Move to Trash:** superseded by controller ruling (c).
+10. **A script tab's connection never ellipsizes:** adopted with the bounded middle fallback, controller ruling (d).
 11. **The chooser footer says "Production is never chosen for you."** whenever a production row is listed and not focused. *Cost if wrong:* one string.
 12. **"Open without a connection" is the only row when no connection shows the file** (R-M4b-9). *Cost if wrong:* copy.
 13. **Git letters are the same in Turkish** (M, N, C, ?): they are what git users read everywhere; the Turkish text alternatives carry the meaning. *Cost if wrong:* three strings.
 14. **Turkish terms** (all `# Review: PO`): betik / Betikler (script), betik kitaplığı (script library), paylaşılan (shared), eşle (map), diskte değişti, Çöp Sepeti / Geri Dönüşüm Kutusu, kodlama, satır sonu, Üretim bağlantısı for production in prose; transaction, commit and rollback stay English ("commit'ten", "commit edin").
 15. **Counts without a plural selector:** `hv-scripts-unsaved-count` (shown only when two or more wait), `hv-scripts-run-stopped` (an ordinal position), `hv-scripts-size-mb` (a unit), and the limits inside `hv-scripts-set-status` / `hv-scripts-diag-limit` (20,000 files, 32 levels). Every other EN message with a count has `[one]` / `*[other]`. *Cost if wrong:* variants.
 16. **The encoding prompt replaces the text** (nothing is decoded until the user names an encoding); read-only shows UTF-8 with �. *Cost if wrong:* a decode guess (no auto-detection in v1).
+17. **SQLite root menu order** (review Minor 7): the two Scripts items follow the M2a items after a separator and come **before** Delete…, which stays last (DESIGN: the destructive row goes last). R-M4b-34's "append after a separator" should read, for the SQLite root, "after the M2a items, before the destructive group", so Task 1b does not append after Delete…. *Cost if wrong:* row order.
+18. **The chooser's focused connection is the active tab's, and the source connection is excluded** (review Critical 1, I1): applied on every path; the check compares the active row with the rule (`capConn()`), not with a value the chooser computed. *Cost:* none.
+19. **The capsule at 960 with a long name** (found while adding ruling d's fixture): the path word goes first, then the palette field collapses to its magnifier (DESIGN Minimum window), then the capsule's connection name (data) ellipsizes; the environment and access words never give way. *Cost if wrong:* the shipped capsule's own collapse order already rules this; the mock now follows it.
+20. **Tab-stop declarations** (review Minor 3): every dialog's header × is not a Tab stop (Escape closes); the status bar's encoding segment is not a Tab stop (its commands are in the palette); toast buttons only after F6. Everything else with a button is a Tab stop.
 
 ### For the controller (Task 1b / 13–18 / 21 pick-up)
 1. Two new icons for Task 1b's icon addendum: `folder`, `file-text`.
-2. The `row.rs` status colours (ruling 1) as a named exception in Task 13 (or Task 1b), with its shot.
-3. The key rows in the table above (R-M4b-37); ruling 9's proposals go to the PO list.
+2. The `row.rs` status colours and weight (ruling a) as a named exception in Task 13, with its shot.
+3. The key rows in the table above (R-M4b-37 plus ruling c's F2); a Trash chord goes to the PO list.
+6. R-M4b-34's wording for the SQLite root (ruling 17).
 4. The hui strings (`hui-editor-t2-*`, `hui-editor-paste-confirm-*`) belong to the editor crate's `hui.ftl` (Task 11's block); everything else to Task 1b's `## m4b-t01b-seams` block in `hacivat-ui.ftl`.
 5. The menu label is "Map to a script library…" (the rewritten plan); the mapping dialog's title stays "Show a script library under {database}".
 
 ### Open items for the PO
 1. Turkish copy (every TR string below is a draft).
-2. Rulings 1 (git colours), 2 (lowercase "shared"), 6 (button variants), 9 (proposed chords), 10 (tab titles).
+2. Controller rulings (a)–(e) for sign-off; a Move to Trash chord (ruling c).
 3. Go to script's chord ⇧⌘O / Ctrl+Shift+O (R-M4b-37) instead of VS Code's ⌘P.
 
 ---
@@ -315,9 +331,10 @@ Each is ruled so the build is not blocked; the PO can overrule any. Items 1–4 
 ## Verification
 
 Run on the committed file (the harness is the mock's own `?check=all` mode, driven by headless Chrome with `--dump-dom`, the same driver M4 used; the driver scripts live in the session scratchpad and are not committed):
-- **634 renders, 0 findings**: 89 scenarios of the thirteen surfaces × EN/TR × dark/light × 1440 × 900 and 960 × 600 (the thirteen pinned "960 · TR" scenarios render dark and light only).
-- Each render is checked for: exceptions; the number of cp-fill blocks larger than a mark (exactly one when the capsule is production, else none); **red outside production/destructive** (every element whose text, fill or border is a red token must be an environment mark, the capsule's block, the production status segment, a Danger button, a destructive menu row, the sheet's production word or the production hairline); **git badges in red** and git badges without a text alternative; text below 11 px (small caps excepted); text-3 on raised (dark; disabled exempt); `undefined`, `NaN`, `null` or an unfilled `{placeholder}`; horizontal overflow in toolbars, the status bar, the title bar, dialog heads and footers, menus, tooltips, the name-error tip, toasts, tree rows, notices, panel headers, the filter, tabs, the settings navigation, palette rows, header and footer, library and mapping rows, strips, popovers, form rows and the secret list; chrome text that ellipsizes (data exempt); trust flags clipped; the capsule's production block, the status segment, the active production tab's mark and the crumb's mark hidden; **a script tab's connection clipped or ellipsized**; a production tab without the hairline; floating layers outside the window or over the status bar; a modal without the focus inside it; **a button that is not a Tab stop** in a dialog footer, notice, popover, settings row or strip; **a toast button that is a Tab stop before F6**; **the chooser preselecting production**; **a secret value in any dialog, toast, tooltip, menu, popover or the status bar**.
-- **51 behaviour probes, all PASS**, driven through real DOM events where a user would act: the scope table (`@PRODUCTION` scopes, `@prod` and `@productİon` hide, `@production/@staging/` hides); an untagged profile sees only unscoped files; orders-prod lists `@production/`, orders-staging hides it (E3) and lists `@staging/`; `@prod` is listed nowhere; the count equals the listed files; Scripts sits above the schemas; the shared tooltip names the other connections; one file opened under orders-prod and orders-staging gives two tabs bound to each (E1) and the capsule follows; the tab menu has no switch; Open under another connection… opens a new tab and leaves the first bound; the chooser lists the focused connection first and never preselects production; production-only has no active row, ↵ opens nothing, ↓ moves onto it; production is preselected only when focused; Escape goes back to the results; `musteri` finds `müşteri_segment.sql`; no hidden file in Go to script; the secret dialog lists lines and kinds but no value, opens on Cancel, Escape keeps the tab unsaved, the allow line is not reported; Reload asks on Cancel with a Danger button, Escape keeps the edits, Keep mine returns the focus to the code, the next save asks Overwrite? on Cancel; the paste confirmation opens on Cancel with Paste as preview Default; a T2 preview has one primary and no ⌘↵; the attach file is exactly format/database/aliases, follows the aliases typed, an empty name disables Attach, no connection detail reaches it; the alias box is unchecked; the file menu has Move to Trash (not red) and Open under another connection…; `/` in a name is refused, Escape returns to the tree; Remove asks on Cancel and is not Danger; the recovery toast's buttons are not Tab stops before F6, F6 makes them so, dismissing returns the focus to the code; a MySQL tab off its database refuses Run naming both databases, and the notice's button returns the focus to the code; the unsaved prompt has Save / Don't save / Cancel with Cancel focused and Don't save not red, Escape keeps the tab; closing a dirty tab asks; EN singular variants; enum variants; no TR plural variants; every EN key has a TR draft.
+- **950 renders, 0 findings** (after fix round 1): 90 scenarios of the thirteen surfaces × EN/TR × dark/light × 1440 × 900, **1280 × 800** and 960 × 600 (the thirteen pinned "960 · TR" scenarios render dark and light only).
+- Each render is checked for: exceptions; the number of cp-fill blocks larger than a mark (exactly one when the capsule is production, else none); **red outside production/destructive** (every element whose text, fill or border is a red token must be an environment mark, the capsule's block, the production status segment, a Danger button, a destructive menu row, the sheet's production word or the production hairline); **git badges in red** and git badges without a text alternative; text below 11 px (small caps excepted); text-3 on raised (dark; disabled exempt); `undefined`, `NaN`, `null` or an unfilled `{placeholder}`; horizontal overflow in toolbars, the status bar, the title bar, dialog heads and footers, menus, tooltips, the name-error tip, toasts, tree rows, notices, panel headers, the filter, tabs, the settings navigation, palette rows, header and footer, library and mapping rows, strips, popovers, form rows and the secret list; chrome text that ellipsizes (data exempt: only spans that hold names, paths, types or SQL; Fluent state words in the tree's meta, in Settings and on tabs are not exempt, review I4); trust flags clipped; the capsule's production block, the status segment, the active production tab's mark and the crumb's mark hidden; **a script tab's connection clipped or ellipsized**; a production tab without the hairline; **a Danger button within 28 px of another footer button**; **a per-cell tooltip in a tree row**; **the capsule running under the palette field**; **a tab connection shortened before its file name gave way, or without both ends**; floating layers outside the window or over the status bar; a modal without the focus inside it; **a button that is not a Tab stop** in a dialog footer, notice, popover, settings row or strip; **a toast button that is a Tab stop before F6**; **the chooser preselecting production** (compared with the active tab's connection, the rule itself); **a secret value in any dialog, toast, tooltip, menu, popover or the status bar**.
+- **58 behaviour probes, all PASS** (7 added in fix round 1: the tree's Open under another connection… with the active tab on orders-dev and a file row under orders-prod preselects no production row and leaves out orders-prod; a tab's Open under another connection… leaves out its own connection; choosing a connection where the file is already open focuses that tab, no duplicate; the database menu appends the Scripts items after all of M4's items; a 47-character connection stays whole on the tab at 1440 and 960 and in the capsule; in a pane too narrow for it, it is shortened in the middle with both ends after the file name reached its floor), driven through real DOM events where a user would act: the scope table (`@PRODUCTION` scopes, `@prod` and `@productİon` hide, `@production/@staging/` hides); an untagged profile sees only unscoped files; orders-prod lists `@production/`, orders-staging hides it (E3) and lists `@staging/`; `@prod` is listed nowhere; the count equals the listed files; Scripts sits above the schemas; the Scripts row tooltip carries the count and names the other connections; one file opened under orders-prod and orders-staging gives two tabs bound to each (E1) and the capsule follows; the tab menu has no switch; Open under another connection… opens a new tab and leaves the first bound; the chooser lists the focused connection first and never preselects production; production-only has no active row, ↵ opens nothing, ↓ moves onto it; production is preselected only when focused; Escape goes back to the results; `musteri` finds `müşteri_segment.sql`; no hidden file in Go to script; the secret dialog lists lines and kinds but no value, opens on Cancel, Escape keeps the tab unsaved, the allow line is not reported; Reload asks on Cancel with a Danger button, Escape keeps the edits, Keep mine returns the focus to the code, the next save asks Overwrite? on Cancel; the paste confirmation opens on Cancel with Paste as preview Default; a T2 preview has one primary and no ⌘↵; the attach file is exactly format/database/aliases, follows the aliases typed, an empty name disables Attach, no connection detail reaches it; the alias box is unchecked; the file menu has Move to Trash (not red) and Open under another connection…; `/` in a name is refused, Escape returns to the tree; Remove asks on Cancel and is not Danger; the recovery toast's buttons are not Tab stops before F6, F6 makes them so, dismissing returns the focus to the code; a MySQL tab off its database refuses Run naming both databases, and the notice's button returns the focus to the code; the unsaved prompt has Save / Don't save / Cancel with Cancel focused and Don't save not red, Escape keeps the tab; closing a dirty tab asks; EN singular variants; enum variants; no TR plural variants; every EN key has a TR draft.
+- Fix round 1 PNG review: the long-name capsule ran under the palette field at 960 (ruling 19), the active tab's connection was shortened while its file name kept full width (fixed: the file name gives way first), the sheet header overflowed with a long name.
 - PNG review (1440 dark/light and every "960 · TR" in light) caught, and the design fixed: the dark theme tokens lost to a stray comment end in the CSS header (every dark render had no capsule fill; found by the filled-block check); a pinned tooltip lost when the screenshot resized the page; the tree selection under a different connection than the open tab on four surfaces; an inactive script tab's connection ellipsized at 960 in Turkish (now never; ruling 10); a downloading tab showing placeholder text; a link tooltip repeating its title; the found-file dialog opening with the focus on its close icon.
 - `grep -nE "(sk|rk)_(live|test)_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{20,}"` over `design/m4b-scripts/` finds nothing (R-C0-4).
 - The copy tables and FTL below are generated from the mock's own `i18n` block, so the two cannot drift.
@@ -342,8 +359,7 @@ Reused verbatim, not redefined: `hv-explorer-*` (M4), `hv-conn-menu-*`, `hv-caps
 |---|---|---|
 | `hv-scripts-node` | Scripts | Betikler |
 | `hv-scripts-node-shared` | shared | paylaşılan |
-| `hv-scripts-node-shared-tip` | Also under {conns}. The same files show under every connection with a database of this name. | Ayrıca şunların altında: {conns}. Aynı dosyalar, bu adda veritabanı olan her bağlantının altında görünür. |
-| `hv-scripts-node-count-tip` | {n} scripts listed under this connection · [one] {n} script listed under this connection | Bu bağlantının altında {n} betik listeleniyor |
+| `hv-scripts-node-shared-tip` | Also under {conns}: every connection with a database of this name shows the same files. | Ayrıca şunların altında: {conns}. Bu adda veritabanı olan her bağlantı aynı dosyaları gösterir. |
 | `hv-scripts-lib-tip` | Folder {path}. Binds to the database {database}. | Klasör: {path}. {database} veritabanına bağlanır. |
 | `hv-scripts-env-folder-tip` | Only connections tagged {env} see this folder. | Bu klasörü yalnızca {env} etiketli bağlantılar görür. |
 | `hv-scripts-git-modified` | M | M |
@@ -356,15 +372,17 @@ Reused verbatim, not redefined: `hv-explorer-*` (M4), `hv-conn-menu-*`, `hv-caps
 | `hv-scripts-git-unknown-tip` | Git status unknown: a .gitattributes filter applies to it, and Hacivat never runs filters. · [dataless] Git status unknown: the file isn't downloaded, and Hacivat doesn't download it to compare. | Git durumu bilinmiyor: dosyaya bir .gitattributes filtresi uygulanıyor; Hacivat filtreleri hiç çalıştırmaz. · [dataless] Git durumu bilinmiyor: dosya indirilmedi; Hacivat karşılaştırmak için onu indirmez. |
 | `hv-scripts-git-contains` | • | • |
 | `hv-scripts-git-contains-tip` | Contains changed files | Değişmiş dosyalar içeriyor |
-| `hv-scripts-outside-link-tip` | Points outside the library, so Hacivat never opens it. | Kitaplığın dışını gösteriyor; Hacivat bunu hiç açmaz. |
+| `hv-scripts-outside-link-tip` | Points outside the library, so Hacivat never opens it. | Kitaplığın dışına işaret ediyor; Hacivat bunu hiç açmaz. |
 | `hv-scripts-dataless` | not downloaded | indirilmedi |
-| `hv-scripts-dataless-tip` | Kept in the cloud. Opening it downloads it first. | Bulutta tutuluyor. Açınca önce indirilir. |
 | `hv-scripts-downloading` | Downloading… | İndiriliyor… |
 | `hv-scripts-diag-row` | {n} problems · [one] {n} problem | {n} sorun |
 | `hv-scripts-missing-row` | Folder not found | Klasör bulunamadı |
 | `hv-scripts-loading` | Listing scripts… | Betikler listeleniyor… |
 | `hv-scripts-downloading-tab` | Downloading {file}… | {file} indiriliyor… |
 | `hv-scripts-downloading-body` | It is kept in the cloud; the text shows when the download ends. Nothing runs until then. | Bulutta tutuluyor; indirme bitince metin görünür. O zamana dek hiçbir şey çalışmaz. |
+| `hv-scripts-node-row-tip` | {n} scripts listed under this connection. · [one] {n} script listed under this connection. | Bu bağlantının altında {n} betik listeleniyor. |
+| `hv-scripts-dataless-row-tip` | Kept in the cloud, not downloaded. Opening it downloads it first. | Bulutta tutuluyor, indirilmedi. Açınca önce indirilir. |
+| `hv-scripts-downloading-row-tip` | Downloading… The tab shows the text when the download ends. | İndiriliyor… İndirme bitince sekme metni gösterir. |
 
 #### Surface 2 · Context menus
 
@@ -383,11 +401,12 @@ Reused verbatim, not redefined: `hv-explorer-*` (M4), `hv-conn-menu-*`, `hv-caps
 | `hv-scripts-menu-copy-path` | Copy path | Yolu kopyala |
 | `hv-scripts-menu-copy-rel` | Copy relative path | Göreli yolu kopyala |
 | `hv-scripts-menu-settings` | Script library settings… | Betik kitaplığı ayarları… |
-| `hv-scripts-menu-outside-tip` | Points outside the library | Kitaplığın dışını gösteriyor |
+| `hv-scripts-menu-outside-tip` | Points outside the library | Kitaplığın dışına işaret ediyor |
 | `hv-scripts-new-name` | untitled.sql | adsız.sql |
 | `hv-scripts-new-folder-name` | new folder | yeni klasör |
 | `hv-scripts-name-err` | Type a name. · [slash] A name can't contain / or \. · [reserved] Windows keeps this name for devices (CON, PRN, AUX, NUL, COM1…). · [exists] {name} is already in this folder. · [dots] A name can't be . or .., and can't end with a dot or a space. · [ext] A script's name ends in .sql or .md. | Bir ad yazın. · [slash] Ad / ya da \ içeremez. · [reserved] Windows bu adı aygıtlar için ayırır (CON, PRN, AUX, NUL, COM1…). · [exists] {name} bu klasörde zaten var. · [dots] Ad . ya da .. olamaz; nokta ya da boşlukla bitemez. · [ext] Betik adı .sql ya da .md ile biter. |
 | `hv-scripts-trashed` | Moved {name} to the Trash. You can put it back from there. · [windows] Moved {name} to the Recycle Bin. You can restore it from there. | {name} Çöp Sepeti'ne taşındı. Oradan geri alabilirsiniz. · [windows] {name} Geri Dönüşüm Kutusu'na taşındı. Oradan geri yükleyebilirsiniz. |
+| `hv-scripts-menu-open-under-none` | No other connection shows this file | Bu dosyayı gösteren başka bağlantı yok |
 
 #### Surface 3 · Attach dialog
 
@@ -440,6 +459,7 @@ Reused verbatim, not redefined: `hv-explorer-*` (M4), `hv-conn-menu-*`, `hv-caps
 | `hv-scripts-remove-title` | Remove {library} from Hacivat? | {library} Hacivat'tan kaldırılsın mı? |
 | `hv-scripts-remove-body` | The folder and its files stay as they are, including .hacivat/workspace.toml. Its Scripts nodes go away, and so do its {n} local mappings. · [one] The folder and its files stay as they are, including .hacivat/workspace.toml. Its Scripts nodes go away, and so does its {n} local mapping. | Klasör ve dosyaları, .hacivat/workspace.toml dahil, olduğu gibi kalır. Betikler düğümleri ve {n} yerel eşlemesi kaldırılır. |
 | `hv-scripts-remove-btn` | Remove | Kaldır |
+| `hv-scripts-remove-body-none` | The folder and its files stay as they are, including .hacivat/workspace.toml. Its Scripts nodes go away. | Klasör ve dosyaları, .hacivat/workspace.toml dahil, olduğu gibi kalır. Betikler düğümleri kaldırılır. |
 
 #### Surface 5 · Script tab
 
@@ -519,6 +539,7 @@ Reused verbatim, not redefined: `hv-explorer-*` (M4), `hv-conn-menu-*`, `hv-caps
 | `hv-scripts-choose-none-body` | It opens unbound and runs nothing until you open it under a connection. | Bağlantısız açılır; bir bağlantıda açana kadar hiçbir şey çalıştırmaz. |
 | `hv-scripts-choose-hint-choose` | Choose | Seç |
 | `hv-scripts-choose-hint-back` | Back | Geri |
+| `hv-scripts-choose-hint-close` | Close | Kapat |
 
 #### Surface 8 · Secret warning
 
@@ -603,7 +624,7 @@ Reused verbatim, not redefined: `hv-explorer-*` (M4), `hv-conn-menu-*`, `hv-caps
 | `hv-scripts-recover-dismiss` | Dismiss | Kapat |
 | `hv-scripts-recover-tab` | Recovered unsaved changes from {date}. | {date} tarihli kaydedilmemiş değişiklikler kurtarıldı. |
 | `hv-scripts-recover-tab-body` | Save keeps them. Discard goes back to the file on disk. | Kaydet onları korur. At, diskteki dosyaya geri döner. |
-| `hv-scripts-recover-discard` | Discard… | At… |
+| `hv-scripts-recover-discard` | Discard… | Değişiklikleri at… |
 | `hv-scripts-recover-missing` | {file} isn't in the library any more. · [library] The library {library} isn't attached any more. | {file} artık kitaplıkta yok. · [library] {library} kitaplığı artık bağlı değil. |
 | `hv-scripts-recover-missing-body` | Your recovered text is in this tab. Save writes it back to the same place. | Kurtarılan metniniz bu sekmede. Kaydet onu aynı yere geri yazar. |
 
@@ -618,15 +639,7 @@ hv-scripts-node-shared = shared
 # Surface 1 (Scripts node).
 # Variables:
 #   $conns (String) - the other connections, a locale list of names (data), e.g. "orders-staging and orders-dev".
-hv-scripts-node-shared-tip = Also under { $conns }. The same files show under every connection with a database of this name.
-# Surface 1 (Scripts node).
-# Variables:
-#   $n (Number) - a count, e.g. 3.
-hv-scripts-node-count-tip =
-    { $n ->
-        [one] { $n } script listed under this connection
-       *[other] { $n } scripts listed under this connection
-    }
+hv-scripts-node-shared-tip = Also under { $conns }: every connection with a database of this name shows the same files.
 # Surface 1 (Scripts node).
 # Variables:
 #   $path (String) - a folder or file path, verbatim (data), e.g. "~/work/orders-scripts".
@@ -655,8 +668,8 @@ hv-scripts-git-unknown = ?
 #   $reason (String) - selector: the reason; one of dataless, filter (anything else: the default).
 hv-scripts-git-unknown-tip =
     { $reason ->
-    [dataless] Git status unknown: the file isn't downloaded, and Hacivat doesn't download it to compare.
-   *[filter] Git status unknown: a .gitattributes filter applies to it, and Hacivat never runs filters.
+        [dataless] Git status unknown: the file isn't downloaded, and Hacivat doesn't download it to compare.
+       *[filter] Git status unknown: a .gitattributes filter applies to it, and Hacivat never runs filters.
     }
 # Surface 1 (Scripts node).
 hv-scripts-git-contains = •
@@ -666,8 +679,6 @@ hv-scripts-git-contains-tip = Contains changed files
 hv-scripts-outside-link-tip = Points outside the library, so Hacivat never opens it.
 # Surface 1 (Scripts node).
 hv-scripts-dataless = not downloaded
-# Surface 1 (Scripts node).
-hv-scripts-dataless-tip = Kept in the cloud. Opening it downloads it first.
 # Surface 1 (Scripts node).
 hv-scripts-downloading = Downloading…
 # Surface 1 (Scripts node).
@@ -703,17 +714,17 @@ hv-scripts-menu-rename = Rename
 #   $os (String) - selector: the host (macos, windows, linux); one of other, windows (anything else: the default).
 hv-scripts-menu-trash =
     { $os ->
-    [windows] Move to Recycle Bin
-   *[other] Move to Trash
+        [windows] Move to Recycle Bin
+       *[other] Move to Trash
     }
 # Surface 2 (Context menus).
 # Variables:
 #   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
 hv-scripts-menu-reveal =
     { $os ->
-    [windows] Reveal in File Explorer
-    [linux] Open Containing Folder
-   *[macos] Reveal in Finder
+        [windows] Reveal in File Explorer
+        [linux] Open Containing Folder
+       *[macos] Reveal in Finder
     }
 # Surface 2 (Context menus).
 hv-scripts-menu-copy-path = Copy path
@@ -733,12 +744,12 @@ hv-scripts-new-folder-name = new folder
 #   $name (String) - a file or folder name, verbatim (data), e.g. "archive_old_orders.sql".
 hv-scripts-name-err =
     { $reason ->
-    [slash] A name can't contain / or \.
-    [reserved] Windows keeps this name for devices (CON, PRN, AUX, NUL, COM1…).
-    [exists] { $name } is already in this folder.
-    [dots] A name can't be . or .., and can't end with a dot or a space.
-    [ext] A script's name ends in .sql or .md.
-   *[empty] Type a name.
+        [slash] A name can't contain / or \.
+        [reserved] Windows keeps this name for devices (CON, PRN, AUX, NUL, COM1…).
+        [exists] { $name } is already in this folder.
+        [dots] A name can't be . or .., and can't end with a dot or a space.
+        [ext] A script's name ends in .sql or .md.
+       *[empty] Type a name.
     }
 # Surface 2 (Context menus).
 # Variables:
@@ -746,8 +757,8 @@ hv-scripts-name-err =
 #   $name (String) - a file or folder name, verbatim (data), e.g. "archive_old_orders.sql".
 hv-scripts-trashed =
     { $os ->
-    [windows] Moved { $name } to the Recycle Bin. You can restore it from there.
-   *[other] Moved { $name } to the Trash. You can put it back from there.
+        [windows] Moved { $name } to the Recycle Bin. You can restore it from there.
+       *[other] Moved { $name } to the Trash. You can put it back from there.
     }
 # Surface 3 (Attach dialog).
 hv-scripts-attach-choose = Choose a folder of scripts
@@ -788,11 +799,11 @@ hv-scripts-attach-btn = Attach
 #   $reason (String) - selector: the reason; one of already, control, empty, long, many (anything else: the default).
 hv-scripts-attach-err =
     { $reason ->
-    [control] A database name can't contain control characters.
-    [long] A database name can be at most 128 bytes.
-    [already] This folder is already attached.
-    [many] Hacivat holds up to 32 libraries. Remove one in Settings › Script libraries first.
-   *[empty] Type the database name.
+        [control] A database name can't contain control characters.
+        [long] A database name can be at most 128 bytes.
+        [already] This folder is already attached.
+        [many] Hacivat holds up to 32 libraries. Remove one in Settings › Script libraries first.
+       *[empty] Type the database name.
     }
 # Surface 3 (Attach dialog).
 # Variables:
@@ -830,18 +841,18 @@ hv-scripts-set-note = A library is a folder of .sql and .md files. Removing one 
 #   $n (Number) - a count, e.g. 3.
 hv-scripts-set-status =
     { $state ->
-    [polling] Checking every 2 seconds
-    [unavailable] Folder not found
-    [limit] Stopped at { $n } files
-   *[watching] Watching for changes
+        [polling] Checking every 2 seconds
+        [unavailable] Folder not found
+        [limit] Stopped at { $n } files
+       *[watching] Watching for changes
     }
 # Surface 4 (Settings › Script libraries).
 # Variables:
 #   $reason (String) - selector: the reason; one of network, watches (anything else: the default).
 hv-scripts-set-status-tip =
     { $reason ->
-    [watches] The system's file-watch limit is low, so Hacivat checks this folder every 2 seconds instead of being told about changes.
-   *[network] This folder is on a network drive, so Hacivat checks it every 2 seconds instead of being told about changes.
+        [watches] The system's file-watch limit is low, so Hacivat checks this folder every 2 seconds instead of being told about changes.
+       *[network] This folder is on a network drive, so Hacivat checks it every 2 seconds instead of being told about changes.
     }
 # Surface 4 (Settings › Script libraries).
 # Variables:
@@ -986,8 +997,8 @@ hv-scripts-unlisted = { $file } is no longer listed under { $conn }.
 #   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
 hv-scripts-unlisted-body =
     { $reason ->
-    [binding] Its library no longer binds to this database. This tab still runs only on { $conn }.
-   *[env] It moved into { $folder }, a folder for another environment. This tab still runs only on { $conn }.
+        [binding] Its library no longer binds to this database. This tab still runs only on { $conn }.
+       *[env] It moved into { $folder }, a folder for another environment. This tab still runs only on { $conn }.
     }
 # Surface 7 (Go to script).
 hv-cmd-scripts-goto = Go to script
@@ -1002,9 +1013,9 @@ hv-cmd-scripts-attach = Attach script library…
 #   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
 hv-cmd-scripts-reveal =
     { $os ->
-    [windows] Reveal script in File Explorer
-    [linux] Open the script's folder
-   *[macos] Reveal script in Finder
+        [windows] Reveal script in File Explorer
+        [linux] Open the script's folder
+       *[macos] Reveal script in Finder
     }
 # Surface 7 (Go to script).
 hv-scripts-goto-ph = Go to a script by name
@@ -1039,10 +1050,10 @@ hv-scripts-choose-hint-back = Back
 #   $kind (String) - selector: the finding's kind; one of key, password, token, url (anything else: the default).
 hv-scripts-secret-gutter =
     { $kind ->
-    [token] Looks like an access token
-    [key] Looks like a private key
-    [url] Looks like a connection URL with a password
-   *[password] Looks like a password
+        [token] Looks like an access token
+        [key] Looks like a private key
+        [url] Looks like a connection URL with a password
+       *[password] Looks like a password
     }
 # Surface 8 (Secret warning).
 hv-scripts-secret-gutter-hint = Saving asks first. A comment with hacivat:allow-secret on this line keeps it quiet.
@@ -1143,11 +1154,11 @@ hv-scripts-enc-ro-note = Shown as UTF-8; characters it can't read show as �. R
 #   $encoding (String) - an encoding's name (data), e.g. "Windows-1254".
 hv-scripts-enc-name =
     { $enc ->
-    [windows-1254] Windows-1254 (Turkish)
-    [iso-8859-9] ISO-8859-9 (Turkish)
-    [windows-1252] Windows-1252 (Western)
-    [utf-16le] UTF-16 LE
-   *[other] { $encoding }
+        [windows-1254] Windows-1254 (Turkish)
+        [iso-8859-9] ISO-8859-9 (Turkish)
+        [windows-1252] Windows-1252 (Western)
+        [utf-16le] UTF-16 LE
+       *[other] { $encoding }
     }
 # Surface 10 (Encoding).
 # Variables:
@@ -1203,16 +1214,16 @@ hv-scripts-diag-contradict = { $path } names two environments, so the files unde
 #   $n (Number) - a count, e.g. 3.
 hv-scripts-diag-limit =
     { $limit ->
-    [depth] Folders deeper than { $n } levels aren't listed.
-   *[files] Listing stopped at { $n } files; the rest of the folder isn't shown.
+        [depth] Folders deeper than { $n } levels aren't listed.
+       *[files] Listing stopped at { $n } files; the rest of the folder isn't shown.
     }
 # Surface 11 (Diagnostics).
 # Variables:
 #   $reason (String) - selector: the reason; one of network, watches (anything else: the default).
 hv-scripts-diag-polling =
     { $reason ->
-    [watches] The system's file-watch limit is low, so changes are checked every 2 seconds.
-   *[network] This folder is on a network drive, so changes are checked every 2 seconds.
+        [watches] The system's file-watch limit is low, so changes are checked every 2 seconds.
+       *[network] This folder is on a network drive, so changes are checked every 2 seconds.
     }
 # Surface 11 (Diagnostics).
 # Variables:
@@ -1221,9 +1232,9 @@ hv-scripts-diag-polling =
 #   $folder (String) - a folder name, verbatim (data), e.g. "@prod".
 hv-scripts-diag-toml =
     { $reason ->
-    [newer] { $file } was written by a newer Hacivat, so the library binds by its folder name, { $folder }.
-    [large] { $file } is larger than 64 KB, so it isn't read; the library binds by its folder name, { $folder }.
-   *[invalid] { $file } isn't valid TOML, so the library binds by its folder name, { $folder }.
+        [newer] { $file } was written by a newer Hacivat, so the library binds by its folder name, { $folder }.
+        [large] { $file } is larger than 64 KB, so it isn't read; the library binds by its folder name, { $folder }.
+       *[invalid] { $file } isn't valid TOML, so the library binds by its folder name, { $folder }.
     }
 # Surface 11 (Diagnostics).
 # Variables:
@@ -1268,8 +1279,8 @@ hv-scripts-recover-discard = Discard…
 #   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
 hv-scripts-recover-missing =
     { $what ->
-    [library] The library { $library } isn't attached any more.
-   *[file] { $file } isn't in the library any more.
+        [library] The library { $library } isn't attached any more.
+       *[file] { $file } isn't in the library any more.
     }
 # Surface 12 (Recovery).
 hv-scripts-recover-missing-body = Your recovered text is in this tab. Save writes it back to the same place.
@@ -1286,8 +1297,8 @@ hv-scripts-run-refused = Run refused: this tab runs on { $bound }, but its sessi
 #   $current (String) - the database the session is on (data), e.g. "api".
 hv-scripts-run-refused-body =
     { $reason ->
-    [edited] { $conn } now opens { $current }: the connection was edited. Nothing was sent. Open the script under the connection that shows { $bound }.
-   *[mysql] Hacivat switched the session back once and it still isn't on { $bound }. Nothing was sent. Try again, or open the script under another connection.
+        [edited] { $conn } now opens { $current }: the connection was edited. Nothing was sent. Open the script under the connection that shows { $bound }.
+       *[mysql] Hacivat switched the session back once and it still isn't on { $bound }. Nothing was sent. Try again, or open the script under another connection.
     }
 # Surface 5 (Script tab).
 # Variables:
@@ -1316,6 +1327,24 @@ hv-scripts-unsaved-discard = Don't save
 hv-scripts-downloading-tab = Downloading { $file }…
 # Surface 1 (Scripts node).
 hv-scripts-downloading-body = It is kept in the cloud; the text shows when the download ends. Nothing runs until then.
+# Surface 2 (Context menus).
+hv-scripts-menu-open-under-none = No other connection shows this file
+# Surface 4 (Settings › Script libraries).
+hv-scripts-remove-body-none = The folder and its files stay as they are, including .hacivat/workspace.toml. Its Scripts nodes go away.
+# Surface 1 (Scripts node).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-node-row-tip =
+    { $n ->
+        [one] { $n } script listed under this connection.
+       *[other] { $n } scripts listed under this connection.
+    }
+# Surface 7 (Go to script).
+hv-scripts-choose-hint-close = Close
+# Surface 1 (Scripts node).
+hv-scripts-dataless-row-tip = Kept in the cloud, not downloaded. Opening it downloads it first.
+# Surface 1 (Scripts node).
+hv-scripts-downloading-row-tip = Downloading… The tab shows the text when the download ends.
 ```
 
 ### Proposed FTL, English (`locales/en/hui.ftl`, the editor crate)
@@ -1356,12 +1385,7 @@ hv-scripts-node-shared = paylaşılan
 # Variables:
 #   $conns (String) - the other connections, a locale list of names (data), e.g. "orders-staging and orders-dev".
 # Review: PO
-hv-scripts-node-shared-tip = Ayrıca şunların altında: { $conns }. Aynı dosyalar, bu adda veritabanı olan her bağlantının altında görünür.
-# Surface 1 (Scripts node).
-# Variables:
-#   $n (Number) - a count, e.g. 3.
-# Review: PO
-hv-scripts-node-count-tip = Bu bağlantının altında { $n } betik listeleniyor
+hv-scripts-node-shared-tip = Ayrıca şunların altında: { $conns }. Bu adda veritabanı olan her bağlantı aynı dosyaları gösterir.
 # Surface 1 (Scripts node).
 # Variables:
 #   $path (String) - a folder or file path, verbatim (data), e.g. "~/work/orders-scripts".
@@ -1400,8 +1424,8 @@ hv-scripts-git-unknown = ?
 # Review: PO
 hv-scripts-git-unknown-tip =
     { $reason ->
-    [dataless] Git durumu bilinmiyor: dosya indirilmedi; Hacivat karşılaştırmak için onu indirmez.
-   *[filter] Git durumu bilinmiyor: dosyaya bir .gitattributes filtresi uygulanıyor; Hacivat filtreleri hiç çalıştırmaz.
+        [dataless] Git durumu bilinmiyor: dosya indirilmedi; Hacivat karşılaştırmak için onu indirmez.
+       *[filter] Git durumu bilinmiyor: dosyaya bir .gitattributes filtresi uygulanıyor; Hacivat filtreleri hiç çalıştırmaz.
     }
 # Surface 1 (Scripts node).
 # Review: PO
@@ -1411,13 +1435,10 @@ hv-scripts-git-contains = •
 hv-scripts-git-contains-tip = Değişmiş dosyalar içeriyor
 # Surface 1 (Scripts node).
 # Review: PO
-hv-scripts-outside-link-tip = Kitaplığın dışını gösteriyor; Hacivat bunu hiç açmaz.
+hv-scripts-outside-link-tip = Kitaplığın dışına işaret ediyor; Hacivat bunu hiç açmaz.
 # Surface 1 (Scripts node).
 # Review: PO
 hv-scripts-dataless = indirilmedi
-# Surface 1 (Scripts node).
-# Review: PO
-hv-scripts-dataless-tip = Bulutta tutuluyor. Açınca önce indirilir.
 # Surface 1 (Scripts node).
 # Review: PO
 hv-scripts-downloading = İndiriliyor…
@@ -1462,8 +1483,8 @@ hv-scripts-menu-rename = Yeniden adlandır
 # Review: PO
 hv-scripts-menu-trash =
     { $os ->
-    [windows] Geri Dönüşüm Kutusu'na taşı
-   *[other] Çöp Sepeti'ne taşı
+        [windows] Geri Dönüşüm Kutusu'na taşı
+       *[other] Çöp Sepeti'ne taşı
     }
 # Surface 2 (Context menus).
 # Variables:
@@ -1471,9 +1492,9 @@ hv-scripts-menu-trash =
 # Review: PO
 hv-scripts-menu-reveal =
     { $os ->
-    [windows] Dosya Gezgini'nde göster
-    [linux] Bulunduğu klasörü aç
-   *[macos] Finder'da göster
+        [windows] Dosya Gezgini'nde göster
+        [linux] Bulunduğu klasörü aç
+       *[macos] Finder'da göster
     }
 # Surface 2 (Context menus).
 # Review: PO
@@ -1486,7 +1507,7 @@ hv-scripts-menu-copy-rel = Göreli yolu kopyala
 hv-scripts-menu-settings = Betik kitaplığı ayarları…
 # Surface 2 (Context menus).
 # Review: PO
-hv-scripts-menu-outside-tip = Kitaplığın dışını gösteriyor
+hv-scripts-menu-outside-tip = Kitaplığın dışına işaret ediyor
 # Surface 2 (Context menus).
 # Review: PO
 hv-scripts-new-name = adsız.sql
@@ -1500,12 +1521,12 @@ hv-scripts-new-folder-name = yeni klasör
 # Review: PO
 hv-scripts-name-err =
     { $reason ->
-    [slash] Ad / ya da \ içeremez.
-    [reserved] Windows bu adı aygıtlar için ayırır (CON, PRN, AUX, NUL, COM1…).
-    [exists] { $name } bu klasörde zaten var.
-    [dots] Ad . ya da .. olamaz; nokta ya da boşlukla bitemez.
-    [ext] Betik adı .sql ya da .md ile biter.
-   *[empty] Bir ad yazın.
+        [slash] Ad / ya da \ içeremez.
+        [reserved] Windows bu adı aygıtlar için ayırır (CON, PRN, AUX, NUL, COM1…).
+        [exists] { $name } bu klasörde zaten var.
+        [dots] Ad . ya da .. olamaz; nokta ya da boşlukla bitemez.
+        [ext] Betik adı .sql ya da .md ile biter.
+       *[empty] Bir ad yazın.
     }
 # Surface 2 (Context menus).
 # Variables:
@@ -1514,8 +1535,8 @@ hv-scripts-name-err =
 # Review: PO
 hv-scripts-trashed =
     { $os ->
-    [windows] { $name } Geri Dönüşüm Kutusu'na taşındı. Oradan geri yükleyebilirsiniz.
-   *[other] { $name } Çöp Sepeti'ne taşındı. Oradan geri alabilirsiniz.
+        [windows] { $name } Geri Dönüşüm Kutusu'na taşındı. Oradan geri yükleyebilirsiniz.
+       *[other] { $name } Çöp Sepeti'ne taşındı. Oradan geri alabilirsiniz.
     }
 # Surface 3 (Attach dialog).
 # Review: PO
@@ -1572,11 +1593,11 @@ hv-scripts-attach-btn = Bağla
 # Review: PO
 hv-scripts-attach-err =
     { $reason ->
-    [control] Veritabanı adı denetim karakteri içeremez.
-    [long] Veritabanı adı en çok 128 bayt olabilir.
-    [already] Bu klasör zaten bağlı.
-    [many] Hacivat en çok 32 kitaplık tutar. Önce Ayarlar › Betik kitaplıkları'ndan birini kaldırın.
-   *[empty] Veritabanının adını yazın.
+        [control] Veritabanı adı denetim karakteri içeremez.
+        [long] Veritabanı adı en çok 128 bayt olabilir.
+        [already] Bu klasör zaten bağlı.
+        [many] Hacivat en çok 32 kitaplık tutar. Önce Ayarlar › Betik kitaplıkları'ndan birini kaldırın.
+       *[empty] Veritabanının adını yazın.
     }
 # Surface 3 (Attach dialog).
 # Variables:
@@ -1627,10 +1648,10 @@ hv-scripts-set-note = Kitaplık, .sql ve .md dosyalarından oluşan bir klasörd
 # Review: PO
 hv-scripts-set-status =
     { $state ->
-    [polling] 2 saniyede bir denetleniyor
-    [unavailable] Klasör bulunamadı
-    [limit] { $n } dosyada durdu
-   *[watching] Değişiklikler izleniyor
+        [polling] 2 saniyede bir denetleniyor
+        [unavailable] Klasör bulunamadı
+        [limit] { $n } dosyada durdu
+       *[watching] Değişiklikler izleniyor
     }
 # Surface 4 (Settings › Script libraries).
 # Variables:
@@ -1638,8 +1659,8 @@ hv-scripts-set-status =
 # Review: PO
 hv-scripts-set-status-tip =
     { $reason ->
-    [watches] Sistemin dosya izleme sınırı düşük; Hacivat değişiklik bildirimi beklemek yerine bu klasörü 2 saniyede bir denetler.
-   *[network] Bu klasör bir ağ sürücüsünde; Hacivat değişiklik bildirimi beklemek yerine onu 2 saniyede bir denetler.
+        [watches] Sistemin dosya izleme sınırı düşük; Hacivat değişiklik bildirimi beklemek yerine bu klasörü 2 saniyede bir denetler.
+       *[network] Bu klasör bir ağ sürücüsünde; Hacivat değişiklik bildirimi beklemek yerine onu 2 saniyede bir denetler.
     }
 # Surface 4 (Settings › Script libraries).
 # Variables:
@@ -1820,8 +1841,8 @@ hv-scripts-unlisted = { $file } artık { $conn } altında listelenmiyor.
 # Review: PO
 hv-scripts-unlisted-body =
     { $reason ->
-    [binding] Kitaplığı artık bu veritabanına bağlı değil. Bu sekme yine yalnızca { $conn } üzerinde çalışır.
-   *[env] Başka bir ortamın klasörüne, { $folder } içine taşındı. Bu sekme yine yalnızca { $conn } üzerinde çalışır.
+        [binding] Kitaplığı artık bu veritabanına bağlı değil. Bu sekme yine yalnızca { $conn } üzerinde çalışır.
+       *[env] Başka bir ortamın klasörüne, { $folder } içine taşındı. Bu sekme yine yalnızca { $conn } üzerinde çalışır.
     }
 # Surface 7 (Go to script).
 # Review: PO
@@ -1841,9 +1862,9 @@ hv-cmd-scripts-attach = Betik kitaplığı bağla…
 # Review: PO
 hv-cmd-scripts-reveal =
     { $os ->
-    [windows] Betiği Dosya Gezgini'nde göster
-    [linux] Betiğin klasörünü aç
-   *[macos] Betiği Finder'da göster
+        [windows] Betiği Dosya Gezgini'nde göster
+        [linux] Betiğin klasörünü aç
+       *[macos] Betiği Finder'da göster
     }
 # Surface 7 (Go to script).
 # Review: PO
@@ -1892,10 +1913,10 @@ hv-scripts-choose-hint-back = Geri
 # Review: PO
 hv-scripts-secret-gutter =
     { $kind ->
-    [token] Erişim belirtecine benziyor
-    [key] Özel anahtara benziyor
-    [url] Parola içeren bir bağlantı adresine benziyor
-   *[password] Parolaya benziyor
+        [token] Erişim belirtecine benziyor
+        [key] Özel anahtara benziyor
+        [url] Parola içeren bir bağlantı adresine benziyor
+       *[password] Parolaya benziyor
     }
 # Surface 8 (Secret warning).
 # Review: PO
@@ -2007,11 +2028,11 @@ hv-scripts-enc-ro-note = UTF-8 olarak gösteriliyor; okunamayan karakterler � 
 # Review: PO
 hv-scripts-enc-name =
     { $enc ->
-    [windows-1254] Windows-1254 (Türkçe)
-    [iso-8859-9] ISO-8859-9 (Türkçe)
-    [windows-1252] Windows-1252 (Batı)
-    [utf-16le] UTF-16 LE
-   *[other] { $encoding }
+        [windows-1254] Windows-1254 (Türkçe)
+        [iso-8859-9] ISO-8859-9 (Türkçe)
+        [windows-1252] Windows-1252 (Batı)
+        [utf-16le] UTF-16 LE
+       *[other] { $encoding }
     }
 # Surface 10 (Encoding).
 # Variables:
@@ -2076,8 +2097,8 @@ hv-scripts-diag-contradict = { $path } iki ortam adlandırıyor; altındaki dosy
 # Review: PO
 hv-scripts-diag-limit =
     { $limit ->
-    [depth] { $n } düzeyden derin klasörler listelenmez.
-   *[files] Listeleme { $n } dosyada durdu; klasörün geri kalanı gösterilmiyor.
+        [depth] { $n } düzeyden derin klasörler listelenmez.
+       *[files] Listeleme { $n } dosyada durdu; klasörün geri kalanı gösterilmiyor.
     }
 # Surface 11 (Diagnostics).
 # Variables:
@@ -2085,8 +2106,8 @@ hv-scripts-diag-limit =
 # Review: PO
 hv-scripts-diag-polling =
     { $reason ->
-    [watches] Sistemin dosya izleme sınırı düşük; değişiklikler 2 saniyede bir denetleniyor.
-   *[network] Bu klasör bir ağ sürücüsünde; değişiklikler 2 saniyede bir denetleniyor.
+        [watches] Sistemin dosya izleme sınırı düşük; değişiklikler 2 saniyede bir denetleniyor.
+       *[network] Bu klasör bir ağ sürücüsünde; değişiklikler 2 saniyede bir denetleniyor.
     }
 # Surface 11 (Diagnostics).
 # Variables:
@@ -2096,9 +2117,9 @@ hv-scripts-diag-polling =
 # Review: PO
 hv-scripts-diag-toml =
     { $reason ->
-    [newer] { $file } daha yeni bir Hacivat ile yazılmış; kitaplık klasör adıyla, { $folder } olarak bağlanıyor.
-    [large] { $file } 64 KB'tan büyük olduğu için okunmadı; kitaplık klasör adıyla, { $folder } olarak bağlanıyor.
-   *[invalid] { $file } geçerli bir TOML değil; kitaplık klasör adıyla, { $folder } olarak bağlanıyor.
+        [newer] { $file } daha yeni bir Hacivat ile yazılmış; kitaplık klasör adıyla, { $folder } olarak bağlanıyor.
+        [large] { $file } 64 KB'tan büyük olduğu için okunmadı; kitaplık klasör adıyla, { $folder } olarak bağlanıyor.
+       *[invalid] { $file } geçerli bir TOML değil; kitaplık klasör adıyla, { $folder } olarak bağlanıyor.
     }
 # Surface 11 (Diagnostics).
 # Variables:
@@ -2143,7 +2164,7 @@ hv-scripts-recover-tab = { DATETIME($date, month: "short", day: "numeric", hour:
 hv-scripts-recover-tab-body = Kaydet onları korur. At, diskteki dosyaya geri döner.
 # Surface 12 (Recovery).
 # Review: PO
-hv-scripts-recover-discard = At…
+hv-scripts-recover-discard = Değişiklikleri at…
 # Surface 12 (Recovery).
 # Variables:
 #   $what (String) - selector: what is missing; one of file, library (anything else: the default).
@@ -2152,8 +2173,8 @@ hv-scripts-recover-discard = At…
 # Review: PO
 hv-scripts-recover-missing =
     { $what ->
-    [library] { $library } kitaplığı artık bağlı değil.
-   *[file] { $file } artık kitaplıkta yok.
+        [library] { $library } kitaplığı artık bağlı değil.
+       *[file] { $file } artık kitaplıkta yok.
     }
 # Surface 12 (Recovery).
 # Review: PO
@@ -2173,8 +2194,8 @@ hv-scripts-run-refused = Çalıştırma reddedildi: bu sekme { $bound } üzerind
 # Review: PO
 hv-scripts-run-refused-body =
     { $reason ->
-    [edited] { $conn } artık { $current } veritabanını açıyor: bağlantı düzenlendi. Hiçbir şey gönderilmedi. Betiği { $bound } veritabanını gösteren bağlantıda açın.
-   *[mysql] Hacivat oturumu bir kez geri geçirdi, yine de { $bound } üzerinde değil. Hiçbir şey gönderilmedi. Yeniden deneyin ya da betiği başka bir bağlantıda açın.
+        [edited] { $conn } artık { $current } veritabanını açıyor: bağlantı düzenlendi. Hiçbir şey gönderilmedi. Betiği { $bound } veritabanını gösteren bağlantıda açın.
+       *[mysql] Hacivat oturumu bir kez geri geçirdi, yine de { $bound } üzerinde değil. Hiçbir şey gönderilmedi. Yeniden deneyin ya da betiği başka bir bağlantıda açın.
     }
 # Surface 5 (Script tab).
 # Variables:
@@ -2212,6 +2233,26 @@ hv-scripts-downloading-tab = { $file } indiriliyor…
 # Surface 1 (Scripts node).
 # Review: PO
 hv-scripts-downloading-body = Bulutta tutuluyor; indirme bitince metin görünür. O zamana dek hiçbir şey çalışmaz.
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-open-under-none = Bu dosyayı gösteren başka bağlantı yok
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-remove-body-none = Klasör ve dosyaları, .hacivat/workspace.toml dahil, olduğu gibi kalır. Betikler düğümleri kaldırılır.
+# Surface 1 (Scripts node).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-node-row-tip = Bu bağlantının altında { $n } betik listeleniyor.
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-choose-hint-close = Kapat
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-dataless-row-tip = Bulutta tutuluyor, indirilmedi. Açınca önce indirilir.
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-downloading-row-tip = İndiriliyor… İndirme bitince sekme metni gösterir.
 ```
 
 ### Proposed FTL, Turkish (`locales/tr/hui.ftl`)
