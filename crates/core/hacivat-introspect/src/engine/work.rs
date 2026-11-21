@@ -145,7 +145,21 @@ pub(super) struct Spec {
     /// What the user chose to keep cached ("Keep cached", D-039) in a background read's
     /// namespace: reported existent, so the read never removes it (fix round 2, R-W4-9).
     pub kept: Vec<ObjectKey>,
+    // ## m4-t33-flaky (named exception in Task 15's file)
+    /// What the pass or fragment last reported through its progress sink: the actor holds the
+    /// same slot with the running task (see [`Reported`]).
+    pub reported: Reported,
+    // ## m4-t33-flaky
 }
+
+// ## m4-t33-flaky (named exception in Task 15's file)
+/// The phase and counts a running pass or fragment last reported itself (`None` until it
+/// reports). The sink writes it and the actor's progress update reads it, both inside the
+/// progress channel's `send_if_modified` (one lock), so a report is never lost: neither when it
+/// comes before the actor published the task's entry, nor when a later update (another task
+/// starting or finishing) rebuilds the entries from the batch counts.
+pub(super) type Reported = Arc<std::sync::Mutex<Option<(super::Phase, u64, Option<u64>)>>>;
+// ## m4-t33-flaky
 
 /// A merged pass or fragment, ready to publish.
 pub(super) struct Merged {
@@ -320,7 +334,7 @@ async fn read(
         // texts they hash (`engine::facet::capturing`).
         Work::Pass { ns, mode, level } => {
             let (read, texts) = super::facet::capturing(with_progress(
-                sink(ctx, ns),
+                sink(ctx, ns, &spec.reported),
                 ctx.intro.introspect(
                     conn,
                     ns,
@@ -336,7 +350,7 @@ async fn read(
         }
         Work::Fragment { ns, keys, level } => {
             let (read, texts) = super::facet::capturing(with_progress(
-                sink(ctx, ns),
+                sink(ctx, ns, &spec.reported),
                 ctx.intro.fragment(
                     conn,
                     ns,
@@ -381,17 +395,28 @@ async fn read(
 
 // ## m4-t17-mysql (named exception; T15 carry m11)
 /// The sink of a pass over `ns`: the introspector's own phase and counts replace the batch
-/// count of `ns`'s entry in the engine's progress (the actor's next update writes the batch
-/// count back; the pass reports again as it goes).
-fn sink(ctx: &WorkerCtx, ns: &NsKey) -> ProgressSink {
+/// count of `ns`'s entry in the engine's progress.
+///
+/// ## m4-t33-flaky (named exception in Task 15's file)
+/// The report is kept in the task's [`Reported`] slot too, and the actor's updates show it
+/// instead of the batch count for as long as the task runs. Before, it lived only in the
+/// published entry: a report made before the actor published the entry was dropped, and the
+/// actor's next update (any other task starting or finishing) wrote the batch count back, so a
+/// pass that reports once and then reads for a long time showed "Reading tables…" with the
+/// batch's counts instead of its own (the flaky R-W3-12 and T24-carry explorer tests).
+fn sink(ctx: &WorkerCtx, ns: &NsKey, reported: &Reported) -> ProgressSink {
     let progress = ctx.progress.clone();
     let ns = ns.clone();
+    let reported = reported.clone();
     ProgressSink::new(move |phase, done, total| {
         progress.send_if_modified(|p| {
+            let next = (phase, done, total);
+            *reported
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(next);
             let Some(t) = p.tasks.iter_mut().find(|t| t.ns == ns) else {
                 return false;
             };
-            let next = (phase, done, total);
             if (t.phase, t.done, t.total) == next {
                 return false;
             }
