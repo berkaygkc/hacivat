@@ -414,3 +414,96 @@ Task 4 fills `pathsafe`, `scan`, `envscope`, `tree` and `dataless` (HV-SCRIPT-03
   - Both are made only after an `lstat` walk has shown every component inside the root and free of links. If an inside folder were swapped for an outside link in the tiny window between the walk and the call, `realpath` would follow it. The swap needs a local writer racing the scan, the same class of window as R-T3-1, and the fd-relative `O_NOFOLLOW` open of Task 5 still protects the read and the save.
   - On Windows, `canonicalize` is a `CreateFileW` on an inside file, which may recall a `RECALL_ON_OPEN` placeholder. That is a download, never an outside access.
   - Not changed; recorded.
+
+## m4b-t05 — file I/O and recovery copies
+
+### Read (HV-SCRIPT-07 step 1; UI-EDIT-02 step 1)
+
+- `fileio::read` sniffs a UTF-8, UTF-16LE or UTF-16BE BOM, else takes strict UTF-8, else answers `NeedsEncoding { guess: None }` (no guesser in M4b; the app asks and calls `read_with(root, rel, label)` with a WHATWG label, so `ISO-8859-9` is `windows-1254`). A BOM-less file with more than 1 % NUL in its first 64 KiB is `Binary`. Decoding never substitutes (`*_without_replacement`); line endings are never normalised, and `FileMeta::line_ending` is the dominant one (ties LF).
+- `read_with` re-encodes what it decoded and answers `Lossy` when that would not give back the same bytes (Shift_JIS's duplicate NEC/IBM rows decode to one character that encodes to the other row), so a save of unchanged text never rewrites a file. `replacement` is never offered (`UnknownEncoding`); bytes that do not decode are `Undecodable`.
+- Tiers (UI-EDIT-23): `tier_for(len, lines)` is Full up to 4 MiB and 100,000 lines, Reduced up to 20 MiB, Preview above; a line over 64 KiB makes a Full file Reduced. A Preview reads the first 2.5 MiB, decodes it incrementally (a character cut by the read is dropped) and ends after the last `\n` (or a `\r` that is not the last character); its stamp still covers the whole file, hashed streaming in 1 MiB reads. `ReadLimits::whole` reads up to 64 MiB as Reduced ("Open anyway").
+- A file that changes while it is read (`fstat` before and after, or a length mismatch) answers `Io(Interrupted)`; the watcher reads it again once its stamp settles (C6).
+
+### Save (HV-SCRIPT-07 steps 3–4; carries-w1 T5, n8)
+
+- The text is encoded first; a character the encoding cannot hold is `Unencodable { first_offset }` (the byte offset in the text) and nothing on disk is touched. UTF-16 is encoded by hand, since `encoding_rs` encodes UTF-16 as UTF-8.
+- With `expect`, the current stamp (read through a no-follow handle and hashed) must equal it, else `ChangedOnDisk(current)`; a file gone since is `DeletedOnDisk` (Save to recreate passes no `expect`). The file must open for writing as it is, so a read-only file is refused and never replaced by a rename.
+- The bytes go to `.<name>.hv-<uuid v4>.tmp` in the same folder (a dot name the scanner never lists, C11; `<name>` cut on a character boundary so the whole name fits 255 bytes, m10; never the process id, R-T1a-4), created with `create_new` and the no-follow flags, 0600 when it replaces a file until it takes the original's permission bits (`mode & 0o777`) and owner (`fchown`), written and synced. The name is then re-checked (still the file that was checked, or still nothing), `save_with_echo` reports the new stamp (step 4: the service records the echo before the file changes), and the temp is renamed over the name relative to the folder handle, and the folder synced. Every failure removes the temp; the original stays as it was (tested with injected faults at write, sync and rename, and a read-only folder). `fileio::is_temp_name` lets the watcher recognise the transient.
+- **Hard links** (alg/28 §3 item 4): a file with `st_nlink > 1` is written in place through its own handle (write, truncate to the new length, sync) after the same stamp check, so every name keeps the new bytes. The same in-place write is used when the temp cannot take the original's owner (a file owned by another user in a shared folder). That write is not atomic: an I/O error in the middle leaves a mix, while the tab stays dirty and its recovery copy stays. Windows has no link count in stable `std`, so it always renames.
+- Windows: the rename retries three times (50, 100, 200 ms) on a sharing or lock violation (alg/28 edge case).
+
+### Paths (HV-SCRIPT-03 step 8; R-T3-1)
+
+- Every read, save and stream walks the `RelPath` from `LibraryRoot::canonical` one folder at a time with Task 3's directory-handle approach, kept as a local copy in `fileio.rs` until the controller reconciles the two (Task 3 was in review): each folder opened with `O_DIRECTORY` and the no-follow flags (macOS `O_NOFOLLOW_ANY`; Windows `FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`, held without `FILE_SHARE_DELETE`), its identity re-checked from the root down around every operation, and on Linux every operation goes through `/proc/self/fd/<n>/`. The root is opened by its canonical path and never canonicalized again, so a root that became a link is refused.
+- A link or junction in a folder position, a folder, FIFO or device at the end, and a dangling, looping or outside link are refused (`PathRefused` on read, `PathChanged` on save); files are opened with `O_NONBLOCK`, so a FIFO swapped in never blocks.
+- A link at the end (an `InsideLink`) is resolved once (`canonicalize`) and followed only to a regular file inside the canonical root; the target path is walked again without following anything, and the save writes the target, so the link stays.
+- **Hidden components are refused** (`PathRefused`), in the path and in a link's target: a name starting with `.` is never listed (C11), and this keeps `.git/` and `.hacivat/` out of reach of a script tab (a library link `x.sql -> .git/hooks/pre-commit` or `-> .hacivat/workspace.toml` is never written through). On Windows, device names, `:` streams, reserved characters and a trailing dot or space are refused too. This overlaps Task 4's `pathsafe::component`, which is a stub on this task's base; the controller can point `check_rel` at it after both merge.
+- Residual (R-T3-1, unchanged): on macOS, `rename`, `unlink` and `canonicalize` are path calls between identity checks. A local process that can already write the library could swap a folder for a link exactly between a check and the call and make the script's own text land where it chose; the after-check reports the change. Closing it needs `openat`/`renameat` (`rustix`) or an `unsafe` exception. Extended attributes, ACLs and Finder tags of a replaced file are not copied (a rename-based save drops them; the in-place cases keep them).
+
+### Stream (`fileio::open_stream`; HV-SCRIPT-12 step 4)
+
+- One handle for the whole run; 64 KiB reads decoded incrementally in the chosen encoding (its own BOM dropped, a character split by a read kept for the next one). After every read, the handle's and the path's `(len, mtime, dev, ino, ctime)` must equal the ones at open (Windows: `len, mtime, created`), else `ChunkError::Changed`, and nothing read after the change is handed out; bytes that do not decode are `ChunkError::Decode`. `LibraryService::open_stream` (Task 10) wires it; Task 12 builds on the stop.
+
+### Recovery copies (HV-SCRIPT-07 step 5; R-M4b-5, Q1)
+
+- `recovery::{store, take_all, discard}` under `LocalPaths::script_recovery_dir(<library uuid>)`: `<xxh3-128(rel path) hex>.sql` (the text, UTF-8) and a `.meta` sidecar, both through `fsio::atomic_write` (0600), in folders set to 0700 (also when they already existed). Nothing is written into a library (L14). When `script_recovery_dir` answers `None`, nothing is written or read and there is no fallback folder (`RecoveryError::NoFolder`; carries-w1 m5).
+- **Deviation:** the sidecar is TOML, not JSON (`format`, `rel_path`, `saved_at_secs`/`_nanos`, and an optional `[base]` with `len`, `mtime_secs`/`_nanos` and the hash as hex), because this crate's manifest has `toml` and no `serde_json`, and no later task edits a manifest. A pre-1970 base stamp is dropped (the app then treats the file as changed). The plan's sidecar also named the encoding; it is not kept, since the app re-reads the file's meta on restore.
+- `take_all` validates and does not delete (a second crash before the user answers still loses nothing): a sidecar whose `rel_path` is not library-relative or does not hash to its file name, a newer `format`, a sidecar over 16 KiB, a missing copy or one that is not UTF-8 is skipped. `Recovered`'s `Debug` shows the text's length only.
+
+### Over-breadth carries (carries-w1 m2) and other notes
+
+- The `process` identifier and glob imports from outside the crate are refused in this crate's non-test files: Task 5's code has neither; `tests/fileio.rs` runs `mkfifo` (Unix) and `cmd /C mklink /J` (Windows) under `tests/`, which the rule exempts. Tests import every item by name (no proptest glob, R-T1a-3).
+- `fileio::faults` (feature `test-support` only) injects one failure at the save's write, sync or rename step on the calling thread; the product build has a no-op twin.
+- `tests/seams.rs` (Task 1a's file) is edited as a named exception: `fileio_stubs_read_and_write_nothing` is removed (the real behaviour is in `tests/fileio.rs`), and its `fileio` import with it. `ReadError::NotImplemented` and `SaveError::NotImplemented` stay for the service stubs (Task 10).
+- **Carry for Task 14:** a `Decoded` in the `Preview` tier holds only the first 2.5 MiB; its tab is read-only and must never be saved (a save with its stamp would succeed and cut the file).
+
+### Fix round 1 (review I1–I4, m1–m12; rulings R-T5-1 to R-T5-4)
+
+This subsection supersedes, where they differ, the bullets above on link resolution (`canonicalize`), the local `Dir` copy, the hidden-name check, the in-place write, the recovery key and the sidecar.
+
+- **Shared folder handles (m1, m4, m12).** Task 3's `Dir` moved unchanged in behaviour into `fileio::dir` (crate-private), and `manifest.rs` uses it (named exception: its private copy and procfs probe are gone; `manifest::with_procfs_absent` is re-exported). Additions: `open_canonical` (the root by its stored canonical path, never canonicalized again), `open_write`, a `private` flag on `create_temp`, the temp predicate as an argument of `sweep_stale_temps`, and the Windows rename retry. Linux without procfs now refuses every save (`Io(Unsupported)`), as the manifest writer does.
+- **Paths through Task 4 (I2, R-T5-2).** Every read, save and stream first calls `pathsafe::join`: the name rules (hidden and skipped names, Windows device names including `CONIN$`, `COM0` and the superscripts, streams, 8.3 and case aliases: m6), the root check, no link on the way, and a final link resolved as text inside the root (`resolve_link`). `fileio` itself never canonicalizes and never resolves a link; the reviewer's bounce link `l.sql -> ../out/bounce.sql -> <lib>/real.sql` is refused and `out/` is untouched (`link_that_leaves_the_root_and_returns_is_refused`). The path `join` answered (the target for an `InsideLink`) is then walked again with no-follow handles, and anything that is a link now is refused (a swap after `join`). The `_scoped` forms (`read_scoped`, `read_with_scoped`, `save_scoped`, `open_stream_scoped`) also re-apply `envscope::visible_at` to what `join` resolved and answer `OutOfScope`; **Task 14's tabs use them**. The plain forms keep the plan's signatures, for callers without a connection.
+- **In place, restored (I1, R-T5-1).** The handle is re-checked against the stamp right before writing (fingerprint and a hash of what it holds now: m3), and the original bytes are kept (files over 64 MiB are not written in place: `Io(FileTooLarge)`). On any error they are written back, the mtime is set back (`File::set_times`), and the content is verified; the answer is then the I/O error, with the file as it was and the editor's stamp still valid. Only when the write-back fails too is the answer `SaveError::Damaged`; the caller then stores the new text with `recovery::CopyMeta { damaged: true }`. Tested with a `WriteAfter(n)` fault (the ENOSPC/EFBIG stand-in) on the in-place, rename and new-file paths, and a failing restore.
+- **No-replace publish of a new file (m4).** A new file's temp is published with a hard link (fails when the name exists → `ChangedOnDisk` with that file's stamp) and, without hard links, with `create_new`; never with a rename.
+- **Streaming stamps (m5).** The current-file check hashes in 1 MiB reads; nothing is read whole except the original of an in-place write.
+- **Stale temps (m2).** Each save sweeps its folder of our own temps, exactly `.<name>.hv-<32 lowercase hex>.tmp` and older than 60 s.
+- **Preview (I4).** `From<&Decoded> for SaveText` is gone; `Decoded::save_text()` is `None` for a Preview. A preview read in a chosen encoding gets the `Lossy` check (m8).
+- **Recovery (I3, m7; R-T5-3, R-T5-4).** A copy is keyed by `RecoveryKey { library, rel, profile, database }` (the tab's binding) and by the writing `Instance` (a random id plus an exclusive `File::try_lock` advisory lock on `script-recovery/instances/<id>.lock`, held for the instance's life; no process id). The stem is the XXH3-128 of those parts, each length-prefixed. `take_all` offers every copy whose instance holds no lock any more (two tabs of one file come back as two entries); a running instance's copies are never offered or deleted by another; `discard` removes only this instance's copy of one key, `discard_entry` an offered one, `discard_library` a detached library's folder. Copies older than 14 days are deleted, not offered. The sidecar (format 2) records the binding, encoding, BOM, line ending, base stamp, `secret_suspected` (set by the caller's secret scan, for Task 17's notice; no redaction, since Q1 says a crash loses nothing) and `damaged`. Dead instances' lock files older than a minute are swept at start.
+- **Windows residuals (m11).** `std` has no stable link count or file index (`MetadataExt::number_of_links`/`file_index` are unstable), and this crate has no `windows-sys`: a hard-linked file is replaced by a rename (the link breaks), and the stream's and the re-check's fingerprint is `(len, mtime, created)`, which NTFS file tunnelling can keep across a rename-replace with the same length and mtime. Add the file index when a manifest change is allowed.
+- `lib.rs`'s Task 1a doc block gets a `## m4b-t05-fileio` note (named exception, m10).
+
+### Fix round 2 (re-review I-fr1-1, I-fr1-2, mf1–mf5; rulings R-T5-5, R-T5-6)
+
+This subsection supersedes the fix-round-1 bullet on the `_scoped` forms.
+
+- **One public function per operation, the environment required (I-fr1-1, R-T5-6).** The functions are:
+  - `read(root, rel, env, limits)`;
+  - `read_with(root, rel, env, label)`;
+  - `save(root, rel, env, text, expect)`;
+  - `save_with_echo(root, rel, env, text, expect, echo)`;
+  - `open_stream(root, rel, env, enc)`.
+
+  `env: Option<EnvTag>`, and `envscope::visible_at` is applied to what `pathsafe::join` resolved. The `_scoped` variants and the unchecked scope are gone; no unscoped form exists. `None` is an untagged connection or an unbound tab, and it sees no `@`-scoped file (fail closed).
+
+  `LibraryService::{read, save, open_stream}` take the tab's environment too (`service.rs`, a named exception; still stubs), so Task 10 inherits the shape.
+
+  Test: `every_public_function_refuses_what_the_environment_does_not_show` (a `@production` path under staging, dev and `None`, through all five functions, plus a new file there).
+- **Partial meta (I-fr1-2).** `FileMeta.partial` is set only by the preview read. `save` refuses partial meta with `SaveError::PreviewOnly` before anything else, whatever text it carries and with or without `expect`. `recovery::store` refuses it too (`RecoveryError::PreviewOnly`), since a preview tab is read-only and never has unsaved text.
+
+  Test: `a_preview_tabs_meta_cannot_be_saved` (the reviewer's route: the buffer plus the tab meta of a 22 MB preview; the file is unchanged).
+- **mf1.** A failed final `sync_all` of the write-back answers `Damaged`: a write-back that may not be durable is not a restore. Test: `failed_restore_sync_reports_damage`.
+- **mf2.** Once the new bytes are on disk (renamed, hard-linked or written in place), a folder check that fails after it answers `SaveError::SavedButPathChanged(stamp)`. This is a completed save with a warning: the tab is clean at that stamp and the user is told the folder changed. It is never a plain failure.
+  - The shared `Dir` gains `rename_noting_after` and `publish_link_noting_after`, which run the operation after the before-check and report the after-check instead of failing.
+  - The link publish unlinks its temp in the same step, so a folder moved right after it leaves no temp (found by this round's test).
+
+  Test: `a_folder_moved_after_the_write_is_a_completed_save` (rename, in-place and new-file paths).
+- **mf3 (R-T5-5).** Where advisory locks are unsupported (some NFS or SMB homes), `Instance::start` still succeeds, unlocked (`Instance::is_locked()` is `false`), and copies are still written.
+  - Their sidecars carry `unlocked = true`, so an unlocked writer's unlocked lock file is never read as "dead".
+  - A copy whose writer cannot be shown dead (that mark, or a lock that cannot be tested here) is offered with `RecoveryEntry::liveness_unknown = true`.
+  - **Carry to M8:** two instances that start together can both offer one dead instance's copies; the M8 single-instance lock closes that.
+
+  Test: `without_advisory_locks_copies_are_kept_and_offered_marked` (with `recovery::with_locks_unsupported`, test-support).
+- **mf4 (carry to Task 10, routed by the controller).** At launch, sweep the `script-recovery/<uuid>` folders of libraries not in the registry, past `MAX_AGE`.
+- **mf5.** The Windows rename retry is a `retrying(op, retry_on, sleep)` helper. Its unit test (`fileio::dir::tests::rename_retry_waits_and_gives_up`) injects a sharing violation and records the waits: 50 + 100 + 200 ms, four tries, then the error; other errors are not retried.
+  - The retry runs inside the shared `Dir::rename`, so it **also applies to Task 3's manifest rename** (`manifest::add_alias`): on Windows, an alias edit over a manifest another program holds open is retried up to about 350 ms before it fails. Nothing else in Task 3's behaviour changed.
+  - It retries `ERROR_ACCESS_DENIED` too, so a permanent denial costs about 350 ms; accepted.

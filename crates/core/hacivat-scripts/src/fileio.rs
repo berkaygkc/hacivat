@@ -5,13 +5,78 @@
 //! Task 1a: the types and fail-closed stubs: [`read`] answers `Err(ReadError::NotImplemented)`
 //! and opens nothing; [`save`] answers `Err(SaveError::NotImplemented)` and writes nothing.
 //! Task 5 writes them (fd-relative temp + rename, hard-link-safe, recovery copies).
+//!
+//! ## m4b-t05-fileio
+//! Task 5: the reader, the saver and the "Run as script" stream (HV-SCRIPT-07, -12 step 4).
+//! Fix round 1 changes are marked `(fr1 …)` with the review finding.
+//!
+//! - **Exact round trip.** [`read`] sniffs a BOM (UTF-8, UTF-16LE/BE), else takes strict
+//!   UTF-8, else answers [`ReadError::NeedsEncoding`] (the app asks, then calls [`read_with`]),
+//!   and refuses as [`ReadError::Binary`] a BOM-less file with more than 1 % NUL in its first
+//!   64 KiB. Nothing is ever decoded with replacement, and line endings are never normalised
+//!   (the text holds them as they are; [`FileMeta::line_ending`] is the dominant one, ties
+//!   LF). [`read_with`] also re-encodes what it decoded and refuses with [`ReadError::Lossy`]
+//!   when that would not give the same bytes back (Shift_JIS's duplicate NEC/IBM rows), so an
+//!   unchanged save never rewrites a file; a preview in a chosen encoding gets the same check
+//!   (fr1 m8). [`save`] encodes in the file's encoding and BOM and refuses a character the
+//!   encoding cannot hold ([`SaveError::Unencodable`]), before it touches the disk.
+//! - **Tiers** (UI-EDIT-23): [`tier_for`] by size and line count, plus Reduced for a line over
+//!   64 KiB; above 20 MiB the read is a preview of the first 2.5 MiB cut after the last line
+//!   break, and its stamp is still the whole file's (hashed streaming, in constant memory). A
+//!   preview cannot be saved: [`Decoded::save_text`] is `None` for it (fr1 I4).
+//! - **Paths** (HV-SCRIPT-03 step 8; fr1 I2, ruling R-T5-2). Every call first asks
+//!   [`pathsafe::join`] (Task 4): the name rules (hidden and skipped names, Windows device
+//!   names, streams and 8.3 aliases), the root check, no link on the way, and a final link
+//!   resolved **as text inside the root** (`resolve_link`); this module never canonicalizes
+//!   and never resolves a link itself. Every public function takes the tab's environment and
+//!   re-applies the scope to what `join` resolved (`envscope::visible_at`; fr2 R-T5-6: there is
+//!   no unscoped form, and `None` sees no `@`-scoped file). Then the path
+//!   that `join` answered (the link's target for an `InsideLink`) is walked again from the
+//!   canonical root with the shared folder handles of [`dir`] (Task 3's, ruling R-T3-1: on
+//!   Linux through `/proc/self/fd/<n>/`, refusing writes without procfs; on macOS with
+//!   `O_NOFOLLOW_ANY`; on Windows held without `FILE_SHARE_DELETE`), refusing anything that is
+//!   a link now, so a swap after `join` is refused rather than followed.
+//! - **Save** (HV-SCRIPT-07 step 3): with `expect`, the file's current stamp (hashed
+//!   streaming, fr1 m5) must equal it ([`SaveError::ChangedOnDisk`] carries the one on disk; a
+//!   vanished file is [`SaveError::DeletedOnDisk`]); the file must be writable as it is (a
+//!   read-only file is refused, never replaced). The bytes go into `.<name>.hv-<uuid v4>.tmp`
+//!   in the same folder (a dot name, so the scanner never lists it; never the process id,
+//!   R-T1a-4), created without following a link, 0600 until it takes the original's
+//!   permission bits and owner, written and synced; the stamp is re-checked, the echo is
+//!   reported ([`save_with_echo`], step 4), and the temp is renamed over the name relative to
+//!   the folder handle (n8), and the folder synced. A new file is published with a hard link,
+//!   which never replaces a file that appeared meanwhile (fr1 m4). Our own temps older than a
+//!   minute are swept from the folder first (fr1 m2). Any failure removes the temp and leaves
+//!   the original as it was.
+//! - **In place** (fr1 I1, ruling R-T5-1). A file with more than one hard link, or one whose
+//!   owner the temp cannot take, is written through its own handle so the links and the owner
+//!   survive. Right before, the handle is re-checked against the stamp (fr1 m3) and the
+//!   original bytes are kept; on any error they are written back (with the original mtime)
+//!   and verified, so the file is as it was. Only when that restore fails too is the answer
+//!   [`SaveError::Damaged`], and the caller keeps the new text in a recovery copy.
+//! - **Stream** ([`open_stream`]): one handle for the whole run, 64 KiB reads decoded
+//!   incrementally (a character cut by a read waits for the next one), and after every read
+//!   the handle's and the path's stamps are compared with the ones at open; a change answers
+//!   [`ChunkError::Changed`] and nothing read after it is handed out.
+
+// ## m4b-t05-fileio fix round 1 (review m1, m4, m12): Task 3's folder handles, shared.
+pub(crate) mod dir;
 
 use std::fmt;
-use std::io;
-use std::time::SystemTime;
+use std::fs::{File, FileTimes, Metadata};
+use std::io::{self, Read, Seek, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::pathsafe::RelPath;
+use hacivat_proto::EnvTag;
+use twox_hash::XxHash3_128;
+
+use crate::encoding::{self, StreamDecoder};
+use crate::envscope;
+use crate::pathsafe::{self, JoinedKind, PathError, RelPath};
 use crate::registry::LibraryRoot;
+use crate::scan::{self, EntryKind};
+use crate::service::{ChunkError, ScriptChunks};
+use dir::{Dir, FsError, is_link};
 
 /// What a file looked like on disk when it was read or written: `(len, mtime)` plus the
 /// XXH3-128 of its bytes (`twox-hash`).
@@ -50,6 +115,10 @@ pub struct FileMeta {
     pub encoding: TextEncoding,
     pub bom: bool,
     pub line_ending: LineEnding,
+    /// ## m4b-t05-fileio fix round 2 (I-fr1-2): the text is only the start of the file (a
+    /// [`SizeTier::Preview`]); set only by the preview read. A save with partial meta is refused
+    /// with [`SaveError::PreviewOnly`], whatever text it carries.
+    pub partial: bool,
 }
 
 impl Default for FileMeta {
@@ -58,6 +127,7 @@ impl Default for FileMeta {
             encoding: TextEncoding::UTF_8,
             bom: false,
             line_ending: LineEnding::Lf,
+            partial: false,
         }
     }
 }
@@ -117,52 +187,1330 @@ impl fmt::Debug for SaveText {
 /// Why a read failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadError {
-    /// Task 1a's stub reads nothing.
+    /// A stub that reads nothing (the service's, until Task 10).
     NotImplemented,
-    /// The path failed the re-validation (HV-SCRIPT-03 step 8).
+    /// The path failed the re-validation (HV-SCRIPT-03 step 8, [`pathsafe::join`]): a name the
+    /// scan never lists, a link or junction on the way, a link out of the library, a folder or
+    /// other non-file, a root that moved.
     PathRefused,
-    /// No BOM, not UTF-8 and no remembered choice: the user picks one.
+    /// ## m4b-t05-fileio fix round 1 (I2), round 2 (R-T5-6): what the path resolves to now
+    /// is not shown under this connection's environment.
+    OutOfScope,
+    /// No BOM, not UTF-8 and no remembered choice: the user picks one ([`read_with`]).
     NeedsEncoding {
         guess: Option<TextEncoding>,
     },
+    /// More than 1 % NUL bytes in the first 64 KiB, without a UTF-16 BOM (UI-EDIT-23).
     Binary,
+    /// [`read_with`] got a label that names no encoding it offers.
+    UnknownEncoding,
+    /// The bytes decode, but encoding the text back would not give the same bytes: a save of
+    /// the unchanged text would rewrite the file.
+    Lossy,
+    /// The bytes do not decode in the chosen encoding.
+    Undecodable,
     Io(io::ErrorKind),
 }
 
-/// Why a save failed; the file on disk is unchanged in every case.
+/// Why a save failed. The file on disk is unchanged in every case but [`SaveError::Damaged`]
+/// and [`SaveError::SavedButPathChanged`] (which is a completed save).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SaveError {
-    /// Task 1a's stub writes nothing.
+    /// A stub that writes nothing (the service's, until Task 10).
     NotImplemented,
     /// The file is not what the editor last read (HV-SCRIPT-08); carries the stamp on disk.
     ChangedOnDisk(DiskStamp),
-    /// The path became a link or another kind of file since it was validated.
+    /// The path became a link or another kind of file since it was validated, or resolves out
+    /// of the library.
     PathChanged,
+    /// The path is not one a script may have: a name the scan never lists (a hidden component,
+    /// C11; `node_modules`), a Windows device or stream name, an 8.3 alias.
+    PathRefused,
+    /// ## m4b-t05-fileio fix round 1 (I2), round 2 (R-T5-6): not shown under this
+    /// connection's environment.
+    OutOfScope,
+    /// `expect` was given, and the file is gone ("Deleted on disk — Save to recreate" saves
+    /// with no `expect`).
+    DeletedOnDisk,
     /// The text has a character the file's encoding cannot hold.
     Unencodable {
         first_offset: usize,
     },
+    /// ## m4b-t05-fileio fix round 1 (I1, ruling R-T5-1): an in-place write failed and the
+    /// original bytes could not be written back: the file holds neither version. The caller
+    /// keeps the new text in a recovery copy (`recovery::CopyMeta::damaged`).
+    Damaged,
+    /// ## m4b-t05-fileio fix round 2 (I-fr1-2): the text's meta is `partial` (a preview holds
+    /// only the start of the file); nothing is written.
+    PreviewOnly,
+    /// ## m4b-t05-fileio fix round 2 (mf2): **the save went through**: the new bytes are on
+    /// disk with this stamp (the tab is clean at it), but the folder check after the write
+    /// failed (a folder on the way was moved or replaced meanwhile). A warning, never a
+    /// failure: the caller treats it as saved and tells the user the folder changed.
+    SavedButPathChanged(DiskStamp),
     Io(io::ErrorKind),
 }
 
-/// Reads and decodes `rel` under `root`.
-///
-/// Task 1a stub (fail closed): opens nothing.
-pub fn read(root: &LibraryRoot, rel: &RelPath, limits: ReadLimits) -> Result<Decoded, ReadError> {
-    let _ = (root, rel, limits);
-    Err(ReadError::NotImplemented)
+impl Decoded {
+    /// ## m4b-t05-fileio fix round 1 (I4): the text as read, to be saved the way it was read;
+    /// `None` for a [`SizeTier::Preview`], which holds only the start of the file and must never
+    /// be saved over it.
+    pub fn save_text(&self) -> Option<SaveText> {
+        (self.tier != SizeTier::Preview).then(|| SaveText {
+            text: self.text.clone(),
+            meta: self.meta,
+        })
+    }
 }
 
-/// Saves `text` to `rel` under `root`; with `expect`, only if the file still has that stamp.
+/// The encoding a WHATWG label names (`"windows-1254"`, `"ISO-8859-9"`, `"Shift_JIS"`), as
+/// [`read_with`] takes it; `None` for an unknown label and for `replacement`. For the app's
+/// encoding chooser and the recovery sidecar.
+pub fn lookup_encoding(label: &str) -> Option<TextEncoding> {
+    encoding::lookup(label)
+}
+
+/// The largest file in the Full tier (UI-EDIT-23 T0).
+pub const FULL_MAX_BYTES: u64 = 4 << 20;
+/// The most lines in the Full tier.
+pub const FULL_MAX_LINES: usize = 100_000;
+/// The longest line in the Full tier, in bytes.
+pub const FULL_MAX_LINE_BYTES: usize = 64 << 10;
+/// The largest file read whole without being asked (UI-EDIT-23 T1).
+pub const REDUCED_MAX_BYTES: u64 = 20 << 20;
+/// The largest file read whole when asked ([`ReadLimits::whole`], UI-EDIT-23 "Open anyway"),
+/// and the largest one written in place (its original is kept in memory, fr1 I1).
+pub const WHOLE_MAX_BYTES: u64 = 64 << 20;
+/// How much of a file a preview reads: 2.5 MiB.
+pub const PREVIEW_BYTES: usize = 5 << 19;
+/// How much of a file the binary check looks at.
+pub const BINARY_PROBE_BYTES: usize = 64 << 10;
+/// One read of [`open_stream`].
+pub const STREAM_CHUNK_BYTES: usize = 64 << 10;
+/// The longest file name the temp name may reach (`NAME_MAX` on every target).
+const NAME_MAX_BYTES: usize = 255;
+const TEMP_MARK: &str = ".hv-";
+const TEMP_SUFFIX: &str = ".tmp";
+/// The random part of a temp name: a v4 UUID in simple form.
+const TEMP_RANDOM_LEN: usize = 32;
+/// One read of a streaming hash.
+const HASH_CHUNK_BYTES: usize = 1 << 20;
+
+/// The tier of a file of `len` bytes and `lines` lines (UI-EDIT-23 step 1: Full up to 4 MiB
+/// and 100,000 lines, Reduced up to 20 MiB, Preview above).
+pub fn tier_for(len: u64, lines: usize) -> SizeTier {
+    if len > REDUCED_MAX_BYTES {
+        SizeTier::Preview
+    } else if len > FULL_MAX_BYTES || lines > FULL_MAX_LINES {
+        SizeTier::Reduced
+    } else {
+        SizeTier::Full
+    }
+}
+
+/// Reads and decodes `rel` under `root` for a tab under a connection whose environment is
+/// `env` (UI-EDIT-02 step 1): a BOM names the encoding, else strict UTF-8, else
+/// [`ReadError::NeedsEncoding`]. Above 20 MiB (64 MiB with [`ReadLimits::whole`]) it reads a
+/// preview, whose meta is `partial`.
 ///
-/// Task 1a stub (fail closed): writes nothing.
+/// ## m4b-t05-fileio fix round 2 (I-fr1-1, ruling R-T5-6)
+/// `env` is required: what the path resolves to must be shown under it
+/// (`envscope::visible_at`), else [`ReadError::OutOfScope`]. `None` is an untagged connection
+/// or an unbound tab, which sees no `@`-scoped file (fail closed). There is no unscoped form.
+pub fn read(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    limits: ReadLimits,
+) -> Result<Decoded, ReadError> {
+    let opened = open_for_read(root, rel, env)?;
+    let cap = if limits.whole {
+        WHOLE_MAX_BYTES
+    } else {
+        REDUCED_MAX_BYTES
+    };
+    if opened.meta.len() > cap {
+        return read_preview(opened, None);
+    }
+    let len = opened.meta.len();
+    let (bytes, stamp) = read_all(opened)?;
+    let (text, meta) = decode_sniffed(&bytes)?;
+    Ok(decoded(text, meta, stamp, len, limits.whole))
+}
+
+/// Reads `rel` in the encoding the user chose by its WHATWG label (`"windows-1254"`), after
+/// [`ReadError::NeedsEncoding`], under `env` as [`read`]. The encoding's own BOM, if present, is
+/// kept for the save.
+pub fn read_with(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    encoding: &str,
+) -> Result<Decoded, ReadError> {
+    let enc = encoding::lookup(encoding).ok_or(ReadError::UnknownEncoding)?;
+    let opened = open_for_read(root, rel, env)?;
+    if opened.meta.len() > REDUCED_MAX_BYTES {
+        return read_preview(opened, Some(enc));
+    }
+    let len = opened.meta.len();
+    let (bytes, stamp) = read_all(opened)?;
+    let own_bom = encoding::bom_of(enc);
+    let bom = !own_bom.is_empty() && bytes.starts_with(own_bom);
+    let body = if bom { &bytes[own_bom.len()..] } else { &bytes };
+    let text = encoding::decode_exact(enc, body).ok_or(ReadError::Undecodable)?;
+    match encoding::encode_exact(enc, bom, &text) {
+        Ok(back) if back == bytes => {}
+        _ => return Err(ReadError::Lossy),
+    }
+    let line_ending = line_stats(&text).ending;
+    let meta = FileMeta {
+        encoding: enc,
+        bom,
+        line_ending,
+        partial: false,
+    };
+    Ok(decoded(text, meta, stamp, len, false))
+}
+
+/// Saves `text` to `rel` under `root` for a tab under `env` (checked as in [`read`], else
+/// [`SaveError::OutOfScope`]); with `expect`, only if the file still has that stamp. Returns
+/// the stamp of what is now on disk (HV-SCRIPT-07 step 3).
 pub fn save(
     root: &LibraryRoot,
     rel: &RelPath,
+    env: Option<EnvTag>,
     text: SaveText,
     expect: Option<DiskStamp>,
 ) -> Result<DiskStamp, SaveError> {
-    let _ = (root, rel, text, expect);
-    Err(SaveError::NotImplemented)
+    save_with_echo(root, rel, env, text, expect, &mut |_| {})
+}
+
+/// [`save`], calling `echo` with the stamp of the new file before it replaces the old one
+/// (HV-SCRIPT-07 step 4: the service records it in the watcher's echo table, so the save's own
+/// events are dropped). An in-place write reports it right after the write.
+pub fn save_with_echo(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    text: SaveText,
+    expect: Option<DiskStamp>,
+    echo: &mut dyn FnMut(&DiskStamp),
+) -> Result<DiskStamp, SaveError> {
+    // fr2 I-fr1-2: a preview's meta travels with whatever text the tab builds; never saved.
+    if text.meta.partial {
+        return Err(SaveError::PreviewOnly);
+    }
+    let bytes = encoding::encode_exact(text.meta.encoding, text.meta.bom, &text.text)
+        .map_err(|first_offset| SaveError::Unencodable { first_offset })?;
+    drop(text);
+    let target = locate(root, rel, env).map_err(Refusal::for_save)?;
+    let dir = target.dir();
+    dir.sweep_stale_temps(&is_temp_name);
+    match target {
+        Target::Missing { dir, name } => {
+            if expect.is_some() {
+                return Err(SaveError::DeletedOnDisk);
+            }
+            publish_new(&dir, &name, &bytes, echo)
+        }
+        Target::Existing { dir, name, lstat } => {
+            let current = stamp_streaming(&dir, &name, &lstat)?;
+            if let Some(expected) = expect
+                && expected != current
+            {
+                return Err(SaveError::ChangedOnDisk(current));
+            }
+            // Writable as it is: a read-only file is refused, never replaced.
+            let writer = dir.open_write(&name, &lstat).map_err(fs_save_error)?;
+            let original = Original {
+                meta: &lstat,
+                stamp: current,
+            };
+            if hard_links(&lstat) > 1 {
+                return in_place(&dir, &name, writer, &original, &bytes, echo);
+            }
+            // Not held across the rename (Windows replaces only a file nobody holds).
+            drop(writer);
+            match replace(&dir, &name, &bytes, &original, echo) {
+                Ok(stamp) => Ok(stamp),
+                Err(Replace::Failed(e)) => Err(e),
+                Err(Replace::OwnerNotKept) => {
+                    let writer = dir.open_write(&name, &lstat).map_err(fs_save_error)?;
+                    in_place(&dir, &name, writer, &original, &bytes, echo)
+                }
+            }
+        }
+    }
+}
+
+/// A chunked UTF-8 reader of `rel` in `encoding` for "Run as script" (HV-SCRIPT-12), under
+/// `env` as [`read`]: the source behind `LibraryService::open_stream` (Task 10 wires it). Its
+/// BOM is dropped.
+pub fn open_stream(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    encoding: TextEncoding,
+) -> Result<Box<dyn ScriptChunks>, ReadError> {
+    let decoder = StreamDecoder::new(encoding).ok_or(ReadError::UnknownEncoding)?;
+    let opened = open_for_read(root, rel, env)?;
+    Ok(Box::new(FileStream {
+        at_open: Fingerprint::of(&opened.meta),
+        dir: opened.dir,
+        name: opened.name,
+        file: opened.file,
+        decoder,
+        done: false,
+    }))
+}
+
+/// The temp name a save of `name` writes first: `.<name>.hv-<uuid v4>.tmp`, with `<name>` cut
+/// on a character boundary so the whole stays within 255 bytes (alg/28 m10). It starts with
+/// `.`, so the scanner never lists it (C11), and never ends in `.sql` or `.md`.
+pub fn temp_name_for(name: &str) -> String {
+    let room = NAME_MAX_BYTES - 1 - TEMP_MARK.len() - TEMP_RANDOM_LEN - TEMP_SUFFIX.len();
+    let mut cut = name.len().min(room);
+    while !name.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        ".{}{TEMP_MARK}{}{TEMP_SUFFIX}",
+        &name[..cut],
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// Whether `name` is exactly a [`temp_name_for`] name: a leading `.`, then `.hv-`, 32
+/// lowercase hex digits and `.tmp` (the watcher's expected transient, HV-SCRIPT-07 step 4, and
+/// the stale-temp sweep, fr1 m2).
+pub fn is_temp_name(name: &str) -> bool {
+    name.starts_with('.')
+        && name
+            .strip_suffix(TEMP_SUFFIX)
+            .and_then(|s| s.rsplit_once(TEMP_MARK))
+            .is_some_and(|(_, random)| {
+                random.len() == TEMP_RANDOM_LEN
+                    && random
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+}
+
+/// Fault injection for the failure tests (feature `test-support`; never in a product build):
+/// the next save on this thread fails at the given step.
+#[cfg(any(test, feature = "test-support"))]
+pub mod faults {
+    use std::cell::{Cell, RefCell};
+    use std::io;
+
+    /// A step of a save.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Fault {
+        /// Before any byte is written.
+        Write,
+        /// ## fix round 1 (I1): after this many bytes are written (an ENOSPC or EFBIG stand-in).
+        WriteAfter(usize),
+        Sync,
+        Rename,
+        /// ## fix round 1 (I1): the write-back of the original after a failed in-place write.
+        Restore,
+        /// ## fix round 2 (mf1): the last sync of that write-back.
+        RestoreSync,
+    }
+
+    thread_local! {
+        static NEXT: Cell<Option<Fault>> = const { Cell::new(None) };
+        static LAST_TEMP: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    /// The next save on this thread fails at `f`, once.
+    pub fn inject(f: Fault) {
+        NEXT.set(Some(f));
+    }
+
+    /// Two faults: `first` fires at its step, then `then` at its own (a failed write whose
+    /// restore fails too).
+    pub fn inject_both(first: Fault, then: Fault) {
+        NEXT.set(Some(first));
+        AFTER.set(Some(then));
+    }
+
+    thread_local! {
+        static AFTER: Cell<Option<Fault>> = const { Cell::new(None) };
+    }
+
+    thread_local! {
+        static BEFORE_PUBLISH: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `f` once, on this thread, in the last window of a save: between the stamp check
+    /// and an in-place write (fix round 1 m3), or between the re-check and the publish of a new
+    /// file (m4). Another writer acts there.
+    pub fn before_publish(f: impl FnOnce() + 'static) {
+        BEFORE_PUBLISH.set(Some(Box::new(f)));
+    }
+
+    pub(super) fn run_before_publish() {
+        if let Some(f) = BEFORE_PUBLISH.take() {
+            f();
+        }
+    }
+
+    thread_local! {
+        static AFTER_PUBLISH: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// ## fix round 2 (mf2): runs `f` once, on this thread, right after a save published its
+    /// bytes (rename, hard link or in-place write) and before the folder check that follows.
+    pub fn after_publish(f: impl FnOnce() + 'static) {
+        AFTER_PUBLISH.set(Some(Box::new(f)));
+    }
+
+    pub(super) fn run_after_publish() {
+        if let Some(f) = AFTER_PUBLISH.take() {
+            f();
+        }
+    }
+
+    /// The temp name the last save on this thread created.
+    pub fn last_temp() -> Option<String> {
+        LAST_TEMP.with_borrow(Clone::clone)
+    }
+
+    fn fire() {
+        NEXT.set(AFTER.take());
+    }
+
+    pub(super) fn hit(at: Fault) -> io::Result<()> {
+        if NEXT.get() == Some(at) {
+            fire();
+            return Err(io::Error::other("injected fault"));
+        }
+        Ok(())
+    }
+
+    /// How many bytes of a write go through before an injected `WriteAfter` fault.
+    pub(super) fn write_budget() -> Option<usize> {
+        match NEXT.get() {
+            Some(Fault::WriteAfter(n)) => {
+                fire();
+                Some(n)
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn record_temp(name: &str) {
+        LAST_TEMP.set(Some(name.to_owned()));
+    }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+mod faults {
+    use std::io;
+
+    #[derive(Clone, Copy)]
+    pub(super) enum Fault {
+        Write,
+        Sync,
+        Rename,
+        Restore,
+        RestoreSync,
+    }
+
+    #[inline]
+    pub(super) fn hit(at: Fault) -> io::Result<()> {
+        let (Fault::Write | Fault::Sync | Fault::Rename | Fault::Restore | Fault::RestoreSync) = at;
+        Ok(())
+    }
+
+    #[inline]
+    pub(super) fn write_budget() -> Option<usize> {
+        None
+    }
+
+    #[inline]
+    pub(super) fn record_temp(_: &str) {}
+
+    #[inline]
+    pub(super) fn run_before_publish() {}
+
+    #[inline]
+    pub(super) fn run_after_publish() {}
+}
+
+use faults::Fault;
+
+/// `write_all`, unless a fault says otherwise (a `WriteAfter(n)` writes `n` bytes and fails).
+fn write_faulted(mut file: &File, bytes: &[u8]) -> io::Result<()> {
+    faults::hit(Fault::Write)?;
+    if let Some(n) = faults::write_budget() {
+        file.write_all(&bytes[..n.min(bytes.len())])?;
+        return Err(io::Error::other("injected partial write"));
+    }
+    file.write_all(bytes)
+}
+
+// ---- paths -------------------------------------------------------------------------------------
+
+/// Why a path was not opened.
+#[derive(Debug)]
+enum Refusal {
+    Path(PathError),
+    Fs(FsError),
+    OutOfScope,
+}
+
+impl From<PathError> for Refusal {
+    fn from(e: PathError) -> Self {
+        Refusal::Path(e)
+    }
+}
+
+impl From<FsError> for Refusal {
+    fn from(e: FsError) -> Self {
+        Refusal::Fs(e)
+    }
+}
+
+impl Refusal {
+    fn for_read(self) -> ReadError {
+        match self {
+            Refusal::Path(PathError::Io(k)) => ReadError::Io(k),
+            Refusal::Fs(FsError::Io(e)) => ReadError::Io(e.kind()),
+            Refusal::OutOfScope => ReadError::OutOfScope,
+            Refusal::Path(_) | Refusal::Fs(_) => ReadError::PathRefused,
+        }
+    }
+
+    fn for_save(self) -> SaveError {
+        match self {
+            Refusal::Path(e) => match e {
+                PathError::Io(k) => SaveError::Io(k),
+                PathError::Malformed
+                | PathError::Name(_)
+                | PathError::Alias
+                | PathError::RootInEnvFolder => SaveError::PathRefused,
+                PathError::LinkOnPath
+                | PathError::NotAFolder
+                | PathError::NotAFile
+                | PathError::OutsideRoot
+                | PathError::RootChanged
+                | PathError::Changed => SaveError::PathChanged,
+            },
+            Refusal::Fs(e) => fs_save_error(e),
+            Refusal::OutOfScope => SaveError::OutOfScope,
+        }
+    }
+}
+
+fn fs_save_error(e: FsError) -> SaveError {
+    match e {
+        FsError::Io(e) => SaveError::Io(e.kind()),
+        FsError::Link
+        | FsError::NotDir
+        | FsError::NotFile
+        | FsError::TooLarge
+        | FsError::Changed => SaveError::PathChanged,
+    }
+}
+
+fn fs_read_error(e: FsError) -> ReadError {
+    Refusal::Fs(e).for_read()
+}
+
+/// Where a path ends, under its folder handle: an existing regular file, or nothing yet.
+enum Target {
+    Existing {
+        dir: Dir,
+        name: String,
+        lstat: Metadata,
+    },
+    Missing {
+        dir: Dir,
+        name: String,
+    },
+}
+
+impl Target {
+    fn dir(&self) -> &Dir {
+        match self {
+            Target::Existing { dir, .. } | Target::Missing { dir, .. } => dir,
+        }
+    }
+}
+
+/// `pathsafe::join` decides (fr1 I2: the link, if any, resolved as text inside the root); then
+/// the path it answered is walked with no-follow folder handles, and anything that is a link
+/// now is refused.
+fn locate(root: &LibraryRoot, rel: &RelPath, env: Option<EnvTag>) -> Result<Target, Refusal> {
+    let joined = pathsafe::join(root, rel)?;
+    {
+        let kind = match joined.kind {
+            JoinedKind::Folder => EntryKind::Folder,
+            JoinedKind::File | JoinedKind::Absent => {
+                scan::script_kind(rel.name()).unwrap_or(EntryKind::Sql)
+            }
+        };
+        if !envscope::visible_at(rel, kind, joined.target.as_ref(), env) {
+            return Err(Refusal::OutOfScope);
+        }
+    }
+    if joined.kind == JoinedKind::Folder {
+        return Err(Refusal::Fs(FsError::NotFile));
+    }
+    let open = joined.target.as_ref().unwrap_or(rel);
+    let mut dir = Dir::open_canonical(&root.canonical)?;
+    let parts: Vec<&str> = open.components().collect();
+    let Some((last, folders)) = parts.split_last() else {
+        return Err(Refusal::Path(PathError::Malformed));
+    };
+    for folder in folders {
+        dir = dir.subdir(folder)?;
+    }
+    let name = (*last).to_owned();
+    let lstat = match dir.lstat(&name) {
+        Ok(m) => m,
+        Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+            // A link's target that vanished is not a place to create a file.
+            if joined.target.is_some() {
+                return Err(Refusal::Path(PathError::Changed));
+            }
+            return Ok(Target::Missing { dir, name });
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if is_link(&lstat) {
+        return Err(Refusal::Path(PathError::Changed));
+    }
+    if !lstat.is_file() {
+        return Err(Refusal::Fs(FsError::NotFile));
+    }
+    Ok(Target::Existing { dir, name, lstat })
+}
+
+// ---- reading -------------------------------------------------------------------------------
+
+/// An open regular file under its folder handle, and its `fstat`.
+struct Opened {
+    dir: Dir,
+    name: String,
+    file: File,
+    meta: Metadata,
+}
+
+fn open_for_read(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+) -> Result<Opened, ReadError> {
+    match locate(root, rel, env).map_err(Refusal::for_read)? {
+        Target::Missing { .. } => Err(ReadError::Io(io::ErrorKind::NotFound)),
+        Target::Existing { dir, name, lstat } => {
+            let file = dir.open_read(&name, &lstat).map_err(fs_read_error)?;
+            let meta = file.metadata().map_err(|e| ReadError::Io(e.kind()))?;
+            Ok(Opened {
+                dir,
+                name,
+                file,
+                meta,
+            })
+        }
+    }
+}
+
+/// All bytes of a file of at most [`WHOLE_MAX_BYTES`], and their stamp. A file that changes
+/// while it is read answers `Io(Interrupted)` (the watcher reads it again once it settles).
+fn read_all(opened: Opened) -> Result<(Vec<u8>, DiskStamp), ReadError> {
+    let io_err = |e: io::Error| ReadError::Io(e.kind());
+    let len = opened.meta.len();
+    let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    (&opened.file)
+        .take(len + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_err)?;
+    let after = opened.file.metadata().map_err(io_err)?;
+    if bytes.len() as u64 != len || Fingerprint::of(&after) != Fingerprint::of(&opened.meta) {
+        return Err(ReadError::Io(io::ErrorKind::Interrupted));
+    }
+    let stamp = stamp_from(&after, bytes.len() as u64, XxHash3_128::oneshot(&bytes));
+    Ok((bytes, stamp))
+}
+
+/// The first [`PREVIEW_BYTES`] decoded and cut after the last line break, with the whole
+/// file's stamp (hashed streaming). `chosen` is the user's encoding, else the sniffed one.
+fn read_preview(opened: Opened, chosen: Option<TextEncoding>) -> Result<Decoded, ReadError> {
+    let io_err = |e: io::Error| ReadError::Io(e.kind());
+    let mut file = &opened.file;
+    let mut prefix = vec![0u8; PREVIEW_BYTES];
+    let mut got = 0;
+    while got < prefix.len() {
+        match file.read(&mut prefix[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(io_err(e)),
+        }
+    }
+    prefix.truncate(got);
+    let mut hasher = XxHash3_128::new();
+    hasher.write(&prefix);
+    let mut total = prefix.len() as u64;
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                hasher.write(&buf[..n]);
+                total += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(io_err(e)),
+        }
+    }
+    let after = opened.file.metadata().map_err(io_err)?;
+    if total != opened.meta.len() || Fingerprint::of(&after) != Fingerprint::of(&opened.meta) {
+        return Err(ReadError::Io(io::ErrorKind::Interrupted));
+    }
+    let stamp = stamp_from(&after, total, hasher.finish_128());
+
+    let sniffed = encoding::sniff_bom(&prefix).map(|(e, _)| e);
+    let enc = match (chosen, sniffed) {
+        (Some(c), _) => c,
+        (None, Some(s)) => s,
+        (None, None) if looks_binary(&prefix) => return Err(ReadError::Binary),
+        (None, None) => TextEncoding::UTF_8,
+    };
+    let bom = {
+        let own = encoding::bom_of(enc);
+        !own.is_empty() && prefix.starts_with(own)
+    };
+    let mut decoder = StreamDecoder::new(enc).ok_or(ReadError::UnknownEncoding)?;
+    let Some(mut text) = decoder.feed(&prefix, false) else {
+        return Err(if chosen.is_some() {
+            ReadError::Undecodable
+        } else {
+            ReadError::NeedsEncoding { guess: None }
+        });
+    };
+    text.truncate(preview_cut(&text));
+    // fr1 m8: the preview must encode back to the bytes it came from, as `read_with` checks.
+    match encoding::encode_exact(enc, bom, &text) {
+        Ok(back) if prefix.starts_with(&back) => {}
+        _ => return Err(ReadError::Lossy),
+    }
+    let meta = FileMeta {
+        encoding: enc,
+        bom,
+        line_ending: line_stats(&text).ending,
+        partial: true,
+    };
+    Ok(Decoded {
+        text,
+        meta,
+        stamp,
+        tier: SizeTier::Preview,
+    })
+}
+
+/// Where a preview ends: after the last `\n`, else after the last `\r` that is not the final
+/// character, else the whole decoded prefix without a final `\r` (which may be the first half
+/// of a CRLF the cut split).
+fn preview_cut(text: &str) -> usize {
+    if let Some(i) = text.rfind('\n') {
+        return i + 1;
+    }
+    match text.rfind('\r') {
+        Some(i) if i + 1 < text.len() => i + 1,
+        _ => text.strip_suffix('\r').map_or(text.len(), str::len),
+    }
+}
+
+/// UI-EDIT-02 step 1 on a whole file.
+fn decode_sniffed(bytes: &[u8]) -> Result<(String, FileMeta), ReadError> {
+    if let Some((enc, n)) = encoding::sniff_bom(bytes)
+        && let Some(text) = encoding::decode_exact(enc, &bytes[n..])
+    {
+        let line_ending = line_stats(&text).ending;
+        return Ok((
+            text,
+            FileMeta {
+                encoding: enc,
+                bom: true,
+                line_ending,
+                partial: false,
+            },
+        ));
+    }
+    if looks_binary(bytes) {
+        return Err(ReadError::Binary);
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(text) => {
+            let line_ending = line_stats(text).ending;
+            Ok((
+                text.to_owned(),
+                FileMeta {
+                    encoding: TextEncoding::UTF_8,
+                    bom: false,
+                    line_ending,
+                    partial: false,
+                },
+            ))
+        }
+        Err(_) => Err(ReadError::NeedsEncoding { guess: None }),
+    }
+}
+
+fn decoded(text: String, meta: FileMeta, stamp: DiskStamp, len: u64, whole: bool) -> Decoded {
+    let stats = line_stats(&text);
+    let tier = match tier_for(len, stats.lines) {
+        SizeTier::Full if stats.longest > FULL_MAX_LINE_BYTES => SizeTier::Reduced,
+        // Asked for the whole file past 20 MiB: Reduced, with a warning (the app's).
+        SizeTier::Preview if whole => SizeTier::Reduced,
+        t => t,
+    };
+    Decoded {
+        text,
+        meta,
+        stamp,
+        tier,
+    }
+}
+
+/// More than 1 % NUL bytes in the first [`BINARY_PROBE_BYTES`] (UI-EDIT-23 edge case).
+fn looks_binary(bytes: &[u8]) -> bool {
+    let probe = &bytes[..bytes.len().min(BINARY_PROBE_BYTES)];
+    let nul = probe.iter().filter(|b| **b == 0).count();
+    nul * 100 > probe.len()
+}
+
+struct LineStats {
+    ending: LineEnding,
+    lines: usize,
+    longest: usize,
+}
+
+/// Line breaks are exactly LF, CRLF and a lone CR (UI-EDIT-02 step 2); the dominant one is the
+/// most frequent, LF on a tie or when there is none (step 3).
+fn line_stats(text: &str) -> LineStats {
+    let b = text.as_bytes();
+    let (mut lf, mut crlf, mut cr) = (0usize, 0usize, 0usize);
+    let (mut longest, mut start, mut i) = (0usize, 0usize, 0usize);
+    while i < b.len() {
+        let width = match b[i] {
+            b'\n' => {
+                lf += 1;
+                1
+            }
+            b'\r' if b.get(i + 1) == Some(&b'\n') => {
+                crlf += 1;
+                2
+            }
+            b'\r' => {
+                cr += 1;
+                1
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        longest = longest.max(i - start);
+        i += width;
+        start = i;
+    }
+    longest = longest.max(b.len() - start);
+    let top = lf.max(crlf).max(cr);
+    let at_top = [lf, crlf, cr].iter().filter(|n| **n == top).count();
+    let ending = if top == 0 || at_top > 1 || lf == top {
+        LineEnding::Lf
+    } else if crlf == top {
+        LineEnding::CrLf
+    } else {
+        LineEnding::Cr
+    };
+    LineStats {
+        ending,
+        lines: lf + crlf + cr + 1,
+        longest,
+    }
+}
+
+// ---- saving --------------------------------------------------------------------------------
+
+/// The file a save replaces, as it was checked.
+struct Original<'a> {
+    meta: &'a Metadata,
+    stamp: DiskStamp,
+}
+
+enum Replace {
+    Failed(SaveError),
+    /// The temp file cannot take the original's owner: write in place instead.
+    OwnerNotKept,
+}
+
+impl From<SaveError> for Replace {
+    fn from(e: SaveError) -> Self {
+        Replace::Failed(e)
+    }
+}
+
+impl From<io::Error> for Replace {
+    fn from(e: io::Error) -> Self {
+        Replace::Failed(SaveError::Io(e.kind()))
+    }
+}
+
+impl From<FsError> for Replace {
+    fn from(e: FsError) -> Self {
+        Replace::Failed(fs_save_error(e))
+    }
+}
+
+/// The XXH3-128 of everything `file` holds from its start, read in 1 MiB pieces (fr1 m5: a
+/// file swapped for a huge one is never read into memory), and the byte count.
+fn hash_streaming(mut file: &File) -> io::Result<(u128, u64)> {
+    file.seek(io::SeekFrom::Start(0))?;
+    let mut hasher = XxHash3_128::new();
+    let mut buf = vec![0u8; HASH_CHUNK_BYTES];
+    let mut total = 0u64;
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => return Ok((hasher.finish_128(), total)),
+            Ok(n) => {
+                hasher.write(&buf[..n]);
+                total += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// The current stamp of the regular file `name`, read through a no-follow handle.
+fn stamp_streaming(dir: &Dir, name: &str, lstat: &Metadata) -> Result<DiskStamp, SaveError> {
+    let file = dir.open_read(name, lstat).map_err(fs_save_error)?;
+    let (hash, len) = hash_streaming(&file).map_err(|e| SaveError::Io(e.kind()))?;
+    let meta = file.metadata().map_err(|e| SaveError::Io(e.kind()))?;
+    Ok(stamp_from(&meta, len, hash))
+}
+
+/// The atomic save over an existing file: a same-folder temp that takes the original's mode
+/// and owner, synced, renamed over `name`.
+fn replace(
+    dir: &Dir,
+    name: &str,
+    bytes: &[u8],
+    original: &Original<'_>,
+    echo: &mut dyn FnMut(&DiskStamp),
+) -> Result<DiskStamp, Replace> {
+    let tmp = temp_name_for(name);
+    faults::record_temp(&tmp);
+    let file = dir.create_temp(&tmp, true)?;
+    let written = write_temp(&file, bytes, Some(original));
+    drop(file);
+    let published = written.and_then(|stamp| {
+        recheck(dir, name, Some(original))?;
+        echo(&stamp);
+        faults::hit(Fault::Rename)?;
+        let still = dir.rename_noting_after(&tmp, name, faults::run_after_publish)?;
+        dir.sync();
+        Ok((stamp, still))
+    });
+    match published {
+        Ok((stamp, true)) => Ok(stamp),
+        // fr2 mf2: renamed, so saved; only the folder check after it failed.
+        Ok((stamp, false)) => Err(Replace::Failed(SaveError::SavedButPathChanged(stamp))),
+        Err(e) => {
+            dir.discard_temp(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// A new file: the temp, synced, is published with a hard link, which fails when the name
+/// exists, so a file that appeared meanwhile is never replaced (fr1 m4, T3's publish). On a
+/// volume without hard links (exFAT, FAT, SMB) the name itself is created with `create_new`,
+/// which never replaces one either.
+fn publish_new(
+    dir: &Dir,
+    name: &str,
+    bytes: &[u8],
+    echo: &mut dyn FnMut(&DiskStamp),
+) -> Result<DiskStamp, SaveError> {
+    let tmp = temp_name_for(name);
+    faults::record_temp(&tmp);
+    let file = dir.create_temp(&tmp, false).map_err(fs_save_error)?;
+    let written = write_temp(&file, bytes, None);
+    drop(file);
+    let linked = match written {
+        Ok(stamp) => recheck(dir, name, None)
+            .and_then(|()| {
+                echo(&stamp);
+                faults::run_before_publish();
+                faults::hit(Fault::Rename).map_err(|e| SaveError::Io(e.kind()))
+            })
+            .map(|()| {
+                let linked = dir.publish_link_noting_after(&tmp, name, faults::run_after_publish);
+                (stamp, linked)
+            }),
+        Err(Replace::Failed(e)) => Err(e),
+        Err(Replace::OwnerNotKept) => Err(SaveError::Io(io::ErrorKind::PermissionDenied)),
+    };
+    dir.discard_temp(&tmp);
+    let (stamp, linked) = linked?;
+    match linked {
+        Ok(true) => {
+            dir.sync();
+            Ok(stamp)
+        }
+        // fr2 mf2: published, so saved; only the folder check after it failed.
+        Ok(false) => Err(SaveError::SavedButPathChanged(stamp)),
+        Err(FsError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => Err(appeared(dir, name)),
+        // No hard links on this volume (`EPERM`, `ENOTSUP`): the no-replace fallback.
+        Err(FsError::Io(_)) => create_in_place(dir, name, bytes),
+        Err(e) => Err(fs_save_error(e)),
+    }
+}
+
+/// What a name that appeared during a new-file save holds now.
+fn appeared(dir: &Dir, name: &str) -> SaveError {
+    match dir.lstat(name) {
+        Ok(m) if m.is_file() && !is_link(&m) => match stamp_streaming(dir, name, &m) {
+            Ok(stamp) => SaveError::ChangedOnDisk(stamp),
+            Err(e) => e,
+        },
+        Ok(_) => SaveError::PathChanged,
+        Err(e) => fs_save_error(e),
+    }
+}
+
+/// The no-hard-link fallback: the name created with `create_new` and written; a partial file
+/// it created is removed again while the name still is that file (T3's `create_in_place`).
+fn create_in_place(dir: &Dir, name: &str, bytes: &[u8]) -> Result<DiskStamp, SaveError> {
+    let file = dir.create_new(name).map_err(|e| match e {
+        FsError::Io(e) if e.kind() == io::ErrorKind::AlreadyExists => appeared(dir, name),
+        e => fs_save_error(e),
+    })?;
+    let written = (|| -> io::Result<DiskStamp> {
+        write_faulted(&file, bytes)?;
+        file.sync_all()?;
+        Ok(stamp_from(
+            &file.metadata()?,
+            bytes.len() as u64,
+            XxHash3_128::oneshot(bytes),
+        ))
+    })();
+    match written {
+        Ok(stamp) => {
+            dir.sync();
+            Ok(stamp)
+        }
+        Err(e) => {
+            let ours = file.metadata().ok().map(|m| dir::identity(&m));
+            drop(file);
+            if let (Some(ours), Ok(now)) = (ours, dir.lstat(name))
+                && !is_link(&now)
+                && dir::identity(&now) == ours
+            {
+                let _ = dir.remove_file(name);
+            }
+            Err(SaveError::Io(e.kind()))
+        }
+    }
+}
+
+fn write_temp(
+    file: &File,
+    bytes: &[u8],
+    original: Option<&Original<'_>>,
+) -> Result<DiskStamp, Replace> {
+    if let Some(o) = original {
+        keep_mode(file, o.meta)?;
+        if keep_owner(file, o.meta).is_err() {
+            return Err(Replace::OwnerNotKept);
+        }
+    }
+    write_faulted(file, bytes)?;
+    faults::hit(Fault::Sync)?;
+    file.sync_all()?;
+    let meta = file.metadata()?;
+    Ok(stamp_from(
+        &meta,
+        bytes.len() as u64,
+        XxHash3_128::oneshot(bytes),
+    ))
+}
+
+/// Right before the publish: the name still holds the file that was checked (or still nothing).
+fn recheck(dir: &Dir, name: &str, original: Option<&Original<'_>>) -> Result<(), SaveError> {
+    let now = match dir.lstat(name) {
+        Ok(m) => Some(m),
+        Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(fs_save_error(e)),
+    };
+    match (original, now) {
+        (None, None) => Ok(()),
+        (Some(o), Some(m))
+            if m.is_file()
+                && Fingerprint::of(&m) == Fingerprint::of(o.meta)
+                && o.stamp.len == m.len() =>
+        {
+            Ok(())
+        }
+        (_, Some(m)) if m.is_file() && !is_link(&m) => {
+            Err(SaveError::ChangedOnDisk(stamp_streaming(dir, name, &m)?))
+        }
+        (Some(_), None) => Err(SaveError::DeletedOnDisk),
+        (_, Some(_)) => Err(SaveError::PathChanged),
+    }
+}
+
+/// Writes over the file through its own handle, so the inode, its other names and its owner
+/// stay (fr1 I1, ruling R-T5-1): the handle is re-checked against the stamp right before (m3),
+/// the original bytes are kept, and on any error they are written back with the original
+/// mtime and verified. [`SaveError::Damaged`] only when that restore fails too.
+fn in_place(
+    dir: &Dir,
+    name: &str,
+    file: File,
+    original: &Original<'_>,
+    bytes: &[u8],
+    echo: &mut dyn FnMut(&DiskStamp),
+) -> Result<DiskStamp, SaveError> {
+    let io_err = |e: io::Error| SaveError::Io(e.kind());
+    if original.stamp.len > WHOLE_MAX_BYTES {
+        return Err(SaveError::Io(io::ErrorKind::FileTooLarge));
+    }
+    faults::run_before_publish();
+    // m3: still the file the stamp was taken of, unchanged since.
+    let now = file.metadata().map_err(io_err)?;
+    let mut kept = Vec::with_capacity(usize::try_from(original.stamp.len).unwrap_or(0));
+    (&file).seek(io::SeekFrom::Start(0)).map_err(io_err)?;
+    (&file).read_to_end(&mut kept).map_err(io_err)?;
+    let unchanged = Fingerprint::of(&now) == Fingerprint::of(original.meta)
+        && kept.len() as u64 == original.stamp.len
+        && XxHash3_128::oneshot(&kept) == original.stamp.hash;
+    if !unchanged {
+        return Err(match dir.lstat(name) {
+            Ok(m) if m.is_file() && !is_link(&m) => match stamp_streaming(dir, name, &m) {
+                Ok(stamp) => SaveError::ChangedOnDisk(stamp),
+                Err(e) => e,
+            },
+            _ => SaveError::PathChanged,
+        });
+    }
+    match write_over(&file, bytes, false) {
+        Ok(()) => {
+            let meta = file.metadata().map_err(io_err)?;
+            let stamp = stamp_from(&meta, bytes.len() as u64, XxHash3_128::oneshot(bytes));
+            echo(&stamp);
+            // fr2 mf2: written through the file's own handle, so saved; a folder moved since is
+            // a warning, never a plain failure.
+            faults::run_after_publish();
+            if dir.verify().is_err() {
+                return Err(SaveError::SavedButPathChanged(stamp));
+            }
+            Ok(stamp)
+        }
+        Err(e) => {
+            // The content decides; the mtime is put back too where the file system can hold
+            // it, so the editor's stamp still matches.
+            let restored = write_over(&file, &kept, true).and_then(|()| {
+                let _ = file.set_times(FileTimes::new().set_modified(original.stamp.mtime));
+                // fr2 mf1: a write-back that may not be durable is not a restore.
+                faults::hit(Fault::RestoreSync)?;
+                file.sync_all()?;
+                let (hash, len) = hash_streaming(&file)?;
+                Ok(len == original.stamp.len && hash == original.stamp.hash)
+            });
+            match restored {
+                Ok(true) => Err(SaveError::Io(e.kind())),
+                Ok(false) | Err(_) => Err(SaveError::Damaged),
+            }
+        }
+    }
+}
+
+/// `bytes` over the whole file through `file`: from the start, then the length cut, then synced.
+/// `restoring` marks the write-back of the original (a fault point of its own).
+fn write_over(mut file: &File, bytes: &[u8], restoring: bool) -> io::Result<()> {
+    file.seek(io::SeekFrom::Start(0))?;
+    if restoring {
+        faults::hit(Fault::Restore)?;
+        file.write_all(bytes)?;
+    } else {
+        write_faulted(file, bytes)?;
+    }
+    file.set_len(bytes.len() as u64)?;
+    if !restoring {
+        faults::hit(Fault::Sync)?;
+    }
+    file.sync_all()
+}
+
+#[cfg(unix)]
+fn keep_mode(file: &File, original: &Metadata) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(
+        original.permissions().mode() & 0o777,
+    ))
+}
+
+#[cfg(not(unix))]
+fn keep_mode(_: &File, _: &Metadata) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn keep_owner(file: &File, original: &Metadata) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    std::os::unix::fs::fchown(file, Some(original.uid()), Some(original.gid()))
+}
+
+#[cfg(not(unix))]
+fn keep_owner(_: &File, _: &Metadata) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn hard_links(meta: &Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.nlink()
+}
+
+#[cfg(not(unix))]
+fn hard_links(_: &Metadata) -> u64 {
+    // fr1 m11: `std` exposes no link count on Windows (`MetadataExt::number_of_links` is
+    // unstable, `windows_by_handle`), and this crate has no `windows-sys`; a rename there
+    // replaces the name, as Notepad's save does (ADR 0009, a recorded residual).
+    1
+}
+
+fn stamp_from(meta: &Metadata, len: u64, hash: u128) -> DiskStamp {
+    DiskStamp {
+        len,
+        mtime: meta.modified().unwrap_or(UNIX_EPOCH),
+        hash,
+    }
+}
+
+// ---- the stream ----------------------------------------------------------------------------
+
+/// What tells two versions of a file apart without reading it: size, times and identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fingerprint {
+    len: u64,
+    mtime: Option<SystemTime>,
+    #[cfg(unix)]
+    unix: (u64, u64, i64, i64),
+    #[cfg(not(unix))]
+    created: Option<SystemTime>,
+}
+
+impl Fingerprint {
+    fn of(meta: &Metadata) -> Self {
+        Fingerprint {
+            len: meta.len(),
+            mtime: meta.modified().ok(),
+            #[cfg(unix)]
+            unix: {
+                use std::os::unix::fs::MetadataExt;
+                (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec())
+            },
+            #[cfg(not(unix))]
+            created: meta.created().ok(),
+        }
+    }
+}
+
+struct FileStream {
+    dir: Dir,
+    name: String,
+    file: File,
+    at_open: Fingerprint,
+    decoder: StreamDecoder,
+    done: bool,
+}
+
+impl FileStream {
+    /// Fills `buf` from the handle; fewer bytes than its length means the end.
+    fn fill(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut got = 0;
+        while got < buf.len() {
+            match self.file.read(&mut buf[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(got)
+    }
+
+    /// The handle and the path both still show the file as it was at open.
+    fn unchanged(&self) -> bool {
+        let handle = self.file.metadata().map(|m| Fingerprint::of(&m));
+        let path = self.dir.lstat(&self.name).map(|m| Fingerprint::of(&m));
+        matches!((handle, path), (Ok(h), Ok(p)) if h == self.at_open && p == self.at_open)
+    }
+}
+
+impl ScriptChunks for FileStream {
+    fn next_chunk(&mut self) -> Option<Result<String, ChunkError>> {
+        let mut buf = vec![0u8; STREAM_CHUNK_BYTES];
+        while !self.done {
+            let n = match self.fill(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(ChunkError::Io(e.kind())));
+                }
+            };
+            // Checked after the read: bytes read under a changed stamp are never handed out.
+            if !self.unchanged() {
+                self.done = true;
+                return Some(Err(ChunkError::Changed));
+            }
+            let last = n < buf.len();
+            let Some(text) = self.decoder.feed(&buf[..n], last) else {
+                self.done = true;
+                return Some(Err(ChunkError::Decode));
+            };
+            self.done = last;
+            if !text.is_empty() {
+                return Some(Ok(text));
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_stats_counts_each_break_once() {
+        let s = line_stats("SELECT 1;\r\nSELECT 2;\n");
+        assert_eq!((s.lines, s.ending), (3, LineEnding::Lf));
+        assert_eq!(line_stats("a\r\nb\r\n").ending, LineEnding::CrLf);
+        assert_eq!(line_stats("a\rb\r").ending, LineEnding::Cr);
+        assert_eq!(line_stats("x\u{2028}y").lines, 1);
+        assert_eq!(line_stats("").lines, 1);
+        assert_eq!(line_stats("ab\ncdef\r\ng").longest, 4);
+        // A CRLF tie with a CR is a tie too: LF.
+        assert_eq!(line_stats("a\r\nb\rc").ending, LineEnding::Lf);
+    }
+
+    #[test]
+    fn preview_never_ends_on_a_lone_cr_at_the_cut() {
+        assert_eq!(preview_cut("a\nb\r"), 2);
+        assert_eq!(preview_cut("a\rb"), 2);
+        assert_eq!(preview_cut("abc\r"), 3);
+        assert_eq!(preview_cut("abc"), 3);
+    }
 }
 // ## m4b-t01a-seams

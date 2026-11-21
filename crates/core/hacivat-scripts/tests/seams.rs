@@ -9,10 +9,10 @@ use hacivat_proto::{EnvTag, ProfileId};
 use hacivat_scripts::testing::FakeEventSource;
 // ## m4b-t04-scanner (named exception): `envscope`, `pathsafe` and `visible` are Task 4's now.
 use hacivat_scripts::{
-    AttachError, DatabaseName, DbNode, EntryKind, EventSource, FileOpError, LibraryId, LibraryRoot,
+    AttachError, DatabaseName, DbNode, EntryKind, EventSource, FileOpError, LibraryId,
     LibraryService, LibraryState, LocalMapping, PathError, RawHint, ReadError, RegistryError,
     RelPath, SaveError, SaveText, SecretKind, SpanKind, UnavailableReason, WatchError, binding,
-    fileio, scan_secrets,
+    scan_secrets,
 };
 use hacivat_settings::LocalPaths;
 
@@ -119,42 +119,21 @@ fn secret_stub_reports_the_whole_text() {
 // ## m4b-t03-registry / m4b-t04-scanner (named exceptions, merged as a union): the manifest
 // and pathsafe stub assertions are gone; Task 3 wrote `tests/manifest.rs`, Task 4 `tests/pathsafe.rs`.
 
-#[test]
-fn fileio_stubs_read_and_write_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.sql"), b"SELECT 1;").unwrap();
-    let before = tree(dir.path());
-    let root = LibraryRoot {
-        id: LibraryId::new(),
-        path: dir.path().into(),
-        canonical: dir.path().canonicalize().unwrap(),
-    };
-    assert!(matches!(
-        fileio::read(&root, &rel("a.sql"), Default::default()),
-        Err(ReadError::NotImplemented)
-    ));
-    assert!(matches!(
-        fileio::save(&root, &rel("a.sql"), text("DROP TABLE t;"), None),
-        Err(SaveError::NotImplemented)
-    ));
-    assert!(matches!(
-        fileio::save(&root, &rel("new.sql"), text("x"), None),
-        Err(SaveError::NotImplemented)
-    ));
-    assert_eq!(tree(dir.path()), before);
-}
-
+// ## m4b-t05-fileio: `fileio::{read, save}` are real now (tests/fileio.rs); the service's
+// own read/save stubs below stay until Task 10. Fix round 2 (R-T5-6): they take the tab's
+// environment, and still refuse with one given.
 #[tokio::test]
 async fn save_stub_writes_nothing() {
     let (s, app, dir) = service_with_library();
     let lib = LibraryId::new();
     assert!(matches!(
-        s.save(lib, &rel("a.sql"), text("x"), None).await,
+        s.save(lib, &rel("a.sql"), Some(EnvTag::Dev), text("x"), None)
+            .await,
         Err(SaveError::NotImplemented)
     ));
     assert!(!dir.path().join("a.sql").exists());
     assert!(matches!(
-        s.save(lib, &rel("b.sql"), text("DROP TABLE t;"), None)
+        s.save(lib, &rel("b.sql"), None, text("DROP TABLE t;"), None)
             .await,
         Err(SaveError::NotImplemented)
     ));
@@ -202,7 +181,7 @@ async fn every_service_call_refuses_and_touches_no_file() {
     };
     assert_eq!(s.map(m, true).await, Err(RegistryError::NotImplemented));
     assert!(matches!(
-        s.read(id, &rel("b.sql")).await,
+        s.read(id, &rel("b.sql"), Some(EnvTag::Dev)).await,
         Err(ReadError::NotImplemented)
     ));
     assert_eq!(
@@ -218,7 +197,7 @@ async fn every_service_call_refuses_and_touches_no_file() {
         Err(FileOpError::NotImplemented)
     );
     assert!(matches!(
-        s.open_stream(id, &rel("b.sql")),
+        s.open_stream(id, &rel("b.sql"), None),
         Err(ReadError::NotImplemented)
     ));
     assert_eq!(tree(dir.path()), before);
