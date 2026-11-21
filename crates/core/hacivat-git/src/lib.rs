@@ -78,6 +78,11 @@ pub enum GitError {
     /// second one starts while it runs, so the library answers this until the read returns
     /// or the app restarts (m2). The call that hit the budget first answers `Timeout`.
     Paused,
+    /// The diagnostic "the repository is too large for the status": its index holds more
+    /// entries than gix decodes under reduced trust (16 MiB of decoded entries; the ceiling is
+    /// measured in `index_entry_ceiling_is_measured_at_the_boundary`). A library inside such a
+    /// repository has no badges (fix round 2, n1).
+    TooLarge,
     // ## m4b-t07-git
     /// The repository could not be read. The kind is fixed text of ours; no message from
     /// `gix` (which can quote config bytes) is kept (m3).
@@ -200,13 +205,15 @@ impl Default for GitLimits {
 ///
 /// Blocks the calling thread for at most `limits.timeout` (call it from the blocking pool):
 /// the pipeline runs on its own worker, and at the deadline this answers
-/// `Unavailable(Timeout)` without waiting for it. While a worker for the same library (by its
-/// canonical path, whatever spelling the caller uses) is still running, a new call answers
-/// `Unavailable(Paused)` at once and starts nothing. Pass the registry's canonical root.
+/// `Unavailable(Timeout)` without waiting for it. The caller itself touches no file (F2): it
+/// claims the library by the spelling it was given, and the worker claims the canonical path
+/// too once it has resolved it. While a worker for the same library is still running, a new
+/// call answers `Unavailable(Paused)` and starts nothing (an alias is caught once its own worker
+/// has resolved it). Pass the registry's canonical root.
 /// Never runs a program, never writes the index, never reads configuration outside the
-/// repository.
+/// repository, never opens a cloud placeholder.
 pub fn status(library_root: &Path, limits: &GitLimits) -> GitState {
-    status::status_with(library_root, limits, Vec::new())
+    status::status_with(library_root, limits, status::Hooks::default())
 }
 
 /// Test hooks for the integration tests (`tests/`); not part of the product API.
@@ -216,18 +223,44 @@ pub mod testing {
     use std::path::Path;
 
     /// [`status`](super::status), with `dataless` (library-relative, `/`-separated) treated as
-    /// cloud placeholders in addition to the ones the file flags name. The hook can only add
-    /// `Unknown(Dataless)` answers and index-copy removals, or (for a `.gitignore`,
-    /// `.gitattributes` or `.gitmodules`) the `Unavailable(Dataless)` refusal; it cannot remove
-    /// one, so it cannot weaken the status (`excluded_path_is_never_opened_by_status`,
-    /// `dataless_control_file_is_unavailable`).
+    /// cloud placeholders in addition to the ones the file flags name. Entries may name files
+    /// inside the repository's `.git` when the library is the worktree (`.git/HEAD`). The hook
+    /// can only add `Unknown(Dataless)` answers, index-copy removals and the
+    /// `Unavailable(Dataless)` refusal; it cannot remove one, so it cannot weaken the status.
     pub fn status_treating_as_dataless(
         library_root: &Path,
         limits: &GitLimits,
         dataless: &[&str],
     ) -> GitState {
-        let extra = dataless.iter().map(|s| (*s).to_owned()).collect();
-        crate::status::status_with(library_root, limits, extra)
+        let hooks = crate::status::Hooks {
+            dataless: dataless.iter().map(|s| (*s).to_owned()).collect(),
+            stall: None,
+        };
+        crate::status::status_with(library_root, limits, hooks)
+    }
+
+    /// Where [`status_with_stall`] blocks the worker.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Stall {
+        /// Before the worker resolves the library path (a stale network mount).
+        BeforeResolve,
+        /// After it has resolved the path and claimed the canonical library.
+        AfterResolve,
+    }
+
+    /// [`status`](super::status), with `stall` run on the worker at `at` (it blocks as long as
+    /// the test wants). It can only delay the status.
+    pub fn status_with_stall(
+        library_root: &Path,
+        limits: &GitLimits,
+        at: Stall,
+        stall: impl FnOnce() + Send + 'static,
+    ) -> GitState {
+        let hooks = crate::status::Hooks {
+            dataless: Vec::new(),
+            stall: Some((at, Box::new(stall))),
+        };
+        crate::status::status_with(library_root, limits, hooks)
     }
 }
 // ## m4b-t07-git

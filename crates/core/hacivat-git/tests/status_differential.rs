@@ -1022,57 +1022,72 @@ fn gitfile_and_alternates_redirection_is_unavailable() {
     }
 }
 
-/// An untracked FIFO named `.gitignore` blocks gix's open forever (`alg/28` §0.8, m3): the call
-/// answers `Unavailable(Timeout)` without joining the worker, and a second call while that
-/// worker is stuck answers at once and starts no second one.
-#[cfg(unix)]
+fn short() -> GitLimits {
+    GitLimits {
+        timeout: std::time::Duration::from_millis(300),
+        ..GitLimits::default()
+    }
+}
+
+/// A worker that blocks where `at` says until the returned sender drops (or sends).
+fn stalled(lib: &Path, at: hacivat_git::testing::Stall) -> (GitState, std::sync::mpsc::Sender<()>) {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    // Bounded, so a regression (the caller resolving the path itself) fails the test instead of
+    // hanging it.
+    let st = hacivat_git::testing::status_with_stall(lib, &short(), at, move || {
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
+    });
+    (st, tx)
+}
+
+/// A worker that never answers in time (m3): `Unavailable(Timeout)` without joining it; while it
+/// is stuck, the library answers `Paused` at once (m2) and starts no second worker. Since fix
+/// round 2 a FIFO `.gitignore` no longer hangs anything (F1), so the stuck worker is injected.
 #[test]
 fn timeout_is_unavailable_not_partial() {
     let repo = build_fixture("worktree-modified");
-    let fifo = repo.root().join("reports/.gitignore");
-    let out = Command::new("mkfifo").arg(&fifo).output().unwrap();
-    assert!(out.status.success());
-    let limits = GitLimits {
-        timeout: std::time::Duration::from_millis(300),
-        ..GitLimits::default()
-    };
-    let first = status(&repo.library(), &limits);
+    let (first, release) = stalled(&repo.library(), hacivat_git::testing::Stall::AfterResolve);
     assert!(
         matches!(first, GitState::Unavailable(GitError::Timeout)),
         "{first:?}"
     );
-    // The first worker is still blocked in the FIFO's open: no second worker, no partial
-    // answer; the library says its status is paused (m2).
-    let second = status(&repo.library(), &limits);
+    let second = status(&repo.library(), &short());
     assert!(
         matches!(second, GitState::Unavailable(GitError::Paused)),
         "{second:?}"
     );
-    // Release the stuck worker (a writer completes its open; closing gives it end of file).
-    drop(std::fs::File::options().write(true).open(&fifo).unwrap());
+    drop(release);
 }
 
-/// P4 (m1): the one-stuck-worker cap is per canonical library, whatever spelling the caller
-/// uses: through a symlinked alias the library still answers `Paused` and starts no worker.
+/// F2: the caller does no file-system work. While the worker's own path resolution blocks
+/// (a stale network mount), the caller still answers within its budget, and a second call with
+/// the same spelling answers `Paused` without resolving anything.
+#[test]
+fn caller_does_no_file_system_work() {
+    let repo = build_fixture("worktree-modified");
+    let (first, release) = stalled(&repo.library(), hacivat_git::testing::Stall::BeforeResolve);
+    assert!(
+        matches!(first, GitState::Unavailable(GitError::Timeout)),
+        "{first:?}"
+    );
+    let second = status(&repo.library(), &short());
+    assert!(
+        matches!(second, GitState::Unavailable(GitError::Paused)),
+        "{second:?}"
+    );
+    drop(release);
+}
+
+/// P4 (m1, F2): the one-stuck-worker cap is per canonical library. Once the stuck worker has
+/// resolved its path, a call through an alias (a symlink, `.`, `..`) answers `Paused`: its own
+/// worker resolves the alias, finds the canonical library taken, and stops.
 #[cfg(unix)]
 #[test]
 fn stuck_worker_cap_is_per_canonical_library() {
     let repo = build_fixture("worktree-modified");
-    let fifo = repo.root().join("reports/.gitignore");
-    assert!(
-        Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap()
-            .success()
-    );
     let alias = canonical(repo.env.path()).join("alias");
     std::os::unix::fs::symlink(repo.root(), &alias).unwrap();
-    let limits = GitLimits {
-        timeout: std::time::Duration::from_millis(300),
-        ..GitLimits::default()
-    };
-    let first = status(&repo.library(), &limits);
+    let (first, release) = stalled(&repo.library(), hacivat_git::testing::Stall::AfterResolve);
     assert!(
         matches!(first, GitState::Unavailable(GitError::Timeout)),
         "{first:?}"
@@ -1082,13 +1097,235 @@ fn stuck_worker_cap_is_per_canonical_library() {
         alias.join("."),
         repo.root().join("reports/.."),
     ] {
-        let st = status(&spelling, &limits);
+        let st = status(&spelling, &short());
         assert!(
             matches!(st, GitState::Unavailable(GitError::Paused)),
             "{spelling:?}: {st:?}"
         );
     }
-    drop(std::fs::File::options().write(true).open(&fifo).unwrap());
+    drop(release);
+}
+
+/// P9 (F1, R-T7-2): every `.gitignore`, `.gitattributes` and `.gitmodules` gix would read, in
+/// the library or a folder between the worktree and it, must be a regular file of at most
+/// 1 MiB: a 300 MiB sparse one is refused before anything reads it (`Failed(TooLarge)`), a FIFO
+/// is refused at once (`Unavailable(Redirected)`), never a hang.
+#[test]
+fn huge_or_special_control_file_is_refused() {
+    let too_large = GitState::Unavailable(GitError::Failed(hacivat_git::FailKind::TooLarge));
+    for (case, file, lib) in [
+        ("root-gitignore", ".gitignore", ""),
+        ("root-gitattributes", ".gitattributes", ""),
+        ("nested-gitignore", "reports/.gitignore", ""),
+        ("ancestor-gitignore", ".gitignore", "reports"),
+        ("ancestor-gitmodules", ".gitmodules", "reports"),
+    ] {
+        let mut repo = build_fixture("clean");
+        repo.lib = lib.into();
+        let f = std::fs::File::create(repo.root().join(file)).unwrap();
+        f.set_len(300 << 20).unwrap();
+        drop(f);
+        let st = repo.status();
+        assert_eq!(format!("{st:?}"), format!("{too_large:?}"), "{case}");
+    }
+    #[cfg(unix)]
+    for (case, file, lib) in [
+        ("fifo-gitattributes", ".gitattributes", ""),
+        ("fifo-nested-gitignore", "reports/.gitignore", ""),
+        ("fifo-ancestor-gitignore", ".gitignore", "reports"),
+    ] {
+        let mut repo = build_fixture("clean");
+        repo.lib = lib.into();
+        assert!(
+            Command::new("mkfifo")
+                .arg(repo.root().join(file))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let st = repo.status();
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Redirected)),
+            "{case}: {st:?}"
+        );
+    }
+}
+
+/// F3 (R-T7-4): the repository's own files that the open, the index read and the HEAD lookup
+/// touch are never opened when they are cloud placeholders: `HEAD`, `config`, `index`,
+/// `packed-refs`, the loose ref HEAD names, a pack file, a nested repository's gitfile or
+/// `HEAD`. The library answers `Unavailable(Dataless)`.
+#[test]
+fn dataless_repository_internals_are_unavailable() {
+    let repo = build_fixture("clean");
+    repo.git(&["repack", "-a", "-d", "-q"]);
+    let pack = std::fs::read_dir(repo.root().join(".git/objects/pack"))
+        .unwrap()
+        .filter_map(|e| e.unwrap().file_name().into_string().ok())
+        .find(|n| n.ends_with(".pack"))
+        .expect("a pack after repack");
+    let pack = format!(".git/objects/pack/{pack}");
+    std::fs::write(
+        repo.root().join(".git/packed-refs"),
+        "# pack-refs with: peeled\n",
+    )
+    .unwrap();
+    // A nested repository (untracked) with a gitfile, and one with a `.git` directory.
+    let other = build_fixture("clean");
+    std::fs::create_dir_all(repo.root().join("nested")).unwrap();
+    std::fs::write(
+        repo.root().join("nested/.git"),
+        format!("gitdir: {}\n", other.root().join(".git").display()),
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.root().join("inner/.git/objects")).unwrap();
+    std::fs::create_dir_all(repo.root().join("inner/.git/refs")).unwrap();
+    std::fs::write(
+        repo.root().join("inner/.git/HEAD"),
+        "ref: refs/heads/main\n",
+    )
+    .unwrap();
+    // Control: nothing flagged, the status is there.
+    assert!(matches!(repo.status(), GitState::Ready(_)), "control");
+    for flagged in [
+        ".git/HEAD",
+        ".git/config",
+        ".git/index",
+        ".git/packed-refs",
+        ".git/refs/heads/main",
+        pack.as_str(),
+        "nested/.git",
+        "inner/.git/HEAD",
+    ] {
+        let st = hacivat_git::testing::status_treating_as_dataless(
+            &repo.library(),
+            &GitLimits::default(),
+            &[flagged],
+        );
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Dataless)),
+            "{flagged}: {st:?}"
+        );
+    }
+}
+
+/// n1: the index ceiling is gix's own reduced-trust allocation limit (16 MiB of decoded
+/// entries), measured here with a real index at the boundary: the largest entry count is
+/// `Ready`, one more is `Unavailable(TooLarge)`, never a silent `Failed`.
+#[test]
+fn index_entry_ceiling_is_measured_at_the_boundary() {
+    if !cli_ok("index_entry_ceiling_is_measured_at_the_boundary") {
+        return;
+    }
+    let ceiling = (16 << 20) / std::mem::size_of::<gix::index::Entry>();
+    let limits = GitLimits {
+        max_entries: usize::MAX,
+        ..GitLimits::default()
+    };
+    let mut results = Vec::new();
+    for n in [ceiling, ceiling + 1] {
+        let repo = Repo::init();
+        let blob =
+            String::from_utf8(repo.git(&["hash-object", "-w", "--stdin"])).unwrap_or_default();
+        let blob = if blob.trim().is_empty() {
+            // `hash-object --stdin` with no input hashes the empty blob.
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391".to_owned()
+        } else {
+            blob.trim().to_owned()
+        };
+        let mut info = String::with_capacity(n * 40);
+        for i in 0..n {
+            info.push_str(&format!("100644 {blob}\td{}/f{i}\n", i % 512));
+        }
+        let mut child = repo
+            .cmd_in(&repo.root(), &["update-index", "--index-info"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(info.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        let st = status(&repo.library(), &limits);
+        results.push(format!(
+            "{n}:{}",
+            match &st {
+                GitState::Ready(_) => "Ready".to_owned(),
+                other => format!("{other:?}"),
+            }
+        ));
+        if n == ceiling {
+            assert!(matches!(st, GitState::Ready(_)), "{n} entries: {st:?}");
+        } else {
+            assert!(
+                matches!(st, GitState::Unavailable(GitError::TooLarge)),
+                "{n} entries: {st:?}"
+            );
+        }
+    }
+    fact(&format!(
+        "t07 index_ceiling entry_size={} max_entries={ceiling} results={}",
+        std::mem::size_of::<gix::index::Entry>(),
+        results.join(",")
+    ));
+}
+
+/// n2: a non-ASCII case-only rename of the library folder (`Çal/` in the index, `çal/` on
+/// disk) is `Unknown(CaseMismatch)`, never `New`, where the file system folds case.
+#[test]
+fn non_ascii_case_only_library_rename_is_case_mismatch() {
+    let mut repo = Repo::init();
+    repo.write("\u{c7}al/a.sql", b"select 1;\n");
+    repo.commit_all();
+    std::fs::rename(repo.root().join("\u{c7}al"), repo.root().join("\u{e7}al")).unwrap();
+    repo.write("\u{e7}al/a.sql", b"select 'changed';\n");
+    repo.lib = "\u{e7}al".into();
+    if !folds_case(&repo.library()) {
+        fact("t07 non_ascii_case_only_library_rename skipped (the file system does not fold case)");
+        return;
+    }
+    let got = ours(&repo.status());
+    assert_eq!(
+        got.get("a.sql").map(String::as_str),
+        Some("Unknown(CaseMismatch)"),
+        "{got:?}"
+    );
+}
+
+/// n5: a dataless folder is not listed, by the pre-walk or by gix (T4 does not read dataless
+/// folders either): nothing under it is reported, nor refused. Its oversize `.gitignore` would be
+/// `Failed(TooLarge)` and its FIFO `Unknown(NotAFile)` if anything listed it.
+#[test]
+fn dataless_folder_is_not_listed() {
+    let repo = build_fixture("clean");
+    let f = std::fs::File::create(repo.root().join("reports/.gitignore")).unwrap();
+    f.set_len(2 << 20).unwrap();
+    drop(f);
+    repo.write("reports/new.sql", b"select 4;\n");
+    #[cfg(unix)]
+    assert!(
+        Command::new("mkfifo")
+            .arg(repo.root().join("reports/pipe"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    repo.write("a.sql", b"select 'changed';\n");
+    let st = hacivat_git::testing::status_treating_as_dataless(
+        &repo.library(),
+        &GitLimits::default(),
+        &["reports"],
+    );
+    let got = ours(&st);
+    assert_eq!(
+        got.get("a.sql").map(String::as_str),
+        Some("Modified"),
+        "{got:?}"
+    );
+    assert!(!got.keys().any(|k| k.starts_with("reports/")), "{got:?}");
 }
 
 /// R-T7-3 (I4): a `.gitignore` or `.gitattributes` the status would read is a cloud

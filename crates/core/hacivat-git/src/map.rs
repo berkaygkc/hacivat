@@ -19,7 +19,7 @@
 //! - **Dataless** (R-M4b-15): a cloud placeholder's flag is read from `lstat` metadata only.
 
 // ## m4b-t07-git
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use gix::bstr::{BStr, BString, ByteSlice as _};
@@ -72,12 +72,14 @@ impl Badges {
 
     /// The badges keyed relative to the library root at `library` (canonical), whose path
     /// relative to the worktree is `prefix` (disk spelling); `icase` when the file system
-    /// folds case. Dataless paths found on the way become `Unknown(Dataless)`, case-only
-    /// mismatches `Unknown(CaseMismatch)`.
+    /// folds case; `aliases` are index spellings of the library folder that the file system
+    /// equates with it (n2). Dataless paths found on the way become `Unknown(Dataless)`,
+    /// case-only mismatches `Unknown(CaseMismatch)`.
     pub(crate) fn into_library(
         self,
         prefix: &str,
         icase: bool,
+        aliases: &BTreeSet<String>,
         library: &Path,
         is_dataless: &dyn Fn(&std::fs::Metadata) -> bool,
     ) -> BTreeMap<GitPath, FileStatus> {
@@ -87,7 +89,7 @@ impl Badges {
             let Ok(repo_path) = repo_path.to_str() else {
                 continue;
             };
-            let Some((rel, prefix_case)) = lib_relative(repo_path, prefix, icase) else {
+            let Some((rel, prefix_case)) = lib_relative(repo_path, prefix, icase, aliases) else {
                 continue;
             };
             let Some(found) = lister.on_disk(library, &rel) else {
@@ -111,9 +113,15 @@ impl Badges {
 
 /// The repository path `path` relative to the library folder `prefix` (disk spelling, `""` for
 /// the worktree), in the index's spelling, and whether the folder matched only by folding case.
-/// Compared component by component in NFC, and ASCII case-insensitively when `icase`. `None`
-/// outside the library.
-pub(crate) fn lib_relative(path: &str, prefix: &str, icase: bool) -> Option<(String, bool)> {
+/// Compared component by component in NFC, ASCII case-insensitively when `icase`, and against
+/// `aliases` (index spellings the file system equates with the folder, n2). `None` outside the
+/// library.
+pub(crate) fn lib_relative(
+    path: &str,
+    prefix: &str,
+    icase: bool,
+    aliases: &BTreeSet<String>,
+) -> Option<(String, bool)> {
     if prefix.is_empty() {
         return (!path.is_empty()).then(|| (path.to_owned(), false));
     }
@@ -122,14 +130,33 @@ pub(crate) fn lib_relative(path: &str, prefix: &str, icase: bool) -> Option<(Str
     if comps.len() <= n {
         return None;
     }
-    let (head, want) = (nfc(&comps[..n].join("/")), nfc(prefix));
+    let raw_head = comps[..n].join("/");
+    let (head, want) = (nfc(&raw_head), nfc(prefix));
     let rest = comps[n..].join("/");
     if head == want {
         Some((rest, false))
-    } else if icase && head.eq_ignore_ascii_case(&want) {
+    } else if (icase && head.eq_ignore_ascii_case(&want)) || aliases.contains(&raw_head) {
         Some((rest, true))
     } else {
         None
+    }
+}
+
+/// Whether two paths are the same file system entry: `(dev, ino)` from `lstat` on Unix. Elsewhere
+/// `std` has no stable file id, so never (n2's alias match is Unix-only).
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        false
     }
 }
 
@@ -141,15 +168,21 @@ struct OnDisk {
     case_only: bool,
 }
 
-/// Directory listings, read once each (names only, never contents).
+/// One listed name: as listed, its NFC form.
+type Listed = (String, String);
+
+/// Directory listings, read once each (names only, never contents), and (Unix) each listing's
+/// file ids, read once on the first case-only lookup in it (n4: no `lstat` per name per path).
 #[derive(Default)]
 struct Lister {
-    dirs: HashMap<PathBuf, Vec<(String, String)>>,
+    dirs: HashMap<PathBuf, Vec<Listed>>,
+    #[cfg(unix)]
+    ids: HashMap<PathBuf, HashMap<(u64, u64), String>>,
 }
 
 impl Lister {
     /// The names in `dir` with their NFC forms.
-    fn names(&mut self, dir: &Path) -> Option<&[(String, String)]> {
+    fn names(&mut self, dir: &Path) -> Option<&[Listed]> {
         if !self.dirs.contains_key(dir) {
             let names = std::fs::read_dir(dir)
                 .ok()?
@@ -188,7 +221,8 @@ impl Lister {
                     // The file system's own lookup (case folding): never dropped (R-T7-1).
                     let md = std::fs::symlink_metadata(dir.join(comp)).ok()?;
                     case_only = true;
-                    same_entry(&dir, names, &md, &want).unwrap_or_else(|| comp.to_owned())
+                    self.same_entry(&dir, &md, &want)
+                        .unwrap_or_else(|| comp.to_owned())
                 }
             };
             dir.push(&found);
@@ -200,39 +234,36 @@ impl Lister {
             case_only,
         })
     }
-}
 
-/// The listed name in `dir` that is the entry `md` describes: by inode on Unix.
-#[cfg(unix)]
-fn same_entry(
-    dir: &Path,
-    names: &[(String, String)],
-    md: &std::fs::Metadata,
-    _want: &str,
-) -> Option<String> {
-    use std::os::unix::fs::MetadataExt as _;
-    names
-        .iter()
-        .find(|(n, _)| {
-            std::fs::symlink_metadata(dir.join(n))
-                .is_ok_and(|m| m.dev() == md.dev() && m.ino() == md.ino())
-        })
-        .map(|(n, _)| n.clone())
-}
+    /// The listed name in `dir` that is the entry `md` describes: by `(dev, ino)` on Unix, from
+    /// the listing's id table (built once per folder).
+    #[cfg(unix)]
+    fn same_entry(&mut self, dir: &Path, md: &std::fs::Metadata, _want: &str) -> Option<String> {
+        use std::os::unix::fs::MetadataExt as _;
+        if !self.ids.contains_key(dir) {
+            let mut table = HashMap::new();
+            for (n, _) in self.names(dir)?.to_vec() {
+                if let Ok(m) = std::fs::symlink_metadata(dir.join(&n)) {
+                    table.insert((m.dev(), m.ino()), n);
+                }
+            }
+            self.ids.insert(dir.to_path_buf(), table);
+        }
+        self.ids.get(dir)?.get(&(md.dev(), md.ino())).cloned()
+    }
 
-/// The listed name in `dir` that is the entry `md` describes: `std` has no stable file id on
-/// Windows, so the one name equal to `want` ASCII case-insensitively (in NFC).
-#[cfg(not(unix))]
-fn same_entry(
-    _dir: &Path,
-    names: &[(String, String)],
-    _md: &std::fs::Metadata,
-    want: &str,
-) -> Option<String> {
-    let mut hits = names.iter().filter(|(_, f)| f.eq_ignore_ascii_case(want));
-    match (hits.next(), hits.next()) {
-        (Some((n, _)), None) => Some(n.clone()),
-        _ => None,
+    /// The listed name in `dir` that is the entry `md` describes: `std` has no stable file id on
+    /// Windows, so the one name equal to `want` ASCII case-insensitively (in NFC). A non-ASCII
+    /// case-only rename finds none: the badge keeps the index's spelling, which no scanned row
+    /// has (n3, a recorded residual).
+    #[cfg(not(unix))]
+    fn same_entry(&mut self, dir: &Path, _md: &std::fs::Metadata, want: &str) -> Option<String> {
+        let names = self.names(dir)?;
+        let mut hits = names.iter().filter(|(_, f)| f.eq_ignore_ascii_case(want));
+        match (hits.next(), hits.next()) {
+            (Some((n, _)), None) => Some(n.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -289,7 +320,7 @@ mod tests {
     }
 
     fn rel(path: &str, prefix: &str, icase: bool) -> Option<(String, bool)> {
-        lib_relative(path, prefix, icase)
+        lib_relative(path, prefix, icase, &BTreeSet::new())
     }
 
     #[test]
@@ -351,7 +382,7 @@ mod tests {
         let folds = std::fs::symlink_metadata(lib.join("FOO.sql")).is_ok();
         let mut b = Badges::default();
         b.add("Foo.sql".into(), FileStatus::Modified);
-        let out = b.into_library("", folds, &lib, &never);
+        let out = b.into_library("", folds, &BTreeSet::new(), &lib, &never);
         if folds {
             assert_eq!(
                 out.get("foo.sql"),
@@ -379,7 +410,7 @@ mod tests {
         b.add("lib/plain.sql".into(), FileStatus::New);
         b.add("lib/gone.sql".into(), FileStatus::Modified);
         b.add("outside.sql".into(), FileStatus::Modified);
-        let out = b.into_library("lib", false, &lib, &never);
+        let out = b.into_library("lib", false, &BTreeSet::new(), &lib, &never);
         let want_key = format!("{nfd_dir}/{nfd_file}");
         assert_eq!(
             out.get(want_key.as_str()),
@@ -400,7 +431,7 @@ mod tests {
         b.add("cloud.sql".into(), FileStatus::New);
         b.add("local.sql".into(), FileStatus::New);
         // A stand-in for the flag: empty files are "placeholders" here.
-        let out = b.into_library("", false, &lib, &|m| m.len() == 0);
+        let out = b.into_library("", false, &BTreeSet::new(), &lib, &|m| m.len() == 0);
         assert_eq!(
             out.get("cloud.sql"),
             Some(&FileStatus::Unknown(UnknownWhy::Dataless))

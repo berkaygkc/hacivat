@@ -75,22 +75,56 @@ fn failed(kind: FailKind) -> GitState {
     GitState::Unavailable(GitError::Failed(kind))
 }
 
-/// The whole status of `library_root` on the timed worker; `dataless` adds library-relative
-/// paths to treat as cloud placeholders (the `testing` hook; empty in the product).
-pub(crate) fn status_with(
-    library_root: &Path,
-    limits: &GitLimits,
-    dataless: Vec<String>,
-) -> GitState {
-    // m1: the stuck-worker cap is keyed by the canonical root, so an alias (a symlink, `..`)
-    // cannot start a second worker. Resolving the path reads metadata only.
-    let Ok(root) = std::fs::canonicalize(library_root) else {
-        return failed(FailKind::LibraryUnreadable);
-    };
+/// The `testing` hooks (empty in the product).
+#[derive(Default)]
+pub(crate) struct Hooks {
+    /// Library-relative paths treated as cloud placeholders.
+    pub(crate) dataless: Vec<String>,
+    /// A stall run on the worker, at the given point.
+    pub(crate) stall: Option<(crate::testing::Stall, Box<dyn FnOnce() + Send>)>,
+}
+
+impl Hooks {
+    fn stall_at(&mut self, at: crate::testing::Stall) {
+        if self.stall.as_ref().is_some_and(|(a, _)| *a == at)
+            && let Some((_, f)) = self.stall.take()
+        {
+            f();
+        }
+    }
+}
+
+/// Resolves the library path (the stall hook stands in for a slow mount here).
+fn resolve(library_root: &Path, hooks: &mut Hooks) -> Option<PathBuf> {
+    hooks.stall_at(crate::testing::Stall::BeforeResolve);
+    std::fs::canonicalize(library_root).ok()
+}
+
+/// The whole status of `library_root` on the timed worker.
+///
+/// F2: the caller does no file-system work at all (a stale network mount blocks path
+/// resolution without limit). It claims the library by the spelling it was given; the worker
+/// resolves the path and then claims the canonical library too, answering `Paused` when another
+/// worker already holds it (m1: an alias reaches the cap once resolved). Both claims are
+/// released when the worker ends.
+pub(crate) fn status_with(library_root: &Path, limits: &GitLimits, hooks: Hooks) -> GitState {
+    let mut hooks = hooks;
     let limits = *limits;
-    let key = root.clone();
-    run_timed(key, limits.timeout, move |interrupt| {
-        pipeline(&root, &limits, &dataless, interrupt)
+    let given = library_root.to_path_buf();
+    let spelling = given.clone();
+    run_timed(spelling, limits.timeout, move |interrupt| {
+        let Some(root) = resolve(&given, &mut hooks) else {
+            return failed(FailKind::LibraryUnreadable);
+        };
+        let _canonical = if root == given {
+            None
+        } else if running().insert(root.clone()) {
+            Some(Running(root.clone()))
+        } else {
+            return GitState::Unavailable(GitError::Paused);
+        };
+        hooks.stall_at(crate::testing::Stall::AfterResolve);
+        pipeline(&root, &limits, &hooks.dataless, interrupt)
     })
 }
 
@@ -146,24 +180,35 @@ fn pipeline(
             return failed(FailKind::PathNotUtf8);
         }
     };
+    // F3: one placeholder test for every path checked before the open: the real flag (from
+    // `lstat`), or the `testing` hook's library-relative set.
+    let hooked: BTreeSet<PathBuf> = extra_dataless.iter().map(|e| root.join(e)).collect();
+    let placeholder = |p: &Path| {
+        hooked.contains(p) || std::fs::symlink_metadata(p).is_ok_and(|m| map::is_dataless(&m))
+    };
+    // A gitfile is read by `check_layout`; it must not be a placeholder.
+    if found.kind == discover::DotGit::File && placeholder(&found.dot_git) {
+        return GitState::Unavailable(GitError::Dataless);
+    }
     let layout = match trust::check_layout(&found, &trust::current_user_owns) {
         Ok(l) => l,
         Err(st) => return st,
     };
+    if let Err(st) = trust::check_internals_dataless(&layout, &placeholder) {
+        return st;
+    }
     if trust::unsupported_format(&layout.git_dir, &layout.common_dir) {
         return GitState::Unavailable(GitError::Unsupported);
     }
     // I3 (R-T7-2), after the format check: a reftable repository has a file at `refs/heads`.
-    if let Err(st) = trust::check_repository_files(&layout) {
+    if let Err(st) = trust::check_repository_files(&layout, &placeholder) {
         return st;
     }
     let extra: BTreeSet<String> = extra_dataless.iter().cloned().collect();
-    let facts =
-        match trust::check_library_tree(&found.worktree, &root, &layout, &extra, &map::is_dataless)
-        {
-            Ok(f) => f,
-            Err(st) => return st,
-        };
+    let facts = match trust::check_library_tree(&found.worktree, &root, &placeholder) {
+        Ok(f) => f,
+        Err(st) => return st,
+    };
     if interrupt.load(Ordering::SeqCst) {
         return GitState::Unavailable(GitError::Timeout);
     }
@@ -299,13 +344,47 @@ fn collect(
     let icase = repo.filesystem_options().is_ok_and(|c| c.ignore_case);
     let on_disk = repo.index_or_empty().map_err(gix_failed(FailKind::Index))?;
     let mut badges = Badges::default();
+    // n2: index spellings of the library folder that only the file system's own case folding
+    // equates with the disk's (`Çal` in the index, `çal` on disk): the same directory by
+    // `(dev, ino)` (Unix). One `lstat` per distinct leading folder of the index.
+    let mut aliases: BTreeSet<String> = BTreeSet::new();
+    if icase && !prefix.is_empty() {
+        let n = prefix.split('/').count();
+        let none = BTreeSet::new();
+        let mut heads: BTreeSet<String> = BTreeSet::new();
+        for entry in on_disk.entries() {
+            let Ok(p) = entry.path(&on_disk).to_str() else {
+                continue;
+            };
+            let comps: Vec<&str> = p.split('/').collect();
+            if comps.len() <= n {
+                continue;
+            }
+            let head = comps[..n].join("/");
+            if heads.insert(head.clone())
+                && map::lib_relative(p, prefix, icase, &none).is_none()
+                && map::same_file(&found.worktree.join(&head), library)
+            {
+                aliases.insert(head);
+            }
+        }
+    }
     // I1: the library-relative part of an index path, compared in NFC (and by case where the
     // file system folds it), whatever the disk's spelling of the library folder.
     let rel_of = |path: &BStr| {
         path.to_str()
             .ok()
-            .and_then(|p| map::lib_relative(p, prefix, icase))
+            .and_then(|p| map::lib_relative(p, prefix, icase, &aliases))
             .map(|(rel, _)| rel)
+    };
+    // n5: dataless folders are listed by nobody: their tracked entries leave the index copy and
+    // gix's walk excludes them (no badge: the scanner does not list them either).
+    let dataless_dirs: Vec<String> = facts.dataless_dirs.iter().map(|d| map::nfc(d)).collect();
+    let in_dataless_dir = |rel: &str| {
+        let rel = map::nfc(rel);
+        dataless_dirs
+            .iter()
+            .any(|d| rel == *d || rel.starts_with(&format!("{d}/")))
     };
 
     // Gitlinks are Unknown(Submodule). Dataless tracked files are Unknown(Dataless) and are
@@ -323,6 +402,10 @@ fn collect(
         let Some(rel) = rel_of(path) else {
             continue;
         };
+        if in_dataless_dir(&rel) {
+            dataless_paths.insert(path.to_owned());
+            continue;
+        }
         if entry.mode.is_submodule() {
             badges.add(path, FileStatus::Unknown(UnknownWhy::Submodule));
             continue;
@@ -369,6 +452,20 @@ fn collect(
                 patterns.push(format!(":(top,literal){form}").into());
             }
         }
+        for alias in &aliases {
+            patterns.push(format!(":(top,literal){alias}").into());
+        }
+    } else if !facts.dataless_dirs.is_empty() {
+        // Exclusions alone match nothing: start from the whole worktree.
+        patterns.push(":(top)".into());
+    }
+    for d in &facts.dataless_dirs {
+        let repo_rel = if prefix.is_empty() {
+            d.clone()
+        } else {
+            format!("{prefix}/{d}")
+        };
+        patterns.push(format!(":(exclude,top,literal){repo_rel}").into());
     }
 
     // Index vs worktree.
@@ -494,7 +591,7 @@ fn collect(
         }
     }
 
-    let mut by_path = badges.into_library(prefix, icase, library, &map::is_dataless);
+    let mut by_path = badges.into_library(prefix, icase, &aliases, library, &map::is_dataless);
     // m5: FIFOs, sockets and devices the pre-walk found (gix lists none of them).
     for rel in &facts.not_files {
         let s = FileStatus::Unknown(UnknownWhy::NotAFile);
