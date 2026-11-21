@@ -4567,7 +4567,7 @@ hv-scripts-secret-gutter =
        *[password] Looks like a password
     }
 # Surface 8 (Secret warning).
-hv-scripts-secret-gutter-hint = Saving asks first. A comment with hacivat:allow-secret on this line keeps it quiet.
+hv-scripts-secret-gutter-hint = Saving asks first. A comment on this line such as -- hacivat:allow-secret (with a space after the dashes) keeps it quiet.
 # Surface 8 (Secret warning).
 # Variables:
 #   $n (Number) - a count, e.g. 3.
@@ -4588,7 +4588,7 @@ hv-scripts-secret-git = If you commit this file, the value is shared with everyo
 # Surface 8 (Secret warning).
 # Variables:
 #   $marker (String) - the literal hacivat:allow-secret (never translated).
-hv-scripts-secret-allow = To keep a line on purpose, add a comment with { $marker } on it.
+hv-scripts-secret-allow = To keep a line on purpose, add the comment -- { $marker } (with a space after the dashes) or /* { $marker } */ on it.
 # Surface 8 (Secret warning).
 hv-scripts-secret-remember = Save anyway is remembered for this tab until you quit.
 # Surface 8 (Secret warning).

@@ -554,3 +554,16 @@ HV-SCRIPT-10; R-M4b-17, -28; alg/28 C9.
 - **m6.** More placeholders are quiet: `%s`, `%(name)s`, `$NAME`, `{name}`, `${{ … }}`, `{{ … }}` with spaces or dots, `[REDACTED]`. A quoted `'null'` is a literal and is reported (m11).
 - **m7, m8.** New rows: `pgp-private-key-block` (alg/28 S21, RFC 4880 §6.2) and `sql-server-sp-addlogin` (S22; kind `password`). The loader now pins sources to alg/28 S9–S16, S21 and S22. Split tokens, positional `INSERT … VALUES` and comment prose are alg/28 [Known gap]s. The EXECUTE IMMEDIATE history gap is M3's and goes to the PO list, not touched here.
 - **m9, m10.** Stale test names and docs are fixed (`lib.rs` doc line, `m4b_stubs.rs` module doc). JWT fixtures are joined from parts.
+
+### Fix round 2 (re-review I-fr1-1, n1–n6)
+
+- **I-fr1-1.** A name whose last part *ends with* `PASSWORD`, `PASSWD`, `PWD` or `SECRET` names the value (`PGPASSWORD=`, `sslpassword=`, `dbpassword=`). Parts are compared uppercased, so ASCII case does not matter. `passwordhash`, `password_hash`, `password_policy` and `password_file` stay quiet.
+- **n1, a `#` glued to a name.** MySQL does read `app#1 …` as a comment: "From a `#` character to the end of the line", and `#` is not an unquoted-identifier character (MySQL 8.4 Reference Manual §11.7, §11.2). The warning still reports the standard reading's value there (`CREATE USER app#1 IDENTIFIED BY tiger`): the cross-reading downgrade of I1 skips a line whose first `#` is glued to a name, because the safe answer is to warn. One pass builds a per-line table, so the check stays linear.
+- **n2.** `{…}`, `{{…}}`, `${…}` and `${{…}}` are placeholders only when they hold name bytes (`[A-Za-z0-9_.-]`, spaces around allowed). `'{s3cr3t-P@ss!}'` reports, while `'{hunter2}'` reads as a name and stays quiet. `<…>` stays broad, as alg/28's `'<password>'` asks, so `'<P@ss w0rd>'` is quiet.
+- **n3, identity tests.**
+  - Proptests: the vocabulary and `\PC` identity proptests now run 20,000 cases each, and the vocabulary adds NUL, 0x01, 0x1f, FF, CR, DEL, NBSP, U+0085, U+3000, U+FEFF and more masked-path words.
+  - Fixed generator: `redact_is_byte_identical_to_m3_with_control_bytes` runs 20,000 cases over statement pieces and every control byte but VT. It asserts that at least a quarter are masked; measured: 15,204.
+  - Cost: about 110 s of debug test time.
+- **n4.** The allow marker needs a space after `--` (MySQL's rule). alg/28 step 1 and the two hint strings (`hv-scripts-secret-gutter-hint`, `hv-scripts-secret-allow`, en and tr; a named exception in T1b's FTL block) say so. The design mock's copy tables keep the old wording until the controller syncs them.
+- **n6, accepted.** `EXEC sp_password 'old', 's3cret', 'l'` reports only `'old'`. The redactor arms on `SP_PASSWORD`, and its first value takes the value position. The line is still flagged, which is all the save dialog needs.
+- **n5** (non-ASCII spaces, a lone CR in a meta line, `Bearer` before a TAB) is pre-existing M3 behaviour and is on the PO list; it is not touched.

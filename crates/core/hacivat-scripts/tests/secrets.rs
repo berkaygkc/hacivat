@@ -504,6 +504,67 @@ fn sp_addlogin_and_pgp_private_keys_are_reported() {
     assert!(scan(&public).is_empty());
 }
 
+// ## m4b-t06-secrets (fix round 2)
+#[test]
+fn glued_password_keys_are_reported() {
+    // I-fr1-1: a key that ends with the secret word names the value.
+    for t in [
+        "-- PGPASSWORD=s3cret psql -h db -U app",
+        "SELECT 'PGPASSWORD=s3cret'",
+        "SELECT 'host=h sslpassword=s3cret'",
+        "SELECT 'host=h dbpassword=s3cret'",
+    ] {
+        assert_eq!(reported(t), [("s3cret", ConnectionString)], "{t}");
+    }
+    // One that only starts with it, or ends with another word, does not.
+    for t in [
+        "SELECT 'passwordhash=abc'",
+        "SELECT 'password_hash=abc'",
+        "SELECT 'password_policy=strict'",
+        "SELECT 'password_file=/etc/pw'",
+    ] {
+        assert!(scan(t).is_empty(), "{t}: {:?}", reported(t));
+    }
+}
+
+#[test]
+fn a_hash_glued_to_a_name_hides_no_value() {
+    // n1: MySQL reads `#1 …` as a comment, the standard reading as an Oracle name; warn.
+    let t = "CREATE USER app#1 IDENTIFIED BY tiger";
+    assert_eq!(reported(t), [("tiger", Password)]);
+    // A `#` comment that starts a line or follows white space stays prose.
+    for t in ["# password reset flow", "SELECT 1; # password reset flow"] {
+        assert!(scan(t).is_empty(), "{t}: {:?}", reported(t));
+    }
+}
+
+#[test]
+fn a_brace_template_holds_a_name() {
+    // n2: `{…}` is a placeholder only when it holds a name.
+    assert_eq!(
+        reported("CREATE USER app PASSWORD '{s3cr3t-P@ss!}'"),
+        [("'{s3cr3t-P@ss!}'", Password)]
+    );
+    for t in [
+        "CREATE USER app PASSWORD '{pw}'",
+        "CREATE USER app PASSWORD '{ db.pw-1 }'",
+        "CREATE USER app PASSWORD '${APP_PW}'",
+    ] {
+        assert!(scan(t).is_empty(), "{t}: {:?}", reported(t));
+    }
+}
+
+#[test]
+fn the_allow_marker_needs_a_space_after_the_dashes() {
+    // n4: MySQL takes `--` as a comment only before white space, and the marker must be in a
+    // comment in both readings, so `--hacivat:allow-secret` does not silence its line.
+    assert_eq!(
+        kinds(&scan("CREATE USER a PASSWORD 'x'; --hacivat:allow-secret")),
+        [Password]
+    );
+    assert!(scan("CREATE USER a PASSWORD 'x'; -- hacivat:allow-secret").is_empty());
+}
+
 #[test]
 fn a_vertical_tab_does_not_hang_the_scan() {
     // Found by the byte-identity test: M3's redactor never returned on a vertical tab outside

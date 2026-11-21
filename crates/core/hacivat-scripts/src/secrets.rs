@@ -309,6 +309,17 @@ fn placeholder(inner: &str) -> bool {
             && t.ends_with(close)
             && !t[open.len()..t.len() - close.len()].contains(['{', '}', '<', '>'])
     };
+    // ## m4b-t06-secrets (fix round 2, n2): a brace template holds a name (`{pw}`,
+    // `${APP_PW}`, `{{ secrets.PW }}`), never a password (`{s3cr3t-P@ss!}`).
+    let named = |open: &str, close: &str| {
+        wrapped(open, close) && {
+            let name = t[open.len()..t.len() - close.len()].trim();
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|c| is_name_byte(c) || matches!(c, b'.' | b'-'))
+        }
+    };
     // ## m4b-t06-secrets (fix round 1, m6): `%s`, `%(name)s`, `$NAME`, `{name}`,
     // `${{ secrets.PW }}`, `[REDACTED]`.
     let printf = t == "%s"
@@ -330,10 +341,11 @@ fn placeholder(inner: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c == b'_' || c == b' ');
     t.is_empty()
         || t.bytes().all(|c| c == b'*')
-        || wrapped("${{", "}}")
-        || wrapped("${", "}")
-        || wrapped("{{", "}}")
-        || wrapped("{", "}")
+        || named("${{", "}}")
+        || named("${", "}")
+        || named("{{", "}}")
+        || named("{", "}")
+        // `<…>` (alg/28's `'<password>'`) stays broad: `'<P@ss w0rd>'` is quiet (ADR).
         || wrapped("<", ">")
         || (t.starts_with(':') && t.len() > 1 && t[1..].bytes().all(is_name_byte))
         || t == "?"
@@ -650,8 +662,22 @@ mod tests {
             assert!(placeholder(p), "{p}");
         }
         for v in [
-            "x", "changeme", "${a}b", "<a><b>", "{{a}}}", "$", ":", "*x*", "{}", "$pw", "%x",
-            "[x]", "%()s",
+            "x",
+            "changeme",
+            "${a}b",
+            "<a><b>",
+            "{{a}}}",
+            "$",
+            ":",
+            "*x*",
+            "{}",
+            "$pw",
+            "%x",
+            "[x]",
+            "%()s",
+            "{s3cr3t-P@ss!}",
+            "${a b}",
+            "{{ x! }}",
         ] {
             assert!(!placeholder(v), "{v}");
         }

@@ -1154,6 +1154,15 @@ fn last_part_names_a_value(parts: &[&str]) -> bool {
         return false;
     };
     let before = rest.last().copied();
+    // ## m4b-t06-secrets (fix round 2, I-fr1-1): a part that ends with the secret word names
+    // the value too (`PGPASSWORD`, `sslpassword`, `dbpassword`); `PASSWORDHASH`,
+    // `password_policy` and `password_file` do not end with one.
+    if ["PASSWORD", "PASSWD", "PWD", "SECRET"]
+        .iter()
+        .any(|w| last.len() > w.len() && last.ends_with(w))
+    {
+        return true;
+    }
     match last {
         "PASSWORD" | "PASSWD" | "PWD" | "SECRET" | "BEARER" => true,
         "TOKEN" => rest.is_empty() || before.is_some_and(|b| SECRET_TOKEN_KINDS.contains(&b)),
@@ -1948,13 +1957,20 @@ fn spans_into(
         .filter(|m| m.depth > depth)
         .map(|m| (m.range.start, m.range.end))
         .collect();
+    // ## m4b-t06-secrets (fix round 2, n1): built only when a cross-reading downgrade asks.
+    let glued: std::cell::OnceCell<GluedHashes> = std::cell::OnceCell::new();
     for m in masks {
         // ## m4b-t06-secrets (fix round 1, I1): code quoted in code, or a comment body (the
         // mask's own scan depth, in either reading), is read again; its bare words are too
         // often prose or names (`-- rotate the password monthly`, `EXECUTE 'GRANT … ' ||
         // password_col`): only quoted values count there.
-        let nested =
-            depth > 0 || m.depth > depth || in_comment.contains(&(m.range.start, m.range.end));
+        // ## m4b-t06-secrets (fix round 2, n1): not when that comment is a `#` glued to a name.
+        let nested = depth > 0
+            || m.depth > depth
+            || (in_comment.contains(&(m.range.start, m.range.end))
+                && !glued
+                    .get_or_init(|| GluedHashes::new(text))
+                    .before(m.range.start));
         let piece = &text[m.range.clone()];
         let kind = match m.role {
             Role::Value if nested && !piece.starts_with(['\'', '"', '$']) => SecretSpanKind::Armed,
@@ -1986,6 +2002,50 @@ fn spans_into(
         if m.role == Role::Conninfo && depth < MAX_DEPTH {
             quoted_code(piece, m.range.start, depth + 1, map, out);
         }
+    }
+}
+
+// ## m4b-t06-secrets (fix round 2, n1)
+/// The first `#` on `at`'s line before `at` is glued to a name (`CREATE USER app#1 IDENTIFIED
+/// BY tiger`, an Oracle name). MySQL does read it as a comment ("From a `#` character to the
+/// end of the line", MySQL 8.4 Reference Manual §11.7; `#` is not among the unquoted
+/// identifier characters `[0-9,a-z,A-Z$_]`, §11.2), so only the standard reading sees the
+/// value; the warning trusts that reading here rather than stay quiet. One pass over the text,
+/// then a binary search per question (linear on a 2 MiB line too).
+struct GluedHashes {
+    /// Per line: its start, and its first `#` when that `#` is glued to a name.
+    lines: Vec<(usize, Option<usize>)>,
+}
+
+impl GluedHashes {
+    fn new(text: &str) -> Self {
+        let b = text.as_bytes();
+        let mut lines = Vec::new();
+        let mut start = 0;
+        let mut first: Option<usize> = None;
+        for (i, &c) in b.iter().enumerate() {
+            if c == b'#' && first.is_none() {
+                first = Some(i);
+            }
+            if c == b'\n' || i + 1 == b.len() {
+                let glued = first.filter(|&h| {
+                    h > start
+                        && (b[h - 1].is_ascii_alphanumeric()
+                            || matches!(b[h - 1], b'_' | b'$')
+                            || b[h - 1] >= 0x80)
+                });
+                lines.push((start, glued));
+                start = i + 1;
+                first = None;
+            }
+        }
+        GluedHashes { lines }
+    }
+
+    /// The first `#` on `at`'s line comes before `at` and is glued to a name.
+    fn before(&self, at: usize) -> bool {
+        let i = self.lines.partition_point(|&(s, _)| s <= at);
+        i > 0 && self.lines[i - 1].1.is_some_and(|h| h < at)
     }
 }
 
@@ -2184,6 +2244,99 @@ mod m4b_t06_tests {
         Ok(())
     }
 
+    // ## m4b-t06-secrets (fix round 2, n3)
+    /// 20,000 SQL-ish texts from a fixed generator over statement pieces that reach the masked
+    /// paths and every control byte but the vertical tab, plus non-ASCII spaces: `redact` and
+    /// `scrub` equal M3's on each, and enough of them are masked that the test cannot go
+    /// vacuous.
+    #[test]
+    fn redact_is_byte_identical_to_m3_with_control_bytes() {
+        const PIECES: &[&str] = &[
+            "ALTER ROLE r PASSWORD ",
+            "CREATE USER u IDENTIFIED BY ",
+            "IDENTIFIED WITH mysql_native_password BY ",
+            "SET PASSWORD FOR 'u'@'%' = ",
+            "SET @pw := ",
+            " INTO @pw",
+            "PRAGMA key = ",
+            "ATTACH 'x.db' AS x KEY ",
+            "SELECT pgp_sym_encrypt(d, ",
+            "SELECT crypt(",
+            "set_config('app.secret', ",
+            "dblink_connect('host=h password=",
+            "'postgresql://u:",
+            "@h/db'",
+            "'{\"apiKey\": \"",
+            "Bearer ",
+            "\\connect db u password=",
+            "-- password ",
+            "# password ",
+            "/* PASSWORD ",
+            " */",
+            "/*!80000 ",
+            "$$",
+            "$t$",
+            "E'",
+            "U&'",
+            "'",
+            "''",
+            "\"",
+            "`",
+            "\\",
+            "(",
+            ")",
+            ",",
+            ";",
+            "=",
+            "s3cret",
+            "tiger",
+            "password_hash = ",
+            "\n",
+            " ",
+            "İ",
+            "ş",
+        ];
+        let mut controls: Vec<String> = (0u8..0x20)
+            .chain([0x7f])
+            .filter(|&c| c != 0x0b)
+            .map(|c| char::from(c).to_string())
+            .collect();
+        for c in ['\u{a0}', '\u{85}', '\u{2028}', '\u{3000}', '\u{feff}'] {
+            controls.push(c.to_string());
+        }
+        // xorshift64*: fixed seed, so a failure names a reproducible case number.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+        let (cases, mut masked) = (20_000, 0);
+        for case in 0..cases {
+            let len = (next() % 24) as usize;
+            let mut t = String::new();
+            for _ in 0..len {
+                let r = next();
+                if r % 4 == 0 {
+                    t.push_str(&controls[(r / 4) as usize % controls.len()]);
+                } else {
+                    t.push_str(PIECES[(r / 4) as usize % PIECES.len()]);
+                }
+            }
+            if let Err(e) = same_as_m3(&t) {
+                panic!("case {case}: {e}");
+            }
+            if redact(&t).changed {
+                masked += 1;
+            }
+        }
+        // Measured: 15,204 of 20,000 masked; a generator that stopped reaching the masked paths
+        // fails here.
+        println!("HV-FACT t06 identity_cases={cases} masked={masked}");
+        assert!(masked * 4 >= cases, "only {masked} of {cases} masked");
+    }
+
     #[test]
     fn redact_is_byte_identical_to_m3_on_the_corpus() {
         let corpus = [
@@ -2213,12 +2366,13 @@ mod m4b_t06_tests {
         }
     }
 
-    /// The vocabulary of the SQL-shaped inputs (no vertical tab, no form feed: see
-    /// `a_vertical_tab_is_white_space`).
-    const VOCAB: &str = "PASSWORD|IDENTIFIED|BY|WITH|FOR|REPLACE|RANDOM|SET|INTO|@pw|@@x|:=|PRAGMA|ATTACH|KEY|key|EXPLAIN|crypt|pgp_sym_encrypt|gen_salt|set_config|'app\\.secret'|password_hash|api_key|U&|E|N|\\$\\$|\\$t\\$|'|''|\"|`|\\\\|;|,|=|\\(|\\)|/\\*|\\*/|/\\*!80000|--|#|\n| |\t|ş|İ|ı|x|1|s3cret|tiger|password=|pwd=|\"apiKey\":|Bearer |://u:p@h|\\{|\\}";
+    /// The vocabulary of the SQL-shaped inputs: no vertical tab (M3 never returned on one, see
+    /// `a_vertical_tab_is_white_space`); other control bytes and non-ASCII spaces are in
+    /// (## m4b-t06-secrets, fix round 2, n3).
+    const VOCAB: &str = "PASSWORD|IDENTIFIED|BY|WITH|FOR|REPLACE|RANDOM|SET|INTO|@pw|@@x|:=|PRAGMA|ATTACH|KEY|key|EXPLAIN|crypt|pgp_sym_encrypt|gen_salt|set_config|'app\\.secret'|password_hash|api_key|U&|E|N|\\$\\$|\\$t\\$|'|''|\"|`|\\\\|;|,|=|\\(|\\)|/\\*|\\*/|/\\*!80000|--|#|\n| |\t|ş|İ|ı|x|1|s3cret|tiger|password=|pwd=|\"apiKey\":|Bearer |://u:p@h|\\{|\\}|\\x00|\\x01|\\x1f|\\x0c|\r|\\x7f|\\x{a0}|\\x{85}|\\x{3000}|\\x{feff}|pgp_pub_decrypt|AES_ENCRYPT|password_changed_at|sp_addlogin";
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(3_000))]
+        #![proptest_config(ProptestConfig::with_cases(20_000))]
         #[test]
         fn redact_is_byte_identical_to_m3(
             s in proptest::string::string_regex(&format!("({VOCAB}){{0,48}}")).unwrap()
@@ -2231,6 +2385,11 @@ mod m4b_t06_tests {
             prop_assert!(same_as_m3(&s).is_ok(), "{}", same_as_m3(&s).unwrap_err());
         }
 
+    }
+
+    proptest! {
+        // A hang guard: fewer cases suffice.
+        #![proptest_config(ProptestConfig::with_cases(3_000))]
         /// The one change to `redact`: a vertical tab is white space. M3 never returned once a
         /// vertical tab started a token (every vertical tab outside quotes, in either reading,
         /// at any depth), so on every text M3 returns on, the change is never reached and the
