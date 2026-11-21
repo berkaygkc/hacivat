@@ -770,3 +770,47 @@ fn a_short_name_alias_is_refused() {
         assert_eq!(join(&root, &rel("LONGER~1.SQL")), Err(PathError::Alias));
     }
 }
+
+#[test]
+fn root_spellings_are_the_canonical_root_and_on_windows_the_typed_forms() {
+    // Re-review n2 (R-T4-3): text only, checked for both hosts on every runner.
+    use hacivat_scripts::pathsafe::root_spellings;
+    let disk = LibraryRoot {
+        id: LibraryId::new(),
+        path: PathBuf::from("C:\\Users\\me\\Scripts"),
+        canonical: PathBuf::from("\\\\?\\C:\\Users\\me\\Scripts"),
+    };
+    assert_eq!(
+        root_spellings(&disk, Host::Unix),
+        std::slice::from_ref(&disk.canonical)
+    );
+    assert_eq!(
+        root_spellings(&disk, Host::Windows),
+        [
+            disk.canonical.clone(),
+            PathBuf::from("C:\\Users\\me\\Scripts")
+        ]
+    );
+    let unc = LibraryRoot {
+        id: LibraryId::new(),
+        path: PathBuf::from("S:\\lib"),
+        canonical: PathBuf::from("\\\\?\\UNC\\srv\\share\\lib"),
+    };
+    assert_eq!(
+        root_spellings(&unc, Host::Windows),
+        [
+            unc.canonical.clone(),
+            PathBuf::from("S:\\lib"),
+            PathBuf::from("\\\\srv\\share\\lib"),
+        ]
+    );
+    let plain = LibraryRoot {
+        id: LibraryId::new(),
+        path: PathBuf::from("/Users/me/Scripts"),
+        canonical: PathBuf::from("/Users/me/Scripts"),
+    };
+    assert_eq!(
+        root_spellings(&plain, Host::Windows),
+        std::slice::from_ref(&plain.canonical)
+    );
+}

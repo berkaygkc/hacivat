@@ -530,7 +530,7 @@ impl Walk<'_> {
             mtime: own.mtime,
             target: None,
         };
-        let (target, meta) = match pathsafe::resolve_link(self.fs, &self.root.canonical, path) {
+        let (target, meta) = match pathsafe::resolve_link(self.fs, self.root, path) {
             Resolved::Target { rel, meta, .. } => (rel, meta),
             Resolved::Loop => return disabled(LinkState::Loop),
             Resolved::Outside | Resolved::Dangling | Resolved::Error(_) => {

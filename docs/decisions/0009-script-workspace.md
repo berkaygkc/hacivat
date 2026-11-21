@@ -237,7 +237,7 @@ Task 4 fills `pathsafe`, `scan`, `envscope`, `tree` and `dataless` (HV-SCRIPT-03
 - Through the `Fs` seam, which has `read_dir` (names, capped), `symlink_metadata`, `canonicalize` and `read_link`. It has no read method, so a scan cannot read contents by construction.
   - Fix round 1 replaced the first round's `resolve` (OS `realpath`, which walked outside paths) with `read_link`, and loops are counted as hops.
   - Tests inject an in-memory `Fs`.
-- The walk is iterative, with an explicit stack. Names are visited in byte order, so a stop is deterministic. The output is in tree order (`tree::order`): an ancestor before its contents, folders before files among siblings, then the name's bytes.
+- The walk is iterative, with an explicit stack. The names of each folder are visited in byte order. A stop on the file or depth limit is deterministic. A stop on the visited limit is not: since fix round 1 (m3) a folder is read only up to the cap, so which names it yields first depends on the OS's order. The output is in tree order (`tree::order`): an ancestor before its contents, folders before files among siblings, then the name's bytes.
 - Not listed:
   - dot names (folders and files, C11) and `node_modules` (ASCII case-insensitive), skipped silently;
   - names that fail `component`, each with a `Diag::BadName` that holds the display form;
@@ -305,7 +305,7 @@ Task 4 fills `pathsafe`, `scan`, `envscope`, `tree` and `dataless` (HV-SCRIPT-03
   4. `lstat`s each name inside the root, and splices in any link it meets, with at most 40 hops before `Loop`;
   5. canonicalises the link-free final path, which stays inside the root, and requires a name the scan would list.
   - On Windows a UNC, device, `\\?\`, other-drive, drive-relative or rooted text is refused from its components alone, so no SMB connection is ever made.
-  - An absolute link that spells the root another way (for example `/var/…` for `/private/var/…`, or another case) is `Outside`: the rule is a text comparison with the canonical root.
+  - An absolute link that spells the root another way (for example `/var/…` for `/private/var/…`, or another case) is `Outside`: the rule is a text comparison with the root's spellings (re-review n2 below).
   - A link hidden by its target's scope gets `Diag::LinkScope { rel }` (m4).
 - **m1, identity.** `join` canonicalises the folders on the way, and the final file or folder, and requires `inside_rel` to equal the requested `RelPath` byte for byte. Otherwise it answers `PathError::Alias`: an 8.3 short name (`GIT~1/config`, `NODE_M~1/x.sql`) or a case or normalisation variant. Scan-produced paths are the OS's stored bytes, so they always match.
 - **m2, dataless folders.** A folder with the dataless flag is listed as a disabled row (`ScriptEntry.dataless = true`, `kind = Folder`), with its ancestors, and is never read. The test double fails on any `read_dir` of such a folder. Running the scan thread under `setiopolicy_np(IOPOL_MATERIALIZE_DATALESS_FILES_OFF)` would need FFI and `unsafe`, which this crate may not use. Not done.
@@ -317,3 +317,19 @@ Task 4 fills `pathsafe`, `scan`, `envscope`, `tree` and `dataless` (HV-SCRIPT-03
   - Cost: a user who keeps libraries under `…/@production/` moves them, or attaches the parent.
 - **m8.** Left as it is (plan-mandated); it is on the PO queue.
 - **m9.** `lib.rs` gains a fenced `## m4b-t04-scanner` note (named exception): `visible`, `component`, `join` and `scan` are no longer stubs. T1a's bullets are untouched, so the merge with Task 3 stays clean.
+
+### Re-review notes (n1–n4; ruling R-T4-3)
+
+- **n1, the test guard.** The in-memory `Fs` now refuses any path whose components after the root are not plain names. A lexical `starts_with` had accepted `/lib/../elsewhere`.
+  - Proof: the reviewer's mutation (`resolve_link` pushes `..` instead of popping it, so it looks up through `..`) now turns `outside_link_texts_are_refused_without_touching_outside` RED. Before this change it stayed green.
+  - The real-file-system twin `a_link_out_through_dot_dot_is_outside` checks only the answer, not the lookups.
+- **n2, absolute link targets on Windows (R-T4-3).** An absolute text may start with any of the root's spellings (`pathsafe::root_spellings`), compared as text, component for component:
+  - the canonical root, on every host;
+  - on Windows also the root as the user chose it (`LibraryRoot::path`) and the plain form of the canonical root (`C:\…` for `\\?\C:\…`, `\\server\…` for `\\?\UNC\server\…`), because `mklink` stores absolute targets as typed.
+  - After a match the walk continues from the canonical root, so no lookup goes through another spelling.
+  - **Remaining cost:** any other absolute text is a disabled "points outside the library" row even when it leads back in. That covers a different drive-letter case, a `subst` or mapped drive, a path through a junction or symlink outside, 8.3 spellings, and on macOS the `/var/…` spelling of `/private/var/…`. A relative link is unaffected. This is a PO-visible cost; it fails closed.
+- **n3.** The "stop is deterministic" line above is corrected for the visited-limit cap.
+- **n4, residual beside R-T3-1.** Two final `canonicalize` calls go through the OS: the one in `resolve_link` (on the link-free final path) and the one in `join`'s identity check.
+  - Both are made only after an `lstat` walk has shown every component inside the root and free of links. If an inside folder were swapped for an outside link in the tiny window between the walk and the call, `realpath` would follow it. The swap needs a local writer racing the scan, the same class of window as R-T3-1, and the fd-relative `O_NOFOLLOW` open of Task 5 still protects the read and the save.
+  - On Windows, `canonicalize` is a `CreateFileW` on an inside file, which may recall a `RECALL_ON_OPEN` placeholder. That is a download, never an outside access.
+  - Not changed; recorded.

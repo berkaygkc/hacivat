@@ -427,7 +427,7 @@ fn check_root(fs: &dyn Fs, root: &LibraryRoot) -> Result<(), PathError> {
 /// list inside the root; `OutsideRoot` otherwise (out, dangling, a loop, a folder, a skipped
 /// place such as `.git/`, another kind of file).
 fn link_target(fs: &dyn Fs, root: &LibraryRoot, link: &Path) -> Result<Joined, PathError> {
-    match resolve_link(fs, &root.canonical, link) {
+    match resolve_link(fs, root, link) {
         Resolved::Target { path, rel, meta }
             if meta.kind == MetaKind::File && scan::script_kind(rel.name()).is_some() =>
         {
@@ -454,8 +454,9 @@ enum Step {
 /// only, inside the root** (fix round 1, I3; ruling R-T4-1, which replaces "resolved with
 /// `realpath`"):
 /// 1. read the link text (`read_link`, an `lstat`-class call on the link itself);
-/// 2. a relative text is walked from the link's folder; an absolute one must start with the
-///    canonical root, component for component, or it is `Outside`, so UNC, device and `\\?\`
+/// 2. a relative text is walked from the link's folder; an absolute one must start with one
+///    of the root's [spellings](root_spellings), component for component (the walk then
+///    continues from the canonical root), or it is `Outside`, so UNC, device and `\\?\`
 ///    targets, another drive and any other root are refused on Windows without being touched;
 /// 3. walk the steps one by one: `..` pops (above the root: `Outside`), a name is `lstat`ed,
 ///    always inside the root; a link met on the way is read and its text spliced in (at most
@@ -465,7 +466,9 @@ enum Step {
 ///    8.3 alias or a case-folded spelling of a skipped folder.
 ///
 /// No system call ever names a path outside the root.
-pub fn resolve_link(fs: &dyn Fs, root: &Path, link: &Path) -> Resolved {
+pub fn resolve_link(fs: &dyn Fs, library: &LibraryRoot, link: &Path) -> Resolved {
+    let root = library.canonical.as_path();
+    let spellings = root_spellings(library, Host::CURRENT);
     let Some(parent) = link.parent() else {
         return Resolved::Outside;
     };
@@ -477,7 +480,7 @@ pub fn resolve_link(fs: &dyn Fs, root: &Path, link: &Path) -> Resolved {
         Err(e) => return Resolved::Error(e.kind()),
     };
     'splice: loop {
-        if !splice(root, &text, &mut done, &mut todo) {
+        if !splice(root, &spellings, &text, &mut done, &mut todo) {
             return Resolved::Outside;
         }
         while let Some(step) = todo.pop() {
@@ -541,20 +544,64 @@ pub fn resolve_link(fs: &dyn Fs, root: &Path, link: &Path) -> Resolved {
     }
 }
 
-/// Puts the steps of the link text `text` on top of `todo`; an absolute text restarts from
-/// the root. `false` when the text leaves the root (no file-system call is made).
-fn splice(root: &Path, text: &Path, done: &mut PathBuf, todo: &mut Vec<Step>) -> bool {
+/// The spellings of the library root an absolute link text may start with (re-review n2,
+/// ruling R-T4-3), compared as text, component for component, with no system call:
+/// - the canonical root, on every host;
+/// - on Windows also the root as the user chose it (`LibraryRoot::path`) and the plain form
+///   of the canonical root (`C:\…` for `\\?\C:\…`, `\\server\…` for `\\?\UNC\server\…`),
+///   because `mklink` stores an absolute target as typed, never in the verbatim form.
+///
+/// `check_root` has just proved that both resolve to the canonical root, and the walk after a
+/// match continues from the canonical root, so no lookup ever goes through the other
+/// spellings. Any other absolute text (another case, a `subst` drive, a junction elsewhere
+/// that leads back in) stays `OutsideLink`.
+pub fn root_spellings(root: &LibraryRoot, host: Host) -> Vec<PathBuf> {
+    let mut out = vec![root.canonical.clone()];
+    if host == Host::Windows {
+        out.push(root.path.clone());
+        if let Some(text) = root.canonical.to_str() {
+            let plain = if let Some(rest) = text.strip_prefix("\\\\?\\UNC\\") {
+                Some(format!("\\\\{rest}"))
+            } else {
+                text.strip_prefix("\\\\?\\").map(str::to_owned)
+            };
+            if let Some(plain) = plain {
+                out.push(PathBuf::from(plain));
+            }
+        }
+        let mut seen = Vec::new();
+        out.retain(|p| {
+            let fresh = !seen.contains(p);
+            if fresh {
+                seen.push(p.clone());
+            }
+            fresh
+        });
+    }
+    out
+}
+
+/// Puts the steps of the link text `text` on top of `todo`; an absolute text that starts with
+/// one of `spellings` restarts from the canonical `root`. `false` when the text leaves the root
+/// (no file-system call is made).
+fn splice(
+    root: &Path,
+    spellings: &[PathBuf],
+    text: &Path,
+    done: &mut PathBuf,
+    todo: &mut Vec<Step>,
+) -> bool {
     let absolute = text
         .components()
         .next()
         .is_some_and(|c| matches!(c, Component::Prefix(_) | Component::RootDir));
     let rest: &Path = if absolute {
-        match text.strip_prefix(root) {
-            Ok(rest) => {
+        match spellings.iter().find_map(|sp| text.strip_prefix(sp).ok()) {
+            Some(rest) => {
                 *done = root.to_path_buf();
                 rest
             }
-            Err(_) => return false,
+            None => return false,
         }
     } else {
         text

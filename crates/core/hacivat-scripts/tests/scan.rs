@@ -53,9 +53,16 @@ struct FakeFs {
 
 /// Every call names a path inside the library root (fix round 1, I3): the fake fails the
 /// test on any other path, so "nothing outside is touched" is checked by every scan test.
+///
+/// ## m4b-t04-scanner (re-review n1): `starts_with` is lexical, so `/lib/../elsewhere` would
+/// pass it; every component after the root must also be a plain name (no `..`, no `.`, no
+/// second root or prefix), or the call is refused as a lookup outside the library.
 fn inside(path: &Path) {
+    let rest = path.strip_prefix(ROOT);
     assert!(
-        path.starts_with(ROOT),
+        rest.is_ok_and(|rest| rest
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))),
         "the scan touched a path outside the library: {path:?}"
     );
 }
@@ -1289,7 +1296,7 @@ fn unc_and_drive_link_texts_are_outside() {
         ("rooted.sql", "\\x.sql"),
     ] {
         fs.link(name, text);
-        let got = resolve_link(&fs, Path::new(ROOT), &Path::new(ROOT).join(name));
+        let got = resolve_link(&fs, &root_of(&fs), &Path::new(ROOT).join(name));
         if cfg!(windows) {
             assert_eq!(got, Resolved::Outside, "{text}");
         } else {
@@ -1434,7 +1441,7 @@ mod unix_fr1 {
         fs::set_permissions(o.path().join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
         symlink(o.path().join("locked/a.sql"), d.path().join("x.sql")).unwrap();
         let root = real_root(d.path());
-        let got = resolve_link(&RealFs, &root.canonical, &root.canonical.join("x.sql"));
+        let got = resolve_link(&RealFs, &root, &root.canonical.join("x.sql"));
         let r = scan(&root, &Limits::default(), &RealFs);
         fs::set_permissions(o.path().join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(got, Resolved::Outside);
@@ -1522,5 +1529,35 @@ mod unix_fr1 {
                 Some("@production/p.sql")
             );
         }
+    }
+}
+
+#[test]
+fn an_absolute_link_through_the_root_as_chosen_resolves_on_windows_only() {
+    // Re-review n2 (R-T4-3): on Windows an absolute target may spell the root as the user
+    // chose it; the walk then continues from the canonical root, so no lookup goes through
+    // the chosen spelling (the fake fails the test on any path outside `/lib`). Elsewhere,
+    // and for any other absolute text, the link stays outside.
+    let mut fs = FakeFs::new();
+    fs.file("x.sql")
+        .link("chosen.sql", "/chosen/x.sql")
+        .link("other.sql", "/other/x.sql")
+        .link("canonical.sql", "/lib/x.sql");
+    let root = LibraryRoot {
+        id: LibraryId::new(),
+        path: PathBuf::from("/chosen"),
+        canonical: PathBuf::from(ROOT),
+    };
+    let at = |n: &str| resolve_link(&fs, &root, &Path::new(ROOT).join(n));
+    let target = |r: Resolved| match r {
+        Resolved::Target { rel, .. } => Some(rel.as_str().to_owned()),
+        _ => None,
+    };
+    assert_eq!(target(at("canonical.sql")).as_deref(), Some("x.sql"));
+    assert_eq!(at("other.sql"), Resolved::Outside);
+    if cfg!(windows) {
+        assert_eq!(target(at("chosen.sql")).as_deref(), Some("x.sql"));
+    } else {
+        assert_eq!(at("chosen.sql"), Resolved::Outside);
     }
 }
