@@ -50,6 +50,7 @@ use hacivat_session::session::{
     effective_read_only,
 };
 use hacivat_sql_editor::SqlLanguageService;
+use hacivat_ui::focus_home::{HomeSlot, focus_home};
 use hacivat_ui::panes::TabId;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{
@@ -545,6 +546,8 @@ pub struct ConsoleHost {
     fixture: Option<FixtureUx>,
     /// The workspace's focused pane when the host last looked.
     pane: Option<hacivat_ui::panes::PaneId>,
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the console is a focus home; its primary is the editor.
+    home: HomeSlot,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -599,6 +602,7 @@ impl ConsoleHost {
             pending_ro: false,
             fixture: None,
             pane: None,
+            home: HomeSlot::new(),
             _subscriptions: subscriptions,
         };
         // A binding the hook handed out is for the tab built in this frame; whatever no host
@@ -1575,7 +1579,7 @@ impl Render for ConsoleHost {
         let actions = self.actions(cx);
         // ## m3b-t22-tx-ui (named exception): with the console's transaction items.
         let bar = toolbar::build_for(&model, &actions, self.console(), cx);
-        div()
+        let root = div()
             .id(("console", self.tab.0))
             .flex()
             .flex_col()
@@ -1605,8 +1609,9 @@ impl Render for ConsoleHost {
             .children(
                 self.console()
                     .and_then(|c| crate::exec_ui::error_bar::render(c, cx)),
-            )
-            .into_any_element()
+            );
+        // ## m4-t33d-fr1 (ruling R-T33d-5)
+        focus_home(&self.home, editor.focus_handle(cx), root).into_any_element()
     }
 }
 

@@ -13,6 +13,7 @@ use hacivat_settings::{LanguagePref, ThemePref, fsio, workspace_state};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::capsule::{Capsule, CapsuleModel, EnvKind};
 use hacivat_ui::dialog::{Dialog, DialogEvent, DialogSpec};
+use hacivat_ui::focus_home::{self, HomeSlot};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::menu::{MenuItemSpec, PopupMenu, PopupMenuEvent};
 use hacivat_ui::panes::{
@@ -137,6 +138,10 @@ pub struct Workspace {
     results_view: Option<AnyView>,
     layers: Layers,
     focus: FocusHandle,
+    // ## m4-t33d-fr1 (ruling R-T33d-5, named exception): the focused pane's content is a focus
+    // home; its primary (the content's own home, else its first Tab stop) is the active pane's
+    // default, where a control outside every home hands the focus when it stops being drawn.
+    pane_home: HomeSlot,
     drag: Option<Seam>,
     state_path: Option<PathBuf>,
     /// Writes `workspace.json`; a pending state is flushed on quit and when the view goes.
@@ -214,6 +219,7 @@ impl Workspace {
             results_view,
             layers: Layers::default(),
             focus: cx.focus_handle(),
+            pane_home: HomeSlot::new(),
             drag: None,
             state_path,
             saver: LatestWriter::new(write_state),
@@ -232,6 +238,17 @@ impl Workspace {
             let map = crate::explorer::live::parse_saved(&explorer);
             crate::explorer::live::set_restored(map, cx);
         }
+        // ## m4-t33d-fr1 (ruling R-T33d-5, named exception): a focused control that stops being
+        // drawn hands the focus to its surface's primary, else to the active pane's default
+        // (none while a layer is open: the layer's own home serves it).
+        let recovery = focus_home::recover_lost_focus(ws.focus.clone(), window, cx, |ws, _, _| {
+            if ws.layers.is_empty() {
+                ws.pane_default()
+            } else {
+                None
+            }
+        });
+        ws._subscriptions.push(recovery);
         // The cached trees of app start, now that the expanded rows are known (R-M4-15).
         crate::explorer::live::start(cx);
         ws._subscriptions
@@ -359,6 +376,13 @@ impl Workspace {
 
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    // ## m4-t33d-fr1 (ruling R-T33d-5, named exception)
+    /// The active pane's default focus as the last frame found it: its content's home primary
+    /// (a console's editor, a DDL view's code area), else its first Tab stop.
+    pub fn pane_default(&self) -> Option<FocusHandle> {
+        self.pane_home.primary()
     }
 
     /// The focused pane's active tab.
@@ -1452,6 +1476,12 @@ impl Workspace {
             Some(tab) => self.tab_content(*tab, theme, window, cx),
             None => editor_empty(theme, cx),
         };
+        // ## m4-t33d-fr1 (ruling R-T33d-5, named exception): the active pane's default.
+        let content = if id == self.panes.focused {
+            focus_home::first_stop_home(&self.pane_home, content).into_any_element()
+        } else {
+            content
+        };
         div()
             .flex()
             .flex_col()
@@ -1598,6 +1628,8 @@ impl Render for Workspace {
             .on_key_down(escape)
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
+            // ## m4-t33d-fr1 (ruling R-T33d-5, named exception)
+            .child(focus_home::frame_start())
             .child(title_bar)
             .child(tiles)
             .child(status_bar)

@@ -635,6 +635,50 @@ struct Counted {
     cancels: u32,
 }
 
+// ## m4-t33d-fr1 (ruling R-T33d-5): Enter on the count's Cancel takes the count state (and
+// Cancel) away; the focus lands on the grid, the results tile's primary.
+#[gpui::test]
+fn cancelling_a_count_by_keyboard_lands_the_focus_on_the_grid(cx: &mut TestAppContext) {
+    let c = pg_console(cx, vec![three_rows("SELECT * FROM orders")]);
+    let counted = Rc::new(RefCell::new(Counted::default()));
+    let hook = counted.clone();
+    c.vcx.cx.update(|cx| {
+        count::set_counter(
+            cx,
+            Rc::new(move |job: CountJob, _cx: &mut gpui::App| {
+                let (tx, done) = tokio::sync::oneshot::channel();
+                let mut h = hook.borrow_mut();
+                h.jobs.push(job);
+                h.answer = Some(tx);
+                let cancels = hook.clone();
+                Ok(CountHandle {
+                    done,
+                    cancel: Rc::new(move || cancels.borrow_mut().cancels += 1),
+                })
+            }),
+        );
+    });
+    c.run("SELECT * FROM orders;");
+    c.redraw();
+    click(&mut *c.vcx, "button-results-count");
+    c.redraw();
+    assert!(matches!(c.count(), CountState::Counting { .. }));
+    let cancel = handle_of(c.vcx, "button-results-count-cancel");
+    press_key(c.vcx, "enter");
+    c.redraw();
+    assert_eq!(counted.borrow().cancels, 1, "Enter cancelled the count");
+    assert_eq!(c.count(), CountState::Idle);
+    assert_ne!(focused(c.vcx), Some(cancel));
+    let grid = c.vcx.cx.read(|cx| {
+        let grid = hosts(cx)
+            .into_iter()
+            .find_map(|h| h.read(cx).grid_of(c.id, 0, cx))
+            .expect("the grid");
+        gpui::Focusable::focus_handle(grid.read(cx), cx)
+    });
+    assert_focus_on(c.vcx, "the grid", &grid);
+}
+
 /// R-M3-76: Count rows sends `SELECT COUNT(*) FROM (\n<q>\n) hv_c` (a separate query of its
 /// own), shows "Counting…" with Cancel while it runs, then the exact count; Cancel goes back
 /// to the button and an answer after it is dropped; a statement that can't be counted says so

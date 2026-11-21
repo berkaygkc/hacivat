@@ -53,6 +53,7 @@ use hacivat_l10n::{Count, ExactDecimal, Text, ids};
 use hacivat_results::{Completeness, PauseReason, StoreSnapshot, TruncReason};
 use hacivat_session::session::UnitId;
 use hacivat_ui::actions::{ActionDef, ActionRegistry};
+use hacivat_ui::focus_home::{HomeSlot, focus_home};
 use hacivat_ui::popover::Declare as _;
 use hacivat_ui::text::TextFn;
 use hacivat_ui_core::gpui_surface::{
@@ -165,6 +166,9 @@ pub struct ResultsHost {
     // ## m3b-t01b-seams (P-M3b-21): the tile root's focus, registered as the `Results` key
     // context.
     focus: FocusHandle,
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the tile is a focus home; its primary is the view shown
+    // (the grid, the Transposed grid, the text) or the Output log.
+    home: HomeSlot,
 }
 
 impl std::fmt::Debug for ResultsHost {
@@ -344,6 +348,7 @@ impl ResultsHost {
             shown: None,
             tiles: HashMap::new(),
             focus: cx.focus_handle(),
+            home: HomeSlot::new(),
         }
     }
 
@@ -850,6 +855,8 @@ impl ResultsHost {
             .size_full()
             .bg(c.panel.to_hsla())
             .child(strip_tabs);
+        // ## m4-t33d-fr1 (ruling R-T33d-5)
+        let primary;
         match active {
             ActiveResult::Output => {
                 self.guard_focus(None, window, cx);
@@ -859,6 +866,7 @@ impl ResultsHost {
                 let lines_empty = list.read(cx).rows().is_empty();
                 // ## m3b-t25-results: ↑/↓ and Enter on the focused log.
                 let log_focus = tile.log_focus.clone();
+                primary = log_focus.clone();
                 let keys = list.downgrade();
                 let emit = results.downgrade();
                 let shown = list.clone();
@@ -917,6 +925,7 @@ impl ResultsHost {
                     super::views::sync(console, &grid, &adapter, cx);
                 }
                 self.guard_focus(Some(&grid), window, cx);
+                primary = super::views::shown_focus(&grid, cx);
                 let (key, unit) = {
                     let entry = results.read(cx).tab(ix)?;
                     (entry.key(), entry.unit())
@@ -1045,7 +1054,7 @@ impl ResultsHost {
                 ));
             }
         }
-        Some(column.into_any_element())
+        Some(focus_home(&self.home, primary, column).into_any_element())
     }
 }
 

@@ -146,9 +146,16 @@ impl Button {
     // ## m4-t33d (R-T33-1)
     /// Whether the button is a Tab stop. A button is one by default (HTML parity), on the
     /// handle it keeps itself; `false` takes it out of the Tab order where a surface's NOTES
-    /// say so (the value viewer's ×). On a handle passed with [`Button::focus_handle`] this
-    /// sets that handle's flag; without this call a passed handle keeps its own. A disabled or
-    /// inert button is never a stop.
+    /// say so (the record inspector's ▲ ▼). On a handle passed with [`Button::focus_handle`]
+    /// this sets that handle's flag; without this call a passed handle keeps its own. A
+    /// disabled or inert button is never a stop.
+    ///
+    /// ## m4-t33d-fr1 (T33d review m2): GPUI keeps the flag on the handle, not on the button:
+    /// on a passed handle this mutates that handle, for every clone of it and after the button
+    /// is gone (the handle is a stop or not wherever else it is tracked). An owner that passes
+    /// its own handle makes it a stop or not where it creates it (`cx.focus_handle().tab_stop(..)`)
+    /// and leaves this call to buttons on their own handle, or to a flag that is the owner's to
+    /// set each frame (a toast's buttons).
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = Some(tab_stop);
         self

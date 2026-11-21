@@ -1067,6 +1067,73 @@ fn reload_from_the_keyboard_keeps_the_focus_in_the_view(cx: &mut TestAppContext)
     );
 }
 
+/// A provided action whose `enabled` the test sets.
+struct ToggledSource(Rc<Cell<bool>>);
+
+impl ExplorerActionProvider for ToggledSource {
+    fn actions(&self, node: &NodeRef, surface: ActionSurface, _: &App) -> Vec<ProvidedAction> {
+        if surface != ActionSurface::DdlViewToolbar || node.kind != Some(ObjectKind::Table) {
+            return Vec::new();
+        }
+        vec![ProvidedAction {
+            slot: ActionSlot::Source,
+            id: "test.edit_source",
+            label: "Edit source".into(),
+            enabled: self.0.get(),
+        }]
+    }
+}
+
+// ## m4-t33d-fr1 (ruling R-T33d-5; T33d review m1): a provided action that turns disabled
+// while it has the focus is no longer tracked; the general recovery hands the focus to the
+// view's code area (its home's primary), so F5 and Tab keep working.
+#[gpui::test]
+fn a_provided_action_disabled_while_focused_hands_the_focus_to_the_code_area(
+    cx: &mut TestAppContext,
+) {
+    let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
+    let (vcx, s, id) = pg_shell(cx, "en", cat);
+    let enabled = Rc::new(Cell::new(true));
+    let provider = enabled.clone();
+    vcx.cx.update(|cx| {
+        register_action_provider(Rc::new(ToggledSource(provider)), cx);
+        let _ = cx.default_global::<ActionRegistry>().register(ActionDef {
+            id: "test.edit_source",
+            title_id: "hv-ddl-view-copy",
+            context: "Workspace",
+            run: Rc::new(|_, _| {}),
+            enabled: |_| true,
+        });
+    });
+    open_view(vcx, id, &users_key());
+    let h = handles(vcx, id);
+    in_window(vcx, |window, cx| window.focus(&h.refresh, cx));
+    vcx.run_until_parked();
+    press(vcx, "shift-tab");
+    let action = focused(vcx).expect("Shift-Tab from Refresh is the provided action");
+    assert_ne!(action, h.refresh);
+    enabled.set(false);
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+    assert!(
+        focused_on(vcx, &h.code),
+        "the focus moved from the disabled action to the code area"
+    );
+    assert!(
+        context_stack(vcx)
+            .0
+            .contains(&ddl_view::DDL_VIEW_CODE_CONTEXT),
+        "the view's bindings are live"
+    );
+    s.verdict.set(Some(Staleness::Unknown));
+    press(vcx, "f5");
+    assert_eq!(
+        state(vcx, id, &users_key()).freshness,
+        Freshness::Unknown,
+        "F5 reloads from there"
+    );
+}
+
 /// The DDL view's focus handles the Tab-order tests name.
 struct ViewHandles {
     refresh: gpui::FocusHandle,

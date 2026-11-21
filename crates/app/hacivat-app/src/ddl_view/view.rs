@@ -53,6 +53,7 @@ use hacivat_sql_editor::SqlLanguageService;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::env_swatch_on_raised;
 use hacivat_ui::checkbox::Checkbox;
+use hacivat_ui::focus_home::{HomeSlot, focus_home};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::popover::Tip;
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
@@ -199,6 +200,8 @@ pub struct DdlView {
     /// command). The view owns them so focus survives a re-render and the tests can name them
     /// (a Button's own handle is a Tab stop too since T33d, R-T33-1).
     toolbar_focus: ToolbarFocus,
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the view is a focus home (`focus_target`).
+    home: HomeSlot,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -294,6 +297,7 @@ impl DdlView {
                 console: tab_stop(cx),
                 provided: RefCell::default(),
             },
+            home: HomeSlot::new(),
             _subscriptions: subscriptions,
         };
         view.load(Why::Show, cx);
@@ -335,28 +339,18 @@ impl DdlView {
         &self.close_focus
     }
 
-    // ## m4-t33d (T33 flaky2 review I2)
-    /// The focus sat on a control this frame no longer draws (Reload once its notice is gone,
-    /// Copy or Open in console once disabled): it moves to the code area when the text is
-    /// shown, else to Refresh. Left there, GPUI would fall back to the window root, where F5
-    /// and the view's other bindings do nothing and Tab restarts at the window's first stop.
-    fn keep_focus_drawn(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let reload_drawn = matches!(self.freshness, Freshness::Changed | Freshness::Unknown);
-        let close_drawn = self.freshness == Freshness::Gone;
-        let toolbar = &self.toolbar_focus;
-        let lost = (!reload_drawn && self.reload_focus.is_focused(window))
-            || (!close_drawn && self.close_focus.is_focused(window))
-            || (!self.can_copy()
-                && (toolbar.copy.is_focused(window) || toolbar.console.is_focused(window)));
-        if !lost {
-            return;
-        }
-        let target = if self.body == Body::Script {
+    // ## m4-t33d (T33 flaky2 review I2, ruling R-T33d-4); m4-t33d-fr1 (ruling R-T33d-5): the
+    // view's focus home primary. A focused control this frame no longer draws (Reload once its
+    // notice is gone, Copy or Open in console once disabled, a provided action once disabled,
+    // a toolbar item that overflowed into ⋯) hands the focus here (`hacivat_ui::focus_home`):
+    // the code area when the text is shown (it is drawn whenever the text is, F5 and Tab work
+    // there), else Refresh.
+    fn focus_target(&self, cx: &App) -> FocusHandle {
+        if self.body == Body::Script {
             self.editor.focus_handle(cx)
         } else {
-            toolbar.refresh.clone()
-        };
-        cx.defer_in(window, move |_, window, cx| window.focus(&target, cx));
+            self.toolbar_focus.refresh.clone()
+        }
     }
 
     /// The object shown (its key follows a rename).
@@ -1522,16 +1516,14 @@ impl DdlView {
 }
 
 impl Render for DdlView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // ## m4-t33d (T33 flaky2 review I2)
-        self.keep_focus_drawn(window, cx);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let c = &theme.tokens.colors;
         let weak = cx.entity().downgrade();
         let toolbar = self.toolbar(&weak, cx);
         let strip = self.strip(&weak, cx);
         let notices = self.notices(&weak, cx);
-        div()
+        let root = div()
             .id("ddl-view")
             .size_full()
             .flex()
@@ -1562,7 +1554,9 @@ impl Render for DdlView {
                             .child(strip),
                     ),
             )
-            .child(self.code(cx))
+            .child(self.code(cx));
+        // ## m4-t33d-fr1 (ruling R-T33d-5)
+        focus_home(&self.home, self.focus_target(cx), root)
     }
 }
 

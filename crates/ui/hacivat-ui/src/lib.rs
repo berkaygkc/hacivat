@@ -10,6 +10,8 @@ pub mod choice_list;
 pub mod dialog;
 pub mod disclosure;
 pub mod explain;
+// ## m4-t33d-fr1 (ruling R-T33d-5): a focused control that stops being drawn hands the focus on.
+pub mod focus_home;
 // ## m2b-t24-shots (fix round 1, I2): scroll containers that follow the focus.
 pub mod follow;
 pub mod form;

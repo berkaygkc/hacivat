@@ -363,6 +363,69 @@ fn the_badge_buttons_are_tab_stops(cx: &mut TestAppContext) {
     });
 }
 
+// ## m4-t33d-fr1 (ruling R-T33d-5; T33d review I1, hostile test H1): Commit goes with the badge
+// it commits; the focus lands on the console's editor (its home's primary), and Tab moves on
+// from there. Before, the focus stayed on Commit's handle, which no frame drew: Tab did
+// nothing and the console's keys were gone.
+#[gpui::test]
+fn committing_from_the_badge_by_keyboard_lands_the_focus_on_the_editor(cx: &mut TestAppContext) {
+    let vcx = shell_staging(cx, "en");
+    let (console, h) = console_over(vcx, pg().tracks_transactions());
+    redraw(vcx);
+    user_exec(&h, "BEGIN");
+    user_exec(&h, "UPDATE t SET a = 1");
+    wait_until(vcx, "the badge", |vcx| {
+        label(vcx, "tx-badge-text").is_some()
+    });
+    let commit = handle_of(vcx, "button-tx-badge-commit");
+    let rollback = handle_of(vcx, "button-tx-badge-rollback");
+    let editor = vcx.cx.read(|cx| {
+        Consoles::get(cx, console)
+            .and_then(|s| s.editor.clone())
+            .expect("the console has an editor")
+            .read(cx)
+            .focus_handle(cx)
+    });
+    in_window(vcx, |window, cx| window.focus(&commit, cx));
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    assert_focus_on(
+        vcx,
+        "Roll back (baseline: Tab works from Commit)",
+        &rollback,
+    );
+    in_window(vcx, |window, cx| window.focus(&commit, cx));
+    vcx.run_until_parked();
+    press_key(vcx, "enter");
+    wait_until(vcx, "the commit", |_| {
+        snapshot(&h).tx.status == TxStatus::Idle
+    });
+    redraw(vcx);
+    assert!(label(vcx, "tx-badge-text").is_none(), "the badge is gone");
+    assert_focus_on(vcx, "the editor", &editor);
+    // The console's keys are live again: the editor takes Tab (it indents there).
+    assert!(
+        context_stack(vcx).0.contains(&"Editor"),
+        "the editor's key context is back: {:?}",
+        context_stack(vcx)
+    );
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    assert_focus_on(vcx, "the editor (it took the Tab)", &editor);
+    // And the window's Tab order goes on from there, to a drawn stop.
+    let order = tab_order(vcx);
+    in_window(vcx, |window, cx| {
+        window.focus(&editor, cx);
+        window.focus_next(cx);
+    });
+    vcx.run_until_parked();
+    let after = focused(vcx).expect("focus_next moved the focus");
+    assert_ne!(after, commit, "never back to the undrawn Commit");
+    assert_ne!(after, editor, "on from the editor");
+    assert!(order.contains(&after), "to a drawn Tab stop");
+}
+
 #[gpui::test]
 fn badge_only_for_user_transactions(cx: &mut TestAppContext) {
     let vcx = shell_staging(cx, "en");

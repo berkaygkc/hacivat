@@ -47,9 +47,15 @@ pub fn note_focus_bounds(
 
 /// An absolute probe, drawing nothing, that records its parent's bounds while `handle` holds
 /// the focus. Its parent must be positioned (`relative`).
+///
+/// ## m4-t33d-fr1 (ruling R-T33d-5): it also reports the widget to the focus homes around it
+/// ([`crate::focus_home`]), so the focus can move on when the widget stops being drawn.
 pub fn focus_probe(handle: FocusHandle) -> impl IntoElement {
     canvas(
-        move |bounds, window, cx| note_focus_bounds(&handle, bounds, window, cx),
+        move |bounds, window, cx| {
+            note_focus_bounds(&handle, bounds, window, cx);
+            crate::focus_home::note_drawn(&handle, window, cx);
+        },
         |_, (), _, _| {},
     )
     .absolute()

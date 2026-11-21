@@ -399,6 +399,27 @@ fn filter_rows_builds_a_filtered_map(cx: &mut TestAppContext) {
     assert!(t.vcx.cx.read(|cx| find::is_open(t.console, cx)));
 }
 
+// ## m4-t33d-fr1 (ruling R-T33d-5): Enter on Show all rows takes the note (and the button)
+// away; the focus lands on the grid, the results tile's primary.
+#[gpui::test]
+fn show_all_rows_by_keyboard_lands_the_focus_on_the_grid(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    let rows = vec![row(1, "ankara"), row(2, "izmir"), row(3, "antalya")];
+    let (source, _w, _) = live(rows, Completeness::Complete);
+    let grid = t.show(source);
+    t.find("an");
+    t.flip(Toggle::Filter);
+    assert!(text_of(t.vcx, "results-filter-note").is_some());
+    let show_all = handle_of(t.vcx, "button-results-filter-show-all");
+    press_key(t.vcx, "enter");
+    t.redraw();
+    assert!(t.map(&grid).is_identity(), "Enter showed all rows");
+    assert_eq!(text_of(t.vcx, "results-filter-note"), None);
+    assert_ne!(focused(t.vcx), Some(show_all));
+    let grid_focus = t.vcx.cx.read(|cx| grid.read(cx).focus_handle(cx));
+    assert_focus_on(t.vcx, "the grid", &grid_focus);
+}
+
 /// Past the fetched rows of an open cursor, go to row fetches; above a million rows it asks
 /// first (Fetch and go, or Cancel), and Stop fetching ends the asking with the cursor open.
 /// Below that it fetches at once, and the grid goes to the row when it arrives.

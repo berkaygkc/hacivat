@@ -717,6 +717,27 @@ fn home_entry_points_are_tab_stops_in_order(cx: &mut TestAppContext) {
     );
 }
 
+// ## m4-t33d-fr1 (ruling R-T33d-5): a focused Connect that turns disabled (the selection
+// cleared) is no longer tracked; the focus lands on the active pane's default, the home's
+// first entry, and Tab goes on from there.
+#[gpui::test]
+fn a_focused_connect_that_turns_disabled_hands_the_focus_to_the_first_entry(
+    cx: &mut TestAppContext,
+) {
+    let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    let new = handle_of(vcx, "button-home-new");
+    let paste = handle_of(vcx, "button-home-paste");
+    focus_list(vcx); // selects a: Connect is enabled
+    let connect = handle_of(vcx, "button-home-connect");
+    assert_focus_on(vcx, "Connect", &connect);
+    vcx.update(|_, cx| ConnectionsModel::select(cx, None));
+    redraw_full(vcx);
+    assert_ne!(focused(vcx), Some(connect), "Connect is disabled");
+    assert_focus_on(vcx, "New connection (the pane's first stop)", &new);
+    in_window(vcx, |window, cx| window.focus_next(cx));
+    assert_focus_on(vcx, "Paste (Tab goes on)", &paste);
+}
+
 // ## m2a-t21-shots
 
 #[gpui::test]

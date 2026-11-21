@@ -943,7 +943,8 @@ impl ValueViewer {
             middle_scroll: ScrollHandle::new(),
             rerun_focus: cx.focus_handle().tab_stop(true),
             copy_focus: cx.focus_handle().tab_stop(true),
-            close_focus: cx.focus_handle(),
+            // ## m4-t33d-fr1 (T33d review m2): NOTES 22 "Header": the × is no Tab stop.
+            close_focus: cx.focus_handle().tab_stop(false),
             seen_focus: Cell::new(0),
             refused_focus: cx.focus_handle().tab_stop(true),
             focus_refusal: false,
@@ -1324,8 +1325,9 @@ impl Render for ValueViewer {
             // ## m4-t33d (R-T33-1, NOTES M3b surface 22 "Header"): the × is not a Tab stop,
             // like T2a's dialogs (Escape closes); Copy raw value is one, as NOTES "Keyboard"
             // lists it.
+            // ## m4-t33d-fr1 (T33d review m2): the handle is made no stop where it is created
+            // (`close_focus`); a `.tab_stop(false)` here only rewrote that handle's flag.
             .focus_handle(self.close_focus.clone())
-            .tab_stop(false)
             .on_click(move |_, _, cx| e.update(cx, |v, cx| v.close(cx)))
         };
         let mut control = div()

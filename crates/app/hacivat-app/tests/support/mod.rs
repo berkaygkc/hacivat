@@ -445,6 +445,27 @@ pub fn handle_of(vcx: &mut VisualTestContext, selector: &'static str) -> FocusHa
     focused(vcx).unwrap_or_else(|| panic!("`{selector}` takes the focus"))
 }
 
+// ## m4-t33d-fr1 (ruling R-T33d-5)
+/// Presses and releases `key` on the focused element (a Button clicks on the key-up, and
+/// `simulate_keystrokes` sends only the key-down).
+pub fn press_key(vcx: &mut VisualTestContext, key: &'static str) {
+    let keystroke = gpui::Keystroke::parse(key).expect("a keystroke");
+    vcx.simulate_keystrokes(key);
+    vcx.simulate_event(gpui::KeyUpEvent { keystroke });
+    vcx.run_until_parked();
+}
+
+// ## m4-t33d-fr1 (ruling R-T33d-5)
+/// Asserts that the focus is on `handle` (`name` in the message).
+#[track_caller]
+pub fn assert_focus_on(vcx: &VisualTestContext, name: &str, handle: &FocusHandle) {
+    assert_eq!(
+        focused(vcx).as_ref(),
+        Some(handle),
+        "the focus is on {name}"
+    );
+}
+
 // ## m4-t33d (R-T33-1)
 /// The window's Tab order: every stop Tab visits from nothing focused, once each, in order
 /// (GPUI's `focus_next` over the last frame). The focus ends on the last stop.

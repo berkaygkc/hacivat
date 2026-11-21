@@ -299,11 +299,27 @@ fn second_console_opens_its_own_session_and_waits_when_the_budget_is_full(cx: &m
         frame_text(vcx).contains("Waiting for a free connection to orders-dev (2 of 2 in use)")
     });
     assert!(session_of(vcx, third).is_none());
-    click(vcx, "button-console-waiting-cancel");
+    // ## m4-t33d-fr1 (ruling R-T33d-5): Cancel from the keyboard; the sentence and its Cancel
+    // go, and the focus lands on the pane's default (the console's editor), not on the
+    // undrawn Cancel.
+    let cancel = handle_of(vcx, "button-console-waiting-cancel");
+    press_key(vcx, "enter");
     wait_until(vcx, "the wait to be cancelled", |vcx| {
         !frame_text(vcx).contains("Waiting for a free connection")
     });
     assert!(session_of(vcx, third).is_none());
+    redraw_full(vcx);
+    let landed = focused(vcx).expect("the focus moved on");
+    assert_ne!(landed, cancel, "not the undrawn Cancel");
+    let pane_first = with_ws(vcx, |ws, _, _| ws.pane_default());
+    assert_eq!(Some(landed.clone()), pane_first, "the pane's default");
+    let editor = vcx.cx.read(|cx| {
+        Consoles::get(cx, third)
+            .and_then(|s| s.editor.clone())
+            .map(|e| gpui::Focusable::focus_handle(e.read(cx), cx))
+    });
+    assert_eq!(Some(landed), editor, "the waiting console's editor");
+    assert!(context_stack(vcx).0.contains(&"Editor"));
     stop_core_runtime_test(cx);
 }
 

@@ -642,6 +642,20 @@ fn cursor_open_segment_is_a_tab_stop_and_enter_closes(cx: &mut TestAppContext) {
     wait_until(vcx, "the cursor to close", |_| {
         snapshot(&h).cursor.is_none()
     });
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the segment goes with the cursor; the focus lands on
+    // the active pane's default (the console's editor), not on the undrawn segment.
+    wait_until(vcx, "the segment to go", |vcx| {
+        !status(vcx).contains("Cursor open")
+    });
+    redraw_full(vcx);
+    let editor = vcx.cx.read(|cx| {
+        Consoles::get(cx, console)
+            .and_then(|s| s.editor.clone())
+            .expect("the console has an editor")
+            .read(cx)
+            .focus_handle(cx)
+    });
+    assert_focus_on(vcx, "the console's editor", &editor);
     stop_core_runtime_test(cx);
 }
 
