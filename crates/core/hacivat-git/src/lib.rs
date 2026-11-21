@@ -217,8 +217,10 @@ pub mod testing {
 
     /// [`status`](super::status), with `dataless` (library-relative, `/`-separated) treated as
     /// cloud placeholders in addition to the ones the file flags name. The hook can only add
-    /// `Unknown(Dataless)` answers and pathspec exclusions; it cannot remove one, so it cannot
-    /// weaken the status (`excluded_path_is_never_opened_by_status`).
+    /// `Unknown(Dataless)` answers and index-copy removals, or (for a `.gitignore`,
+    /// `.gitattributes` or `.gitmodules`) the `Unavailable(Dataless)` refusal; it cannot remove
+    /// one, so it cannot weaken the status (`excluded_path_is_never_opened_by_status`,
+    /// `dataless_control_file_is_unavailable`).
     pub fn status_treating_as_dataless(
         library_root: &Path,
         limits: &GitLimits,

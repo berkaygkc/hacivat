@@ -774,6 +774,7 @@ mod tests {
         assert!(unsupported_format(&top, &top));
     }
 
+    #[cfg(unix)]
     fn layout_of(g: &Path) -> Layout {
         Layout {
             git_dir: g.to_path_buf(),

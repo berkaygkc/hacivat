@@ -5,7 +5,9 @@
 //! `Unavailable(Timeout)`, sets the interrupt flag and returns **without joining** the worker,
 //! because `gix`'s blocking opens of `.gitignore`, `.gitattributes` (and a FIFO in their place)
 //! cannot be interrupted (`alg/28` §0.8). While that worker still runs, a new call for the same
-//! library answers `Unavailable(Timeout)` at once: at most one stuck worker per library.
+//! library (by canonical root, m1) answers `Unavailable(Paused)` at once (m2): at most one stuck
+//! worker per library. The worker stays cheap: every repository file a read could follow into
+//! an unbounded stream is checked regular and capped first (`trust`, I3, R-T7-2).
 //!
 //! ## `gix` entry points used, and why none can start a program (Task 7 Step 3)
 //!

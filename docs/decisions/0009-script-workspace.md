@@ -262,3 +262,58 @@ Task 7 instead removes those entries from an in-memory copy of the index (`State
 - `:(exclude)` pathspecs for dataless paths: quadratic, as above.
 - Running `git status` with protective flags: Q4, ADR D2.
 - `parallel`: R-T0-1 holds; 10,000 files take 131 ms without it.
+
+### Fix round 1 (review I1–I5, m1–m10; rulings R-T7-1..3)
+
+**One normal form for comparing (I1).**
+- The library prefix and the index paths are compared component by component in NFC.
+- macOS keeps an NFD folder name; under `core.precomposeUnicode` the index holds NFC. Before this fix, a Turkish `çalışma/` library answered an empty, confident "clean".
+- The pathspec carries the prefix in the disk's spelling, in NFC and in NFD (their union), so it matches the index's spelling whichever it is.
+- Keys are still the disk's bytes.
+
+**Case-only differences (I2, R-T7-1).**
+- On a file system that folds case (`core.ignoreCase`, as gix reads it), an index path that differs from the disk only by case is `Unknown(CaseMismatch)`, keyed by the disk's spelling. It is never dropped.
+- The disk entry is found through the file system's own lookup. On Unix the name is identified by `(dev, ino)` (no casing code). On Windows, which has no stable file id in `std`, it is the unique ASCII case-insensitive NFC match; failing that, the index spelling is kept and the badge is still `Unknown`.
+- A library folder that matches its index spelling only by case marks every path under it `Unknown(CaseMismatch)`.
+- Only changed paths are mapped, so a clean, case-renamed file has no badge (the CLI shows none either).
+- The differential oracle no longer shares the product's listing rule:
+  - it keeps the CLI's own spelling;
+  - it drops a path only when the OS's `lstat` cannot find it;
+  - it compares through NFC plus an explicit case-only rule;
+  - a separate assertion checks that every key is the disk's spelling.
+
+**Bounded reads, so an abandoned worker stays cheap (I3, R-T7-2).** gix's `ref_contents` follows a symlink and reads with no limit. Before the open, these files must be regular files (not a symlink, FIFO or device) under their caps; otherwise `Unavailable(Redirected)`, or `Failed(TooLarge)` when over the cap:
+
+| File | Cap |
+|---|---|
+| `HEAD` | 4 KiB |
+| every loose ref on its symbolic chain, under the git dir and the common dir (folders on the way must be real directories; names must stay under `refs/` with no `..`; at most 5 hops) | 4 KiB |
+| `packed-refs`, `info/exclude`, `info/attributes` | 1 MiB |
+| the index | 256 MiB (it can legitimately pass 1 MiB; the cap only bounds a hostile one) |
+
+- **Nested repositories** inside the library: gix's classification reads their `HEAD` with no limit. Hacivat's own pre-walk of the library (names and `lstat` only) therefore requires each nested `.git` to be one of:
+  - a real directory with a regular `HEAD` under 4 KiB;
+  - a regular gitfile under 4 KiB whose target's `HEAD` is the same.
+  A symlinked `.git` is refused.
+- The pre-walk enters no symlinked folder, no `.git` and no nested repository. More than 200,000 entries, or a folder deeper than 64, answers `Failed(TooLarge)`.
+- These checks run after the format check, because a reftable repository keeps a file at `refs/heads`.
+- **Residual:** a swap between the check and gix's read (a concurrent writer inside the user's own repository) is not closed.
+- Measured on macOS, debug build: 135 ms for 10,000 files and 325 ms for 20,000 dataless paths, including the pre-walk.
+
+**Placeholders among the files gix reads (I4, R-T7-3).**
+- If a `.gitignore`, `.gitattributes` or `.gitmodules` in the library, in a folder between the worktree and the library, or in `info/exclude`/`info/attributes` is a cloud placeholder, it is not opened, since opening downloads it.
+- The library answers `Unavailable(Dataless)`, the diagnostic for that case. Tracked and untracked files are covered alike, because the pre-walk sees both.
+
+**No-spawn proof on Linux (I5).** The `build-test` job installs `strace` on Linux (`# ## m4b-t07-git`, named exception). With `CI` set, the hostile and positive-control tests fail when no spawn detector ran. The positive control asserts whenever a detector runs.
+
+**Minor items:**
+- **m1.** The one-stuck-worker cap is keyed by the canonical library root. The caller's spelling (a symlink alias, `..`) no longer matters.
+- **m2.** A call while a stuck worker lives answers `Unavailable(Paused)`: "status is paused: a file in the repository does not respond". The call that hit the budget answers `Timeout`. The pause lasts until the blocked read returns or the app restarts, because the worker is never joined. Task 13 shows the notice text from FTL.
+- **m3.** `Failed` carries a fixed `FailKind`: `LibraryUnreadable`, `PathNotUtf8`, `OwnerUnreadable`, `Open`, `Index`, `Worktree`, `Head`, `Setup`, `TooManyEntries`, `TooLarge` or `Worker`. No gix text is kept, since a config parse error can quote config bytes.
+- **m4.** A repository config that cannot be read (missing, not regular, over 1 MiB, unparseable, or the same for `config.worktree`) is `Unsupported`, fail closed.
+- **m5.** An untracked FIFO, socket or device is `Unknown(NotAFile)`. gix emits none of them, so the pre-walk records them.
+- **m7.** The FIFO-based global-config tests are Unix-only, because Windows has no FIFOs. On Windows the submodule and global-config vectors are covered by `hostile_repo_runs_no_program`: it holds a submodule and a hostile `HOME` and runs inside the Job Object, which counts any started process.
+- **m8.** The hostile fixture holds a live filter vector: a same-length `b.sql` with a touched mtime, so gix must hash it through the pipeline. It answers `Unknown(Filtered)`, and no marker appears.
+- **m9.** The doc-hidden `pub mod testing` is product API by necessity. A `testing` feature would need a manifest edit (Task 1a's). It can only add `Unknown(Dataless)` answers and `Unavailable(Dataless)` refusals.
+- **m10.** Ownership is checked again, after the open, on the worktree, git dir and common dir that gix opened.
+- **For the Task 1a owner (m6).** `BackendInPublicApi` counts the `_` of `use … as _` as a backend name, so a private impl header with `'_` reads as public API. This crate names its lifetimes instead; the rule could skip `_` imports.
