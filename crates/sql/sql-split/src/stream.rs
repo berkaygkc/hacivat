@@ -20,6 +20,12 @@
 //! One statement longer than [`STREAM_STATEMENT_MAX`] is [`StreamItem::TooLong`]. When the
 //! statement is still open at that size the splitter does not look for its end (it would have
 //! to hold it): it yields the `TooLong` and nothing more, and drops the rest of the stream.
+//!
+//! All of the above is the default policy, [`StreamPolicy::Exact`]. Under
+//! [`StreamPolicy::Eager`] (M4b "Run as script", R-M4b-46) MySQL/MariaDB statements are given
+//! out without the block hold, and the stream stops at the first block mismatch with one
+//! `UnknownBlock` item instead of refusing back: it equals the default stream for every script
+//! whose blocks match (ADR 0005 `m4b-t08`).
 
 use std::sync::Arc;
 
@@ -58,6 +64,20 @@ pub enum StreamItem {
     },
 }
 
+// ## m4b-t08-stream-hold
+/// What the stream may give out before the end of the script (M4b Task 8, R-M4b-46).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum StreamPolicy {
+    /// The stream equals the whole script's execution split for every chunking (module
+    /// documentation); on MySQL/MariaDB it holds everything after the last block-tracked
+    /// statement.
+    #[default]
+    Exact,
+    /// MySQL/MariaDB statements are given out before the latest anchor even with no block held,
+    /// and the stream stops at the first block mismatch.
+    Eager,
+}
+
 /// How far back from the latest item an anchor is looked for.
 const ANCHOR_SCAN: usize = 256;
 
@@ -76,10 +96,18 @@ pub struct StreamSplitter {
     tried: usize,
     /// A statement too long to hold was met: nothing more is split.
     stopped: bool,
+    // ## m4b-t08-stream-hold
+    policy: StreamPolicy,
 }
 
 impl StreamSplitter {
     pub fn new(ctx: DialectCtx, flavor: ClientFlavor) -> Self {
+        Self::with_policy(ctx, flavor, StreamPolicy::Exact)
+    }
+
+    // ## m4b-t08-stream-hold
+    /// A splitter that gives out under `policy` ([`StreamPolicy`]).
+    pub fn with_policy(ctx: DialectCtx, flavor: ClientFlavor, policy: StreamPolicy) -> Self {
         StreamSplitter {
             ctx,
             flavor,
@@ -88,7 +116,14 @@ impl StreamSplitter {
             delimiter: None,
             tried: 0,
             stopped: false,
+            policy,
         }
+    }
+
+    /// The bytes held, not given out yet (the memory test).
+    #[doc(hidden)]
+    pub fn held_len(&self) -> usize {
+        self.held.len()
     }
 
     /// The items `chunk` settles (possibly none: they come once later text can no longer
@@ -106,7 +141,7 @@ impl StreamSplitter {
         let a = self.analysis();
         let mut out = Vec::new();
         if let Some(x) = self.settled(&a) {
-            self.give_out(&a, x, &mut out);
+            self.release(&a, x, &mut out);
             self.tried = 0;
             return out;
         }
@@ -118,7 +153,10 @@ impl StreamSplitter {
         {
             // A statement still open past the cap: give out what precedes it, then stop.
             let at = usize::from(s.strict.start());
-            self.give_out(&a, at, &mut out);
+            self.release(&a, at, &mut out);
+            if self.stopped {
+                return out;
+            }
             out.push(StreamItem::TooLong { offset: self.base });
             self.stopped = true;
             self.held = String::new();
@@ -134,7 +172,7 @@ impl StreamSplitter {
         let a = self.analysis();
         let mut out = Vec::new();
         let n = self.held.len();
-        self.give_out(&a, n.saturating_add(1), &mut out);
+        self.release(&a, n.saturating_add(1), &mut out);
         out
     }
 
@@ -153,7 +191,9 @@ impl StreamSplitter {
         let text = &self.held;
         let cp = client_profile(self.flavor);
         let mut limit = a.items.len();
-        if split_profile(&self.ctx).family == BlockFamily::MySql {
+        if self.policy == StreamPolicy::Exact
+            && split_profile(&self.ctx).family == BlockFamily::MySql
+        {
             limit = a
                 .items
                 .iter()
@@ -170,6 +210,100 @@ impl StreamSplitter {
             .take(ANCHOR_SCAN)
             .filter_map(|j| anchor(text, a, j))
             .find(|x| *x <= ambiguous && if_depth(text, cp, &a.client, *x) == Some(0))
+    }
+
+    // ## m4b-t08-stream-hold
+    /// Gives out the items of `a` before `upto` as the policy allows: under
+    /// [`StreamPolicy::Exact`], and off MySQL/MariaDB, all of them ([`Self::give_out`]).
+    ///
+    /// Under [`StreamPolicy::Eager`] on MySQL/MariaDB a block mismatch (`UnknownBlock`) may refuse
+    /// statements already given out (the stray-`END` backstop refuses back to the last
+    /// block-tracked statement, which is no longer held). So when `a` has one, the text before
+    /// `upto` is split on its own: without one there (the mismatch lies in the text still held,
+    /// and its refusal of earlier statements is the backstop's), its items are given out as if
+    /// the mismatch were not there yet; with one, the stream stops at the first statement that
+    /// brings one ([`Self::stop_at_mismatch`]).
+    fn release(&mut self, a: &Analysis, upto: usize, out: &mut Vec<StreamItem>) {
+        let eager = self.policy == StreamPolicy::Eager
+            && split_profile(&self.ctx).family == BlockFamily::MySql;
+        if !eager || !mismatched(a) {
+            self.give_out(a, upto, out);
+            return;
+        }
+        let end = upto.min(self.held.len());
+        let prefix = (end < self.held.len()).then(|| self.prefix_analysis(end));
+        let p = prefix.as_ref().unwrap_or(a);
+        if mismatched(p) {
+            self.stop_at_mismatch(p, end, out);
+        } else {
+            self.give_out(p, upto, out);
+        }
+    }
+
+    /// The pass over the held text's first `end` bytes (`end` is an item's start or the end).
+    fn prefix_analysis(&self, end: usize) -> Analysis {
+        let start = SplitStart {
+            lex: LexState::Initial,
+            delimiter: self.delimiter.clone(),
+        };
+        analyze(&self.held[..end], None, &self.ctx, self.flavor, &start)
+    }
+
+    /// `p`, the pass over the held text's first `end` bytes, has a block mismatch: gives out
+    /// what precedes the first statement that brings one, then one
+    /// [`StreamItem::Ambiguous`] `UnknownBlock` at the mismatch, and stops the stream.
+    ///
+    /// The statement is found by splitting prefixes that end where an item starts (or at `end`):
+    /// the first prefix with a mismatch ends just after it. A binary search over the items
+    /// always lands on a prefix with a mismatch whose predecessor has none, so what is given
+    /// out comes from a pass with no mismatch, and nothing from that statement on is given out.
+    fn stop_at_mismatch(&mut self, p: &Analysis, end: usize, out: &mut Vec<StreamItem>) {
+        let starts: Vec<usize> = p
+            .items
+            .iter()
+            .map(|it| usize::from(item_start(it)))
+            .collect();
+        // Prefix `k` holds the items `..=k`; the last is `p` itself.
+        let cut = |k: usize| starts.get(k + 1).copied().unwrap_or(end);
+        let (mut lo, mut hi) = (0, starts.len().saturating_sub(1));
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if mismatched(&self.prefix_analysis(cut(mid))) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        let first = starts.get(lo).copied().unwrap_or(0);
+        let bad = if cut(lo) == end {
+            None
+        } else {
+            Some(self.prefix_analysis(cut(lo)))
+        };
+        let bad = bad.as_ref().unwrap_or(p);
+        let from = match bad.items.get(lo) {
+            Some(RawItem::Stmt(s)) => usize::from(s.strict.start()),
+            _ => first,
+        };
+        let at = bad
+            .ambiguous
+            .iter()
+            .filter(|x| x.reason == AmbiguityReason::UnknownBlock)
+            .map(|x| usize::from(x.at.start()))
+            .filter(|x| *x >= from)
+            .min()
+            .unwrap_or(from);
+        let offset = self.base + at as u64;
+        if first > 0 {
+            let clean = self.prefix_analysis(first);
+            self.give_out(&clean, first, out);
+        }
+        out.push(StreamItem::Ambiguous {
+            offset,
+            reason: AmbiguityReason::UnknownBlock,
+        });
+        self.stopped = true;
+        self.held = String::new();
     }
 
     /// Gives out every item of `a` that starts before `upto` and drops the text before it.
@@ -233,6 +367,24 @@ impl StreamSplitter {
         self.delimiter = a.delimiter_at(size(cut));
         self.held.drain(..cut);
         self.base += cut as u64;
+    }
+}
+
+// ## m4b-t08-stream-hold
+/// Whether the pass found a block mismatch.
+fn mismatched(a: &Analysis) -> bool {
+    a.ambiguous
+        .iter()
+        .any(|x| x.reason == AmbiguityReason::UnknownBlock)
+}
+
+/// Where item `it` starts, its leading comments included.
+fn item_start(it: &RawItem) -> TextSize {
+    match it {
+        RawItem::Stmt(s) => s
+            .leading
+            .map_or(s.strict.start(), |l| l.start().min(s.strict.start())),
+        RawItem::Empty(r) => r.start(),
     }
 }
 
