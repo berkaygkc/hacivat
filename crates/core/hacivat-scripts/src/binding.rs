@@ -78,8 +78,17 @@ fn order_key(lib: &LibrarySnapshot) -> String {
 /// The logical name of an SQLite database: the main file's stem (`orders.db` → `orders`;
 /// R-M4b-3, -32), or `None` when the stem is missing or not a valid name, so the node binds
 /// only through a local mapping.
+///
+/// ## m4b-t03-registry fix round 1 (review m11): also `None` for SQLite's in-memory name
+/// (`:memory:`) and for a dot file (`.db`, `.hidden.db`), whose "stem" is not a database name.
 pub fn logical_for_sqlite(main_file: &Path) -> Option<LogicalDb> {
+    if main_file.as_os_str() == ":memory:" {
+        return None;
+    }
     let stem = main_file.file_stem()?.to_str()?;
+    if stem.starts_with('.') {
+        return None;
+    }
     LogicalDb::parse(stem).ok()
 }
 // ## m4b-t01a-seams

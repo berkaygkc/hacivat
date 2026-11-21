@@ -209,6 +209,159 @@ fn registry_file_is_0600_and_holds_no_profile_secret() {
     assert_eq!(fs::read_to_string(a.file()).unwrap(), "version = 1\n");
 }
 
+// ## m4b-t03-registry fix round 1
+
+/// alg/28 `registry_is_0600_and_atomic` (review m10): the file is 0600 after every save, a
+/// save replaces it whole through a rename (a hard link to the old file keeps the old bytes),
+/// and no temp file stays.
+#[test]
+fn registry_is_0600_and_atomic() {
+    let a = app();
+    let lib = tempfile::tempdir().unwrap();
+    let (mut reg, _) = a.load();
+    let root = reg.add(lib.path(), &a.guard(), t0()).unwrap();
+    reg.save().unwrap();
+    let first = fs::read_to_string(a.file()).unwrap();
+    let kept = a.paths.data.join("old-registry");
+    fs::create_dir_all(&a.paths.data).unwrap();
+    fs::hard_link(a.file(), &kept).unwrap();
+    reg.set_mapping(mapping(ProfileId::new(), "orders", root.id))
+        .unwrap();
+    reg.save().unwrap();
+    // Renamed into place: the old inode still holds the old text.
+    assert_eq!(fs::read_to_string(&kept).unwrap(), first);
+    assert!(
+        fs::read_to_string(a.file())
+            .unwrap()
+            .contains("[[mapping]]")
+    );
+    assert_eq!(a.config_names(), ["libraries.toml"]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(a.file()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+}
+
+/// Review m5 (alg/28 HV-SCRIPT-01 edge cases): a case-only different spelling on a
+/// case-insensitive volume, and the NFD spelling of an NFC folder on a normalization-insensitive
+/// one, are the same library. Where the volume tells them apart, they are different folders.
+#[test]
+fn case_only_and_nfd_spellings_are_the_same_library() {
+    let a = app();
+    let top = tempfile::tempdir().unwrap();
+    fs::create_dir(top.path().join("Lib")).unwrap();
+    fs::create_dir(top.path().join("Lib/sub")).unwrap();
+    let (mut reg, _) = a.load();
+    let lib = reg.add(&top.path().join("Lib"), &a.guard(), t0()).unwrap();
+    if top.path().join("lib").exists() {
+        assert_eq!(
+            reg.add(&top.path().join("lib"), &a.guard(), t0())
+                .map(|_| ()),
+            Err(RegistryError::AlreadyRegistered(lib.id))
+        );
+        assert_eq!(
+            reg.add(&top.path().join("LIB/sub"), &a.guard(), t0())
+                .map(|_| ()),
+            Err(RegistryError::Nested(lib.id))
+        );
+    }
+    let nfc = top.path().join("m\u{fc}\u{15f}teri");
+    let nfd = top.path().join("mu\u{308}s\u{327}teri");
+    fs::create_dir(&nfc).unwrap();
+    let first = reg.add(&nfc, &a.guard(), t0()).unwrap();
+    if nfd.exists() {
+        assert_eq!(
+            reg.add(&nfd, &a.guard(), t0()).map(|_| ()),
+            Err(RegistryError::AlreadyRegistered(first.id))
+        );
+    } else {
+        // A normalization-sensitive volume: the NFD name is another (missing) folder.
+        assert!(matches!(
+            reg.add(&nfd, &a.guard(), t0()),
+            Err(RegistryError::Io(_))
+        ));
+    }
+}
+
+/// Review m6: a hand-edited registry with the same folder under two spellings, or a folder
+/// inside another library, keeps the first row only.
+#[test]
+fn load_drops_rows_for_the_same_or_a_nested_folder() {
+    let a = app();
+    let top = tempfile::tempdir().unwrap();
+    for d in ["team", "team/inner", "other"] {
+        fs::create_dir_all(top.path().join(d)).unwrap();
+    }
+    let p = |rel: &str| top.path().join(rel).to_str().unwrap().replace('\\', "/");
+    let ids: Vec<LibraryId> = (0..5).map(|_| LibraryId::new()).collect();
+    let rows = [
+        p("team"),
+        p("team/inner/.."),
+        p("team/inner"),
+        p("other"),
+        top.path().to_str().unwrap().replace('\\', "/"),
+    ];
+    let mut text = String::from("version = 1\n");
+    for (id, path) in ids.iter().zip(&rows) {
+        text.push_str(&format!("[[library]]\nid = \"{id}\"\npath = \"{path}\"\n"));
+    }
+    a.write(&text);
+    let (reg, diags) = a.load();
+    assert_eq!(
+        reg.libraries().iter().map(|l| l.id).collect::<Vec<_>>(),
+        [ids[0], ids[3]]
+    );
+    assert_eq!(
+        diags,
+        [
+            RegistryDiag::LibraryDropped {
+                index: 1,
+                problem: RowProblem::Duplicate
+            },
+            RegistryDiag::LibraryDropped {
+                index: 2,
+                problem: RowProblem::Nested
+            },
+            RegistryDiag::LibraryDropped {
+                index: 4,
+                problem: RowProblem::Nested
+            },
+        ]
+    );
+}
+
+/// Review m7: a FIFO (or any non-regular file) named `libraries.toml` is never opened, so it
+/// cannot hang the start; the registry is read-only and the file is left alone.
+#[cfg(unix)]
+#[test]
+fn registry_that_is_not_a_regular_file_is_never_opened() {
+    use std::os::unix::fs::FileTypeExt;
+    let a = app();
+    fs::create_dir_all(&a.paths.config).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(a.file())
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let (reg, diags) = a.load();
+    assert_eq!(diags, [RegistryDiag::NotAFile]);
+    assert!(reg.is_read_only());
+    assert_eq!(reg.save(), Err(RegistryError::ReadOnly));
+    assert!(
+        fs::symlink_metadata(a.file())
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
+    // A folder of that name too.
+    let a = app();
+    fs::create_dir_all(a.file()).unwrap();
+    assert_eq!(a.load().1, [RegistryDiag::NotAFile]);
+}
+// ## m4b-t03-registry fix round 1
+
 #[test]
 fn registry_load_of_garbage_sets_it_aside() {
     for garbage in [

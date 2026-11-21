@@ -65,6 +65,13 @@ impl LogicalDb {
     }
 
     /// The binding comparison ([`same_db`]).
+    /// The name as a UI shows it (fix round 1, review m8): every invisible or reordering
+    /// character as `<U+XXXX>`. A name may hold zero-width or format characters (only controls
+    /// and bidi controls are refused), so a raw display could pass for another name.
+    pub fn display_escaped(&self) -> String {
+        escape_untrusted(&self.0, usize::MAX)
+    }
+
     pub fn same_db(&self, other: &LogicalDb) -> bool {
         same_db(self.as_str(), other.as_str())
     }
@@ -112,8 +119,9 @@ fn is_invisible(c: char) -> bool {
 }
 
 /// `text` with every invisible or reordering character written as `<U+XXXX>`, cut after
-/// `max_chars` characters with `…`: how untrusted names from a library enter a diagnostic.
-pub(crate) fn escape_untrusted(text: &str, max_chars: usize) -> String {
+/// `max_chars` characters with `…`: how untrusted names from a library enter a diagnostic, and
+/// how the app and UI show any name read from a library (public since fix round 1, review m8).
+pub fn escape_untrusted(text: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for (i, c) in text.chars().enumerate() {
         if i == max_chars {

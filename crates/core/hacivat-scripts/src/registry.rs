@@ -160,6 +160,10 @@ pub enum RegistryDiag {
     OrphanMapping { index: usize },
     /// More than [`MAX_LIBRARIES`] rows; the rest were dropped.
     TooManyLibraries,
+    /// `libraries.toml` is not a regular file (a FIFO, a folder, a device; a link is followed
+    /// to its target, which must be one): never opened, so it cannot hang the start; the
+    /// registry is read-only and the file is left alone (fix round 1, review m7).
+    NotAFile,
 }
 
 /// Why a row was dropped.
@@ -173,6 +177,9 @@ pub enum RowProblem {
     Duplicate,
     /// A field is missing or not a string.
     MissingField,
+    /// The folder is inside an earlier row's folder or contains it (canonical paths; fix
+    /// round 1, review m6). A different spelling of the same folder is a `Duplicate`.
+    Nested,
 }
 
 /// A registered library as the file keeps it.
@@ -242,9 +249,14 @@ impl LibraryRegistry {
         };
         let mut diags = Vec::new();
         let bytes = match read_capped(path) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
+            Ok(Capped::Bytes(bytes)) => bytes,
+            Ok(Capped::TooLarge) => {
                 reg.set_aside(&mut diags);
+                return (reg, diags);
+            }
+            Ok(Capped::NotAFile) => {
+                reg.read_only = true;
+                diags.push(RegistryDiag::NotAFile);
                 return (reg, diags);
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => return (reg, diags),
@@ -288,21 +300,31 @@ impl LibraryRegistry {
 
     fn load_libraries(&mut self, rows: &[&toml::Table], diags: &mut Vec<RegistryDiag>) {
         let mut too_many = false;
+        // The kept rows' canonical paths (a missing folder through its deepest existing
+        // ancestor), so a hand-edited file cannot project one folder twice.
+        let mut canonical: Vec<PathBuf> = Vec::new();
         for (index, row) in rows.iter().enumerate() {
             let parsed = library_row(row).and_then(|lib| {
-                let duplicate = self
+                let here = canonical_lenient(&lib.path);
+                let same = self
                     .libraries
                     .iter()
-                    .any(|l| l.id == lib.id || l.path == lib.path);
-                if duplicate {
+                    .zip(&canonical)
+                    .any(|(l, c)| l.id == lib.id || l.path == lib.path || *c == here);
+                if same {
                     Err(RowProblem::Duplicate)
+                } else if canonical.iter().any(|c| overlaps(c, &here)) {
+                    Err(RowProblem::Nested)
                 } else {
-                    Ok(lib)
+                    Ok((lib, here))
                 }
             });
             match parsed {
                 Ok(_) if self.libraries.len() == MAX_LIBRARIES => too_many = true,
-                Ok(lib) => self.libraries.push(lib),
+                Ok((lib, here)) => {
+                    self.libraries.push(lib);
+                    canonical.push(here);
+                }
                 Err(problem) => diags.push(RegistryDiag::LibraryDropped { index, problem }),
             }
         }
@@ -556,13 +578,41 @@ impl LibraryRegistry {
     }
 }
 
-/// The file's bytes; `None` when it is larger than any registry.
-fn read_capped(path: &Path) -> io::Result<Option<Vec<u8>>> {
+/// What [`read_capped`] found.
+enum Capped {
+    Bytes(Vec<u8>),
+    /// Larger than any registry.
+    TooLarge,
+    /// Not a regular file (review m7): never opened.
+    NotAFile,
+}
+
+/// The file's bytes. Only a regular file is opened (a link is followed, as config managers
+/// link dot files, but its target must be a regular file), with `O_NONBLOCK` on Unix and an
+/// `fstat` re-check, so a FIFO swapped in never blocks the start.
+fn read_capped(path: &Path) -> io::Result<Capped> {
     use std::io::Read;
-    let file = fs::File::open(path)?;
+    if !fs::metadata(path)?.is_file() {
+        return Ok(Capped::NotAFile);
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = opts.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(Capped::NotAFile);
+    }
     let mut bytes = Vec::new();
     file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
-    Ok((bytes.len() as u64 <= MAX_FILE_BYTES).then_some(bytes))
+    Ok(if bytes.len() as u64 <= MAX_FILE_BYTES {
+        Capped::Bytes(bytes)
+    } else {
+        Capped::TooLarge
+    })
 }
 
 /// The rows of the array of tables `key` (none when absent); `None` when it has another shape.

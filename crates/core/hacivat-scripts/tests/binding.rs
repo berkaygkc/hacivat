@@ -206,6 +206,12 @@ fn sqlite_logical_db_is_the_file_stem() {
     // No stem, or one that is not a valid name: no automatic binding.
     assert!(logical_for_sqlite(Path::new("/")).is_none());
     assert!(logical_for_sqlite(Path::new("/x/a\u{202E}b.db")).is_none());
+    // ## m4b-t03-registry fix round 1 (review m11): a dot file and SQLite's in-memory name are
+    // not file stems.
+    assert!(logical_for_sqlite(Path::new("/x/.db")).is_none());
+    assert!(logical_for_sqlite(Path::new("/x/.hidden.db")).is_none());
+    assert!(logical_for_sqlite(Path::new(":memory:")).is_none());
+    assert!(logical_for_sqlite(Path::new("")).is_none());
 }
 
 /// alg/28 `deleted_profile_drops_mappings` (R-M4b-2).
@@ -239,8 +245,21 @@ fn deleted_profile_drops_mappings() {
     let (mut reg, _) = LibraryRegistry::load(&paths.libraries_toml());
     assert_eq!(reg.retain_profiles(|p| p != kept), 1);
     assert!(reg.mappings().is_empty());
-    assert!(!matches!(
-        LibraryRegistry::load(&paths.libraries_toml()).1.first(),
-        Some(RegistryDiag::OrphanMapping { .. })
-    ));
+    // ## m4b-t03-registry fix round 1 (review m10): saved and loaded again, the mapping is gone,
+    // the library stays, and nothing is reported.
+    reg.save().unwrap();
+    let (reg, diags) = LibraryRegistry::load(&paths.libraries_toml());
+    assert!(diags.is_empty(), "{diags:?}");
+    assert!(reg.mappings().is_empty());
+    assert_eq!(reg.libraries().len(), 1);
+    // A mapping row whose library was removed by hand is dropped on load, with a diagnostic.
+    let text = std::fs::read_to_string(paths.libraries_toml()).unwrap();
+    let orphan = format!(
+        "{text}\n[[mapping]]\nprofile = \"{kept}\"\ndatabase = \"a\"\nlibrary = \"{}\"\n",
+        LibraryId::new()
+    );
+    std::fs::write(paths.libraries_toml(), orphan).unwrap();
+    let (reg, diags) = LibraryRegistry::load(&paths.libraries_toml());
+    assert_eq!(diags, [RegistryDiag::OrphanMapping { index: 0 }]);
+    assert!(reg.mappings().is_empty());
 }

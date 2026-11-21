@@ -519,41 +519,74 @@ fn manifest_write_refuses_a_hacivat_file() {
     );
 }
 
+/// `read_text` on a 256 KiB thread: a nesting-guard regression aborts the test process loudly
+/// (a stack overflow) instead of passing on a large stack.
+fn read_text_small_stack(text: String) -> ManifestRead {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || read_text(&text))
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
 /// A hostile manifest that nests arrays or inline tables up to the size cap is refused, never
-/// a stack overflow (the parser runs on a small core-runtime thread).
+/// a stack overflow (the parser runs on a small core-runtime thread). The guard's lexer follows
+/// the pinned `toml_parser` lexer, so no string, comment or atom form hides brackets from it
+/// that the parser then sees (fix round 1, m1).
 #[test]
 fn deeply_nested_manifest_is_refused_without_overflow() {
-    let room = MANIFEST_MAX_BYTES - 32;
-    let arrays = format!("format = 1\nx = {}", "[".repeat(room));
-    let tables = format!("format = 1\nx = {}", "{a=".repeat(room / 3));
-    let closed = format!(
-        "format = 1\nx = {}{}\n",
-        "[".repeat(room / 2 - 8),
-        "]".repeat(room / 2 - 8)
-    );
-    for text in [arrays, tables, closed] {
-        let r = std::thread::Builder::new()
-            .stack_size(256 * 1024)
-            .spawn(move || read_text(&text))
-            .unwrap()
-            .join()
-            .unwrap();
-        assert!(r.db.is_none());
-        assert_eq!(r.diags, [Diag::TooDeep]);
+    let room = MANIFEST_MAX_BYTES - 64;
+    let open = |n: usize| "[".repeat(n);
+    let close = |n: usize| "]".repeat(n);
+    let hostile = [
+        format!("format = 1\nx = {}", open(room)),
+        format!("format = 1\nx = {}", "{a=".repeat(room / 3)),
+        format!(
+            "format = 1\nx = {}{}\n",
+            open(room / 2 - 8),
+            close(room / 2 - 8)
+        ),
+        // A one-line basic string ends at the newline, even after a backslash (review m1).
+        format!("format = 1\na = \"\\\nb = {}", open(room)),
+        format!("format = 1\na = \"x\\\\\\\nb = {}", open(room)),
+        // A one-line literal string ends at the newline.
+        format!("format = 1\na = 'x\nb = {}", open(room)),
+        // A comment ends at a carriage return too.
+        format!("format = 1 # note\rb = {}", open(room)),
+        // A quote inside an atom starts no string.
+        format!("format = 1\na = x\"y\nb = {}", open(room)),
+        format!("format = 1\na = x\"{}", open(room)),
+        format!("format = 1\na = x'{}", open(room)),
+        // An unclosed multi-line string runs to the end; the brackets before it count.
+        format!("format = 1\nb = {}\"\"\"", open(room)),
+    ];
+    for text in hostile {
+        let shown = text[..40].escape_debug().to_string();
+        let r = read_text_small_stack(text);
+        assert!(r.db.is_none(), "{shown}");
+        assert_eq!(r.diags, [Diag::TooDeep], "{shown}");
     }
-    // Brackets in strings and comments do not count; 16 levels still parse.
-    let deep = "[".repeat(40);
+    // The same forms just past the limit are refused by the guard, not by the parser.
+    for text in [
+        format!("format = 1\na = \"\\\nb = {}{}\n", open(17), close(17)),
+        format!("format = 1 # note\rb = {}{}\n", open(17), close(17)),
+        format!("format = 1\na = x\"y\nb = {}{}\n", open(17), close(17)),
+        format!("format = 1\nw = {}{}\n", open(17), close(17)),
+    ] {
+        assert_eq!(read_text_small_stack(text).diags, [Diag::TooDeep]);
+    }
+    // Brackets in strings (every form) and comments do not count; 16 levels still parse.
+    let deep = open(40);
     let text = format!(
-        "format = 1 # {deep}\ndatabase = \"{}\"\nx = '{deep}'\ny = \"\"\"\n{deep}\\\"\"\"\"\nz = '''{deep}'''\nw = {}{}\n",
-        "[".repeat(20),
-        "[".repeat(16),
-        "]".repeat(16)
+        "format = 1 # {deep}\ndatabase = \"{}\"\nx = '{deep}'\ny = \"\"\"\n{deep}\\\"\"\"\"\nz = '''{deep}'''\nv = \"\"\"a\\\n  {deep}\"\"\"\nw = {}{}\n",
+        open(20),
+        open(16),
+        close(16)
     );
-    let r = read_text(&text);
-    assert_eq!(r.db.unwrap().as_str(), "[".repeat(20));
+    let r = read_text_small_stack(text);
+    assert_eq!(r.db.unwrap().as_str(), open(20));
     assert!(!r.diags.contains(&Diag::TooDeep), "{:?}", r.diags);
-    let too_deep = format!("format = 1\nw = {}{}\n", "[".repeat(17), "]".repeat(17));
-    assert_eq!(read_text(&too_deep).diags, [Diag::TooDeep]);
 }
 
 /// carries-w1 T3: when the volume has no hard links (exFAT, FAT, SMB), the fallback still never
@@ -755,3 +788,151 @@ mod windows {
         assert_eq!(r.diags, [Diag::LinkIgnored]);
     }
 }
+
+// ## m4b-t03-registry fix round 1
+
+/// Review I1 (R-M4b-8): the alias edit keeps the file's line endings (CRLF stays CRLF; a mixed
+/// file takes its dominant style, ties LF) and its BOM.
+#[test]
+fn add_alias_keeps_line_endings_and_bom() {
+    let bom = "\u{FEFF}";
+    let rows = [
+        (
+            "format = 1\r\ndatabase = \"orders\"\r\n".to_string(),
+            "format = 1\r\ndatabase = \"orders\"\r\naliases = [\"orders_p\"]\r\n".to_string(),
+        ),
+        (
+            "# note\r\nformat = 1\r\ndatabase = \"orders\"\r\naliases = [\"a\"] # keep\r\n"
+                .to_string(),
+            "# note\r\nformat = 1\r\ndatabase = \"orders\"\r\naliases = [\"a\", \"orders_p\"] # keep\r\n"
+                .to_string(),
+        ),
+        (
+            format!("{bom}format = 1\r\ndatabase = \"orders\"\r\n"),
+            format!("{bom}format = 1\r\ndatabase = \"orders\"\r\naliases = [\"orders_p\"]\r\n"),
+        ),
+        (
+            format!("{bom}format = 1\ndatabase = \"orders\"\n"),
+            format!("{bom}format = 1\ndatabase = \"orders\"\naliases = [\"orders_p\"]\n"),
+        ),
+        // Mixed: two CRLF lines, one LF line → CRLF.
+        (
+            "# a\r\nformat = 1\r\ndatabase = \"orders\"\n".to_string(),
+            "# a\r\nformat = 1\r\ndatabase = \"orders\"\r\naliases = [\"orders_p\"]\r\n".to_string(),
+        ),
+        // Mixed: one CRLF line, two LF lines → LF.
+        (
+            "# a\r\nformat = 1\ndatabase = \"orders\"\n".to_string(),
+            "# a\nformat = 1\ndatabase = \"orders\"\naliases = [\"orders_p\"]\n".to_string(),
+        ),
+    ];
+    for (before, after) in rows {
+        let d = lib_with(&before);
+        add_alias(d.path(), &db("orders_p")).unwrap();
+        let got = fs::read_to_string(manifest_path(d.path())).unwrap();
+        assert_eq!(got, after, "{before:?}");
+        let r = read(d.path());
+        assert!(r.diags.is_empty(), "{:?}", r.diags);
+        assert!(r.aliases.iter().any(|a| a.as_str() == "orders_p"));
+    }
+}
+
+/// Review m2: where operations cannot be relative to the folder handle (Linux without procfs),
+/// every write refuses (`Unsupported`) and nothing is created or changed; reading still works.
+#[test]
+fn writes_refuse_without_handle_relative_paths() {
+    let unsupported = Err(WriteError::Io(std::io::ErrorKind::Unsupported));
+    let d = lib_dir();
+    let r = manifest::with_procfs_absent(|| write_new(d.path(), &m("orders", &[])));
+    assert_eq!(r, unsupported);
+    assert!(names_under(d.path()).is_empty());
+    let text = "format = 1\ndatabase = \"orders\"\n";
+    let d = lib_with(text);
+    let r = manifest::with_procfs_absent(|| add_alias(d.path(), &db("x")));
+    assert_eq!(r, unsupported);
+    assert_eq!(fs::read_to_string(manifest_path(d.path())).unwrap(), text);
+    assert_eq!(names_under(&d.path().join(".hacivat")), ["workspace.toml"]);
+    let r = manifest::with_procfs_absent(|| read(d.path()));
+    assert_eq!(r.db.unwrap().as_str(), "orders");
+    // The flag is the closure's only: the same thread writes normally again.
+    add_alias(d.path(), &db("x")).unwrap();
+}
+
+/// Review m4: a temp file left by a crash (`.workspace.toml.hv-<uuid>.tmp`, older than a
+/// minute) is swept by the next write; a fresh one (another writer's) and other names stay.
+#[test]
+fn stale_temp_files_are_swept() {
+    use std::time::{Duration, SystemTime};
+    let age = |p: &Path, t: SystemTime| {
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    };
+    let d = lib_dir();
+    let h = d.path().join(".hacivat");
+    fs::create_dir(&h).unwrap();
+    let stale = h.join(".workspace.toml.hv-0123456789abcdef0123456789abcdef.tmp");
+    let fresh = h.join(format!(".workspace.toml.hv-{}.tmp", "f".repeat(32)));
+    let other = h.join(".workspace.toml.hv-notours.tmp");
+    let note = h.join("notes.txt");
+    for p in [&stale, &fresh, &other, &note] {
+        fs::write(p, "x").unwrap();
+    }
+    let old = SystemTime::now() - Duration::from_secs(300);
+    for p in [&stale, &other, &note] {
+        age(p, old);
+    }
+    write_new(d.path(), &m("orders", &[])).unwrap();
+    assert!(!stale.exists());
+    assert!(fresh.exists() && other.exists() && note.exists());
+    // add_alias sweeps too.
+    fs::write(&stale, "x").unwrap();
+    age(&stale, old);
+    add_alias(d.path(), &db("orders_p")).unwrap();
+    assert!(!stale.exists());
+    assert!(fresh.exists());
+}
+
+/// Review m8: names may hold invisible format characters (per spec), so their display is
+/// escaped.
+#[test]
+fn display_escaped_shows_invisible_characters() {
+    for (name, shown) in [
+        ("or\u{200B}ders", "or<U+200B>ders"),
+        ("a\u{2028}b", "a<U+2028>b"),
+        ("\u{FEFF}x", "<U+FEFF>x"),
+        ("so\u{00AD}ft", "so<U+00AD>ft"),
+        ("müşteri", "müşteri"),
+    ] {
+        assert_eq!(db(name).display_escaped(), shown);
+    }
+    assert_eq!(
+        hacivat_scripts::names::escape_untrusted("a\u{202E}b", 64),
+        "a<U+202E>b"
+    );
+}
+
+/// Review m5: duplicate keys (plain and quoted), a NUL byte, and CRLF input.
+#[test]
+fn manifest_edge_rows() {
+    for text in [
+        "format = 1\ndatabase = \"a\"\ndatabase = \"b\"\n",
+        "format = 1\ndatabase = \"a\"\n\"database\" = \"b\"\n",
+        "format = 1\ndatabase = \"a\u{0}\"\n",
+        "format = 1\n\u{0}\n",
+    ] {
+        let r = read_text(text);
+        assert!(r.db.is_none(), "{text:?}");
+        assert_eq!(r.diags, [Diag::InvalidToml], "{text:?}");
+    }
+    let r = read_text("format = 1\r\ndatabase = \"orders\"\r\naliases = [\"o\"]\r\n");
+    assert_eq!(r.db.unwrap().as_str(), "orders");
+    assert_eq!(r.aliases.len(), 1);
+    assert!(r.diags.is_empty());
+    let r = read_text("\u{FEFF}format = 1\r\ndatabase = \"orders\"\r\n");
+    assert_eq!(r.db.unwrap().as_str(), "orders");
+}
+// ## m4b-t03-registry fix round 1

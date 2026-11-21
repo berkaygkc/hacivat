@@ -27,13 +27,14 @@
 //!   following a link, and re-checks before and after that the path still names that folder
 //!   (device and inode on Unix). A `.hacivat` that is a link (a Windows junction included) or
 //!   not a folder is refused and nothing is created where it points. On Linux the operations
-//!   go through `/proc/self/fd/<n>/`, so they are relative to the handle itself; on macOS the
+//!   go through `/proc/self/fd/<n>/`, so they are relative to the handle itself, and without
+//!   procfs every write refuses (`Unsupported`, fix round 1); on macOS the
 //!   opens also refuse a link in any component (`O_NOFOLLOW_ANY`); on Windows the handles are
 //!   held without `FILE_SHARE_DELETE`, so neither folder can be renamed or replaced while the
 //!   write runs. `std` has no `openat`, and this crate takes no `unsafe` (ADR 0009
 //!   `m4b-t03`).
-//! - **The alias edit** ([`add_alias`]) goes through `toml_edit`, so a teammate's comments and
-//!   layout stay, and replaces the file with a same-folder temp file and a rename, which never
+//! - **The alias edit** ([`add_alias`]) goes through `toml_edit`, so a teammate's comments,
+//!   layout, dominant line ending and BOM stay, and replaces the file with a same-folder temp file and a rename, which never
 //!   writes through a hard link; the file's mode is kept.
 
 use std::ffi::OsStr;
@@ -323,13 +324,13 @@ fn write_new_with(root: &Path, manifest: &ManifestV1, hard_links: bool) -> Resul
     let text = manifest.checked_text()?;
     let root = Dir::open_root(root).map_err(write_error)?;
     let h = root.hacivat_creating().map_err(write_error)?;
+    h.sweep_stale_temps();
     match h.lstat(MANIFEST) {
         Ok(_) => return Err(WriteError::Exists),
         Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(write_error(e)),
     }
-    let tmp = temp_name();
-    let mut f = h.create_new(&tmp).map_err(write_error)?;
+    let (tmp, mut f) = h.create_temp().map_err(write_error)?;
     let written = write_synced(&mut f, text.as_bytes());
     drop(f);
     let linked = written.map_err(FsError::Io).and_then(|()| {
@@ -339,7 +340,7 @@ fn write_new_with(root: &Path, manifest: &ManifestV1, hard_links: bool) -> Resul
             Err(FsError::Io(io::ErrorKind::Unsupported.into()))
         }
     });
-    let _ = h.remove_file(&tmp);
+    h.discard_temp(&tmp);
     match linked {
         Ok(()) => {}
         Err(FsError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -355,85 +356,173 @@ fn write_new_with(root: &Path, manifest: &ManifestV1, hard_links: bool) -> Resul
 
 /// Creates the manifest itself with `create_new` (never replacing a file) and writes it; a
 /// partial file it created is removed again.
+///
+/// ## m4b-t03-registry fix round 1 (review m3): the partial file is unlinked only while the
+/// name still is the file this call created (same device and inode), so a `.hacivat` swapped
+/// for a link in that window never loses the other folder's `workspace.toml`.
 fn create_in_place(h: &Dir, bytes: &[u8]) -> Result<(), WriteError> {
     let mut f = h.create_new(MANIFEST).map_err(|e| match e {
         FsError::Io(e) if e.kind() == io::ErrorKind::AlreadyExists => WriteError::Exists,
         e => write_error(e),
     })?;
     if let Err(e) = write_synced(&mut f, bytes) {
+        let ours = f.metadata().ok().map(|m| identity(&m));
         drop(f);
-        let _ = h.remove_file(MANIFEST);
+        if let (Some(ours), Ok(now)) = (ours, h.lstat(MANIFEST))
+            && !is_link(&now)
+            && identity(&now) == ours
+        {
+            let _ = h.remove_file(MANIFEST);
+        }
         return Err(WriteError::Io(e.kind()));
     }
     Ok(())
 }
 
-/// The deepest nesting of `[`/`{` in TOML text, outside strings and comments (a lexer just
-/// precise enough for that: basic, literal and multi-line strings, escapes, `#` comments).
-/// Table headers count too (`[[a]]` is 2). Unbalanced text is fine: the parser refuses it.
+/// The deepest nesting of `[`/`{` tokens in TOML text, as the parser will see them.
+///
+/// ## m4b-t03-registry fix round 1 (review m1)
+/// A token-for-token copy of the boundaries of the pinned `toml_parser` 1.1.5 lexer
+/// (`src/lexer/mod.rs`, which `toml` and `toml_edit` both use), so that no string, comment or
+/// atom form hides a bracket the parser then recurses on:
+/// - a comment runs from `#` to the next CR or LF (not included);
+/// - a one-line basic string `"…"` ends at its closing `"` or **before** an LF; a backslash
+///   takes the next byte with it only when that byte is `\` or `"`, so `"\` + LF ends at the LF;
+/// - a one-line literal string `'…'` ends at its closing `'` or before an LF;
+/// - a multi-line basic string `"""…"""` ends after the first `"""` that no backslash takes
+///   (plus up to two more `"`), a multi-line literal `'''…'''` after the first `'''` (plus up to
+///   two more `'`); unclosed, either runs to the end;
+/// - anything else that is not punctuation or whitespace is an atom up to the next of
+///   `. = , [ ] { }`, space, tab, `#`, CR, LF: a quote inside an atom starts no string.
+///
+/// Table headers count too (`[[a]]` is 2). Unbalanced text is fine: the parser refuses it. A
+/// bump of `toml_parser` must re-check these rules (the `deeply_nested…` test pins them).
 pub(crate) fn nesting_depth(text: &str) -> usize {
+    const ATOM_END: &[u8] = b".=,[]{} \t#\r\n";
     let b = text.as_bytes();
     let (mut i, mut depth, mut max) = (0, 0usize, 0usize);
     while i < b.len() {
-        match b[i] {
-            b'#' => {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            q @ (b'"' | b'\'') => {
-                i = string_end(b, i, q);
-                continue;
-            }
+        i = match b[i] {
             b'[' | b'{' => {
                 depth += 1;
                 max = max.max(depth);
+                i + 1
             }
-            b']' | b'}' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        i += 1;
+            b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                i + 1
+            }
+            b'.' | b'=' | b',' | b' ' | b'\t' | b'\r' | b'\n' => i + 1,
+            b'#' => find_any(b, i, b"\r\n").unwrap_or(b.len()),
+            b'\'' if b[i..].starts_with(b"'''") => multi_line_end(b, i + 3, b'\''),
+            b'\'' => match find_any(b, i + 1, b"'\n") {
+                Some(j) if b[j] == b'\'' => j + 1,
+                Some(j) => j,
+                None => b.len(),
+            },
+            b'"' if b[i..].starts_with(b"\"\"\"") => multi_line_end(b, i + 3, b'"'),
+            b'"' => basic_end(b, i + 1),
+            _ => find_any(b, i, ATOM_END).unwrap_or(b.len()),
+        };
     }
     max
 }
 
-/// The index just past the string that starts at `start` with quote `q` (basic `"` with
-/// escapes, literal `'`, either one tripled for multi-line); a one-line string also ends at a
-/// newline.
-fn string_end(b: &[u8], start: usize, q: u8) -> usize {
-    let multi = b[start..].starts_with(&[q, q, q]);
-    let mut i = start + if multi { 3 } else { 1 };
-    while i < b.len() {
-        if q == b'"' && b[i] == b'\\' {
-            i += 2;
-            continue;
-        }
-        if b[i] == q && (!multi || b[i..].starts_with(&[q, q, q])) {
-            i += 1;
-            // A multi-line string ends at its last run of quotes (`""""` holds one).
-            while multi && i < b.len() && b[i] == q {
-                i += 1;
-            }
-            return i;
-        }
-        if !multi && b[i] == b'\n' {
-            return i;
-        }
-        i += 1;
-    }
-    i
+/// The first index at or after `from` whose byte is in `set`.
+fn find_any(b: &[u8], from: usize, set: &[u8]) -> Option<usize> {
+    b[from..]
+        .iter()
+        .position(|c| set.contains(c))
+        .map(|p| from + p)
 }
 
-/// Appends `alias` to the manifest's `aliases` through `toml_edit`, keeping comments and
-/// layout (R-M4b-8's "Also add … as an alias for everyone"). Nothing changes when the library
-/// already binds that name. Refuses a missing, linked, unreadable, invalid or newer manifest
-/// and a full alias list, and then writes nothing.
+/// A backslash in a basic string takes the next byte with it only when it is `\` or `"`.
+fn after_escape(b: &[u8], backslash: usize) -> usize {
+    match b.get(backslash + 1) {
+        Some(b'\\' | b'"') => backslash + 2,
+        _ => backslash + 1,
+    }
+}
+
+/// The end of a one-line basic string whose body starts at `k`: after its closing quote, or at
+/// (before) an LF.
+fn basic_end(b: &[u8], mut k: usize) -> usize {
+    while k < b.len() {
+        match b[k] {
+            b'"' => return k + 1,
+            b'\n' => return k,
+            b'\\' => k = after_escape(b, k),
+            _ => k += 1,
+        }
+    }
+    b.len()
+}
+
+/// The end of a multi-line string with quote `q` whose body starts at `k`: after the first
+/// unescaped triple quote and up to two more quotes; the end of the text when unclosed.
+fn multi_line_end(b: &[u8], mut k: usize, q: u8) -> usize {
+    let delim = [q, q, q];
+    while k < b.len() {
+        if q == b'"' && b[k] == b'\\' {
+            k = after_escape(b, k);
+            continue;
+        }
+        if b[k..].starts_with(&delim) {
+            let mut end = k + 3;
+            for _ in 0..2 {
+                if b.get(end) == Some(&q) {
+                    end += 1;
+                }
+            }
+            return end;
+        }
+        k += 1;
+    }
+    b.len()
+}
+
+// ## m4b-t03-registry fix round 1 (review m2): the injectable probe of "no procfs".
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static NO_PROCFS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` as if this were Linux without procfs, on this thread only: every folder handle
+/// opened inside refuses writes (`Unsupported`), as the real code does there. For tests.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn with_procfs_absent<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NO_PROCFS.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(NO_PROCFS.with(|c| c.replace(true)));
+    f()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn procfs_forced_absent() -> bool {
+    NO_PROCFS.with(std::cell::Cell::get)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn procfs_forced_absent() -> bool {
+    false
+}
+
+/// Appends `alias` to the manifest's `aliases` through `toml_edit`, keeping comments, layout,
+/// line endings and the BOM (R-M4b-8's "Also add … as an alias for everyone"). Nothing changes
+/// when the library already binds that name. Refuses a missing, linked, unreadable, invalid or
+/// newer manifest and a full alias list, and then writes nothing.
 pub fn add_alias(root: &Path, alias: &LogicalDb) -> Result<(), WriteError> {
     let root_dir = Dir::open_root(root).map_err(write_error)?;
     let h = root_dir.subdir(HACIVAT).map_err(|e| match e {
         FsError::Io(e) if e.kind() == io::ErrorKind::NotFound => WriteError::NoManifest,
         e => write_error(e),
     })?;
+    h.sweep_stale_temps();
     let (bytes, meta) = read_manifest_file(&h).map_err(|e| match e {
         FsError::Io(e) if e.kind() == io::ErrorKind::NotFound => WriteError::NoManifest,
         e => WriteError::Unreadable(read_diag(e)),
@@ -470,11 +559,21 @@ pub fn add_alias(root: &Path, alias: &LogicalDb) -> Result<(), WriteError> {
             list.push(alias.as_str());
         }
     }
-    let mut out = Vec::with_capacity(bytes.len() + alias.as_str().len() + 8);
+    // ## m4b-t03-registry fix round 1 (review I1): `toml_edit` writes LF after every line, so
+    // the text goes back to the file's dominant line ending (ties LF), and keeps its BOM.
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count() - crlf;
+    let edited = doc.to_string().replace("\r\n", "\n");
+    let edited = if crlf > lf {
+        edited.replace('\n', "\r\n")
+    } else {
+        edited
+    };
+    let mut out = Vec::with_capacity(edited.len() + BOM.len());
     if bom {
         out.extend_from_slice(BOM);
     }
-    out.extend_from_slice(doc.to_string().as_bytes());
+    out.extend_from_slice(edited.as_bytes());
     if out.len() > MANIFEST_MAX_BYTES {
         return Err(WriteError::Unreadable(Diag::TooLarge));
     }
@@ -499,15 +598,14 @@ fn refuses_edit(d: &Diag) -> bool {
 /// Replaces the manifest with `bytes` through a same-folder temp file and a rename (never
 /// writing through a hard link), keeping the old file's mode.
 fn replace(h: &Dir, bytes: &[u8], old: &Metadata) -> Result<(), WriteError> {
-    let tmp = temp_name();
-    let mut f = h.create_new(&tmp).map_err(write_error)?;
+    let (tmp, mut f) = h.create_temp().map_err(write_error)?;
     let written = keep_mode(&f, old).and_then(|()| write_synced(&mut f, bytes));
     drop(f);
     let renamed = written
         .map_err(FsError::Io)
         .and_then(|()| h.rename(&tmp, MANIFEST));
     if let Err(e) = renamed {
-        let _ = h.remove_file(&tmp);
+        h.discard_temp(&tmp);
         return Err(write_error(e));
     }
     h.sync();
@@ -635,9 +733,29 @@ struct Dir {
     /// Held for the whole operation (on Windows without `FILE_SHARE_DELETE`).
     handle: File,
     chain: Vec<(PathBuf, Identity)>,
+    reach: Reach,
+}
+
+/// How operations under a [`Dir`] name their files.
+#[derive(Debug)]
+enum Reach {
+    /// The folder's path, between identity checks (macOS with `O_NOFOLLOW_ANY` opens; Windows,
+    /// where the held handles keep the folders in place).
+    #[cfg_attr(
+        target_os = "linux",
+        expect(dead_code, reason = "Linux always goes through the handle or refuses")
+    )]
+    Path,
     /// Linux: `/proc/self/fd/<n>`, the handle as a path prefix.
-    #[cfg(target_os = "linux")]
-    proc: Option<PathBuf>,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(dead_code, reason = "only Linux has a handle-relative path")
+    )]
+    Handle(PathBuf),
+    /// Linux without procfs (fix round 1, review m2): nothing can be relative to the handle,
+    /// so writes refuse (`Unsupported`) instead of falling back to plain paths; reads (which
+    /// re-check the file's identity) still work.
+    WritesRefused,
 }
 
 impl Dir {
@@ -674,31 +792,97 @@ impl Dir {
             return Err(FsError::Changed);
         }
         chain.push((path.clone(), identity(&meta)));
-        #[cfg(target_os = "linux")]
-        let proc = {
-            use std::os::fd::AsRawFd;
-            let p = PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
-            fs::metadata(&p)
-                .ok()
-                .filter(|m| identity(m) == identity(&meta))
-                .map(|_| p)
+        let reach = if procfs_forced_absent() {
+            Reach::WritesRefused
+        } else {
+            platform_reach(&handle, &meta)
         };
         Ok(Dir {
             path,
             handle,
             chain,
-            #[cfg(target_os = "linux")]
-            proc,
+            reach,
         })
     }
 
     /// The path an operation on `name` uses.
     fn child(&self, name: &str) -> PathBuf {
-        #[cfg(target_os = "linux")]
-        if let Some(p) = &self.proc {
-            return p.join(name);
+        match &self.reach {
+            Reach::Handle(p) => p.join(name),
+            Reach::Path | Reach::WritesRefused => self.path.join(name),
         }
-        self.path.join(name)
+    }
+
+    /// Whether this folder may be written (review m2: never through plain paths on Linux).
+    fn writable(&self) -> Result<(), FsError> {
+        match self.reach {
+            Reach::WritesRefused => Err(FsError::Io(io::ErrorKind::Unsupported.into())),
+            Reach::Path | Reach::Handle(_) => Ok(()),
+        }
+    }
+
+    /// Runs the write `op` between two [`Dir::verify`]s, if this folder may be written.
+    fn write_checked<T>(&self, op: impl FnOnce() -> io::Result<T>) -> Result<T, FsError> {
+        self.writable()?;
+        self.checked(op)
+    }
+
+    /// A new temp file with a random name. Removed again if the after-check fails, so no temp
+    /// is left in a committed folder by that path (review m4).
+    fn create_temp(&self) -> Result<(String, File), FsError> {
+        let name = temp_name();
+        self.writable()?;
+        self.verify()?;
+        let f = self.new_file_options().open(self.child(&name))?;
+        if let Err(e) = self.verify() {
+            drop(f);
+            self.discard_temp(&name);
+            return Err(e);
+        }
+        Ok((name, f))
+    }
+
+    /// Removes a temp file this code made, on every path, without the identity checks: its
+    /// random name can only ever be ours, wherever the folder now is.
+    fn discard_temp(&self, name: &str) {
+        if self.writable().is_ok() {
+            let _ = fs::remove_file(self.child(name));
+        }
+    }
+
+    /// Removes temp files a crash left (review m4): exactly `.workspace.toml.hv-<32 lowercase
+    /// hex>.tmp`, regular files older than [`STALE_TEMP_AGE`]. A younger one may be another
+    /// writer's. Best effort, at most [`SWEEP_MAX_ENTRIES`] entries looked at.
+    fn sweep_stale_temps(&self) {
+        if self.writable().is_err() || self.verify().is_err() {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(self.child("")) else {
+            return;
+        };
+        for entry in entries.take(SWEEP_MAX_ENTRIES).flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str().filter(|n| is_our_temp(n)) else {
+                continue;
+            };
+            let stale = fs::symlink_metadata(self.child(name)).is_ok_and(|m| {
+                m.is_file()
+                    && m.modified()
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age >= STALE_TEMP_AGE)
+            });
+            if stale {
+                self.discard_temp(name);
+            }
+        }
+    }
+
+    fn new_file_options(&self) -> OpenOptions {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        no_follow(&mut opts);
+        opts
     }
 
     /// Every folder from the root down still is the one that was opened.
@@ -742,7 +926,7 @@ impl Dir {
         match self.lstat(HACIVAT) {
             Ok(_) => {}
             Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
-                match self.checked(|| fs::DirBuilder::new().create(self.child(HACIVAT))) {
+                match self.write_checked(|| fs::DirBuilder::new().create(self.child(HACIVAT))) {
                     Ok(()) => {}
                     Err(FsError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(e) => return Err(e),
@@ -755,10 +939,8 @@ impl Dir {
 
     /// A new file `name` (never an existing one, never through a link), mode from the umask.
     fn create_new(&self, name: &str) -> Result<File, FsError> {
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        no_follow(&mut opts);
-        self.checked(|| opts.open(self.child(name)))
+        let opts = self.new_file_options();
+        self.write_checked(|| opts.open(self.child(name)))
     }
 
     /// `name` for reading: not through a link, never blocking on a FIFO, and the same file
@@ -789,15 +971,15 @@ impl Dir {
 
     /// `linkat`: fails when `to` exists, so nothing is ever replaced.
     fn hard_link(&self, from: &str, to: &str) -> Result<(), FsError> {
-        self.checked(|| fs::hard_link(self.child(from), self.child(to)))
+        self.write_checked(|| fs::hard_link(self.child(from), self.child(to)))
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<(), FsError> {
-        self.checked(|| fs::rename(self.child(from), self.child(to)))
+        self.write_checked(|| fs::rename(self.child(from), self.child(to)))
     }
 
     fn remove_file(&self, name: &str) -> Result<(), FsError> {
-        self.checked(|| fs::remove_file(self.child(name)))
+        self.write_checked(|| fs::remove_file(self.child(name)))
     }
 
     /// Flushes the folder's entries (Unix; best effort: the file is already in place).
@@ -807,6 +989,40 @@ impl Dir {
         #[cfg(not(unix))]
         let _ = &self.handle;
     }
+}
+
+/// Linux: the handle as a path prefix when procfs answers for it (and names this very folder);
+/// otherwise writes are refused.
+#[cfg(target_os = "linux")]
+fn platform_reach(handle: &File, meta: &Metadata) -> Reach {
+    use std::os::fd::AsRawFd;
+    let p = PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
+    match fs::metadata(&p) {
+        Ok(m) if m.is_dir() && identity(&m) == identity(meta) => Reach::Handle(p),
+        _ => Reach::WritesRefused,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_reach(_: &File, _: &Metadata) -> Reach {
+    Reach::Path
+}
+
+/// How old a leftover temp file must be before a write sweeps it.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+/// The most `.hacivat/` entries a sweep looks at.
+const SWEEP_MAX_ENTRIES: usize = 4096;
+
+/// Whether `name` is exactly a temp name [`temp_name`] makes.
+fn is_our_temp(name: &str) -> bool {
+    name.strip_prefix(&format!(".{MANIFEST}.hv-"))
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+        .is_some_and(|id| {
+            id.len() == 32
+                && id
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        })
 }
 
 #[cfg(unix)]
