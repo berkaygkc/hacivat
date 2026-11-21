@@ -471,3 +471,39 @@ This subsection supersedes, where they differ, the bullets above on link resolut
 - **Recovery (I3, m7; R-T5-3, R-T5-4).** A copy is keyed by `RecoveryKey { library, rel, profile, database }` (the tab's binding) and by the writing `Instance` (a random id plus an exclusive `File::try_lock` advisory lock on `script-recovery/instances/<id>.lock`, held for the instance's life; no process id). The stem is the XXH3-128 of those parts, each length-prefixed. `take_all` offers every copy whose instance holds no lock any more (two tabs of one file come back as two entries); a running instance's copies are never offered or deleted by another; `discard` removes only this instance's copy of one key, `discard_entry` an offered one, `discard_library` a detached library's folder. Copies older than 14 days are deleted, not offered. The sidecar (format 2) records the binding, encoding, BOM, line ending, base stamp, `secret_suspected` (set by the caller's secret scan, for Task 17's notice; no redaction, since Q1 says a crash loses nothing) and `damaged`. Dead instances' lock files older than a minute are swept at start.
 - **Windows residuals (m11).** `std` has no stable link count or file index (`MetadataExt::number_of_links`/`file_index` are unstable), and this crate has no `windows-sys`: a hard-linked file is replaced by a rename (the link breaks), and the stream's and the re-check's fingerprint is `(len, mtime, created)`, which NTFS file tunnelling can keep across a rename-replace with the same length and mtime. Add the file index when a manifest change is allowed.
 - `lib.rs`'s Task 1a doc block gets a `## m4b-t05-fileio` note (named exception, m10).
+
+### Fix round 2 (re-review I-fr1-1, I-fr1-2, mf1–mf5; rulings R-T5-5, R-T5-6)
+
+This subsection supersedes the fix-round-1 bullet on the `_scoped` forms.
+
+- **One public function per operation, the environment required (I-fr1-1, R-T5-6).** The functions are:
+  - `read(root, rel, env, limits)`;
+  - `read_with(root, rel, env, label)`;
+  - `save(root, rel, env, text, expect)`;
+  - `save_with_echo(root, rel, env, text, expect, echo)`;
+  - `open_stream(root, rel, env, enc)`.
+
+  `env: Option<EnvTag>`, and `envscope::visible_at` is applied to what `pathsafe::join` resolved. The `_scoped` variants and the unchecked scope are gone; no unscoped form exists. `None` is an untagged connection or an unbound tab, and it sees no `@`-scoped file (fail closed).
+
+  `LibraryService::{read, save, open_stream}` take the tab's environment too (`service.rs`, a named exception; still stubs), so Task 10 inherits the shape.
+
+  Test: `every_public_function_refuses_what_the_environment_does_not_show` (a `@production` path under staging, dev and `None`, through all five functions, plus a new file there).
+- **Partial meta (I-fr1-2).** `FileMeta.partial` is set only by the preview read. `save` refuses partial meta with `SaveError::PreviewOnly` before anything else, whatever text it carries and with or without `expect`. `recovery::store` refuses it too (`RecoveryError::PreviewOnly`), since a preview tab is read-only and never has unsaved text.
+
+  Test: `a_preview_tabs_meta_cannot_be_saved` (the reviewer's route: the buffer plus the tab meta of a 22 MB preview; the file is unchanged).
+- **mf1.** A failed final `sync_all` of the write-back answers `Damaged`: a write-back that may not be durable is not a restore. Test: `failed_restore_sync_reports_damage`.
+- **mf2.** Once the new bytes are on disk (renamed, hard-linked or written in place), a folder check that fails after it answers `SaveError::SavedButPathChanged(stamp)`. This is a completed save with a warning: the tab is clean at that stamp and the user is told the folder changed. It is never a plain failure.
+  - The shared `Dir` gains `rename_noting_after` and `publish_link_noting_after`, which run the operation after the before-check and report the after-check instead of failing.
+  - The link publish unlinks its temp in the same step, so a folder moved right after it leaves no temp (found by this round's test).
+
+  Test: `a_folder_moved_after_the_write_is_a_completed_save` (rename, in-place and new-file paths).
+- **mf3 (R-T5-5).** Where advisory locks are unsupported (some NFS or SMB homes), `Instance::start` still succeeds, unlocked (`Instance::is_locked()` is `false`), and copies are still written.
+  - Their sidecars carry `unlocked = true`, so an unlocked writer's unlocked lock file is never read as "dead".
+  - A copy whose writer cannot be shown dead (that mark, or a lock that cannot be tested here) is offered with `RecoveryEntry::liveness_unknown = true`.
+  - **Carry to M8:** two instances that start together can both offer one dead instance's copies; the M8 single-instance lock closes that.
+
+  Test: `without_advisory_locks_copies_are_kept_and_offered_marked` (with `recovery::with_locks_unsupported`, test-support).
+- **mf4 (carry to Task 10, routed by the controller).** At launch, sweep the `script-recovery/<uuid>` folders of libraries not in the registry, past `MAX_AGE`.
+- **mf5.** The Windows rename retry is a `retrying(op, retry_on, sleep)` helper. Its unit test (`fileio::dir::tests::rename_retry_waits_and_gives_up`) injects a sharing violation and records the waits: 50 + 100 + 200 ms, four tries, then the error; other errors are not retried.
+  - The retry runs inside the shared `Dir::rename`, so it **also applies to Task 3's manifest rename** (`manifest::add_alias`): on Windows, an alias edit over a manifest another program holds open is retried up to about 350 ms before it fails. Nothing else in Task 3's behaviour changed.
+  - It retries `ERROR_ACCESS_DENIED` too, so a permanent denial costs about 350 ms; accepted.

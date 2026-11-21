@@ -11,8 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hacivat_proto::ProfileId;
 use hacivat_scripts::recovery::{
-    CopyMeta, Instance, RecoveryEntry, RecoveryKey, discard, discard_entry, discard_library, store,
-    store_at, take_all,
+    CopyMeta, Instance, RecoveryEntry, RecoveryError, RecoveryKey, discard, discard_entry,
+    discard_library, store, store_at, take_all, with_locks_unsupported,
 };
 use hacivat_scripts::{
     DatabaseName, DiskStamp, FileMeta, LibraryId, LineEnding, RelPath, TextEncoding,
@@ -147,6 +147,7 @@ fn recovery_round_trip_and_discard() {
             encoding: hacivat_scripts::fileio::lookup_encoding("windows-1254").unwrap(),
             bom: false,
             line_ending: LineEnding::CrLf,
+            partial: false,
         },
         base: Some(stamp()),
         secret_suspected: true,
@@ -392,4 +393,55 @@ fn an_existing_folder_is_made_private() {
     let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&dir), 0o700);
     assert_eq!(mode(dir.parent().unwrap()), 0o700);
+}
+
+/// fr2 mf3 (R-T5-5): where advisory locks are unsupported, the instance still starts and still
+/// writes copies (a crash loses nothing); a later launch offers them marked "liveness unknown".
+#[test]
+fn without_advisory_locks_copies_are_kept_and_offered_marked() {
+    let (paths, _app, _lib) = env();
+    let unlocked = with_locks_unsupported(|| Instance::start(&paths)).unwrap();
+    assert!(!unlocked.is_locked());
+    store(&paths, &unlocked, &key("a.sql"), "kept", &plain()).unwrap();
+    // Its lock file is not locked while it runs, so a lock test would read "dead": the
+    // sidecar's mark keeps the copy from passing as a dead instance's.
+    let other = Instance::start(&paths).unwrap();
+    assert!(other.is_locked());
+    let found = take_all(&paths, &other, lib_id());
+    assert_eq!(texts(&found), [("a.sql".into(), "kept".into())]);
+    assert!(found[0].liveness_unknown);
+    // A locked instance's copies, seen where locks cannot be tested, are offered marked too:
+    // the double offer of two instances starting together is the M8 single-instance carry.
+    store(&paths, &other, &key("b.sql"), "theirs", &plain()).unwrap();
+    let third = Instance::start(&paths).unwrap();
+    let seen = with_locks_unsupported(|| take_all(&paths, &third, lib_id()));
+    let b = seen.iter().find(|e| e.key.rel.as_str() == "b.sql").unwrap();
+    assert!(b.liveness_unknown);
+    // A lockable dead instance's copy is not marked.
+    drop(other);
+    let after = take_all(&paths, &third, lib_id());
+    let b = after
+        .iter()
+        .find(|e| e.key.rel.as_str() == "b.sql")
+        .unwrap();
+    assert!(!b.liveness_unknown);
+}
+
+/// fr2 I-fr1-2: a preview's meta is never stored.
+#[test]
+fn a_preview_meta_is_not_stored() {
+    let (paths, _app, _lib) = env();
+    let me = Instance::start(&paths).unwrap();
+    let copy = CopyMeta {
+        meta: FileMeta {
+            partial: true,
+            ..FileMeta::default()
+        },
+        ..plain()
+    };
+    assert_eq!(
+        store(&paths, &me, &key("a.sql"), "x", &copy),
+        Err(RecoveryError::PreviewOnly)
+    );
+    assert!(!dir_of(&paths).exists());
 }

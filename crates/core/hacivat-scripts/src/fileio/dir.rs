@@ -376,6 +376,54 @@ impl Dir {
         self.write_checked(|| rename_retrying(&self.child(from), &self.child(to)))
     }
 
+    /// ## m4b-t05-fileio fix round 2 (mf2): runs the write `op` after a [`Dir::verify`], and
+    /// answers whether the folders still check out afterwards, instead of failing: once `op`
+    /// has published a file, a moved folder is a warning, not an undone write.
+    /// `between` runs after `op` and before the after-check (a test hook).
+    fn write_noting_after(
+        &self,
+        op: impl FnOnce() -> io::Result<()>,
+        between: impl FnOnce(),
+    ) -> Result<bool, FsError> {
+        self.writable()?;
+        self.verify()?;
+        op()?;
+        between();
+        Ok(self.verify().is_ok())
+    }
+
+    /// [`Dir::rename`], answering whether the folders still check out after it (fix round 2).
+    pub(crate) fn rename_noting_after(
+        &self,
+        from: &str,
+        to: &str,
+        between: impl FnOnce(),
+    ) -> Result<bool, FsError> {
+        self.write_noting_after(
+            || rename_retrying(&self.child(from), &self.child(to)),
+            between,
+        )
+    }
+
+    /// [`Dir::hard_link`] of the temp `from` to `to`, then the temp unlinked in the same step
+    /// (so a folder moved right after the publish leaves no temp behind), answering whether the
+    /// folders still check out after it.
+    pub(crate) fn publish_link_noting_after(
+        &self,
+        from: &str,
+        to: &str,
+        between: impl FnOnce(),
+    ) -> Result<bool, FsError> {
+        self.write_noting_after(
+            || {
+                fs::hard_link(self.child(from), self.child(to))?;
+                let _ = fs::remove_file(self.child(from));
+                Ok(())
+            },
+            between,
+        )
+    }
+
     pub(crate) fn remove_file(&self, name: &str) -> Result<(), FsError> {
         self.write_checked(|| fs::remove_file(self.child(name)))
     }
@@ -408,25 +456,58 @@ fn platform_reach(_: &File, _: &Metadata) -> Reach {
 
 /// Windows: a rename over a file another program holds open can fail with a sharing violation
 /// for a moment (an indexer, a virus scanner); three retries with backoff (alg/28 edge case).
+/// This reaches Task 3's manifest rename too (ADR 0009 `m4b-t05` fix round 2, mf5).
 #[cfg(windows)]
 fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
-    let mut wait = Duration::from_millis(50);
-    for _ in 0..3 {
-        match fs::rename(from, to) {
-            // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
-            Err(e) if matches!(e.raw_os_error(), Some(5 | 32 | 33)) => {
-                std::thread::sleep(wait);
-                wait *= 2;
-            }
-            other => return other,
-        }
-    }
-    fs::rename(from, to)
+    retrying(
+        || fs::rename(from, to),
+        is_sharing_error,
+        std::thread::sleep,
+    )
 }
 
 #[cfg(not(windows))]
 fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)
+}
+
+/// `ERROR_ACCESS_DENIED`, `ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION`.
+#[cfg_attr(
+    not(any(windows, test)),
+    expect(
+        dead_code,
+        reason = "the rename retry runs on Windows only; tested everywhere"
+    )
+)]
+fn is_sharing_error(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(5 | 32 | 33))
+}
+
+/// Runs `op`; on an error `retry_on` accepts, waits 50, 100, then 200 ms between three more
+/// tries, then makes one last one (about 350 ms at most). `sleep` is injectable for the test.
+#[cfg_attr(
+    not(any(windows, test)),
+    expect(
+        dead_code,
+        reason = "the rename retry runs on Windows only; tested everywhere"
+    )
+)]
+fn retrying(
+    mut op: impl FnMut() -> io::Result<()>,
+    retry_on: fn(&io::Error) -> bool,
+    mut sleep: impl FnMut(Duration),
+) -> io::Result<()> {
+    let mut wait = Duration::from_millis(50);
+    for _ in 0..3 {
+        match op() {
+            Err(e) if retry_on(&e) => {
+                sleep(wait);
+                wait *= 2;
+            }
+            other => return other,
+        }
+    }
+    op()
 }
 
 #[cfg(unix)]
@@ -489,5 +570,67 @@ mod win {
     pub const FILE_SHARE_WRITE: u32 = 1 << 1;
     pub const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 1 << 21;
     pub const FILE_FLAG_BACKUP_SEMANTICS: u32 = 1 << 25;
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// fr2 mf5: the Windows retry, with an injected sharing violation (32) and a recorded sleep.
+    #[test]
+    fn rename_retry_waits_and_gives_up() {
+        let violation = || io::Error::from_raw_os_error(32);
+        // Two violations, then success: three tries, two waits.
+        let mut left = 2;
+        let mut tries = 0;
+        let mut waits = Vec::new();
+        let got = retrying(
+            || {
+                tries += 1;
+                if left > 0 {
+                    left -= 1;
+                    Err(violation())
+                } else {
+                    Ok(())
+                }
+            },
+            is_sharing_error,
+            |d| waits.push(d),
+        );
+        assert!(got.is_ok());
+        assert_eq!(tries, 3);
+        assert_eq!(
+            waits,
+            [Duration::from_millis(50), Duration::from_millis(100)]
+        );
+        // Always violated: four tries, three waits, then the error.
+        let mut tries = 0;
+        let mut waits = Vec::new();
+        let got = retrying(
+            || {
+                tries += 1;
+                Err(violation())
+            },
+            is_sharing_error,
+            |d| waits.push(d),
+        );
+        assert_eq!(got.unwrap_err().raw_os_error(), Some(32));
+        assert_eq!(tries, 4);
+        assert_eq!(waits.iter().sum::<Duration>(), Duration::from_millis(350));
+        // Another error is not retried.
+        let mut tries = 0;
+        let got = retrying(
+            || {
+                tries += 1;
+                Err(io::Error::from_raw_os_error(2))
+            },
+            is_sharing_error,
+            |_| panic!("no wait for a non-sharing error"),
+        );
+        assert!(got.is_err());
+        assert_eq!(tries, 1);
+        for code in [5, 32, 33] {
+            assert!(is_sharing_error(&io::Error::from_raw_os_error(code)));
+        }
+    }
 }
 // ## m4b-t05-fileio

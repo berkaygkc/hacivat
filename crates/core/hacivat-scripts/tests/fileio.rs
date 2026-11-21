@@ -38,7 +38,7 @@ fn lib_with_bytes(name: &str, bytes: &[u8]) -> tempfile::TempDir {
 }
 
 fn read_default(d: &tempfile::TempDir, name: &str) -> hacivat_scripts::Decoded {
-    read(&root(d), &rel(name), ReadLimits::default()).unwrap()
+    read(&root(d), &rel(name), None, ReadLimits::default()).unwrap()
 }
 
 fn text(s: &str) -> SaveText {
@@ -168,7 +168,7 @@ fn fileio_round_trip_table() {
     ];
     for (name, bytes, enc, bom, ending) in rows {
         let d = lib_with_bytes("f.sql", &bytes);
-        let r = read(&root(&d), &rel("f.sql"), ReadLimits::default())
+        let r = read(&root(&d), &rel("f.sql"), None, ReadLimits::default())
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(r.meta.encoding.name(), enc, "{name}");
         assert_eq!(r.meta.bom, bom, "{name}");
@@ -183,6 +183,7 @@ fn fileio_round_trip_table() {
         save(
             &root(&d),
             &rel("f.sql"),
+            None,
             r.save_text().unwrap(),
             Some(r.stamp),
         )
@@ -203,29 +204,30 @@ fn windows_1254_needs_an_encoding_then_round_trips() {
     let bytes = cp1254("SELECT 'İĞŞ ğüşıöçİ';\r\n");
     let d = lib_with_bytes("tr.sql", &bytes);
     assert!(matches!(
-        read(&root(&d), &rel("tr.sql"), ReadLimits::default()),
+        read(&root(&d), &rel("tr.sql"), None, ReadLimits::default()),
         Err(ReadError::NeedsEncoding { .. })
     ));
-    let r = read_with(&root(&d), &rel("tr.sql"), "windows-1254").unwrap();
+    let r = read_with(&root(&d), &rel("tr.sql"), None, "windows-1254").unwrap();
     assert_eq!(r.text, "SELECT 'İĞŞ ğüşıöçİ';\r\n");
     assert_eq!(r.meta.encoding.name(), "windows-1254");
     assert!(!r.meta.bom);
     // ISO-8859-9 is the same encoding to WHATWG.
-    let iso = read_with(&root(&d), &rel("tr.sql"), "ISO-8859-9").unwrap();
+    let iso = read_with(&root(&d), &rel("tr.sql"), None, "ISO-8859-9").unwrap();
     assert_eq!(iso.meta.encoding.name(), "windows-1254");
     save(
         &root(&d),
         &rel("tr.sql"),
+        None,
         r.save_text().unwrap(),
         Some(r.stamp),
     )
     .unwrap();
     assert_eq!(fs::read(d.path().join("tr.sql")).unwrap(), bytes);
     // An edit is encoded back in the file's encoding, never as UTF-8.
-    let r = read_with(&root(&d), &rel("tr.sql"), "windows-1254").unwrap();
+    let r = read_with(&root(&d), &rel("tr.sql"), None, "windows-1254").unwrap();
     let mut edited = r.save_text().unwrap();
     edited.text.push_str("-- Ş\r\n");
-    save(&root(&d), &rel("tr.sql"), edited, Some(r.stamp)).unwrap();
+    save(&root(&d), &rel("tr.sql"), None, edited, Some(r.stamp)).unwrap();
     assert_eq!(
         fs::read(d.path().join("tr.sql")).unwrap(),
         cp1254("SELECT 'İĞŞ ğüşıöçİ';\r\n-- Ş\r\n")
@@ -236,25 +238,25 @@ fn windows_1254_needs_an_encoding_then_round_trips() {
 fn read_with_refuses_an_unknown_encoding_and_a_lossy_one() {
     let d = lib_with_bytes("a.sql", b"SELECT 1;");
     assert_eq!(
-        read_with(&root(&d), &rel("a.sql"), "no-such-encoding").unwrap_err(),
+        read_with(&root(&d), &rel("a.sql"), None, "no-such-encoding").unwrap_err(),
         ReadError::UnknownEncoding
     );
     // `replacement` would decode every byte to U+FFFD.
     assert_eq!(
-        read_with(&root(&d), &rel("a.sql"), "csiso2022kr").unwrap_err(),
+        read_with(&root(&d), &rel("a.sql"), None, "csiso2022kr").unwrap_err(),
         ReadError::UnknownEncoding
     );
     // Shift_JIS 0x87 0x90 (NEC row 13) decodes to U+2252, which encodes back as 0x81 0xE0: a
     // save of the unchanged text would change the file, so the read refuses it.
     let d = lib_with_bytes("sj.sql", &[b'a', 0x87, 0x90, b'b']);
     assert_eq!(
-        read_with(&root(&d), &rel("sj.sql"), "Shift_JIS").unwrap_err(),
+        read_with(&root(&d), &rel("sj.sql"), None, "Shift_JIS").unwrap_err(),
         ReadError::Lossy
     );
     // Bytes the encoding cannot decode at all.
     let d = lib_with_bytes("bad.sql", &[0xFF, 0xFF, 0xFF]);
     assert_eq!(
-        read_with(&root(&d), &rel("bad.sql"), "UTF-8").unwrap_err(),
+        read_with(&root(&d), &rel("bad.sql"), None, "UTF-8").unwrap_err(),
         ReadError::Undecodable
     );
 }
@@ -263,11 +265,11 @@ fn read_with_refuses_an_unknown_encoding_and_a_lossy_one() {
 fn unencodable_character_refuses_the_save() {
     let bytes = cp1254("SELECT 'İ';\n");
     let d = lib_with_bytes("tr.sql", &bytes);
-    let r = read_with(&root(&d), &rel("tr.sql"), "windows-1254").unwrap();
+    let r = read_with(&root(&d), &rel("tr.sql"), None, "windows-1254").unwrap();
     let mut edited = r.save_text().unwrap();
     edited.text = "SELECT 'İ';\n-- 漢\n".into();
     assert_eq!(
-        save(&root(&d), &rel("tr.sql"), edited, Some(r.stamp)),
+        save(&root(&d), &rel("tr.sql"), None, edited, Some(r.stamp)),
         Err(SaveError::Unencodable {
             first_offset: "SELECT 'İ';\n-- ".len()
         })
@@ -284,7 +286,7 @@ fn binary_file_is_refused() {
     bytes.extend(std::iter::repeat_n(b'x', 1000));
     let d = lib_with_bytes("a.sql", &bytes);
     assert_eq!(
-        read(&root(&d), &rel("a.sql"), ReadLimits::default()).unwrap_err(),
+        read(&root(&d), &rel("a.sql"), None, ReadLimits::default()).unwrap_err(),
         ReadError::Binary
     );
     // At most 1 %: text with a few NUL characters still opens.
@@ -309,7 +311,7 @@ fn invalid_utf8_without_a_bom_asks_for_an_encoding() {
         let d = lib_with_bytes("a.sql", &bytes);
         assert!(
             matches!(
-                read(&root(&d), &rel("a.sql"), ReadLimits::default()),
+                read(&root(&d), &rel("a.sql"), None, ReadLimits::default()),
                 Err(ReadError::NeedsEncoding { .. })
             ),
             "{bytes:?}"
@@ -322,7 +324,7 @@ fn changed_on_disk_refuses_without_expect_match() {
     let d = lib_with_bytes("f.sql", b"a");
     let r = read_default(&d, "f.sql");
     fs::write(d.path().join("f.sql"), b"b").unwrap();
-    match save(&root(&d), &rel("f.sql"), text("c"), Some(r.stamp)) {
+    match save(&root(&d), &rel("f.sql"), None, text("c"), Some(r.stamp)) {
         Err(SaveError::ChangedOnDisk(now)) => {
             assert_eq!(now.len, 1);
             assert_eq!(now.hash, xxh3(b"b"));
@@ -331,7 +333,7 @@ fn changed_on_disk_refuses_without_expect_match() {
     }
     assert_eq!(fs::read(d.path().join("f.sql")).unwrap(), b"b");
     // Without `expect` (the user chose Overwrite), the save goes through.
-    let stamp = save(&root(&d), &rel("f.sql"), text("c"), None).unwrap();
+    let stamp = save(&root(&d), &rel("f.sql"), None, text("c"), None).unwrap();
     assert_eq!(fs::read(d.path().join("f.sql")).unwrap(), b"c");
     assert_eq!(stamp.hash, xxh3(b"c"));
 }
@@ -344,12 +346,19 @@ fn save_detects_change_since_open() {
     let mut forged = r.stamp;
     forged.hash ^= 1;
     assert!(matches!(
-        save(&root(&d), &rel("f.sql"), text("x"), Some(forged)),
+        save(&root(&d), &rel("f.sql"), None, text("x"), Some(forged)),
         Err(SaveError::ChangedOnDisk(now)) if now == r.stamp
     ));
     assert_eq!(fs::read(d.path().join("f.sql")).unwrap(), b"SELECT 1;");
     // The stamp the save returns is the one a read sees next.
-    let saved = save(&root(&d), &rel("f.sql"), text("SELECT 2;"), Some(r.stamp)).unwrap();
+    let saved = save(
+        &root(&d),
+        &rel("f.sql"),
+        None,
+        text("SELECT 2;"),
+        Some(r.stamp),
+    )
+    .unwrap();
     assert_eq!(read_default(&d, "f.sql").stamp, saved);
 }
 
@@ -357,7 +366,14 @@ fn save_detects_change_since_open() {
 fn save_creates_a_new_file_and_refuses_one_deleted_since_open() {
     let d = tempfile::tempdir().unwrap();
     fs::create_dir(d.path().join("sub")).unwrap();
-    let s = save(&root(&d), &rel("sub/new.sql"), text("SELECT 1;\n"), None).unwrap();
+    let s = save(
+        &root(&d),
+        &rel("sub/new.sql"),
+        None,
+        text("SELECT 1;\n"),
+        None,
+    )
+    .unwrap();
     assert_eq!(
         fs::read(d.path().join("sub/new.sql")).unwrap(),
         b"SELECT 1;\n"
@@ -366,16 +382,22 @@ fn save_creates_a_new_file_and_refuses_one_deleted_since_open() {
     let r = read_default(&d, "sub/new.sql");
     fs::remove_file(d.path().join("sub/new.sql")).unwrap();
     assert_eq!(
-        save(&root(&d), &rel("sub/new.sql"), text("x"), Some(r.stamp)),
+        save(
+            &root(&d),
+            &rel("sub/new.sql"),
+            None,
+            text("x"),
+            Some(r.stamp)
+        ),
         Err(SaveError::DeletedOnDisk)
     );
     assert!(!d.path().join("sub/new.sql").exists());
     // "Save to recreate": no expectation.
-    save(&root(&d), &rel("sub/new.sql"), text("x"), None).unwrap();
+    save(&root(&d), &rel("sub/new.sql"), None, text("x"), None).unwrap();
     assert_eq!(fs::read(d.path().join("sub/new.sql")).unwrap(), b"x");
     // A missing folder is not created.
     assert!(matches!(
-        save(&root(&d), &rel("nope/a.sql"), text("x"), None),
+        save(&root(&d), &rel("nope/a.sql"), None, text("x"), None),
         Err(SaveError::Io(std::io::ErrorKind::NotFound))
     ));
     assert!(!d.path().join("nope").exists());
@@ -388,25 +410,25 @@ fn save_refuses_a_folder_and_hidden_paths() {
     fs::create_dir(d.path().join(".hacivat")).unwrap();
     let before = names_under(d.path());
     assert_eq!(
-        save(&root(&d), &rel("x.sql"), text("x"), None),
+        save(&root(&d), &rel("x.sql"), None, text("x"), None),
         Err(SaveError::PathChanged)
     );
     // Never listed, so never written (C11): the manifest folder, a dot file.
     for hidden in [".hacivat/workspace.toml", ".a.sql", "sub/.git/config"] {
         assert_eq!(
-            save(&root(&d), &rel(hidden), text("x"), None),
+            save(&root(&d), &rel(hidden), None, text("x"), None),
             Err(SaveError::PathRefused),
             "{hidden}"
         );
         assert_eq!(
-            read(&root(&d), &rel(hidden), ReadLimits::default()).unwrap_err(),
+            read(&root(&d), &rel(hidden), None, ReadLimits::default()).unwrap_err(),
             ReadError::PathRefused,
             "{hidden}"
         );
     }
     assert_eq!(names_under(d.path()), before);
     assert_eq!(
-        read(&root(&d), &rel("x.sql"), ReadLimits::default()).unwrap_err(),
+        read(&root(&d), &rel("x.sql"), None, ReadLimits::default()).unwrap_err(),
         ReadError::PathRefused
     );
 }
@@ -424,6 +446,7 @@ fn failed_save_leaves_original() {
         let got = save(
             &root(&d),
             &rel("f.sql"),
+            None,
             text("DROP TABLE t;"),
             Some(r.stamp),
         );
@@ -435,7 +458,14 @@ fn failed_save_leaves_original() {
         );
         assert_eq!(names_under(d.path()), ["f.sql"], "{fault:?}: no tmp left");
         // The fault fired once; the next save goes through.
-        save(&root(&d), &rel("f.sql"), text("SELECT 2;"), Some(r.stamp)).unwrap();
+        save(
+            &root(&d),
+            &rel("f.sql"),
+            None,
+            text("SELECT 2;"),
+            Some(r.stamp),
+        )
+        .unwrap();
         assert_eq!(fs::read(d.path().join("f.sql")).unwrap(), b"SELECT 2;");
     }
 }
@@ -460,11 +490,18 @@ fn tmp_name_never_collides_with_a_script() {
     assert!(fileio::is_temp_name(&t));
     let d = lib_with_bytes(&long, b"SELECT 1;");
     let r = read_default(&d, &long);
-    save(&root(&d), &rel(&long), text("SELECT 2;"), Some(r.stamp)).unwrap();
+    save(
+        &root(&d),
+        &rel(&long),
+        None,
+        text("SELECT 2;"),
+        Some(r.stamp),
+    )
+    .unwrap();
     assert_eq!(names_under(d.path()), std::slice::from_ref(&long));
     // The temp file a save really writes has that shape.
     faults::inject(faults::Fault::Rename);
-    let _ = save(&root(&d), &rel(&long), text("x"), None);
+    let _ = save(&root(&d), &rel(&long), None, text("x"), None);
     let used = faults::last_temp().expect("the save made a temp file");
     assert!(fileio::is_temp_name(&used), "{used}");
     assert!(used.len() <= 255);
@@ -520,7 +557,7 @@ fn preview_cuts_at_the_last_line_break_before_2_5_mb() {
     assert!(r.text.len() <= PREVIEW_BYTES);
     assert!(r.meta.bom);
     // Asked for the whole file (UI-EDIT-23 "Open anyway"): Reduced, all of it.
-    let r = read(&root(&d), &rel("u16.sql"), ReadLimits { whole: true }).unwrap();
+    let r = read(&root(&d), &rel("u16.sql"), None, ReadLimits { whole: true }).unwrap();
     assert_eq!(r.tier, SizeTier::Reduced);
     assert_eq!(r.text, "SELECT 'ğüş';\r\n".repeat(800_000));
 }
@@ -534,6 +571,7 @@ fn save_with_echo_reports_the_stamp_before_the_file_changes() {
     let got = save_with_echo(
         &root(&d),
         &rel("f.sql"),
+        None,
         text("new text"),
         Some(r.stamp),
         &mut |s| seen.push((*s, fs::read(&path).unwrap())),
@@ -553,7 +591,7 @@ fn open_stream_yields_utf8_chunks_cut_at_char_boundaries() {
     assert!(bytes.len() > 200 << 10);
     let d = lib_with_bytes("big.sql", &bytes);
     let whole = read_default(&d, "big.sql");
-    let mut s = open_stream(&root(&d), &rel("big.sql"), whole.meta.encoding).unwrap();
+    let mut s = open_stream(&root(&d), &rel("big.sql"), None, whole.meta.encoding).unwrap();
     let mut joined = String::new();
     let mut n = 0;
     while let Some(chunk) = s.next_chunk() {
@@ -578,7 +616,7 @@ fn open_stream_yields_utf8_chunks_cut_at_char_boundaries() {
     utf8.extend("ğğğ".as_bytes());
     let d = lib_with_bytes("u8.sql", &utf8);
     let r = read_default(&d, "u8.sql");
-    let mut s = open_stream(&root(&d), &rel("u8.sql"), r.meta.encoding).unwrap();
+    let mut s = open_stream(&root(&d), &rel("u8.sql"), None, r.meta.encoding).unwrap();
     let mut joined = String::new();
     while let Some(c) = s.next_chunk() {
         joined.push_str(&c.unwrap());
@@ -594,6 +632,7 @@ fn open_stream_stops_on_bytes_that_do_not_decode() {
     let mut s = open_stream(
         &root(&d),
         &rel("bad.sql"),
+        None,
         hacivat_scripts::TextEncoding::UTF_8,
     )
     .unwrap();
@@ -614,6 +653,7 @@ fn open_stream_reports_a_change_on_disk() {
     let mut s = open_stream(
         &root(&d),
         &rel("f.sql"),
+        None,
         hacivat_scripts::TextEncoding::UTF_8,
     )
     .unwrap();
@@ -636,6 +676,7 @@ fn open_stream_reports_a_change_on_disk() {
     let mut s = open_stream(
         &root(&d),
         &rel("g.sql"),
+        None,
         hacivat_scripts::TextEncoding::UTF_8,
     )
     .unwrap();
@@ -661,7 +702,13 @@ fn preview_cannot_be_saved() {
     assert_eq!(r.tier, SizeTier::Preview);
     assert!(r.save_text().is_none());
     // A whole read of the same file can be.
-    let whole = read(&root(&d), &rel("dump.sql"), ReadLimits { whole: true }).unwrap();
+    let whole = read(
+        &root(&d),
+        &rel("dump.sql"),
+        None,
+        ReadLimits { whole: true },
+    )
+    .unwrap();
     assert!(whole.save_text().is_some());
     assert_eq!(
         fs::read(d.path().join("dump.sql")).unwrap().len(),
@@ -679,6 +726,7 @@ fn partial_write_on_the_rename_path_leaves_original() {
     let got = save(
         &root(&d),
         &rel("f.sql"),
+        None,
         text("DELETE FROM t WHERE id = 1;\n"),
         Some(r.stamp),
     );
@@ -693,7 +741,7 @@ fn partial_write_of_a_new_file_leaves_nothing() {
     let d = tempfile::tempdir().unwrap();
     faults::inject(faults::Fault::WriteAfter(3));
     assert!(matches!(
-        save(&root(&d), &rel("new.sql"), text("SELECT 1;"), None),
+        save(&root(&d), &rel("new.sql"), None, text("SELECT 1;"), None),
         Err(SaveError::Io(_))
     ));
     assert!(names_under(d.path()).is_empty());
@@ -721,7 +769,7 @@ fn stale_temps_are_swept_on_save() {
             .unwrap();
     }
     let r = read_default(&d, "f.sql");
-    save(&root(&d), &rel("f.sql"), text("b"), Some(r.stamp)).unwrap();
+    save(&root(&d), &rel("f.sql"), None, text("b"), Some(r.stamp)).unwrap();
     let left = names_under(d.path());
     assert!(!left.contains(&old), "{left:?}");
     for kept in [&young, &upper, &short] {
@@ -745,41 +793,108 @@ fn temp_file_is_never_listed() {
     assert_eq!(rels, ["a.sql"]);
 }
 
-/// I2: the `_scoped` forms re-apply the environment scope to what the path resolves to.
+/// fr2 I-fr1-1 (R-T5-6): the environment is a required argument of every public function. A
+/// `@production` file is refused under staging and under `None` (an untagged connection or an
+/// unbound tab) by each of them, and nothing changes on disk; under production it opens.
 #[test]
-fn scoped_forms_refuse_what_the_environment_does_not_show() {
+fn every_public_function_refuses_what_the_environment_does_not_show() {
     use hacivat_proto::EnvTag;
     let d = lib_with_bytes("@production/purge.sql", b"DELETE FROM t;");
     let r = root(&d);
     let p = rel("@production/purge.sql");
-    assert_eq!(
-        fileio::read_scoped(&r, &p, Some(EnvTag::Dev), ReadLimits::default()).unwrap_err(),
-        ReadError::OutOfScope
-    );
-    assert_eq!(
-        fileio::read_scoped(&r, &p, None, ReadLimits::default()).unwrap_err(),
-        ReadError::OutOfScope
-    );
-    let ok = fileio::read_scoped(&r, &p, Some(EnvTag::Production), ReadLimits::default()).unwrap();
-    assert_eq!(
-        fileio::save_scoped(
-            &r,
-            &p,
-            Some(EnvTag::Dev),
-            text("x"),
-            Some(ok.stamp),
-            &mut |_| {}
-        ),
-        Err(SaveError::OutOfScope)
-    );
+    let ok = read(&r, &p, Some(EnvTag::Production), ReadLimits::default()).unwrap();
     let enc = hacivat_scripts::TextEncoding::UTF_8;
-    assert!(fileio::open_stream_scoped(&r, &p, Some(EnvTag::Staging), enc).is_err());
+    for env in [Some(EnvTag::Staging), Some(EnvTag::Dev), None] {
+        assert_eq!(
+            read(&r, &p, env, ReadLimits::default()).unwrap_err(),
+            ReadError::OutOfScope,
+            "{env:?}"
+        );
+        assert_eq!(
+            read_with(&r, &p, env, "windows-1254").unwrap_err(),
+            ReadError::OutOfScope,
+            "{env:?}"
+        );
+        assert_eq!(
+            save(&r, &p, env, text("x"), Some(ok.stamp)),
+            Err(SaveError::OutOfScope),
+            "{env:?}"
+        );
+        assert_eq!(
+            save(&r, &p, env, text("x"), None),
+            Err(SaveError::OutOfScope),
+            "{env:?}"
+        );
+        assert_eq!(
+            save_with_echo(&r, &p, env, text("x"), None, &mut |_| panic!("no echo")),
+            Err(SaveError::OutOfScope),
+            "{env:?}"
+        );
+        assert!(
+            matches!(open_stream(&r, &p, env, enc), Err(ReadError::OutOfScope)),
+            "{env:?}"
+        );
+        // A new file there is refused too.
+        assert_eq!(
+            save(&r, &rel("@production/new.sql"), env, text("x"), None),
+            Err(SaveError::OutOfScope),
+            "{env:?}"
+        );
+    }
+    assert_eq!(
+        names_under(d.path()),
+        ["@production", "@production/purge.sql"]
+    );
     assert_eq!(
         fs::read(d.path().join("@production/purge.sql")).unwrap(),
         b"DELETE FROM t;"
     );
-    let env = Some(EnvTag::Production);
-    fileio::save_scoped(&r, &p, env, text("x"), Some(ok.stamp), &mut |_| {}).unwrap();
+    assert!(open_stream(&r, &p, Some(EnvTag::Production), enc).is_ok());
+    save(&r, &p, Some(EnvTag::Production), text("x"), Some(ok.stamp)).unwrap();
+    // An unscoped file opens under every environment, `None` included.
+    let d = lib_with_bytes("plain.sql", b"SELECT 1;");
+    for env in [Some(EnvTag::Production), Some(EnvTag::Staging), None] {
+        assert!(read(&root(&d), &rel("plain.sql"), env, ReadLimits::default()).is_ok());
+    }
+}
+
+/// fr2 I-fr1-2: the reviewer's route. An editor Save builds `SaveText` from its buffer and the
+/// tab's meta, with the tab's stamp; for a preview tab that meta is `partial`, and the save is
+/// refused whatever the text, with or without `expect`.
+#[test]
+fn a_preview_tabs_meta_cannot_be_saved() {
+    let line = format!("SELECT {};\n", "1".repeat(90));
+    let bytes = line.repeat(230_000).into_bytes();
+    assert!(bytes.len() > 22_000_000);
+    let d = lib_with_bytes("dump.sql", &bytes);
+    let r = read_default(&d, "dump.sql");
+    assert_eq!(r.tier, SizeTier::Preview);
+    assert!(r.meta.partial);
+    for expect in [Some(r.stamp), None] {
+        for body in [r.text.clone(), "SELECT 1;\n".to_owned()] {
+            let tab = SaveText {
+                text: body,
+                meta: r.meta,
+            };
+            assert_eq!(
+                save(&root(&d), &rel("dump.sql"), None, tab, expect),
+                Err(SaveError::PreviewOnly)
+            );
+        }
+    }
+    let after = fs::read(d.path().join("dump.sql")).unwrap();
+    assert_eq!(after.len(), bytes.len());
+    assert_eq!(xxh3(&after), xxh3(&bytes));
+    assert_eq!(names_under(d.path()), ["dump.sql"]);
+    // A whole read's meta is not partial.
+    let whole = read(
+        &root(&d),
+        &rel("dump.sql"),
+        None,
+        ReadLimits { whole: true },
+    )
+    .unwrap();
+    assert!(!whole.meta.partial);
 }
 
 /// m8: a preview read in a chosen encoding gets the same loss check as a whole read.
@@ -790,12 +905,12 @@ fn preview_in_a_chosen_encoding_is_checked_for_loss() {
     assert!(bytes.len() as u64 > 20 << 20);
     let d = lib_with_bytes("sj.sql", &bytes);
     assert_eq!(
-        read_with(&root(&d), &rel("sj.sql"), "Shift_JIS").unwrap_err(),
+        read_with(&root(&d), &rel("sj.sql"), None, "Shift_JIS").unwrap_err(),
         ReadError::Lossy
     );
     // Without the NEC row, the preview reads.
     let d = lib_with_bytes("ok.sql", &bytes[4..]);
-    let r = read_with(&root(&d), &rel("ok.sql"), "Shift_JIS").unwrap();
+    let r = read_with(&root(&d), &rel("ok.sql"), None, "Shift_JIS").unwrap();
     assert_eq!(r.tier, SizeTier::Preview);
 }
 
@@ -806,7 +921,7 @@ fn new_file_save_never_replaces_one_that_appeared() {
     let theirs = d.path().join("new.sql");
     faults::before_publish(move || fs::write(theirs, b"theirs").unwrap());
     assert!(matches!(
-        save(&root(&d), &rel("new.sql"), text("mine"), None),
+        save(&root(&d), &rel("new.sql"), None, text("mine"), None),
         Err(SaveError::ChangedOnDisk(now)) if now.hash == xxh3(b"theirs")
     ));
     assert_eq!(fs::read(d.path().join("new.sql")).unwrap(), b"theirs");
@@ -820,9 +935,9 @@ fn without_procfs_saves_refuse_and_reads_work() {
     let r = read_default(&d, "f.sql");
     let got = hacivat_scripts::manifest::with_procfs_absent(|| {
         (
-            save(&root(&d), &rel("f.sql"), text("x"), Some(r.stamp)),
-            save(&root(&d), &rel("new.sql"), text("x"), None),
-            read(&root(&d), &rel("f.sql"), ReadLimits::default()).map(|r| r.text),
+            save(&root(&d), &rel("f.sql"), None, text("x"), Some(r.stamp)),
+            save(&root(&d), &rel("new.sql"), None, text("x"), None),
+            read(&root(&d), &rel("f.sql"), None, ReadLimits::default()).map(|r| r.text),
         )
     });
     assert_eq!(got.0, Err(SaveError::Io(std::io::ErrorKind::Unsupported)));
@@ -849,6 +964,7 @@ mod unix {
         save(
             &root(&d),
             &rel("real.sql"),
+            None,
             text("SELECT 2;"),
             Some(r.stamp),
         )
@@ -858,7 +974,14 @@ mod unix {
         symlink("real.sql", d.path().join("l.sql")).unwrap();
         let r = read_default(&d, "l.sql");
         assert_eq!(r.text, "SELECT 2;");
-        save(&root(&d), &rel("l.sql"), text("SELECT 3;"), Some(r.stamp)).unwrap();
+        save(
+            &root(&d),
+            &rel("l.sql"),
+            None,
+            text("SELECT 3;"),
+            Some(r.stamp),
+        )
+        .unwrap();
         assert!(
             fs::symlink_metadata(d.path().join("l.sql"))
                 .unwrap()
@@ -874,6 +997,7 @@ mod unix {
         save(
             &root(&d),
             &rel("sub/up.sql"),
+            None,
             text("SELECT 4;"),
             Some(r.stamp),
         )
@@ -881,7 +1005,7 @@ mod unix {
         assert_eq!(fs::read(d.path().join("real.sql")).unwrap(), b"SELECT 4;");
         // A new file takes the umask's mode, never the 0600 of the temp (fr1 m9: compared
         // with a file the same umask made, so the test holds under any umask).
-        save(&root(&d), &rel("new.sql"), text("x"), None).unwrap();
+        save(&root(&d), &rel("new.sql"), None, text("x"), None).unwrap();
         fs::write(d.path().join("probe.txt"), b"").unwrap();
         assert_eq!(
             mode(&d.path().join("new.sql")),
@@ -896,7 +1020,14 @@ mod unix {
         fs::hard_link(d.path().join("a.sql"), d.path().join("b.sql")).unwrap();
         let r = read_default(&d, "a.sql");
         let ino = fs::metadata(d.path().join("a.sql")).unwrap().ino();
-        save(&root(&d), &rel("a.sql"), text("SELECT 22;"), Some(r.stamp)).unwrap();
+        save(
+            &root(&d),
+            &rel("a.sql"),
+            None,
+            text("SELECT 22;"),
+            Some(r.stamp),
+        )
+        .unwrap();
         // Written in place: both names still show the same inode and the new bytes.
         assert_eq!(fs::metadata(d.path().join("a.sql")).unwrap().ino(), ino);
         assert_eq!(fs::read(d.path().join("b.sql")).unwrap(), b"SELECT 22;");
@@ -904,13 +1035,13 @@ mod unix {
         // The stamp check runs first there too.
         fs::write(d.path().join("b.sql"), b"theirs").unwrap();
         assert!(matches!(
-            save(&root(&d), &rel("a.sql"), text("mine"), Some(r.stamp)),
+            save(&root(&d), &rel("a.sql"), None, text("mine"), Some(r.stamp)),
             Err(SaveError::ChangedOnDisk(_))
         ));
         assert_eq!(fs::read(d.path().join("a.sql")).unwrap(), b"theirs");
         // A shorter text is not padded with the old tail.
         let r = read_default(&d, "a.sql");
-        save(&root(&d), &rel("a.sql"), text("x"), Some(r.stamp)).unwrap();
+        save(&root(&d), &rel("a.sql"), None, text("x"), Some(r.stamp)).unwrap();
         assert_eq!(fs::read(d.path().join("b.sql")).unwrap(), b"x");
         assert!(names_under(other.path()).is_empty());
         assert_eq!(names_under(d.path()), ["a.sql", "b.sql"]);
@@ -924,11 +1055,11 @@ mod unix {
         fs::remove_file(d.path().join("f.sql")).unwrap();
         symlink(outside.path().join("target.sql"), d.path().join("f.sql")).unwrap();
         assert_eq!(
-            save(&root(&d), &rel("f.sql"), text("pwned"), Some(r.stamp)),
+            save(&root(&d), &rel("f.sql"), None, text("pwned"), Some(r.stamp)),
             Err(SaveError::PathChanged)
         );
         assert_eq!(
-            save(&root(&d), &rel("f.sql"), text("pwned"), None),
+            save(&root(&d), &rel("f.sql"), None, text("pwned"), None),
             Err(SaveError::PathChanged)
         );
         assert_eq!(
@@ -936,13 +1067,14 @@ mod unix {
             b"outside"
         );
         assert_eq!(
-            read(&root(&d), &rel("f.sql"), ReadLimits::default()).unwrap_err(),
+            read(&root(&d), &rel("f.sql"), None, ReadLimits::default()).unwrap_err(),
             ReadError::PathRefused
         );
         assert!(
             open_stream(
                 &root(&d),
                 &rel("f.sql"),
+                None,
                 hacivat_scripts::TextEncoding::UTF_8
             )
             .is_err()
@@ -955,11 +1087,17 @@ mod unix {
         fs::write(outside.path().join("sub/a.sql"), b"SELECT 1;").unwrap();
         symlink(outside.path().join("sub"), d.path().join("sub")).unwrap();
         assert_eq!(
-            save(&root(&d), &rel("sub/a.sql"), text("pwned"), Some(r.stamp)),
+            save(
+                &root(&d),
+                &rel("sub/a.sql"),
+                None,
+                text("pwned"),
+                Some(r.stamp)
+            ),
             Err(SaveError::PathChanged)
         );
         assert_eq!(
-            save(&root(&d), &rel("sub/new.sql"), text("pwned"), None),
+            save(&root(&d), &rel("sub/new.sql"), None, text("pwned"), None),
             Err(SaveError::PathChanged)
         );
         assert_eq!(names_under(&outside.path().join("sub")), ["a.sql"]);
@@ -973,7 +1111,7 @@ mod unix {
         symlink(".hacivat/workspace.toml", d.path().join("m.sql")).unwrap();
         for name in ["dangling.sql", "m.sql"] {
             assert_eq!(
-                save(&root(&d), &rel(name), text("x"), None),
+                save(&root(&d), &rel(name), None, text("x"), None),
                 Err(SaveError::PathChanged),
                 "{name}"
             );
@@ -995,7 +1133,7 @@ mod unix {
         assert_eq!(read_default(&d, "in.sql").text, "inside");
         for name in ["out.sql", "loop.sql"] {
             assert_eq!(
-                read(&root(&d), &rel(name), ReadLimits::default()).unwrap_err(),
+                read(&root(&d), &rel(name), None, ReadLimits::default()).unwrap_err(),
                 ReadError::PathRefused,
                 "{name}"
             );
@@ -1011,11 +1149,11 @@ mod unix {
             .unwrap();
         assert!(ok.success());
         assert_eq!(
-            read(&root(&d), &rel("p.sql"), ReadLimits::default()).unwrap_err(),
+            read(&root(&d), &rel("p.sql"), None, ReadLimits::default()).unwrap_err(),
             ReadError::PathRefused
         );
         assert_eq!(
-            save(&root(&d), &rel("p.sql"), text("x"), None),
+            save(&root(&d), &rel("p.sql"), None, text("x"), None),
             Err(SaveError::PathChanged)
         );
     }
@@ -1033,7 +1171,7 @@ mod unix {
             fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
             return;
         }
-        let got = save(&root(&d), &rel("sub/f.sql"), text("x"), Some(r.stamp));
+        let got = save(&root(&d), &rel("sub/f.sql"), None, text("x"), Some(r.stamp));
         fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
             got,
@@ -1054,7 +1192,7 @@ mod unix {
         }
         let r = read_default(&d, "f.sql");
         assert_eq!(
-            save(&root(&d), &rel("f.sql"), text("x"), Some(r.stamp)),
+            save(&root(&d), &rel("f.sql"), None, text("x"), Some(r.stamp)),
             Err(SaveError::Io(std::io::ErrorKind::PermissionDenied))
         );
         assert_eq!(fs::read(&p).unwrap(), b"SELECT 1;");
@@ -1078,11 +1216,11 @@ mod unix {
         fs::rename(&lib, base.path().join("old")).unwrap();
         symlink(outside.path(), &lib).unwrap();
         assert_eq!(
-            read(&r, &rel("a.sql"), ReadLimits::default()).unwrap_err(),
+            read(&r, &rel("a.sql"), None, ReadLimits::default()).unwrap_err(),
             ReadError::PathRefused
         );
         assert_eq!(
-            save(&r, &rel("a.sql"), text("pwned"), None),
+            save(&r, &rel("a.sql"), None, text("pwned"), None),
             Err(SaveError::PathChanged)
         );
         assert_eq!(fs::read(outside.path().join("a.sql")).unwrap(), b"outside");
@@ -1093,7 +1231,7 @@ mod unix {
         let nfd = "mu\u{0308}s.sql";
         let d = lib_with_bytes(nfd, b"SELECT 1;");
         let r = read_default(&d, nfd);
-        save(&root(&d), &rel(nfd), text("SELECT 2;"), Some(r.stamp)).unwrap();
+        save(&root(&d), &rel(nfd), None, text("SELECT 2;"), Some(r.stamp)).unwrap();
         let names: Vec<String> = fs::read_dir(d.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -1110,7 +1248,7 @@ mod unix {
         fs::set_permissions(d.path().join("a.sql"), fs::Permissions::from_mode(0o640)).unwrap();
         let r = read_default(&d, "a.sql");
         let before = fs::metadata(d.path().join("a.sql")).unwrap();
-        save(&root(&d), &rel("a.sql"), text("y"), Some(r.stamp)).unwrap();
+        save(&root(&d), &rel("a.sql"), None, text("y"), Some(r.stamp)).unwrap();
         let after = fs::metadata(d.path().join("b.sql")).unwrap();
         assert_eq!(mode(&d.path().join("b.sql")), 0o640);
         // fr1 m9: the owner too (the same inode, written in place).
@@ -1130,6 +1268,7 @@ mod unix {
         let got = save(
             &root(&d),
             &rel("a.sql"),
+            None,
             text("SELECT 'a much longer replacement text';\n"),
             Some(r.stamp),
         );
@@ -1139,7 +1278,14 @@ mod unix {
         }
         // The editor's stamp still matches, so the next save goes through.
         assert_eq!(read_default(&d, "a.sql").stamp, r.stamp);
-        save(&root(&d), &rel("a.sql"), text("SELECT 2;"), Some(r.stamp)).unwrap();
+        save(
+            &root(&d),
+            &rel("a.sql"),
+            None,
+            text("SELECT 2;"),
+            Some(r.stamp),
+        )
+        .unwrap();
         assert_eq!(fs::read(d.path().join("b.sql")).unwrap(), b"SELECT 2;");
         assert_eq!(names_under(d.path()), ["a.sql", "b.sql"]);
     }
@@ -1155,6 +1301,7 @@ mod unix {
             save(
                 &root(&d),
                 &rel("a.sql"),
+                None,
                 text("DROP TABLE t;\n"),
                 Some(r.stamp)
             ),
@@ -1173,7 +1320,7 @@ mod unix {
         let other = d.path().join("b.sql");
         faults::before_publish(move || fs::write(other, b"SELECT 9;").unwrap());
         assert!(matches!(
-            save(&root(&d), &rel("a.sql"), text("mine"), Some(r.stamp)),
+            save(&root(&d), &rel("a.sql"), None, text("mine"), Some(r.stamp)),
             Err(SaveError::ChangedOnDisk(now)) if now.hash == xxh3(b"SELECT 9;")
         ));
         assert_eq!(fs::read(d.path().join("a.sql")).unwrap(), b"SELECT 9;");
@@ -1198,15 +1345,93 @@ mod unix {
             canonical,
         };
         assert_eq!(
-            read(&r, &rel("l.sql"), ReadLimits::default()).unwrap_err(),
+            read(&r, &rel("l.sql"), None, ReadLimits::default()).unwrap_err(),
             ReadError::PathRefused
         );
         assert_eq!(
-            save(&r, &rel("l.sql"), text("pwned"), None),
+            save(&r, &rel("l.sql"), None, text("pwned"), None),
             Err(SaveError::PathChanged)
         );
         assert_eq!(fs::read(lib.join("real.sql")).unwrap(), b"inside");
         assert_eq!(names_under(&out), ["bounce.sql"]);
+    }
+
+    /// fr2 mf1: a write-back whose last sync fails is not a restore: `Damaged`.
+    #[test]
+    fn failed_restore_sync_reports_damage() {
+        let d = lib_with_bytes("a.sql", b"SELECT 1;\n");
+        fs::hard_link(d.path().join("a.sql"), d.path().join("b.sql")).unwrap();
+        let r = read_default(&d, "a.sql");
+        faults::inject_both(faults::Fault::WriteAfter(4), faults::Fault::RestoreSync);
+        assert_eq!(
+            save(
+                &root(&d),
+                &rel("a.sql"),
+                None,
+                text("DROP TABLE t;\n"),
+                Some(r.stamp)
+            ),
+            Err(SaveError::Damaged)
+        );
+    }
+
+    /// The folder `sub` moves to `moved` (and a new, empty `sub` takes its name) right after a
+    /// save published its bytes.
+    fn move_folder_after_publish(d: &tempfile::TempDir) {
+        let base = d.path().to_path_buf();
+        faults::after_publish(move || {
+            fs::rename(base.join("sub"), base.join("moved")).unwrap();
+            fs::create_dir(base.join("sub")).unwrap();
+        });
+    }
+
+    /// fr2 mf2: once the new bytes are on disk, a folder check that fails after it is
+    /// `SavedButPathChanged` with the new stamp, never a plain failure: on the rename path, the
+    /// in-place path and the new-file path.
+    #[test]
+    fn a_folder_moved_after_the_write_is_a_completed_save() {
+        // Rename path.
+        let d = lib_with_bytes("sub/f.sql", b"old");
+        let r = read_default(&d, "sub/f.sql");
+        move_folder_after_publish(&d);
+        match save(
+            &root(&d),
+            &rel("sub/f.sql"),
+            None,
+            text("new"),
+            Some(r.stamp),
+        ) {
+            Err(SaveError::SavedButPathChanged(stamp)) => assert_eq!(stamp.hash, xxh3(b"new")),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(fs::read(d.path().join("moved/f.sql")).unwrap(), b"new");
+        assert_eq!(names_under(&d.path().join("moved")), ["f.sql"]);
+        // In place (hard-linked).
+        let d = lib_with_bytes("sub/a.sql", b"old");
+        fs::hard_link(d.path().join("sub/a.sql"), d.path().join("sub/b.sql")).unwrap();
+        let r = read_default(&d, "sub/a.sql");
+        move_folder_after_publish(&d);
+        assert!(matches!(
+            save(
+                &root(&d),
+                &rel("sub/a.sql"),
+                None,
+                text("new"),
+                Some(r.stamp)
+            ),
+            Err(SaveError::SavedButPathChanged(_))
+        ));
+        assert_eq!(fs::read(d.path().join("moved/b.sql")).unwrap(), b"new");
+        // A new file.
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join("sub")).unwrap();
+        move_folder_after_publish(&d);
+        assert!(matches!(
+            save(&root(&d), &rel("sub/n.sql"), None, text("new"), None),
+            Err(SaveError::SavedButPathChanged(_))
+        ));
+        assert_eq!(fs::read(d.path().join("moved/n.sql")).unwrap(), b"new");
+        assert_eq!(names_under(&d.path().join("moved")), ["n.sql"]);
     }
 }
 
@@ -1233,11 +1458,11 @@ mod windows {
         let d = tempfile::tempdir().unwrap();
         junction(&d.path().join("sub"), outside.path());
         assert_eq!(
-            save(&root(&d), &rel("sub/a.sql"), text("pwned"), None),
+            save(&root(&d), &rel("sub/a.sql"), None, text("pwned"), None),
             Err(SaveError::PathChanged)
         );
         assert_eq!(
-            read(&root(&d), &rel("sub/a.sql"), ReadLimits::default()).unwrap_err(),
+            read(&root(&d), &rel("sub/a.sql"), None, ReadLimits::default()).unwrap_err(),
             ReadError::PathRefused
         );
         assert_eq!(fs::read(outside.path().join("a.sql")).unwrap(), b"outside");
@@ -1249,7 +1474,7 @@ mod windows {
         let d = tempfile::tempdir().unwrap();
         for bad in ["con.sql", "NUL", "a.sql:stream", "trail.sql.", "trail.sql "] {
             assert_eq!(
-                save(&root(&d), &rel(bad), text("x"), None),
+                save(&root(&d), &rel(bad), None, text("x"), None),
                 Err(SaveError::PathRefused),
                 "{bad:?}"
             );
@@ -1266,7 +1491,7 @@ mod windows {
             return; // file links need Developer Mode or the privilege on this runner
         }
         assert_eq!(
-            read(&root(&d), &rel("l.sql"), ReadLimits::default()).unwrap_err(),
+            read(&root(&d), &rel("l.sql"), None, ReadLimits::default()).unwrap_err(),
             ReadError::PathRefused
         );
     }

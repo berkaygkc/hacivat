@@ -94,6 +94,10 @@ pub struct RecoveryEntry {
     pub text: String,
     pub copy: CopyMeta,
     pub saved_at: SystemTime,
+    /// ## m4b-t05-fileio fix round 2 (mf3, ruling R-T5-5): whether the instance that wrote it
+    /// could not be shown dead (advisory locks unsupported where it ran, or not testable
+    /// here). Such a copy is still offered, marked: it may belong to a running instance.
+    pub liveness_unknown: bool,
     instance: Uuid,
     stem: String,
 }
@@ -105,6 +109,7 @@ impl fmt::Debug for RecoveryEntry {
             .field("text_len", &self.text.len())
             .field("copy", &self.copy)
             .field("saved_at", &self.saved_at)
+            .field("liveness_unknown", &self.liveness_unknown)
             .finish_non_exhaustive()
     }
 }
@@ -114,6 +119,9 @@ impl fmt::Debug for RecoveryEntry {
 pub enum RecoveryError {
     /// `script_recovery_dir` has no folder for this library: nothing is written anywhere.
     NoFolder,
+    /// ## m4b-t05-fileio fix round 2 (I-fr1-2): the meta is `partial` (a preview, which is
+    /// read-only and never has unsaved text); nothing is stored.
+    PreviewOnly,
     Io(io::ErrorKind),
 }
 
@@ -127,13 +135,17 @@ impl From<io::Error> for RecoveryError {
 /// launch and keep it until quit.
 pub struct Instance {
     id: Uuid,
-    /// Held locked; dropping it (or a crash) releases the lock.
-    _lock: File,
+    /// Held locked; dropping it (or a crash) releases the lock. `None` where advisory locks
+    /// are unsupported (fix round 2, mf3): the instance still writes copies, marked.
+    _lock: Option<File>,
 }
 
 impl fmt::Debug for Instance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Instance").field("id", &self.id).finish()
+        f.debug_struct("Instance")
+            .field("id", &self.id)
+            .field("locked", &self._lock.is_some())
+            .finish()
     }
 }
 
@@ -151,16 +163,30 @@ impl Instance {
             opts.mode(0o600);
         }
         let lock = opts.open(dir.join(format!("{}.{LOCK_EXT}", id.simple())))?;
-        lock.try_lock().map_err(|e| match e {
-            TryLockError::WouldBlock => RecoveryError::Io(io::ErrorKind::WouldBlock),
-            TryLockError::Error(e) => e.into(),
-        })?;
+        let lock = match try_lock(&lock) {
+            Ok(()) => Some(lock),
+            // A fresh file of our own cannot be held by anyone else.
+            Err(TryLockError::WouldBlock) => {
+                return Err(RecoveryError::Io(io::ErrorKind::WouldBlock));
+            }
+            // fr2 mf3 (R-T5-5): no advisory locks here (some NFS or SMB homes). Copies are still
+            // written, so a crash loses nothing; their sidecars say the instance's liveness is
+            // unknown, and a later launch offers them with that mark. Two instances that start
+            // together may both offer one dead instance's copies: the M8 single-instance lock
+            // closes that (carry).
+            Err(TryLockError::Error(_)) => None,
+        };
         sweep_dead_locks(&dir, id);
         Ok(Instance { id, _lock: lock })
     }
 
     pub fn id(&self) -> Uuid {
         self.id
+    }
+
+    /// Whether this instance holds its advisory lock (`false` where locks are unsupported).
+    pub fn is_locked(&self) -> bool {
+        self._lock.is_some()
     }
 }
 
@@ -174,7 +200,7 @@ pub fn store(
 ) -> Result<(), RecoveryError> {
     store_in(
         folder(paths, key.library),
-        instance.id,
+        instance,
         key,
         text,
         copy,
@@ -201,8 +227,14 @@ pub fn take_all(paths: &LocalPaths, instance: &Instance, lib: LibraryId) -> Vec<
         let Some(found) = read_one(&dir, lib, &path) else {
             continue;
         };
-        if found.instance == instance.id || alive(paths, found.instance) {
+        if found.instance == instance.id {
             continue;
+        }
+        let mut found = found;
+        match liveness(paths, found.instance) {
+            Liveness::Alive => continue,
+            Liveness::Dead => {}
+            Liveness::Unknown => found.liveness_unknown = true,
         }
         let expired = now
             .duration_since(found.saved_at)
@@ -253,23 +285,62 @@ fn instances_dir(paths: &LocalPaths) -> Option<PathBuf> {
     paths.script_recovery_dir(INSTANCES)
 }
 
-/// Whether the instance `id` still holds its lock. A lock file nobody holds is removed (its
-/// instance is gone); a missing one means the same.
-fn alive(paths: &LocalPaths, id: Uuid) -> bool {
+/// Whether an instance is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    Alive,
+    Dead,
+    /// Its lock cannot be tested here (fix round 2, mf3): offered, marked.
+    Unknown,
+}
+
+/// Whether the instance `id` still holds its lock. A lock file nobody holds, or a missing one,
+/// means it is gone.
+fn liveness(paths: &LocalPaths, id: Uuid) -> Liveness {
     let Some(dir) = instances_dir(paths) else {
-        return false;
+        return Liveness::Dead;
     };
     let path = dir.join(format!("{}.{LOCK_EXT}", id.simple()));
     let Ok(file) = fs::OpenOptions::new().read(true).write(true).open(&path) else {
-        return false;
+        return Liveness::Dead;
     };
-    match file.try_lock() {
-        Ok(()) => false,
-        Err(TryLockError::WouldBlock) => true,
-        // A lock that cannot be tested is treated as held: never offer or delete a copy that
-        // might be a running instance's.
-        Err(TryLockError::Error(_)) => true,
+    match try_lock(&file) {
+        Ok(()) => Liveness::Dead,
+        Err(TryLockError::WouldBlock) => Liveness::Alive,
+        // A lock that cannot be tested: neither deleted nor hidden, offered with the mark
+        // (R-T5-5; before fix round 2 such copies were never offered).
+        Err(TryLockError::Error(_)) => Liveness::Unknown,
     }
+}
+
+/// `File::try_lock`, or, under [`with_locks_unsupported`] (tests), the error a file system
+/// without advisory locks answers.
+fn try_lock(file: &File) -> Result<(), TryLockError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if NO_LOCKS.with(std::cell::Cell::get) {
+        return Err(TryLockError::Error(io::ErrorKind::Unsupported.into()));
+    }
+    file.try_lock()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static NO_LOCKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` as if advisory locks were unsupported, on this thread only (fix round 2, mf3).
+/// For tests.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn with_locks_unsupported<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NO_LOCKS.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(NO_LOCKS.with(|c| c.replace(true)));
+    f()
 }
 
 /// Removes the lock files of instances that are gone. A missing lock file means "not running"
@@ -298,7 +369,7 @@ fn sweep_dead_locks(dir: &Path, own: Uuid) {
             continue;
         }
         if let Ok(file) = fs::OpenOptions::new().read(true).write(true).open(&path)
-            && file.try_lock().is_ok()
+            && try_lock(&file).is_ok()
         {
             let _ = fs::remove_file(&path);
         }
@@ -307,16 +378,19 @@ fn sweep_dead_locks(dir: &Path, own: Uuid) {
 
 fn store_in(
     dir: Option<PathBuf>,
-    instance: Uuid,
+    instance: &Instance,
     key: &RecoveryKey,
     text: &str,
     copy: &CopyMeta,
     now: SystemTime,
 ) -> Result<(), RecoveryError> {
+    if copy.meta.partial {
+        return Err(RecoveryError::PreviewOnly);
+    }
     let dir = dir.ok_or(RecoveryError::NoFolder)?;
     make_private(&dir)?;
-    let stem = stem_of(instance, key);
-    let meta = Sidecar::new(instance, key, copy, now);
+    let stem = stem_of(instance.id, key);
+    let meta = Sidecar::new(instance.id, key, copy, now, !instance.is_locked());
     let meta = toml::to_string(&meta).map_err(|_| RecoveryError::Io(io::ErrorKind::InvalidData))?;
     fsio::atomic_write(&dir.join(format!("{stem}.{TEXT_EXT}")), text.as_bytes())?;
     fsio::atomic_write(&dir.join(format!("{stem}.{META_EXT}")), meta.as_bytes())?;
@@ -415,6 +489,7 @@ fn read_one(dir: &Path, lib: LibraryId, meta_path: &Path) -> Option<RecoveryEntr
                 "cr" => LineEnding::Cr,
                 _ => return None,
             },
+            partial: false,
         },
         base: match sidecar.base {
             None => None,
@@ -428,6 +503,8 @@ fn read_one(dir: &Path, lib: LibraryId, meta_path: &Path) -> Option<RecoveryEntr
         text,
         copy,
         saved_at: time_of(sidecar.saved_at_secs, sidecar.saved_at_nanos)?,
+        // An unlocked writer's lock file is unlocked while it runs: never read that as dead.
+        liveness_unknown: sidecar.unlocked,
         instance,
         stem: stem.to_owned(),
     })
@@ -449,6 +526,9 @@ struct Sidecar {
     line_ending: String,
     secret_suspected: bool,
     damaged: bool,
+    /// fr2 mf3: the writing instance held no advisory lock.
+    #[serde(default)]
+    unlocked: bool,
     saved_at_secs: u64,
     saved_at_nanos: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -464,7 +544,13 @@ struct BaseStamp {
 }
 
 impl Sidecar {
-    fn new(instance: Uuid, key: &RecoveryKey, copy: &CopyMeta, now: SystemTime) -> Self {
+    fn new(
+        instance: Uuid,
+        key: &RecoveryKey,
+        copy: &CopyMeta,
+        now: SystemTime,
+        unlocked: bool,
+    ) -> Self {
         let since = |t: SystemTime| t.duration_since(UNIX_EPOCH).ok();
         let saved = since(now).unwrap_or_default();
         Sidecar {
@@ -483,6 +569,7 @@ impl Sidecar {
             .to_owned(),
             secret_suspected: copy.secret_suspected,
             damaged: copy.damaged,
+            unlocked,
             saved_at_secs: saved.as_secs(),
             saved_at_nanos: saved.subsec_nanos(),
             // A file stamped before 1970 keeps no base: the app then treats it as changed.
@@ -532,7 +619,7 @@ pub fn store_at(
 ) -> Result<(), RecoveryError> {
     store_in(
         folder(paths, key.library),
-        instance.id,
+        instance,
         key,
         text,
         copy,
@@ -559,7 +646,7 @@ mod tests {
         assert_eq!(
             store_in(
                 None,
-                Uuid::new_v4(),
+                &unlocked(),
                 &key(),
                 "x",
                 &CopyMeta::default(),
@@ -567,6 +654,38 @@ mod tests {
             ),
             Err(RecoveryError::NoFolder)
         );
+    }
+
+    fn unlocked() -> Instance {
+        Instance {
+            id: Uuid::new_v4(),
+            _lock: None,
+        }
+    }
+
+    /// fr2 I-fr1-2: a preview's meta is never stored (and nothing is written).
+    #[test]
+    fn partial_meta_is_not_stored() {
+        let copy = CopyMeta {
+            meta: FileMeta {
+                partial: true,
+                ..FileMeta::default()
+            },
+            ..CopyMeta::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            store_in(
+                Some(dir.path().join("lib")),
+                &unlocked(),
+                &key(),
+                "x",
+                &copy,
+                SystemTime::now()
+            ),
+            Err(RecoveryError::PreviewOnly)
+        );
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 
     #[test]
@@ -580,7 +699,7 @@ mod tests {
             ..CopyMeta::default()
         };
         assert!(
-            Sidecar::new(Uuid::new_v4(), &key(), &copy, SystemTime::now())
+            Sidecar::new(Uuid::new_v4(), &key(), &copy, SystemTime::now(), false)
                 .base
                 .is_none()
         );

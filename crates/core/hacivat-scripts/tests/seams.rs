@@ -120,18 +120,20 @@ fn secret_stub_reports_the_whole_text() {
 // and pathsafe stub assertions are gone; Task 3 wrote `tests/manifest.rs`, Task 4 `tests/pathsafe.rs`.
 
 // ## m4b-t05-fileio: `fileio::{read, save}` are real now (tests/fileio.rs); the service's
-// own read/save stubs below stay until Task 10.
+// own read/save stubs below stay until Task 10. Fix round 2 (R-T5-6): they take the tab's
+// environment, and still refuse with one given.
 #[tokio::test]
 async fn save_stub_writes_nothing() {
     let (s, app, dir) = service_with_library();
     let lib = LibraryId::new();
     assert!(matches!(
-        s.save(lib, &rel("a.sql"), text("x"), None).await,
+        s.save(lib, &rel("a.sql"), Some(EnvTag::Dev), text("x"), None)
+            .await,
         Err(SaveError::NotImplemented)
     ));
     assert!(!dir.path().join("a.sql").exists());
     assert!(matches!(
-        s.save(lib, &rel("b.sql"), text("DROP TABLE t;"), None)
+        s.save(lib, &rel("b.sql"), None, text("DROP TABLE t;"), None)
             .await,
         Err(SaveError::NotImplemented)
     ));
@@ -179,7 +181,7 @@ async fn every_service_call_refuses_and_touches_no_file() {
     };
     assert_eq!(s.map(m, true).await, Err(RegistryError::NotImplemented));
     assert!(matches!(
-        s.read(id, &rel("b.sql")).await,
+        s.read(id, &rel("b.sql"), Some(EnvTag::Dev)).await,
         Err(ReadError::NotImplemented)
     ));
     assert_eq!(
@@ -195,7 +197,7 @@ async fn every_service_call_refuses_and_touches_no_file() {
         Err(FileOpError::NotImplemented)
     );
     assert!(matches!(
-        s.open_stream(id, &rel("b.sql")),
+        s.open_stream(id, &rel("b.sql"), None),
         Err(ReadError::NotImplemented)
     ));
     assert_eq!(tree(dir.path()), before);
