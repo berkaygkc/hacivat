@@ -341,7 +341,7 @@ Task 7 instead removes those entries from an in-memory copy of the index (`State
   - every loose ref on HEAD's symbolic chain;
   - a main or nested gitfile;
   - a nested repository's `HEAD`.
-- **Residual:** loose objects are not checked (that would be thousands of `lstat`s per status).
+- ~~**Residual:** loose objects are not checked (that would be thousands of `lstat`s per status).~~ Corrected in fix round 3 (G2): the premise was wrong. gix reads loose objects on every status (the HEAD commit and every tree reachable from it), so they are now checked; see `### Fix round 3`.
 
 **The index ceiling is gix's (n1).**
 - Under reduced trust, gix refuses an index whose decoded entries (`entries × size_of::<gix::index::Entry>()`) exceed `gitoxide.objects.allocLimitIfReducedTrust`.
@@ -374,3 +374,42 @@ More than 256 dataless folders answer `Unavailable(Dataless)`, which keeps the e
 **CI (n6).** The `strace` install retries: three `apt-get update` attempts, `Acquire::Retries=3`, and `--no-install-recommends`.
 
 **Cost.** Measured on macOS, debug build: 147 ms for a 10,000-file status and 339 ms for 20,000 dataless paths, pre-walk and checks included.
+
+### Fix round 3 (re-review G1, G2, p1–p3; rulings R-T7-5, R-T7-6)
+
+**No replace-ref scan (G1, R-T7-5).**
+- Under reduced trust, gix's open still scans `refs/replace/**`: `core.useReplaceRefs` defaults to on and can come only from trusted sections.
+  - It reads every entry whole, with no cap.
+  - It walks a symlinked `refs/replace` root out of the repository. A link to `~` would read, and download, the whole home folder.
+- The status now opens with `config_overrides(["core.useReplaceRefs=false"])`. That is an API source of kind `Override`, which gix trusts, and which is not a repository section, so both trust invariants still hold. The scan never runs.
+- A `refs/replace` that exists but is not a real folder (a symlink, a file) answers `Unavailable(Redirected)` before the open.
+- **Cost:** no CLI parity for `git replace`. A replaced commit is seen as the original, as the CLI shows it under `GIT_NO_REPLACE_OBJECTS=1`.
+- Test `replace_refs_are_never_scanned` (P11) proves it functionally: `git replace HEAD side` would make a status that honours replace refs see `a.sql` as staged-modified, and ours stays clean. A 200 MiB file sits beside the ref, and a symlinked `refs/replace` is refused.
+
+**Loose objects are checked (G2, R-T7-6).**
+- gix reads loose objects on every status: the HEAD commit, every tree reachable from it, and index blobs for a deleted `.gitattributes` or `.gitignore`.
+- Before the open, Hacivat `lstat`s these in the repository's object folder and in each alternate's:
+  - the `pack` folder and its entries;
+  - every two-hex-digit fan-out folder and its entries.
+- A placeholder answers `Unavailable(Dataless)`.
+- More than **20,000** loose entries per object folder answers `Unavailable(TooLarge(LooseObjects))`, with the diagnostic "too many loose objects; run git gc".
+  - `git gc --auto`, run by `git commit`, keeps loose objects near 6,700, so the cap is rarely met.
+  - A repository that has auto gc turned off and many unpacked commits is refused rather than half-checked.
+- `GitError::TooLarge` now carries `TooLargeWhy::{Index, LooseObjects}`.
+- Tests: `dataless_loose_object_is_unavailable` (P10: the HEAD commit, the root tree, a fan-out folder) and `too_many_loose_objects_is_unavailable`.
+
+**Layout files before they are read (p1).**
+- The main gitfile, a plain `.git`'s `commondir`, a linked worktree's `commondir` and `gitdir`, `objects/info/alternates`, and each alternate's objects (packs and loose, same cap) are checked for placeholders in `check_layout`, before it reads them.
+- A split index's `sharedindex.*` must be a regular file under the index cap: a FIFO answers `Redirected` and never hangs a worker. It is also checked for placeholders.
+- Test `dataless_layout_files_and_split_index_are_unavailable`.
+
+**Index file cap (p2).**
+- `INDEX_MAX`, the file size, equals gix's 16 MiB allocation limit.
+- The measured 209,715-entry ceiling holds for short paths (`d<n>/f<n>`). An index whose paths are long reaches 16 MiB on disk with fewer entries, so it is refused below 209,715. That is conservative: gix's own path-storage estimate would refuse it too.
+
+**Test hooks fenced (p3).**
+- A `check-deps` rule `GitTestingHookOutsideTests` refuses `hacivat_git::testing` in any file outside `crates/core/hacivat-git/tests/`, through renames, groups and globs. It is a named exception in `xtask/src/check_deps.rs`, inside `// ## m4b-t07-git` blocks.
+- Test `git_testing_hooks_outside_its_tests_are_flagged` covers six forms, plus a clean file and the crate's own `tests/`.
+- So the doc-hidden hooks stay test-only, whoever depends on the crate.
+
+**Cost.** Measured on macOS, debug build: 170 ms for a 10,000-file status (its 10,100 loose objects are checked) and 345 ms for 20,000 dataless paths.
