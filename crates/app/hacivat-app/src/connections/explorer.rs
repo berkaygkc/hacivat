@@ -66,6 +66,8 @@ use crate::explorer::adapter::{
     FilterResult, NodeInfo, ProfileInput, SYNC_FILTER_NAMES, profile_key,
 };
 use crate::explorer::contrib::{ContributedChildren, contributors};
+// ## m4b-t01b-seams
+use crate::explorer::contrib::ExplorerContributor;
 use crate::l10n_global::{L10nGlobal, is_turkic, text_fn, tr, tr_id, ui_language};
 use crate::shell::Workspace;
 use crate::shell::hooks::ShellHooks;
@@ -131,6 +133,11 @@ pub struct ExplorerView {
     expanded_seen: KeySet,
     // ## m4-t33d-fr1 (ruling R-T33d-5): the explorer is a focus home; its primary is the tree.
     home: HomeSlot,
+    // ## m4b-t01b-seams (named lines, R-M4b-34): the owner of every contributed node: the
+    // contributor that listed it under a database (rebuilt with the model), and the owner of
+    // the node a loaded child was listed under (kept with `loads`).
+    owners: HashMap<TreeKey, Rc<dyn ExplorerContributor>>,
+    load_owners: HashMap<TreeKey, Rc<dyn ExplorerContributor>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -335,7 +342,7 @@ pub fn menu_items(cx: &App, id: ProfileId) -> Vec<MenuItemSpec> {
         }
         item
     };
-    vec![
+    let mut items = vec![
         item(
             text_fn(if connected {
                 ids::hv::CONN_MENU_DISCONNECT
@@ -353,9 +360,27 @@ pub fn menu_items(cx: &App, id: ProfileId) -> Vec<MenuItemSpec> {
             crate::l10n_global::text_fn_id("hv-conn-menu-clear-history"),
             "connection.clear_history",
         ),
-        // ## m2a-t21-shots: "Delete… in red" (NOTES §8).
-        item(text_fn(ids::hv::CONN_MENU_DELETE), "connection.delete").danger(true),
-    ]
+    ];
+    // ## m4b-t01b-seams (named exception, R-M4b-34 (2), T2 ruling 17): a SQLite profile root is
+    // its one database's node (R-M4b-32): the Scripts items come after the other items and a
+    // separator, and the destructive Delete… stays last, in its own group. None from the stub.
+    let sqlite = cx
+        .try_global::<ConnectionsModel>()
+        .and_then(|m| m.profiles().iter().find(|p| p.id == id).map(|p| p.engine))
+        .is_some_and(|engine| {
+            hacivat_meta::kind::database_level(engine) == hacivat_meta::kind::DbLevel::File
+        });
+    if sqlite {
+        let scripts = crate::scripts::database_menu_items(&NodeInfo::Profile(id), cx);
+        if !scripts.is_empty() {
+            items.push(MenuItemSpec::separator());
+            items.extend(scripts);
+            items.push(MenuItemSpec::separator());
+        }
+    }
+    // ## m2a-t21-shots: "Delete… in red" (NOTES §8).
+    items.push(item(text_fn(ids::hv::CONN_MENU_DELETE), "connection.delete").danger(true));
+    items
 }
 
 /// Opens the connection menu of the selection at `anchor` (or under the selected row).
@@ -485,11 +510,17 @@ fn profile_input(p: &Arc<Profile>, cx: &App) -> ProfileInput {
     }
 }
 
+/// Each contributed node's owner, by key.
+// ## m4b-t01b-seams (R-M4b-34)
+type Owners = HashMap<TreeKey, Rc<dyn ExplorerContributor>>;
+
 /// The contributed nodes of every database a profile shows (R-M4-19).
-fn contributed_places(profiles: &[ProfileInput], cx: &App) -> Vec<ContributedPlace> {
+// ## m4b-t01b-seams (named exception, R-M4b-34): with the contributor that listed each node.
+fn contributed_places(profiles: &[ProfileInput], cx: &App) -> (Vec<ContributedPlace>, Owners) {
     let list = contributors(cx);
+    let mut owners = Owners::new();
     if list.is_empty() {
-        return Vec::new();
+        return (Vec::new(), owners);
     }
     let mut out = Vec::new();
     for p in profiles {
@@ -528,10 +559,14 @@ fn contributed_places(profiles: &[ProfileInput], cx: &App) -> Vec<ContributedPla
             }
         }
         for db in dbs {
-            let nodes: Vec<_> = list
-                .iter()
-                .flat_map(|c| c.database_children(p.profile.id, &db, cx))
-                .collect();
+            let mut nodes = Vec::new();
+            for c in &list {
+                for node in c.database_children(p.profile.id, &db, cx) {
+                    // ## m4b-t01b-seams: a key two contributors list stays its first owner's.
+                    owners.entry(node.key).or_insert_with(|| c.clone());
+                    nodes.push(node);
+                }
+            }
             if !nodes.is_empty() {
                 out.push(ContributedPlace {
                     profile: p.profile.id,
@@ -541,7 +576,19 @@ fn contributed_places(profiles: &[ProfileInput], cx: &App) -> Vec<ContributedPla
             }
         }
     }
-    out
+    (out, owners)
+}
+
+// ## m4b-t01b-seams (named lines, R-M4b-34)
+/// The contributor that owns contributed node `key` (it listed it, or the node it is listed
+/// under); `None` for any other key.
+pub(crate) fn contributed_owner(key: TreeKey, cx: &App) -> Option<Rc<dyn ExplorerContributor>> {
+    let view = explorer(cx)?;
+    let v = view.read(cx);
+    v.owners
+        .get(&key)
+        .or_else(|| v.load_owners.get(&key))
+        .cloned()
 }
 
 fn contributors_generation(cx: &App) -> u64 {
@@ -630,6 +677,13 @@ impl ExplorerView {
                 this.refresh(cx);
                 cx.notify();
             }),
+            // ## m4b-t01b-seams (named exception, R-M4b-34 (3)): a contributor changed
+            // (`contrib::contributors_changed`): its nodes are read again and drawn with no
+            // other event.
+            cx.observe_global::<crate::explorer::contrib::Contributors>(|this, cx| {
+                this.refresh(cx);
+                cx.notify();
+            }),
         ];
         let mut view = ExplorerView {
             filter,
@@ -650,6 +704,9 @@ impl ExplorerView {
             // ## m4-t24-live (named exception)
             expanded_seen: KeySet::default(),
             home: HomeSlot::new(),
+            // ## m4b-t01b-seams
+            owners: HashMap::new(),
+            load_owners: HashMap::new(),
             _subscriptions: subscriptions,
         };
         view.refresh(cx);
@@ -785,6 +842,8 @@ impl ExplorerView {
         {
             // A contributor changed: its expanded nodes are asked again.
             self.loads.clear();
+            // ## m4b-t01b-seams: and their children's owners with them.
+            self.load_owners.clear();
         }
         self.stamp = Some(self.stamp(cx));
         let profiles: Vec<ProfileInput> = cx
@@ -794,7 +853,9 @@ impl ExplorerView {
             .iter()
             .map(|p| profile_input(p, cx))
             .collect();
-        let contributed = contributed_places(&profiles, cx);
+        // ## m4b-t01b-seams (named exception, R-M4b-34): the owners come with the places.
+        let (contributed, owners) = contributed_places(&profiles, cx);
+        self.owners = owners;
         let inputs = ExplorerInputs {
             contributed,
             profiles,
@@ -954,6 +1015,19 @@ impl ExplorerView {
                     t.set_expanded(key, !open, cx);
                 });
             }
+            // ## m4b-t01b-seams (named exception, R-M4b-34 (1)): a contributed node that does
+            // not expand (a script file) is activated by its owner only. Deferred: the owner
+            // may read this view, which is leased to this listener until it returns.
+            Some(NodeInfo::Contributed { .. }) => {
+                let owner = self
+                    .owners
+                    .get(&key)
+                    .or_else(|| self.load_owners.get(&key))
+                    .cloned();
+                if let Some(owner) = owner {
+                    window.defer(cx, move |window, cx| owner.activate(key, window, cx));
+                }
+            }
             Some(_) | None => {}
         }
     }
@@ -977,18 +1051,30 @@ impl ExplorerView {
         let Some(node) = top else {
             return;
         };
-        let list = contributors(cx);
+        // ## m4b-t01b-seams (named exception, R-M4b-34): only the node's owner describes its
+        // children, and they belong to it (no other contributor is asked about a key).
+        let Some(owner) = self
+            .owners
+            .get(&key)
+            .or_else(|| self.load_owners.get(&key))
+            .cloned()
+        else {
+            return;
+        };
         let state = match &node.children {
             ContributedChildren::Lazy(f) => f(cx),
             ContributedChildren::Leaf => return,
         };
-        let nodes = match &state {
+        let nodes: Vec<_> = match &state {
             ChildState::Loaded(keys) => keys
                 .iter()
-                .filter_map(|k| list.iter().find_map(|c| c.child_node(*k, cx)))
+                .filter_map(|k| owner.child_node(*k, cx))
                 .collect(),
             _ => Vec::new(),
         };
+        for n in &nodes {
+            self.load_owners.insert(n.key, owner.clone());
+        }
         self.loads.insert(key, ContributedLoad { state, nodes });
         self.refresh(cx);
         if self.result.is_some() {

@@ -3783,3 +3783,887 @@ hv-metadata-clear-subtitle = Bu bilgisayarda { $size }
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
 hv-history-cleared-backups-failed = { $name } için sorgu geçmişi temizlendi, ancak hasarlı yedekleri silinemedi.
+
+## m4b-t01b-seams
+
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-node = Betikler
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-node-shared = paylaşılan
+# Surface 1 (Scripts node).
+# Variables:
+#   $conns (String) - the other connections, a locale list of names (data), e.g. "orders-staging and orders-dev".
+# Review: PO
+hv-scripts-node-shared-tip = Ayrıca şunların altında: { $conns }. Bu adda veritabanı olan her bağlantı aynı dosyaları gösterir.
+# Surface 1 (Scripts node).
+# Variables:
+#   $path (String) - a folder or file path, verbatim (data), e.g. "~/work/orders-scripts".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-lib-tip = Klasör: { $path }. { $database } veritabanına bağlanır.
+# Surface 1 (Scripts node).
+# Variables:
+#   $env (String) - the environment word (an env-* message), e.g. "production".
+# Review: PO
+hv-scripts-env-folder-tip = Bu klasörü yalnızca { $env } etiketli bağlantılar görür.
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-git-modified = M
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-git-modified-tip = Değiştirildi: son commit'ten farklı
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-git-new = N
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-git-new-tip = Yeni: son commit'te yok
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-git-conflicted = C
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-git-conflicted-tip = Çakışma: birleştirme çözülmedi
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-git-unknown = ?
+# Surface 1 (Scripts node).
+# Variables:
+#   $reason (String) - selector: the reason; one of dataless, filter (anything else: the default).
+# Review: PO
+hv-scripts-git-unknown-tip =
+    { $reason ->
+        [dataless] Git durumu bilinmiyor: dosya indirilmedi; Hacivat karşılaştırmak için onu indirmez.
+       *[filter] Git durumu bilinmiyor: dosyaya bir .gitattributes filtresi uygulanıyor; Hacivat filtreleri hiç çalıştırmaz.
+    }
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-git-contains = •
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-git-contains-tip = Değişmiş dosyalar içeriyor
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-outside-link-tip = Kitaplığın dışına işaret ediyor; Hacivat bunu hiç açmaz.
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-dataless = indirilmedi
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-downloading = İndiriliyor…
+# Surface 1 (Scripts node).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-diag-row = { $n } sorun
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-missing-row = Klasör bulunamadı
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-loading = Betikler listeleniyor…
+# Surface 2 (Context menus).
+# Review: PO
+hv-explorer-menu-attach-library = Betik kitaplığı bağla…
+# Surface 2 (Context menus).
+# Review: PO
+hv-explorer-menu-map-library = Bir betik kitaplığına eşle…
+# Surface 2 (Context menus).
+# Review: PO
+hv-explorer-menu-map-library-none = Bağlı başka kitaplık yok
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-new-script = Yeni betik
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-new-folder = Yeni klasör
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-open = Aç
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-open-under = Başka bir bağlantıda aç…
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-rename = Yeniden adlandır
+# Surface 2 (Context menus).
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of other, windows (anything else: the default).
+# Review: PO
+hv-scripts-menu-trash =
+    { $os ->
+        [windows] Geri Dönüşüm Kutusu'na taşı
+       *[other] Çöp Sepeti'ne taşı
+    }
+# Surface 2 (Context menus).
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+# Review: PO
+hv-scripts-menu-reveal =
+    { $os ->
+        [windows] Dosya Gezgini'nde göster
+        [linux] Bulunduğu klasörü aç
+       *[macos] Finder'da göster
+    }
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-copy-path = Yolu kopyala
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-copy-rel = Göreli yolu kopyala
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-settings = Betik kitaplığı ayarları…
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-outside-tip = Kitaplığın dışına işaret ediyor
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-new-name = adsız.sql
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-new-folder-name = yeni klasör
+# Surface 2 (Context menus).
+# Variables:
+#   $reason (String) - selector: the reason; one of dots, empty, exists, ext, reserved, slash (anything else: the default).
+#   $name (String) - a file or folder name, verbatim (data), e.g. "archive_old_orders.sql".
+# Review: PO
+hv-scripts-name-err =
+    { $reason ->
+        [slash] Ad / ya da \ içeremez.
+        [reserved] Windows bu adı aygıtlar için ayırır (CON, PRN, AUX, NUL, COM1…).
+        [exists] { $name } bu klasörde zaten var.
+        [dots] Ad . ya da .. olamaz; nokta ya da boşlukla bitemez.
+        [ext] Betik adı .sql ya da .md ile biter.
+       *[empty] Bir ad yazın.
+    }
+# Surface 2 (Context menus).
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of other, windows (anything else: the default).
+#   $name (String) - a file or folder name, verbatim (data), e.g. "archive_old_orders.sql".
+# Review: PO
+hv-scripts-trashed =
+    { $os ->
+        [windows] { $name } Geri Dönüşüm Kutusu'na taşındı. Oradan geri yükleyebilirsiniz.
+       *[other] { $name } Çöp Sepeti'ne taşındı. Oradan geri alabilirsiniz.
+    }
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-choose = Betik klasörü seçin
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-title = Betik kitaplığı bağla
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-folder = Klasör
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-change = Değiştir…
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-database = Veritabanı
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-database-hint = Bu betiklerin ait olduğu veritabanı. Bu adda veritabanı olan her bağlantı onları gösterir.
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-aliases = Takma adlar
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-aliases-ph = Başka adları, virgülle ayırarak
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-shows-under = Görüneceği yerler
+# Surface 3 (Attach dialog).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-attach-shows-none = Henüz { $database } adlı veritabanı olan bağlantı yok.
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-will-write = Hacivat klasörde şu dosyayı oluşturur:
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-file-note = Yalnızca veritabanı adını ve takma adlarını içerir; bağlantı, sunucu ya da parola asla yazılmaz. Ekibiniz aynı bağlamayı alsın diye commit edin.
+# Surface 3 (Attach dialog).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-attach-found = .hacivat/workspace.toml bulundu — { $database } veritabanına bağlar
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-found-note = Hacivat bu dosyayı okur, hiç değiştirmez.
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-attach-btn = Bağla
+# Surface 3 (Attach dialog).
+# Variables:
+#   $reason (String) - selector: the reason; one of already, control, empty, long, many (anything else: the default).
+# Review: PO
+hv-scripts-attach-err =
+    { $reason ->
+        [control] Veritabanı adı denetim karakteri içeremez.
+        [long] Veritabanı adı en çok 128 bayt olabilir.
+        [already] Bu klasör zaten bağlı.
+        [many] Hacivat en çok 32 kitaplık tutar. Önce Ayarlar › Betik kitaplıkları'ndan birini kaldırın.
+       *[empty] Veritabanının adını yazın.
+    }
+# Surface 3 (Attach dialog).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-map-title = { $database } altında bir betik kitaplığı göster
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-map-library = Kitaplık
+# Surface 3 (Attach dialog).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-map-binds = { $database } veritabanına bağlı
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-map-note = Eşleme yalnızca bu bilgisayarda tutulur. Ekip arkadaşlarınız görmez.
+# Surface 3 (Attach dialog).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-map-alias = { $database } adını, bu klasörü kullanan herkes için takma ad olarak da ekle
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-map-alias-sub = .hacivat/workspace.toml dosyasına ekler, dosyadaki yorumları korur
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-map-btn = Burada göster
+# Surface 3 (Attach dialog).
+# Review: PO
+hv-scripts-map-other = Başka klasör bağla…
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-settings-nav-scripts = Betik kitaplıkları
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-settings-section-scripts = Betik kitaplıkları
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-set-attach = Klasör bağla…
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-set-note = Kitaplık, .sql ve .md dosyalarından oluşan bir klasördür. Kaldırmak klasöre ve dosyalarına hiç dokunmaz.
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $state (String) - selector: the watcher state; one of limit, polling, unavailable, watching (anything else: the default).
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-set-status =
+    { $state ->
+        [polling] 2 saniyede bir denetleniyor
+        [unavailable] Klasör bulunamadı
+        [limit] { $n } dosyada durdu
+       *[watching] Değişiklikler izleniyor
+    }
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $reason (String) - selector: the reason; one of network, watches (anything else: the default).
+# Review: PO
+hv-scripts-set-status-tip =
+    { $reason ->
+        [watches] Sistemin dosya izleme sınırı düşük; Hacivat değişiklik bildirimi beklemek yerine bu klasörü 2 saniyede bir denetler.
+       *[network] Bu klasör bir ağ sürücüsünde; Hacivat değişiklik bildirimi beklemek yerine onu 2 saniyede bir denetler.
+    }
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-set-files = { $n } betik
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $aliases (String) - the aliases, a locale list (data), e.g. "orders_p".
+# Review: PO
+hv-scripts-set-aliases = takma adlar: { $aliases }
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-set-git = git deposu
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-set-git-off = git durumu kapalı
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-set-remove = Kaldır…
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-set-mappings = Yerel eşlemeler
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-set-mapping-shows = gösterir:
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-set-mapping-remove = Kaldır
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-set-empty = Henüz betik kitaplığı yok. Betiklerini ait oldukları veritabanlarının altında görmek için .sql ve .md dosyalarından oluşan bir klasör bağlayın.
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+# Review: PO
+hv-scripts-remove-title = { $library } Hacivat'tan kaldırılsın mı?
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-remove-body = Klasör ve dosyaları, .hacivat/workspace.toml dahil, olduğu gibi kalır. Betikler düğümleri ve { $n } yerel eşlemesi kaldırılır.
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-remove-btn = Kaldır
+# Surface 5 (Script tab).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+# Review: PO
+hv-scripts-tab-title = { $file } · { $conn }
+# Surface 5 (Script tab).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-tab-title-db = { $file } · { $conn } · { $database }
+# Surface 5 (Script tab).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-tab-title-unbound = { $file } · bağlantı yok
+# Surface 5 (Script tab).
+# Variables:
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+# Review: PO
+hv-scripts-tab-tip-library = { $library } kitaplığından
+# Surface 5 (Script tab).
+# Variables:
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-tab-tip-runs = { $conn } üzerinde, { $database } veritabanında çalışır
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-tab-tip-unbound = Hiçbir yerde çalışmaz: bağlantısı silindi
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-tab-tip-unsaved = Kaydedilmemiş değişiklikler
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-tab-save = Kaydet
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-tab-save-all = Tümünü kaydet
+# Surface 5 (Script tab).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-tab-saved = { $file } kaydedildi
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-run-md = Markdown notları çalışmaz
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-run-unbound = Bu sekmenin bağlantısı silindi; hiçbir şey çalıştırmaz. Başka bir bağlantıda açın.
+# Surface 5 (Script tab).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-run-switching = { $database } veritabanına geçiliyor…
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-unbound-title = Bu sekmenin açıldığı bağlantı silindi.
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-unbound-body = Metin korunuyor. Bir bağlantıda açana kadar hiçbir yerde çalışmaz.
+# Surface 5 (Script tab).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-use-log = Bu sekmenin oturumu artık { $database } veritabanını kullanıyor
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-disk-changed = { $file } diskte değişti.
+# Surface 6 (Changes on disk).
+# Review: PO
+hv-scripts-disk-changed-body = Bu sekmedeki düzenlemeleriniz kaydedilmedi. Yeniden yükle onları atar; Benimkini koru onları tutar ve kaydederken üzerine yazmadan önce sorar.
+# Surface 6 (Changes on disk).
+# Review: PO
+hv-scripts-disk-reload = Yeniden yükle
+# Surface 6 (Changes on disk).
+# Review: PO
+hv-scripts-disk-keep = Benimkini koru
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-disk-reload-title = Düzenlemeleriniz atılıp { $file } yeniden yüklensin mi?
+# Surface 6 (Changes on disk).
+# Review: PO
+hv-scripts-disk-reload-body = Diskteki dosya bu sekmedeki metnin yerini alır. Düzenlemeleriniz atılır.
+# Surface 6 (Changes on disk).
+# Review: PO
+hv-scripts-disk-reload-yes = At ve yeniden yükle
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-disk-reloaded = { $file } diskte değiştiği için yeniden yüklendi
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $new (String) - the new file name, verbatim (data), e.g. "haftalık_rapor.sql".
+# Review: PO
+hv-scripts-disk-renamed = { $file } dosyasının adı { $new } oldu; bu sekme onu izliyor
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-disk-deleted = { $file } diskten silindi.
+# Surface 6 (Changes on disk).
+# Review: PO
+hv-scripts-disk-deleted-body = Metin bu sekmede duruyor. Kaydet dosyayı yeniden yazar.
+# Surface 6 (Changes on disk).
+# Review: PO
+hv-scripts-disk-overwrite-title = Dosya siz açtıktan sonra diskte değişti. Üzerine yazılsın mı?
+# Surface 6 (Changes on disk).
+# Review: PO
+hv-scripts-disk-overwrite-body = Kaydetmek, Hacivat dışında yapılan değişiklikler dahil, diskteki sürümün yerini alır.
+# Surface 6 (Changes on disk).
+# Review: PO
+hv-scripts-disk-overwrite = Üzerine yaz
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+# Review: PO
+hv-scripts-unlisted = { $file } artık { $conn } altında listelenmiyor.
+# Surface 6 (Changes on disk).
+# Variables:
+#   $reason (String) - selector: the reason; one of binding, env (anything else: the default).
+#   $folder (String) - a folder name, verbatim (data), e.g. "@prod".
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+# Review: PO
+hv-scripts-unlisted-body =
+    { $reason ->
+        [binding] Kitaplığı artık bu veritabanına bağlı değil. Bu sekme yine yalnızca { $conn } üzerinde çalışır.
+       *[env] Başka bir ortamın klasörüne, { $folder } içine taşındı. Bu sekme yine yalnızca { $conn } üzerinde çalışır.
+    }
+# Surface 7 (Go to script).
+# Review: PO
+hv-cmd-scripts-goto = Betiğe git
+# Surface 7 (Go to script).
+# Review: PO
+hv-cmd-file-save = Betiği kaydet
+# Surface 7 (Go to script).
+# Review: PO
+hv-cmd-file-save-all = Tüm betikleri kaydet
+# Surface 7 (Go to script).
+# Review: PO
+hv-cmd-scripts-attach = Betik kitaplığı bağla…
+# Surface 7 (Go to script).
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+# Review: PO
+hv-cmd-scripts-reveal =
+    { $os ->
+        [windows] Betiği Dosya Gezgini'nde göster
+        [linux] Betiğin klasörünü aç
+       *[macos] Betiği Finder'da göster
+    }
+# Surface 2 (Context menus). The palette title of F2 on a script file or folder row (controller ruling c).
+# Review: PO
+hv-cmd-scripts-rename = Betiği veya klasörü yeniden adlandır
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-goto-ph = Ada göre betiğe git
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-goto-none = Eşleşen betik yok
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-goto-empty = Henüz betik kitaplığı yok
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-goto-empty-body = Bir veritabanının menüsünden ya da Ayarlar › Betik kitaplıkları'ndan klasör bağlayın.
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-goto-hint-open = Aç
+# Surface 7 (Go to script).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-choose-title = { $file } şu bağlantıda açılsın:
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-choose-current = geçerli
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-choose-prod-note = Üretim bağlantısı sizin yerinize hiç seçilmez.
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-choose-none = Bu dosyayı gösteren bağlantı yok.
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-choose-none-row = Bağlantı olmadan aç
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-choose-none-body = Bağlantısız açılır; bir bağlantıda açana kadar hiçbir şey çalıştırmaz.
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-choose-hint-choose = Seç
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-choose-hint-back = Geri
+# Surface 8 (Secret warning).
+# Variables:
+#   $kind (String) - selector: the finding's kind; one of key, password, token, url (anything else: the default).
+# Review: PO
+hv-scripts-secret-gutter =
+    { $kind ->
+        [token] Erişim belirtecine benziyor
+        [key] Özel anahtara benziyor
+        [url] Parola içeren bir bağlantı adresine benziyor
+       *[password] Parolaya benziyor
+    }
+# Surface 8 (Secret warning).
+# Review: PO
+hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırda hacivat:allow-secret içeren bir yorum onu susturur.
+# Surface 8 (Secret warning).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-secret-title = { $file } içinde { $n } satır gizli bilgiye benziyor
+# Surface 8 (Secret warning).
+# Review: PO
+hv-scripts-secret-body = Hacivat parolaya ya da belirtece benzeyen metin buldu. Değerler burada gösterilmez.
+# Surface 8 (Secret warning).
+# Variables:
+#   $line (Number) - a line number, shown without grouping, e.g. 48213.
+# Review: PO
+hv-scripts-secret-line = Satır { NUMBER($line, useGrouping: "false") }
+# Surface 8 (Secret warning).
+# Review: PO
+hv-scripts-secret-git = Bu dosyayı commit ederseniz değer, depoyu okuyabilen herkesle paylaşılır.
+# Surface 8 (Secret warning).
+# Variables:
+#   $marker (String) - the literal hacivat:allow-secret (never translated).
+# Review: PO
+hv-scripts-secret-allow = Bir satırı bilerek tutmak için o satıra { $marker } içeren bir yorum ekleyin.
+# Surface 8 (Secret warning).
+# Review: PO
+hv-scripts-secret-remember = Yine de kaydet, siz çıkana kadar bu sekme için hatırlanır.
+# Surface 8 (Secret warning).
+# Review: PO
+hv-scripts-secret-save = Yine de kaydet
+# Surface 9 (Large files).
+# Review: PO
+hv-scripts-run-as-script = Betik olarak çalıştır
+# Surface 9 (Large files).
+# Review: PO
+hv-scripts-run-as-script-tip = Dosyanın tamamını diskten, her seferinde bir ifade olmak üzere ve her birini Çalıştır'ın denetimlerinden geçirerek gönderir. İlk hatada durur.
+# Surface 9 (Large files).
+# Review: PO
+hv-scripts-run-running = Betik olarak çalışıyor
+# Surface 9 (Large files).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-run-sent = { $n } ifade gönderildi
+# Surface 9 (Large files).
+# Variables:
+#   $line (Number) - a line number, shown without grouping, e.g. 48213.
+# Review: PO
+hv-scripts-run-line = satır { NUMBER($line, useGrouping: "false") }
+# Surface 9 (Large files).
+# Variables:
+#   $read (String) - bytes read so far (an hv-scripts-size-mb message), e.g. "38 MB".
+#   $size (String) - a size (an hv-scripts-size-mb message), e.g. "148 MB".
+# Review: PO
+hv-scripts-run-read = { $read } / { $size }
+# Surface 9 (Large files).
+# Review: PO
+hv-scripts-run-busy = Betik olarak çalışıyor: bitmesini bekleyin ya da durdurun
+# Surface 9 (Large files).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-run-stopped = { $n }. ifadede durdu: sunucu hata döndürdü. Ondan sonrası gönderilmedi.
+# Surface 9 (Large files).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-run-done = { $file } dosyasından { $n } ifade çalıştırıldı
+# Surface 9 (Large files).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-run-cancelled = { $n } ifadeden sonra durduruldu. Sonrası gönderilmedi.
+# Surface 9 (Large files).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-size-mb = { $n } MB
+# Surface 10 (Encoding).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-enc-title = { $file } UTF-8 metin değil.
+# Surface 10 (Encoding).
+# Review: PO
+hv-scripts-enc-body = Kaydedildiği kodlamayı seçin ya da önce bakmak için salt okunur açın.
+# Surface 10 (Encoding).
+# Review: PO
+hv-scripts-enc-label = Kodlama
+# Surface 10 (Encoding).
+# Review: PO
+hv-scripts-enc-open = Aç
+# Surface 10 (Encoding).
+# Review: PO
+hv-scripts-enc-ro = Salt okunur aç
+# Surface 10 (Encoding).
+# Review: PO
+hv-scripts-enc-ro-chip = salt okunur
+# Surface 10 (Encoding).
+# Review: PO
+hv-scripts-enc-ro-note = UTF-8 olarak gösteriliyor; okunamayan karakterler � olarak görünür. Düzenlemek için bir kodlamayla yeniden açın.
+# Surface 10 (Encoding).
+# Variables:
+#   $enc (String) - selector: the encoding id; one of iso-8859-9, other, utf-16le, windows-1252, windows-1254 (anything else: the default).
+#   $encoding (String) - an encoding's name (data), e.g. "Windows-1254".
+# Review: PO
+hv-scripts-enc-name =
+    { $enc ->
+        [windows-1254] Windows-1254 (Türkçe)
+        [iso-8859-9] ISO-8859-9 (Türkçe)
+        [windows-1252] Windows-1252 (Batı)
+        [utf-16le] UTF-16 LE
+       *[other] { $encoding }
+    }
+# Surface 10 (Encoding).
+# Variables:
+#   $encoding (String) - an encoding's name (data), e.g. "Windows-1254".
+# Review: PO
+hv-scripts-enc-bom = { $encoding }, BOM'lu
+# Surface 10 (Encoding).
+# Review: PO
+hv-scripts-enc-seg-tip = Kodlama ve satır sonları. Kaydetmek ikisini de korur.
+# Surface 10 (Encoding).
+# Variables:
+#   $encoding (String) - an encoding's name (data), e.g. "Windows-1254".
+# Review: PO
+hv-scripts-enc-menu-head = Kodlama: { $encoding }
+# Surface 10 (Encoding).
+# Review: PO
+hv-scripts-enc-reopen = Başka kodlamayla yeniden aç…
+# Surface 10 (Encoding).
+# Review: PO
+hv-scripts-enc-save-with = Başka kodlamayla kaydet…
+# Surface 10 (Encoding).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-enc-unencodable-title = { $file } kaydedilemedi
+# Surface 10 (Encoding).
+# Variables:
+#   $line (Number) - a line number, shown without grouping, e.g. 48213.
+#   $char (String) - the character that cannot be encoded (data), e.g. "漢".
+#   $encoding (String) - an encoding's name (data), e.g. "Windows-1254".
+# Review: PO
+hv-scripts-enc-unencodable-body = { NUMBER($line, useGrouping: "false") }. satırdaki { $char } karakteri { $encoding } ile yazılamaz. Silin ya da Başka kodlamayla kaydet… seçeneğini kullanın.
+# Surface 11 (Diagnostics).
+# Variables:
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-diag-title = { $library } içinde { $n } sorun
+# Surface 11 (Diagnostics).
+# Variables:
+#   $folder (String) - a folder name, verbatim (data), e.g. "@prod".
+#   $suggestion (String) - the tag it probably meant, e.g. "@production".
+# Review: PO
+hv-scripts-diag-unknown-env = { $folder } bir ortam etiketi değil; altındaki dosyalar gizlendi ({ $suggestion } mı demek istediniz?)
+# Surface 11 (Diagnostics).
+# Variables:
+#   $folder (String) - a folder name, verbatim (data), e.g. "@prod".
+# Review: PO
+hv-scripts-diag-unknown-env-nosug = { $folder } bir ortam etiketi değil; altındaki dosyalar gizlendi.
+# Surface 11 (Diagnostics).
+# Review: PO
+hv-scripts-diag-env-help = Ortam klasörleri @local, @dev, @test, @staging ve @production'dır.
+# Surface 11 (Diagnostics).
+# Variables:
+#   $path (String) - a folder or file path, verbatim (data), e.g. "~/work/orders-scripts".
+# Review: PO
+hv-scripts-diag-contradict = { $path } iki ortam adlandırıyor; altındaki dosyalar her yerde gizlendi.
+# Surface 11 (Diagnostics).
+# Variables:
+#   $limit (String) - selector: which limit; one of depth, files (anything else: the default).
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-diag-limit =
+    { $limit ->
+        [depth] { $n } düzeyden derin klasörler listelenmez.
+       *[files] Listeleme { $n } dosyada durdu; klasörün geri kalanı gösterilmiyor.
+    }
+# Surface 11 (Diagnostics).
+# Variables:
+#   $reason (String) - selector: the reason; one of network, watches (anything else: the default).
+# Review: PO
+hv-scripts-diag-polling =
+    { $reason ->
+        [watches] Sistemin dosya izleme sınırı düşük; değişiklikler 2 saniyede bir denetleniyor.
+       *[network] Bu klasör bir ağ sürücüsünde; değişiklikler 2 saniyede bir denetleniyor.
+    }
+# Surface 11 (Diagnostics).
+# Variables:
+#   $reason (String) - selector: the reason; one of invalid, large, newer (anything else: the default).
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $folder (String) - a folder name, verbatim (data), e.g. "@prod".
+# Review: PO
+hv-scripts-diag-toml =
+    { $reason ->
+        [newer] { $file } daha yeni bir Hacivat ile yazılmış; kitaplık klasör adıyla, { $folder } olarak bağlanıyor.
+        [large] { $file } 64 KB'tan büyük olduğu için okunmadı; kitaplık klasör adıyla, { $folder } olarak bağlanıyor.
+       *[invalid] { $file } geçerli bir TOML değil; kitaplık klasör adıyla, { $folder } olarak bağlanıyor.
+    }
+# Surface 11 (Diagnostics).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-diag-toml-keys = { $file } Hacivat'ın kullanmadığı anahtarlar içeriyor. Bunlar yok sayılır.
+# Surface 11 (Diagnostics).
+# Review: PO
+hv-scripts-diag-parser = Ayrıştırıcı mesajı
+# Surface 11 (Diagnostics).
+# Review: PO
+hv-scripts-diag-untrusted = Git durumu kapalı: depo başka bir kullanıcıya ait.
+# Surface 11 (Diagnostics).
+# Review: PO
+hv-scripts-diag-untrusted-help = Git de böyle bir depoyu güvenli olarak işaretlenene kadar (safe.directory) reddeder. Hacivat onun için rozet göstermez.
+# Surface 11 (Diagnostics).
+# Variables:
+#   $path (String) - a folder or file path, verbatim (data), e.g. "~/work/orders-scripts".
+# Review: PO
+hv-scripts-diag-missing = Klasör yerinde yok: { $path }. Bağlı olmayan bir sürücüde olabilir.
+# Surface 12 (Recovery).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-recover-title = { $n } betikteki kaydedilmemiş değişiklikler kurtarıldı
+# Surface 12 (Recovery).
+# Review: PO
+hv-scripts-recover-body = Hacivat bunlar kaydedilmeden kapandı. Sekmeleri değişikliklerinizle yeniden açık; korumak için kaydedin.
+# Surface 12 (Recovery).
+# Review: PO
+hv-scripts-recover-show = Göster
+# Surface 12 (Recovery).
+# Review: PO
+hv-scripts-recover-dismiss = Kapat
+# Surface 12 (Recovery).
+# Variables:
+#   $date (DateTime) - when the recovery copy was written, e.g. 2026-11-21 14:05.
+# Review: PO
+hv-scripts-recover-tab = { DATETIME($date, month: "short", day: "numeric", hour: "numeric", minute: "numeric") } tarihli kaydedilmemiş değişiklikler kurtarıldı.
+# Surface 12 (Recovery).
+# Review: PO
+hv-scripts-recover-tab-body = Kaydet onları korur. At, diskteki dosyaya geri döner.
+# Surface 12 (Recovery).
+# Review: PO
+hv-scripts-recover-discard = Değişiklikleri at…
+# Surface 12 (Recovery).
+# Variables:
+#   $what (String) - selector: what is missing; one of file, library (anything else: the default).
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+# Review: PO
+hv-scripts-recover-missing =
+    { $what ->
+        [library] { $library } kitaplığı artık bağlı değil.
+       *[file] { $file } artık kitaplıkta yok.
+    }
+# Surface 12 (Recovery).
+# Review: PO
+hv-scripts-recover-missing-body = Kurtarılan metniniz bu sekmede. Kaydet onu aynı yere geri yazar.
+# Surface 5 (Script tab).
+# Variables:
+#   $bound (String) - the database the tab is bound to (data), e.g. "kampanya".
+#   $current (String) - the database the session is on (data), e.g. "api".
+# Review: PO
+hv-scripts-run-refused = Çalıştırma reddedildi: bu sekme { $bound } üzerinde çalışır, ama oturumu { $current } üzerinde.
+# Surface 5 (Script tab).
+# Variables:
+#   $reason (String) - selector: the reason; one of edited, mysql (anything else: the default).
+#   $bound (String) - the database the tab is bound to (data), e.g. "kampanya".
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+#   $current (String) - the database the session is on (data), e.g. "api".
+# Review: PO
+hv-scripts-run-refused-body =
+    { $reason ->
+        [edited] { $conn } artık { $current } veritabanını açıyor: bağlantı düzenlendi. Hiçbir şey gönderilmedi. Betiği { $bound } veritabanını gösteren bağlantıda açın.
+       *[mysql] Hacivat oturumu bir kez geri geçirdi, yine de { $bound } üzerinde değil. Hiçbir şey gönderilmedi. Yeniden deneyin ya da betiği başka bir bağlantıda açın.
+    }
+# Surface 5 (Script tab).
+# Variables:
+#   $bound (String) - the database the tab is bound to (data), e.g. "kampanya".
+# Review: PO
+hv-scripts-run-refused-retry = { $bound } veritabanına geç ve çalıştır
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-run-refused-unbound = Çalıştırma reddedildi: bu sekmenin bağlantısı yok.
+# Surface 6b (Unsaved changes).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-unsaved-title = { $file } dosyasındaki değişiklikler kaydedilsin mi?
+# Surface 6b (Unsaved changes).
+# Review: PO
+hv-scripts-unsaved-body = Kaydetmezseniz değişiklikleriniz kaybolur.
+# Surface 6b (Unsaved changes).
+# Variables:
+#   $total (Number) - the total, e.g. 2.
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-unsaved-count = { $total } kaydedilmemiş betikten { $n }. betik
+# Surface 6b (Unsaved changes).
+# Review: PO
+hv-scripts-unsaved-save = Kaydet
+# Surface 6b (Unsaved changes).
+# Review: PO
+hv-scripts-unsaved-discard = Kaydetme
+# Surface 1 (Scripts node).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-downloading-tab = { $file } indiriliyor…
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-downloading-body = Bulutta tutuluyor; indirme bitince metin görünür. O zamana dek hiçbir şey çalışmaz.
+# Surface 2 (Context menus).
+# Review: PO
+hv-scripts-menu-open-under-none = Bu dosyayı gösteren başka bağlantı yok
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-remove-body-none = Klasör ve dosyaları, .hacivat/workspace.toml dahil, olduğu gibi kalır. Betikler düğümleri kaldırılır.
+# Surface 1 (Scripts node).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-node-row-tip = Bu bağlantının altında { $n } betik listeleniyor.
+# Surface 7 (Go to script).
+# Review: PO
+hv-scripts-choose-hint-close = Kapat
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-dataless-row-tip = Bulutta tutuluyor, indirilmedi. Açınca önce indirilir.
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-downloading-row-tip = İndiriliyor… İndirme bitince sekme metni gösterir.

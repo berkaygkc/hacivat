@@ -666,6 +666,13 @@ mod t24 {
                     "explorer.collapse_children",
                     cx,
                 ));
+                // ## m4b-t01b-seams (named exception, R-M4b-34 (2)): the Scripts items ("Attach
+                // script library…", "Map to a script library…") after M4's, past a separator.
+                let scripts = crate::scripts::database_menu_items(&info, cx);
+                if !scripts.is_empty() {
+                    out.push(sep());
+                    out.extend(scripts);
+                }
             }
             NodeInfo::Group { .. } | NodeInfo::BuiltIn { .. } => {
                 if matches!(info, NodeInfo::Group { .. }) {
@@ -778,7 +785,14 @@ mod t24 {
                     out.extend(source);
                 }
             }
-            NodeInfo::Environment(_) | NodeInfo::Profile(_) | NodeInfo::Contributed { .. } => {
+            // ## m4b-t01b-seams (named exception, R-M4b-34 (2)): a contributed node's menu is
+            // its owner's (`None` when it has no item, or the key has no owner).
+            NodeInfo::Contributed { .. } => {
+                let owner = crate::connections::explorer::contributed_owner(key, cx)?;
+                let items = owner.context_menu(key, cx);
+                return (!items.is_empty()).then_some(items);
+            }
+            NodeInfo::Environment(_) | NodeInfo::Profile(_) => {
                 return None;
             }
         }

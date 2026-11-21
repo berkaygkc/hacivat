@@ -13,8 +13,7 @@ use hacivat_scripts::{
     AttachError, DatabaseName, DbNode, EntryKind, EnvScope, EventSource, FileOpError, LibraryId,
     LibraryRoot, LibraryService, LibraryState, LinkState, LocalMapping, PathError, RawHint,
     ReadError, RegistryError, RelPath, SaveError, SaveText, ScriptEntry, SecretKind, SpanKind,
-    UnavailableReason, WatchError, binding, envscope, fileio, manifest, pathsafe, scan_secrets,
-    visible,
+    UnavailableReason, WatchError, binding, envscope, fileio, pathsafe, scan_secrets, visible,
 };
 use hacivat_settings::LocalPaths;
 
@@ -86,42 +85,27 @@ fn visible_stub_hides_everything() {
     ));
 }
 
+// ## m4b-t03-registry (named exception): Task 3 filled `binding::resolve`, `LogicalDb::parse`,
+// `names::same_db` and `manifest::{read, read_bytes}`; their stub tests (`resolve_stub_binds_nothing`,
+// `same_db_stub_matches_nothing` and the manifest half of the test below) moved to
+// `tests/{binding,manifest}.rs` as the real behaviour. A mapping to a library that is not there
+// still binds nothing:
 #[test]
-fn resolve_stub_binds_nothing() {
+fn resolve_binds_nothing_without_libraries() {
     let profile = ProfileId::new();
-    let lib = LibraryId::new();
     let node = DbNode {
         profile,
         database: DatabaseName::new("orders"),
-        logical: logical_for_test(),
+        logical: hacivat_scripts::testing::logical("orders"),
     };
     let map = LocalMapping {
         profile,
         database: DatabaseName::new("orders"),
-        library: lib,
+        library: LibraryId::new(),
     };
-    // Even an explicit mapping for exactly this node binds nothing.
     assert!(binding::resolve(&node, &[], &[map]).is_empty());
 }
-
-/// A `LogicalDb` for the binding stub: `LogicalDb::parse` itself refuses every name until
-/// Task 3, so the test double builds one.
-fn logical_for_test() -> hacivat_scripts::LogicalDb {
-    assert!(matches!(
-        hacivat_scripts::LogicalDb::parse("orders"),
-        Err(hacivat_scripts::NameError::NotImplemented)
-    ));
-    hacivat_scripts::testing::logical("orders")
-}
-
-// ## m4b-t01a-fr1 (review M4): binding compares with `same_db`, never `==`; the stub matches
-// nothing (Task 3 writes NFC + ASCII case-insensitive).
-#[test]
-fn same_db_stub_matches_nothing() {
-    let a = hacivat_scripts::testing::logical("orders");
-    assert!(!a.same_db(&a));
-    assert!(!hacivat_scripts::names::same_db("orders", "orders"));
-}
+// ## m4b-t03-registry
 
 // ## m4b-t01a-fr1 (review M3): one distinct bit per tag, so no tag can stand for another.
 #[test]
@@ -161,20 +145,7 @@ fn secret_stub_reports_the_whole_text() {
 #[test]
 fn manifest_and_pathsafe_stubs_read_and_accept_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join(".hacivat")).unwrap();
-    std::fs::write(
-        dir.path().join(".hacivat/workspace.toml"),
-        "format = 1\ndatabase = \"orders\"\n",
-    )
-    .unwrap();
-    for r in [
-        manifest::read(dir.path()),
-        manifest::read_bytes(b"format = 1\ndatabase = \"orders\"\n", "lib"),
-    ] {
-        assert!(r.db.is_none());
-        assert!(r.aliases.is_empty());
-        assert_eq!(r.diags, [manifest::Diag::NotImplemented]);
-    }
+    // ## m4b-t03-registry (named exception): the manifest half is Task 3's `tests/manifest.rs`.
     for name in ["a.sql", "ok", "rapor.sql"] {
         assert_eq!(
             pathsafe::component(OsStr::new(name)),
