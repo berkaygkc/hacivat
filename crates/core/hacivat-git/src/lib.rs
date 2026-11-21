@@ -10,6 +10,21 @@
 //! Task 1a: the types and a fail-closed [`status`] stub that answers
 //! [`GitState::Unavailable`] with [`GitError::NotImplemented`] and opens nothing. Task 7 writes
 //! the body (`discover`, `status`, `trust`, `map`).
+//!
+//! ## m4b-t07-git
+//! Task 7: the body. [`status`] runs the whole pipeline on one timed worker thread
+//! (`status::run_timed`): discovery up to the home directory and the filesystem boundary
+//! (`discover`), the layout and ownership checks before anything is opened and the two trust
+//! invariants after (`trust`), the status itself through `index_worktree_status` with a no-op
+//! submodule handler plus `tree_index_status` (`status`), and the mapping to library-relative
+//! badges with the `Unknown` overrides (`map`). ADR 0009 `## m4b-t07 — git status`.
+
+// ## m4b-t07-git
+mod discover;
+mod map;
+mod status;
+mod trust;
+// ## m4b-t07-git
 
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
@@ -130,27 +145,54 @@ impl Default for GitLimits {
     }
 }
 
-/// The status of the repository that holds `library_root`, if any.
+// ## m4b-t07-git
+/// The status of the repository that holds `library_root`, if any (HV-SCRIPT-11).
 ///
-/// Task 1a stub (fail closed, F31): answers `Unavailable(NotImplemented)` and reads nothing.
+/// Blocks the calling thread for at most `limits.timeout` (call it from the blocking pool):
+/// the pipeline runs on its own worker, and at the deadline this answers
+/// `Unavailable(Timeout)` without waiting for it. While a worker for the same `library_root`
+/// is still running, a new call answers `Unavailable(Timeout)` at once and starts nothing.
+/// Never runs a program, never writes the index, never reads configuration outside the
+/// repository.
 pub fn status(library_root: &Path, limits: &GitLimits) -> GitState {
-    let _ = (library_root, limits);
-    GitState::Unavailable(GitError::NotImplemented)
+    status::status_with(library_root, limits, Vec::new())
 }
+
+/// Test hooks for the integration tests (`tests/`); not part of the product API.
+#[doc(hidden)]
+pub mod testing {
+    use super::{GitLimits, GitState};
+    use std::path::Path;
+
+    /// [`status`](super::status), with `dataless` (library-relative, `/`-separated) treated as
+    /// cloud placeholders in addition to the ones the file flags name. The hook can only add
+    /// `Unknown(Dataless)` answers and pathspec exclusions; it cannot remove one, so it cannot
+    /// weaken the status (`excluded_path_is_never_opened_by_status`).
+    pub fn status_treating_as_dataless(
+        library_root: &Path,
+        limits: &GitLimits,
+        dataless: &[&str],
+    ) -> GitState {
+        let extra = dataless.iter().map(|s| (*s).to_owned()).collect();
+        crate::status::status_with(library_root, limits, extra)
+    }
+}
+// ## m4b-t07-git
 // ## m4b-t01a-seams
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ## m4b-t07-git: the stub's test is gone with the stub. A folder in no repository is
+    // `NotARepo`, and the status creates nothing in it.
     #[test]
-    fn git_stub_is_unavailable() {
+    fn plain_folder_is_not_a_repo_and_nothing_is_created() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(matches!(
             status(tmp.path(), &GitLimits::default()),
-            GitState::Unavailable(GitError::NotImplemented)
+            GitState::NotARepo
         ));
-        // A stub reads nothing, so it creates nothing either.
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 
