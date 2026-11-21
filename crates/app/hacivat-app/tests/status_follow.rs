@@ -1098,10 +1098,13 @@ fn bounds_of(
     vcx.debug_bounds(selector)
 }
 
-/// Whether the last frame drew the label `#id`, visible and painted.
+/// Whether the window shows the label `#id`, visible and painted.
+/// ## m4-t33-flaky3: read from a frame that renders every view ([`full_frame`]): the last
+/// frame alone lacks the texts of a cached view it reused (the console's editor), so the
+/// placeholder could go missing for good after a late status update.
 fn drawn(vcx: &VisualTestContext, id: &str) -> bool {
     let needle = format!("#{id}");
-    registry_frame(vcx)
+    full_frame(vcx)
         .iter()
         .any(|r| r.path.ends_with(&needle) && r.visible && r.painted_px > 0.0)
 }
@@ -1379,7 +1382,16 @@ fn empty_console_draws_its_placeholder(cx: &mut TestAppContext) {
     wait_until(vcx, "the placeholder", |vcx| {
         drawn(vcx, "editor-placeholder")
     });
-    let text = text_of(vcx, "editor-placeholder").expect("the placeholder");
+    // ## m4-t33-flaky3: a frame that renders the shell again but reuses the editor's cached
+    // view (a late session or status update draws one) still shows the placeholder.
+    with_ws(vcx, |_, _, cx| cx.notify());
+    vcx.run_until_parked();
+    assert!(drawn(vcx, "editor-placeholder"));
+    let text = full_frame(vcx)
+        .into_iter()
+        .find(|r| r.path.ends_with("#editor-placeholder"))
+        .map(|r| r.text.to_string())
+        .expect("the placeholder");
     assert!(text.starts_with("Write SQL here."), "{text}");
     // Narrow: it wraps inside the text area, never cut.
     vcx.simulate_resize(gpui::size(gpui::px(700.0), gpui::px(600.0)));
@@ -1387,9 +1399,7 @@ fn empty_console_draws_its_placeholder(cx: &mut TestAppContext) {
     // resize places it (the editor asks for it). ## m4-t32-shots (named exception; T32 flake
     // carry): under load that frame comes later, so wait for a frame that draws it whole.
     wait_until(vcx, "the placeholder placed after the resize", |vcx| {
-        in_window(vcx, |window, _| window.refresh());
-        vcx.run_until_parked();
-        registry_frame(vcx)
+        full_frame(vcx)
             .into_iter()
             .find(|r| r.path.ends_with("#editor-placeholder"))
             .is_some_and(|r| !r.clipped && !r.truncated)

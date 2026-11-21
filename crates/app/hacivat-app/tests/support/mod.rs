@@ -241,6 +241,32 @@ pub fn registry_frame(vcx: &VisualTestContext) -> Vec<RenderedText> {
         .collect()
 }
 
+// ## m4-t33-flaky3
+/// What a frame that renders every view again draws (`window.refresh()`), isolation marks
+/// stripped, read right after that frame. [`registry_frame`] reads the last frame, and a frame
+/// renders only the views that changed: a cached view it reuses (the console's editor,
+/// `hacivat_ui_editor::a11y::embed`) stays on screen but records none of its texts in it. Use
+/// this to ask what the window shows now, not whether the app repainted. Nothing runs between
+/// the frame and the read, so a later frame that reuses the cached view again cannot replace
+/// it.
+pub fn full_frame(vcx: &VisualTestContext) -> Vec<RenderedText> {
+    vcx.run_until_parked();
+    // The update draws the dirty window before it returns (GPUI's test mode).
+    in_window(vcx, |window, _| window.refresh());
+    vcx.cx
+        .read(|cx| {
+            cx.try_global::<TextRegistry>()
+                .map(|r| r.frame.clone())
+                .unwrap_or_default()
+        })
+        .into_iter()
+        .map(|mut r| {
+            r.text = strip(&r.text).into();
+            r
+        })
+        .collect()
+}
+
 /// Texts drawn by `file` (a path suffix such as `hacivat-ui/src/toast.rs`), in paint order.
 fn texts_from(vcx: &VisualTestContext, file: &str) -> Vec<String> {
     let needle = format!("{file}:");
