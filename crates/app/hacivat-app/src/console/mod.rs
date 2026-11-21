@@ -31,6 +31,8 @@ pub use view::{console_binding, editor_segment, focused_console};
 pub use view::editor_segment_cells;
 // ## m4-t24-live (named exception, fix round 1): the plan's `console::open_with_text`.
 pub use commands::open_with_text;
+// ## m4b-t01b-seams (named exception): where a console's text comes from (R-M4b-30).
+pub use registry::ConsoleSource;
 
 use crate::shell::{set_console_binding, set_console_view, set_tab_decor};
 

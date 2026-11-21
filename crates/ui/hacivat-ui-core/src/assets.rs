@@ -131,6 +131,10 @@ const ICONS: &[(&str, &[u8])] = lucide![
     "server",
     "terminal",
     "refresh-cw",
+    // ## m4b-t01b-seams (named exception, the P-M3b-37 precedent): the M4b script workspace's
+    // folder and Markdown note rows (`design/m4b-scripts/NOTES.md`, "New primitives").
+    "folder",
+    "file-text",
 ];
 const HV_MARK: &[u8] = include_bytes!("../assets/icons/hacivat/hv-mark.svg");
 

@@ -97,12 +97,21 @@ pub(crate) enum AppEdit {
     /// Bytes of the text as it is when the edit is made.
     SelectRange(Range<usize>),
     Paste(Pasted),
+    // ## m4b-t01b-seams (named line, R-M4b-38): the text read from disk again, held like
+    // `SetText` while a composition is open (Task 11's `replace_from_disk` makes it).
+    #[allow(
+        dead_code,
+        reason = "Task 11's replace_from_disk makes it; the stub refuses first"
+    )]
+    ReplaceFromDisk(String),
 }
 
 /// A held app edit.
 #[derive(Debug)]
 enum Held {
     SetText(String),
+    // ## m4b-t01b-seams (R-M4b-38)
+    ReplaceFromDisk(String),
     /// `version`: the model version `range` is for, rebased at the flush (review I1); `None`
     /// when a held `set_text` comes first, whose text the range is for.
     Select {
@@ -187,6 +196,8 @@ pub(crate) fn hold(v: &mut EditorView, edit: AppEdit) {
             }
         }
         AppEdit::Paste(p) => Held::Paste(p),
+        // ## m4b-t01b-seams (R-M4b-38): queued in order; Task 11 decides its coalescing.
+        AppEdit::ReplaceFromDisk(text) => Held::ReplaceFromDisk(text),
     };
     v.input.deferred.push(held);
 }
@@ -363,6 +374,11 @@ fn flush(v: &mut EditorView, cx: &mut Context<EditorView>) {
                 }
             }
             Held::Paste(p) => clipboard::apply(v, p, cx),
+            // ## m4b-t01b-seams (R-M4b-38): applied when the composition ends (the stub refuses,
+            // and the host's bar stays).
+            Held::ReplaceFromDisk(text) => {
+                let _ = v.replace_from_disk(&text, cx);
+            }
         }
         v.input.flushing = false;
     }

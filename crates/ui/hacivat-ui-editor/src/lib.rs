@@ -30,6 +30,8 @@ mod mouse;
 mod paint;
 pub mod preview;
 mod probe;
+// ## m4b-t01b-seams: reload from disk and the T2 preview (stubs until Task 11).
+mod reload;
 mod scroll;
 pub mod scrollbar;
 mod service;
@@ -60,3 +62,5 @@ pub use view::{EditorEvent, EditorStatus, EditorView, FocusedEditor};
 pub use find::{FindMatcher, FindStatus};
 // ## m3c-t34-editor
 pub use mouse::DRAG_AUTOSCROLL_TICK;
+// ## m4b-t01b-seams
+pub use reload::{PreviewSpec, ReloadRefused};
