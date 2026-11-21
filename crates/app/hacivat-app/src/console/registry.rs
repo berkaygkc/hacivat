@@ -40,6 +40,22 @@ pub struct ConsoleState {
     pub service: Option<Rc<SqlLanguageService>>,
 }
 
+// ## m4b-t01b-seams (named lines, plan Task 1b): where a console's text comes from.
+/// Where a console's text comes from: a console of its own (M3, the default), or a script file
+/// of a library, opened under the console's connection and `database` (R-M4b-4; `None`: the
+/// profile's own database). A script console is never bound by a connect (R-M4b-30) and never
+/// autosaves into the consoles folder (R-M4b-5); Task 14 fills both.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum ConsoleSource {
+    #[default]
+    Console,
+    Script {
+        library: crate::scripts::LibraryId,
+        rel: crate::scripts::RelPath,
+        database: Option<crate::scripts::DatabaseName>,
+    },
+}
+
 /// Every console (a global).
 #[derive(Debug, Default)]
 pub struct Consoles {
@@ -47,6 +63,10 @@ pub struct Consoles {
     states: HashMap<ConsoleId, ConsoleState>,
     focused: Option<ConsoleId>,
     next: u64,
+    // ## m4b-t01b-seams: each console's source beside its state, so every `ConsoleState`
+    // literal (M3's restore included) stays a console of its own: a console with no entry is
+    // `ConsoleSource::Console`.
+    sources: HashMap<ConsoleId, ConsoleSource>,
 }
 
 impl Global for Consoles {}
@@ -61,6 +81,8 @@ impl Consoles {
         s.id = id;
         if let Some(old) = c.by_tab.insert(s.tab, id) {
             c.states.remove(&old);
+            // ## m4b-t01b-seams
+            c.sources.remove(&old);
         }
         c.states.insert(id, s);
         id
@@ -88,8 +110,35 @@ impl Consoles {
         if let Some(s) = c.states.remove(&id) {
             c.by_tab.remove(&s.tab);
         }
+        // ## m4b-t01b-seams
+        c.sources.remove(&id);
         if c.focused == Some(id) {
             c.focused = None;
+        }
+    }
+
+    // ## m4b-t01b-seams (named lines, plan Task 1b)
+    /// Where console `id`'s text comes from ([`ConsoleSource::Console`] unless set).
+    pub fn source(cx: &App, id: ConsoleId) -> ConsoleSource {
+        cx.try_global::<Consoles>()
+            .and_then(|c| c.sources.get(&id).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Sets console `id`'s source (Task 14, right after it registers a script console);
+    /// nothing for a console that is gone.
+    pub fn set_source(cx: &mut App, id: ConsoleId, source: ConsoleSource) {
+        let c = cx.default_global::<Consoles>();
+        if !c.states.contains_key(&id) {
+            return;
+        }
+        match source {
+            ConsoleSource::Console => {
+                c.sources.remove(&id);
+            }
+            script => {
+                c.sources.insert(id, script);
+            }
         }
     }
 

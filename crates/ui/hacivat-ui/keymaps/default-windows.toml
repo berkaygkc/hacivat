@@ -703,3 +703,32 @@ context = "ExplorerTree"
 chord = "f5"
 command = "ddl_view.reload"
 context = "DdlViewCode"
+
+## m4b-t01b-seams
+# The M4b script-workspace rows (R-M4b-37, controller ruling R-T2-1 (c);
+# design/m4b-scripts/NOTES.md "Keys"). Each command is registered disabled until its task fills
+# it, so its chord passes through until then (M4 precedent).
+# - `scripts.goto` (Go to script): `ctrl-shift-o`, free on all three hosts; Ctrl+Shift never collides
+#   with AltGr, and it does not start with the palette's chord.
+# - `file.save`: `ctrl-s` in the script tab's own key context only (`ScriptTab`); the M2a
+#   `ConnectionDialog` row on the same chord is a modal layer's and wins while it is open.
+# - `file.save_all`: palette and menu only here: `ctrl-alt-s` is AltGr+S (`ś` on
+#   Polish), Ctrl+Shift+S is VS Code's Save As and Ctrl+K S starts with the palette chord.
+# - `scripts.rename`: F2 on a script file or folder row (`ExplorerTree`); the command decides
+#   whether the cursor row is a script row.
+# - `scripts.reveal`, `scripts.attach` and Move to Trash: palette and menu only (no chord).
+
+[[binding]]
+chord = "ctrl-shift-o"
+command = "scripts.goto"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-s"
+command = "file.save"
+context = "ScriptTab"
+
+[[binding]]
+chord = "f2"
+command = "scripts.rename"
+context = "ExplorerTree"

@@ -4138,3 +4138,721 @@ hv-metadata-clear-subtitle = { $size } on this computer
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-history-cleared-backups-failed = The query history of { $name } was cleared, but its damaged backups couldn't be deleted.
+
+## m4b-t01b-seams
+
+# Surface 1 (Scripts node).
+hv-scripts-node = Scripts
+# Surface 1 (Scripts node).
+hv-scripts-node-shared = shared
+# Surface 1 (Scripts node).
+# Variables:
+#   $conns (String) - the other connections, a locale list of names (data), e.g. "orders-staging and orders-dev".
+hv-scripts-node-shared-tip = Also under { $conns }: every connection with a database of this name shows the same files.
+# Surface 1 (Scripts node).
+# Variables:
+#   $path (String) - a folder or file path, verbatim (data), e.g. "~/work/orders-scripts".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-lib-tip = Folder { $path }. Binds to the database { $database }.
+# Surface 1 (Scripts node).
+# Variables:
+#   $env (String) - the environment word (an env-* message), e.g. "production".
+hv-scripts-env-folder-tip = Only connections tagged { $env } see this folder.
+# Surface 1 (Scripts node).
+hv-scripts-git-modified = M
+# Surface 1 (Scripts node).
+hv-scripts-git-modified-tip = Modified: differs from the last commit
+# Surface 1 (Scripts node).
+hv-scripts-git-new = N
+# Surface 1 (Scripts node).
+hv-scripts-git-new-tip = New: not in the last commit
+# Surface 1 (Scripts node).
+hv-scripts-git-conflicted = C
+# Surface 1 (Scripts node).
+hv-scripts-git-conflicted-tip = Conflicted: the merge isn't resolved
+# Surface 1 (Scripts node).
+hv-scripts-git-unknown = ?
+# Surface 1 (Scripts node).
+# Variables:
+#   $reason (String) - selector: the reason; one of dataless, filter (anything else: the default).
+hv-scripts-git-unknown-tip =
+    { $reason ->
+        [dataless] Git status unknown: the file isn't downloaded, and Hacivat doesn't download it to compare.
+       *[filter] Git status unknown: a .gitattributes filter applies to it, and Hacivat never runs filters.
+    }
+# Surface 1 (Scripts node).
+hv-scripts-git-contains = •
+# Surface 1 (Scripts node).
+hv-scripts-git-contains-tip = Contains changed files
+# Surface 1 (Scripts node).
+hv-scripts-outside-link-tip = Points outside the library, so Hacivat never opens it.
+# Surface 1 (Scripts node).
+hv-scripts-dataless = not downloaded
+# Surface 1 (Scripts node).
+hv-scripts-downloading = Downloading…
+# Surface 1 (Scripts node).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-diag-row =
+    { $n ->
+        [one] { $n } problem
+       *[other] { $n } problems
+    }
+# Surface 1 (Scripts node).
+hv-scripts-missing-row = Folder not found
+# Surface 1 (Scripts node).
+hv-scripts-loading = Listing scripts…
+# Surface 2 (Context menus).
+hv-explorer-menu-attach-library = Attach script library…
+# Surface 2 (Context menus).
+hv-explorer-menu-map-library = Map to a script library…
+# Surface 2 (Context menus).
+hv-explorer-menu-map-library-none = No other library is attached
+# Surface 2 (Context menus).
+hv-scripts-menu-new-script = New script
+# Surface 2 (Context menus).
+hv-scripts-menu-new-folder = New folder
+# Surface 2 (Context menus).
+hv-scripts-menu-open = Open
+# Surface 2 (Context menus).
+hv-scripts-menu-open-under = Open under another connection…
+# Surface 2 (Context menus).
+hv-scripts-menu-rename = Rename
+# Surface 2 (Context menus).
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of other, windows (anything else: the default).
+hv-scripts-menu-trash =
+    { $os ->
+        [windows] Move to Recycle Bin
+       *[other] Move to Trash
+    }
+# Surface 2 (Context menus).
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+hv-scripts-menu-reveal =
+    { $os ->
+        [windows] Reveal in File Explorer
+        [linux] Open Containing Folder
+       *[macos] Reveal in Finder
+    }
+# Surface 2 (Context menus).
+hv-scripts-menu-copy-path = Copy path
+# Surface 2 (Context menus).
+hv-scripts-menu-copy-rel = Copy relative path
+# Surface 2 (Context menus).
+hv-scripts-menu-settings = Script library settings…
+# Surface 2 (Context menus).
+hv-scripts-menu-outside-tip = Points outside the library
+# Surface 2 (Context menus).
+hv-scripts-new-name = untitled.sql
+# Surface 2 (Context menus).
+hv-scripts-new-folder-name = new folder
+# Surface 2 (Context menus).
+# Variables:
+#   $reason (String) - selector: the reason; one of dots, empty, exists, ext, reserved, slash (anything else: the default).
+#   $name (String) - a file or folder name, verbatim (data), e.g. "archive_old_orders.sql".
+hv-scripts-name-err =
+    { $reason ->
+        [slash] A name can't contain / or \.
+        [reserved] Windows keeps this name for devices (CON, PRN, AUX, NUL, COM1…).
+        [exists] { $name } is already in this folder.
+        [dots] A name can't be . or .., and can't end with a dot or a space.
+        [ext] A script's name ends in .sql or .md.
+       *[empty] Type a name.
+    }
+# Surface 2 (Context menus).
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of other, windows (anything else: the default).
+#   $name (String) - a file or folder name, verbatim (data), e.g. "archive_old_orders.sql".
+hv-scripts-trashed =
+    { $os ->
+        [windows] Moved { $name } to the Recycle Bin. You can restore it from there.
+       *[other] Moved { $name } to the Trash. You can put it back from there.
+    }
+# Surface 3 (Attach dialog).
+hv-scripts-attach-choose = Choose a folder of scripts
+# Surface 3 (Attach dialog).
+hv-scripts-attach-title = Attach a script library
+# Surface 3 (Attach dialog).
+hv-scripts-attach-folder = Folder
+# Surface 3 (Attach dialog).
+hv-scripts-attach-change = Change…
+# Surface 3 (Attach dialog).
+hv-scripts-attach-database = Database
+# Surface 3 (Attach dialog).
+hv-scripts-attach-database-hint = The database these scripts are for. Every connection with a database of this name shows them.
+# Surface 3 (Attach dialog).
+hv-scripts-attach-aliases = Aliases
+# Surface 3 (Attach dialog).
+hv-scripts-attach-aliases-ph = Other names for it, separated by commas
+# Surface 3 (Attach dialog).
+hv-scripts-attach-shows-under = Shows under
+# Surface 3 (Attach dialog).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-attach-shows-none = No connection has a database named { $database } yet.
+# Surface 3 (Attach dialog).
+hv-scripts-attach-will-write = Hacivat creates this file in the folder:
+# Surface 3 (Attach dialog).
+hv-scripts-attach-file-note = It holds only the database name and its aliases: never a connection, a host or a password. Commit it so your team gets the same binding.
+# Surface 3 (Attach dialog).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-attach-found = Found .hacivat/workspace.toml — binds to { $database }
+# Surface 3 (Attach dialog).
+hv-scripts-attach-found-note = Hacivat reads this file and never changes it.
+# Surface 3 (Attach dialog).
+hv-scripts-attach-btn = Attach
+# Surface 3 (Attach dialog).
+# Variables:
+#   $reason (String) - selector: the reason; one of already, control, empty, long, many (anything else: the default).
+hv-scripts-attach-err =
+    { $reason ->
+        [control] A database name can't contain control characters.
+        [long] A database name can be at most 128 bytes.
+        [already] This folder is already attached.
+        [many] Hacivat holds up to 32 libraries. Remove one in Settings › Script libraries first.
+       *[empty] Type the database name.
+    }
+# Surface 3 (Attach dialog).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-map-title = Show a script library under { $database }
+# Surface 3 (Attach dialog).
+hv-scripts-map-library = Library
+# Surface 3 (Attach dialog).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-map-binds = binds to { $database }
+# Surface 3 (Attach dialog).
+hv-scripts-map-note = The mapping is kept on this computer only. Your teammates don't see it.
+# Surface 3 (Attach dialog).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-map-alias = Also add { $database } as an alias for everyone who uses this folder
+# Surface 3 (Attach dialog).
+hv-scripts-map-alias-sub = Adds it to .hacivat/workspace.toml and keeps the file's comments
+# Surface 3 (Attach dialog).
+hv-scripts-map-btn = Show here
+# Surface 3 (Attach dialog).
+hv-scripts-map-other = Attach another folder…
+# Surface 4 (Settings › Script libraries).
+hv-settings-nav-scripts = Script libraries
+# Surface 4 (Settings › Script libraries).
+hv-settings-section-scripts = Script libraries
+# Surface 4 (Settings › Script libraries).
+hv-scripts-set-attach = Attach a folder…
+# Surface 4 (Settings › Script libraries).
+hv-scripts-set-note = A library is a folder of .sql and .md files. Removing one never changes the folder or its files.
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $state (String) - selector: the watcher state; one of limit, polling, unavailable, watching (anything else: the default).
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-set-status =
+    { $state ->
+        [polling] Checking every 2 seconds
+        [unavailable] Folder not found
+        [limit] Stopped at { $n } files
+       *[watching] Watching for changes
+    }
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $reason (String) - selector: the reason; one of network, watches (anything else: the default).
+hv-scripts-set-status-tip =
+    { $reason ->
+        [watches] The system's file-watch limit is low, so Hacivat checks this folder every 2 seconds instead of being told about changes.
+       *[network] This folder is on a network drive, so Hacivat checks it every 2 seconds instead of being told about changes.
+    }
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-set-files =
+    { $n ->
+        [one] { $n } script
+       *[other] { $n } scripts
+    }
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $aliases (String) - the aliases, a locale list (data), e.g. "orders_p".
+hv-scripts-set-aliases = aliases { $aliases }
+# Surface 4 (Settings › Script libraries).
+hv-scripts-set-git = git repository
+# Surface 4 (Settings › Script libraries).
+hv-scripts-set-git-off = git status off
+# Surface 4 (Settings › Script libraries).
+hv-scripts-set-remove = Remove…
+# Surface 4 (Settings › Script libraries).
+hv-scripts-set-mappings = Local mappings
+# Surface 4 (Settings › Script libraries).
+hv-scripts-set-mapping-shows = shows
+# Surface 4 (Settings › Script libraries).
+hv-scripts-set-mapping-remove = Remove
+# Surface 4 (Settings › Script libraries).
+hv-scripts-set-empty = No script libraries yet. Attach a folder of .sql and .md files to see its scripts under the databases they are for.
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+hv-scripts-remove-title = Remove { $library } from Hacivat?
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-remove-body =
+    { $n ->
+        [one] The folder and its files stay as they are, including .hacivat/workspace.toml. Its Scripts nodes go away, and so does its { $n } local mapping.
+       *[other] The folder and its files stay as they are, including .hacivat/workspace.toml. Its Scripts nodes go away, and so do its { $n } local mappings.
+    }
+# Surface 4 (Settings › Script libraries).
+hv-scripts-remove-btn = Remove
+# Surface 5 (Script tab).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+hv-scripts-tab-title = { $file } · { $conn }
+# Surface 5 (Script tab).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-tab-title-db = { $file } · { $conn } · { $database }
+# Surface 5 (Script tab).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-tab-title-unbound = { $file } · no connection
+# Surface 5 (Script tab).
+# Variables:
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+hv-scripts-tab-tip-library = From the library { $library }
+# Surface 5 (Script tab).
+# Variables:
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-tab-tip-runs = Runs on { $conn }, database { $database }
+# Surface 5 (Script tab).
+hv-scripts-tab-tip-unbound = Runs nowhere: its connection was deleted
+# Surface 5 (Script tab).
+hv-scripts-tab-tip-unsaved = Unsaved changes
+# Surface 5 (Script tab).
+hv-scripts-tab-save = Save
+# Surface 5 (Script tab).
+hv-scripts-tab-save-all = Save all
+# Surface 5 (Script tab).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-tab-saved = Saved { $file }
+# Surface 5 (Script tab).
+hv-scripts-run-md = Markdown notes do not run
+# Surface 5 (Script tab).
+hv-scripts-run-unbound = This tab's connection was deleted, so it runs nothing. Open it under another connection.
+# Surface 5 (Script tab).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-run-switching = Switching to { $database }…
+# Surface 5 (Script tab).
+hv-scripts-unbound-title = The connection this tab was opened under was deleted.
+# Surface 5 (Script tab).
+hv-scripts-unbound-body = The text is kept. It runs nowhere until you open it under a connection.
+# Surface 5 (Script tab).
+# Variables:
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-use-log = This tab's session now uses { $database }
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-disk-changed = { $file } changed on disk.
+# Surface 6 (Changes on disk).
+hv-scripts-disk-changed-body = Your edits in this tab aren't saved. Reload discards them; Keep mine keeps them, and saving then asks before it overwrites.
+# Surface 6 (Changes on disk).
+hv-scripts-disk-reload = Reload
+# Surface 6 (Changes on disk).
+hv-scripts-disk-keep = Keep mine
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-disk-reload-title = Discard your edits and reload { $file }?
+# Surface 6 (Changes on disk).
+hv-scripts-disk-reload-body = The file on disk replaces the text in this tab. Your edits are discarded.
+# Surface 6 (Changes on disk).
+hv-scripts-disk-reload-yes = Discard and reload
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-disk-reloaded = Reloaded { $file }: it changed on disk
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $new (String) - the new file name, verbatim (data), e.g. "haftalık_rapor.sql".
+hv-scripts-disk-renamed = { $file } was renamed to { $new }; this tab follows it
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-disk-deleted = { $file } was deleted on disk.
+# Surface 6 (Changes on disk).
+hv-scripts-disk-deleted-body = The text stays in this tab. Save writes the file again.
+# Surface 6 (Changes on disk).
+hv-scripts-disk-overwrite-title = The file changed on disk since you opened it. Overwrite?
+# Surface 6 (Changes on disk).
+hv-scripts-disk-overwrite-body = Saving replaces the version on disk, including the changes made outside Hacivat.
+# Surface 6 (Changes on disk).
+hv-scripts-disk-overwrite = Overwrite
+# Surface 6 (Changes on disk).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+hv-scripts-unlisted = { $file } is no longer listed under { $conn }.
+# Surface 6 (Changes on disk).
+# Variables:
+#   $reason (String) - selector: the reason; one of binding, env (anything else: the default).
+#   $folder (String) - a folder name, verbatim (data), e.g. "@prod".
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+hv-scripts-unlisted-body =
+    { $reason ->
+        [binding] Its library no longer binds to this database. This tab still runs only on { $conn }.
+       *[env] It moved into { $folder }, a folder for another environment. This tab still runs only on { $conn }.
+    }
+# Surface 7 (Go to script).
+hv-cmd-scripts-goto = Go to script
+# Surface 7 (Go to script).
+hv-cmd-file-save = Save script
+# Surface 7 (Go to script).
+hv-cmd-file-save-all = Save all scripts
+# Surface 7 (Go to script).
+hv-cmd-scripts-attach = Attach script library…
+# Surface 7 (Go to script).
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+hv-cmd-scripts-reveal =
+    { $os ->
+        [windows] Reveal script in File Explorer
+        [linux] Open the script's folder
+       *[macos] Reveal script in Finder
+    }
+# Surface 2 (Context menus). The palette title of F2 on a script file or folder row (controller ruling c).
+hv-cmd-scripts-rename = Rename script or folder
+# Surface 7 (Go to script).
+hv-scripts-goto-ph = Go to a script by name
+# Surface 7 (Go to script).
+hv-scripts-goto-none = No script matches
+# Surface 7 (Go to script).
+hv-scripts-goto-empty = No script libraries yet
+# Surface 7 (Go to script).
+hv-scripts-goto-empty-body = Attach a folder from a database's menu or Settings › Script libraries.
+# Surface 7 (Go to script).
+hv-scripts-goto-hint-open = Open
+# Surface 7 (Go to script).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-choose-title = Open { $file } under
+# Surface 7 (Go to script).
+hv-scripts-choose-current = current
+# Surface 7 (Go to script).
+hv-scripts-choose-prod-note = Production is never chosen for you.
+# Surface 7 (Go to script).
+hv-scripts-choose-none = No connection shows this file.
+# Surface 7 (Go to script).
+hv-scripts-choose-none-row = Open without a connection
+# Surface 7 (Go to script).
+hv-scripts-choose-none-body = It opens unbound and runs nothing until you open it under a connection.
+# Surface 7 (Go to script).
+hv-scripts-choose-hint-choose = Choose
+# Surface 7 (Go to script).
+hv-scripts-choose-hint-back = Back
+# Surface 8 (Secret warning).
+# Variables:
+#   $kind (String) - selector: the finding's kind; one of key, password, token, url (anything else: the default).
+hv-scripts-secret-gutter =
+    { $kind ->
+        [token] Looks like an access token
+        [key] Looks like a private key
+        [url] Looks like a connection URL with a password
+       *[password] Looks like a password
+    }
+# Surface 8 (Secret warning).
+hv-scripts-secret-gutter-hint = Saving asks first. A comment with hacivat:allow-secret on this line keeps it quiet.
+# Surface 8 (Secret warning).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-secret-title =
+    { $n ->
+        [one] { $n } line in { $file } looks like a secret
+       *[other] { $n } lines in { $file } look like secrets
+    }
+# Surface 8 (Secret warning).
+hv-scripts-secret-body = Hacivat found text that looks like a password or a token. The values aren't shown here.
+# Surface 8 (Secret warning).
+# Variables:
+#   $line (Number) - a line number, shown without grouping, e.g. 48213.
+hv-scripts-secret-line = Line { NUMBER($line, useGrouping: "false") }
+# Surface 8 (Secret warning).
+hv-scripts-secret-git = If you commit this file, the value is shared with everyone who can read the repository.
+# Surface 8 (Secret warning).
+# Variables:
+#   $marker (String) - the literal hacivat:allow-secret (never translated).
+hv-scripts-secret-allow = To keep a line on purpose, add a comment with { $marker } on it.
+# Surface 8 (Secret warning).
+hv-scripts-secret-remember = Save anyway is remembered for this tab until you quit.
+# Surface 8 (Secret warning).
+hv-scripts-secret-save = Save anyway
+# Surface 9 (Large files).
+hv-scripts-run-as-script = Run as script
+# Surface 9 (Large files).
+hv-scripts-run-as-script-tip = Sends the whole file from disk, one statement at a time, each through Run's checks. It stops at the first error.
+# Surface 9 (Large files).
+hv-scripts-run-running = Running as script
+# Surface 9 (Large files).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-run-sent =
+    { $n ->
+        [one] { $n } statement sent
+       *[other] { $n } statements sent
+    }
+# Surface 9 (Large files).
+# Variables:
+#   $line (Number) - a line number, shown without grouping, e.g. 48213.
+hv-scripts-run-line = line { NUMBER($line, useGrouping: "false") }
+# Surface 9 (Large files).
+# Variables:
+#   $read (String) - bytes read so far (an hv-scripts-size-mb message), e.g. "38 MB".
+#   $size (String) - a size (an hv-scripts-size-mb message), e.g. "148 MB".
+hv-scripts-run-read = { $read } of { $size }
+# Surface 9 (Large files).
+hv-scripts-run-busy = Running as script: wait for it, or stop it
+# Surface 9 (Large files).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-run-stopped = Stopped at statement { $n }: the server returned an error. Nothing after it was sent.
+# Surface 9 (Large files).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-run-done =
+    { $n ->
+        [one] Ran { $n } statement from { $file }
+       *[other] Ran { $n } statements from { $file }
+    }
+# Surface 9 (Large files).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-run-cancelled =
+    { $n ->
+        [one] Stopped after { $n } statement. Nothing after it was sent.
+       *[other] Stopped after { $n } statements. Nothing after them was sent.
+    }
+# Surface 9 (Large files).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-size-mb = { $n } MB
+# Surface 10 (Encoding).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-enc-title = { $file } isn't UTF-8 text.
+# Surface 10 (Encoding).
+hv-scripts-enc-body = Choose the encoding it was saved in, or open it read-only to look first.
+# Surface 10 (Encoding).
+hv-scripts-enc-label = Encoding
+# Surface 10 (Encoding).
+hv-scripts-enc-open = Open
+# Surface 10 (Encoding).
+hv-scripts-enc-ro = Open read-only
+# Surface 10 (Encoding).
+hv-scripts-enc-ro-chip = read-only
+# Surface 10 (Encoding).
+hv-scripts-enc-ro-note = Shown as UTF-8; characters it can't read show as �. Reopen with an encoding to edit.
+# Surface 10 (Encoding).
+# Variables:
+#   $enc (String) - selector: the encoding id; one of iso-8859-9, other, utf-16le, windows-1252, windows-1254 (anything else: the default).
+#   $encoding (String) - an encoding's name (data), e.g. "Windows-1254".
+hv-scripts-enc-name =
+    { $enc ->
+        [windows-1254] Windows-1254 (Turkish)
+        [iso-8859-9] ISO-8859-9 (Turkish)
+        [windows-1252] Windows-1252 (Western)
+        [utf-16le] UTF-16 LE
+       *[other] { $encoding }
+    }
+# Surface 10 (Encoding).
+# Variables:
+#   $encoding (String) - an encoding's name (data), e.g. "Windows-1254".
+hv-scripts-enc-bom = { $encoding } with BOM
+# Surface 10 (Encoding).
+hv-scripts-enc-seg-tip = Encoding and line endings. Saving keeps both.
+# Surface 10 (Encoding).
+# Variables:
+#   $encoding (String) - an encoding's name (data), e.g. "Windows-1254".
+hv-scripts-enc-menu-head = Encoding: { $encoding }
+# Surface 10 (Encoding).
+hv-scripts-enc-reopen = Reopen with encoding…
+# Surface 10 (Encoding).
+hv-scripts-enc-save-with = Save with encoding…
+# Surface 10 (Encoding).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-enc-unencodable-title = Couldn't save { $file }
+# Surface 10 (Encoding).
+# Variables:
+#   $char (String) - the character that cannot be encoded (data), e.g. "漢".
+#   $line (Number) - a line number, shown without grouping, e.g. 48213.
+#   $encoding (String) - an encoding's name (data), e.g. "Windows-1254".
+hv-scripts-enc-unencodable-body = { $char } on line { NUMBER($line, useGrouping: "false") } can't be written in { $encoding }. Remove it, or use Save with encoding….
+# Surface 11 (Diagnostics).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+hv-scripts-diag-title =
+    { $n ->
+        [one] { $n } problem in { $library }
+       *[other] { $n } problems in { $library }
+    }
+# Surface 11 (Diagnostics).
+# Variables:
+#   $folder (String) - a folder name, verbatim (data), e.g. "@prod".
+#   $suggestion (String) - the tag it probably meant, e.g. "@production".
+hv-scripts-diag-unknown-env = { $folder } is not an environment tag — files under it are hidden (did you mean { $suggestion }?)
+# Surface 11 (Diagnostics).
+# Variables:
+#   $folder (String) - a folder name, verbatim (data), e.g. "@prod".
+hv-scripts-diag-unknown-env-nosug = { $folder } is not an environment tag — files under it are hidden.
+# Surface 11 (Diagnostics).
+hv-scripts-diag-env-help = Environment folders are @local, @dev, @test, @staging and @production.
+# Surface 11 (Diagnostics).
+# Variables:
+#   $path (String) - a folder or file path, verbatim (data), e.g. "~/work/orders-scripts".
+hv-scripts-diag-contradict = { $path } names two environments, so the files under it are hidden everywhere.
+# Surface 11 (Diagnostics).
+# Variables:
+#   $limit (String) - selector: which limit; one of depth, files (anything else: the default).
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-diag-limit =
+    { $limit ->
+        [depth] Folders deeper than { $n } levels aren't listed.
+       *[files] Listing stopped at { $n } files; the rest of the folder isn't shown.
+    }
+# Surface 11 (Diagnostics).
+# Variables:
+#   $reason (String) - selector: the reason; one of network, watches (anything else: the default).
+hv-scripts-diag-polling =
+    { $reason ->
+        [watches] The system's file-watch limit is low, so changes are checked every 2 seconds.
+       *[network] This folder is on a network drive, so changes are checked every 2 seconds.
+    }
+# Surface 11 (Diagnostics).
+# Variables:
+#   $reason (String) - selector: the reason; one of invalid, large, newer (anything else: the default).
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $folder (String) - a folder name, verbatim (data), e.g. "@prod".
+hv-scripts-diag-toml =
+    { $reason ->
+        [newer] { $file } was written by a newer Hacivat, so the library binds by its folder name, { $folder }.
+        [large] { $file } is larger than 64 KB, so it isn't read; the library binds by its folder name, { $folder }.
+       *[invalid] { $file } isn't valid TOML, so the library binds by its folder name, { $folder }.
+    }
+# Surface 11 (Diagnostics).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-diag-toml-keys = { $file } has keys Hacivat doesn't use. They are ignored.
+# Surface 11 (Diagnostics).
+hv-scripts-diag-parser = Parser message
+# Surface 11 (Diagnostics).
+hv-scripts-diag-untrusted = Git status is off: the repository belongs to another user.
+# Surface 11 (Diagnostics).
+hv-scripts-diag-untrusted-help = Git itself refuses such a repository until it is marked safe (safe.directory). Hacivat shows no badges for it.
+# Surface 11 (Diagnostics).
+# Variables:
+#   $path (String) - a folder or file path, verbatim (data), e.g. "~/work/orders-scripts".
+hv-scripts-diag-missing = The folder isn't there: { $path }. It may be on a drive that isn't connected.
+# Surface 12 (Recovery).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-recover-title =
+    { $n ->
+        [one] Recovered unsaved changes to { $n } script
+       *[other] Recovered unsaved changes to { $n } scripts
+    }
+# Surface 12 (Recovery).
+hv-scripts-recover-body = Hacivat closed before they were saved. Their tabs are open again with your changes; save to keep them.
+# Surface 12 (Recovery).
+hv-scripts-recover-show = Show
+# Surface 12 (Recovery).
+hv-scripts-recover-dismiss = Dismiss
+# Surface 12 (Recovery).
+# Variables:
+#   $date (DateTime) - when the recovery copy was written, e.g. 2026-11-21 14:05.
+hv-scripts-recover-tab = Recovered unsaved changes from { DATETIME($date, month: "short", day: "numeric", hour: "numeric", minute: "numeric") }.
+# Surface 12 (Recovery).
+hv-scripts-recover-tab-body = Save keeps them. Discard goes back to the file on disk.
+# Surface 12 (Recovery).
+hv-scripts-recover-discard = Discard…
+# Surface 12 (Recovery).
+# Variables:
+#   $what (String) - selector: what is missing; one of file, library (anything else: the default).
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+hv-scripts-recover-missing =
+    { $what ->
+        [library] The library { $library } isn't attached any more.
+       *[file] { $file } isn't in the library any more.
+    }
+# Surface 12 (Recovery).
+hv-scripts-recover-missing-body = Your recovered text is in this tab. Save writes it back to the same place.
+# Surface 5 (Script tab).
+# Variables:
+#   $bound (String) - the database the tab is bound to (data), e.g. "kampanya".
+#   $current (String) - the database the session is on (data), e.g. "api".
+hv-scripts-run-refused = Run refused: this tab runs on { $bound }, but its session is on { $current }.
+# Surface 5 (Script tab).
+# Variables:
+#   $reason (String) - selector: the reason; one of edited, mysql (anything else: the default).
+#   $bound (String) - the database the tab is bound to (data), e.g. "kampanya".
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+#   $current (String) - the database the session is on (data), e.g. "api".
+hv-scripts-run-refused-body =
+    { $reason ->
+        [edited] { $conn } now opens { $current }: the connection was edited. Nothing was sent. Open the script under the connection that shows { $bound }.
+       *[mysql] Hacivat switched the session back once and it still isn't on { $bound }. Nothing was sent. Try again, or open the script under another connection.
+    }
+# Surface 5 (Script tab).
+# Variables:
+#   $bound (String) - the database the tab is bound to (data), e.g. "kampanya".
+hv-scripts-run-refused-retry = Switch to { $bound } and run
+# Surface 5 (Script tab).
+hv-scripts-run-refused-unbound = Run refused: this tab has no connection.
+# Surface 6b (Unsaved changes).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-unsaved-title = Save changes to { $file }?
+# Surface 6b (Unsaved changes).
+hv-scripts-unsaved-body = Your changes are lost if you don't save them.
+# Surface 6b (Unsaved changes).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+#   $total (Number) - the total, e.g. 2.
+hv-scripts-unsaved-count = { $n } of { $total } unsaved scripts
+# Surface 6b (Unsaved changes).
+hv-scripts-unsaved-save = Save
+# Surface 6b (Unsaved changes).
+hv-scripts-unsaved-discard = Don't save
+# Surface 1 (Scripts node).
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-downloading-tab = Downloading { $file }…
+# Surface 1 (Scripts node).
+hv-scripts-downloading-body = It is kept in the cloud; the text shows when the download ends. Nothing runs until then.
+# Surface 2 (Context menus).
+hv-scripts-menu-open-under-none = No other connection shows this file
+# Surface 4 (Settings › Script libraries).
+hv-scripts-remove-body-none = The folder and its files stay as they are, including .hacivat/workspace.toml. Its Scripts nodes go away.
+# Surface 1 (Scripts node).
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-node-row-tip =
+    { $n ->
+        [one] { $n } script listed under this connection.
+       *[other] { $n } scripts listed under this connection.
+    }
+# Surface 7 (Go to script).
+hv-scripts-choose-hint-close = Close
+# Surface 1 (Scripts node).
+hv-scripts-dataless-row-tip = Kept in the cloud, not downloaded. Opening it downloads it first.
+# Surface 1 (Scripts node).
+hv-scripts-downloading-row-tip = Downloading… The tab shows the text when the download ends.

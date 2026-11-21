@@ -24,6 +24,11 @@ pub enum TabKind {
         profile: hacivat_proto::ProfileId,
         object: DdlObjectId,
     },
+    // ## m4b-t01b-seams (named lines, R-M4b-22, R-M4b-29): a script tab, bound for its life to
+    // the (library, file, connection, database) its handle names (`crate::scripts::tabs`; the
+    // kind stays `Copy`, as `DdlView`'s object does). Saved in `workspace.json` (version 2).
+    /// A script of a library, opened under a connection (`crate::scripts::tabs::spec`).
+    Script { script: crate::scripts::ScriptTabId },
 }
 
 // ## m4-t01b-seams (ruling R-W0-1)

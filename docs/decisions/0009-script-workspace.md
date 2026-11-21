@@ -256,3 +256,34 @@ D7 and HV-SCRIPT-01 step 4 say the writes are relative to the validated director
 - **SQLite stem (m11).** `logical_for_sqlite` answers `None` for `:memory:` and for a dot file (`.db`, `.hidden.db`).
 - **Tests (m5, m10):** `case_only_and_nfd_spellings_are_the_same_library`, `registry_is_0600_and_atomic` and `manifest_edge_rows` (duplicate plain and quoted keys, NUL, CRLF), and `deleted_profile_drops_mappings` now checks the saved-and-reloaded registry.
 - **Not changed:** m12. `lib.rs`'s Task 1a doc block still lists the old stubs, and `lib.rs` is in no W1 task's Files line; carry to the next owner of `lib.rs`, or to the controller's merge.
+
+## m4b-t01b — UI and app seams
+
+- **Stubs, none on a user path.** `crate::scripts` holds every M4b app module as a fail-closed stub (owners in its module docs). `ScriptsContributor` contributes no node and answers generation 0, and it is **not registered** (Task 13 registers it), so M4's "no contributor" check and every M4 shot hold. `scripts::open_script` opens nothing. `scripts::database_menu_items` adds no item. `scripts::goto::open` opens an empty Go-to-script layer over `Palette`. The six M4b commands (`scripts.goto`, `file.save`, `file.save_all`, `scripts.reveal`, `scripts.attach`, `scripts.rename`) are registered **disabled**, so none is a palette row and their chords pass through. `EditorView::replace_from_disk` refuses with `ReloadRefused::NotImplemented` and keeps the text, and `set_preview` does nothing.
+- **Script tabs are a tab kind (R-M4b-29).** `TabKind::Script { script: ScriptTabId }`. `TabKind` is `Copy` and is copied at about ninety sites, so the binding (library, file, profile, database) sits behind an interned handle, as M4's `DdlObjectId` does (R-W0-1). The same binding always gets the same handle, so "one tab per (file, connection)" (R-M4b-4) compares handles (`Workspace::open_script_tab`). `workspace.json` stores the binding itself (`kind: "script"`, `library`, `rel_path`, `profile`, `database`), never the handle, and goes to version 2.
+  - A version-1 file loads as before. A script-kind tab in it, or one whose library or path does not parse, closes like a tab of an unregistered kind, and the file is not set aside.
+  - An unreadable profile restores the tab unbound, as for a console. It is never bound to another connection.
+- **Where a console's text comes from.** `ConsoleSource { Console, Script { library, rel, database } }` lives beside each console's state in `Consoles` (`Consoles::source`/`set_source`, default `Console`). It is not a field of `ConsoleState`: a field would break the fourteen `ConsoleState` literals in M3's code and tests. Every console M3 registers or restores therefore stays a console of its own.
+- **The three M4 seam gaps (R-M4b-34).**
+  - (1) Enter or a double click on a contributed node that does not expand calls its owner's `activate`, deferred out of the explorer's update. An expandable node still toggles.
+  - (2) A contributed node's menu is its owner's `context_menu`, or none when that is empty. The PG database and MySQL/MariaDB schema menus end with `database_menu_items` after a separator. The SQLite profile root gets them after its items and a separator, with a separator before `Delete…`, which stays last (T2 ruling 17).
+  - (3) `contrib::contributors_changed` touches the now-public `Contributors` global, which `ExplorerView` observes. A contributor's change then rebuilds and redraws the tree with no other event.
+- **Ownership.** The owner of a contributed key is the contributor that listed it under a database (the first one, if two list the same key), or the owner of the node it was listed under. Lazy children are asked of that owner only (M4 asked every contributor). No other contributor is ever asked to activate, describe or give a menu for a key it does not own.
+- **Keys (R-M4b-37, controller ruling R-T2-1 (c)).**
+
+  | Command | Context | macOS | Windows and Linux |
+  |---|---|---|---|
+  | `scripts.goto` | `Workspace` | `cmd-shift-o` | `ctrl-shift-o` |
+  | `file.save` | `ScriptTab` | `cmd-s` | `ctrl-s` |
+  | `file.save_all` | `Workspace` | `cmd-alt-s` | none (palette and menu only) |
+  | `scripts.rename` | `ExplorerTree` | `f2` | `f2` |
+  | `scripts.reveal`, `scripts.attach` | — | none | none |
+
+  Move to Trash has no chord. `ScriptTab` is the active script tab's context.
+- **Copy.** The mock's generated FTL goes into `## m4b-t01b-seams` of `locales/{en,tr}/hacivat-ui.ftl` as is, with two changes:
+  - The two save titles take the ids the R5 rule gives their commands (`hv-cmd-file-save`, `hv-cmd-file-save-all`; the mock wrote `hv-cmd-scripts-save*`).
+  - One title is added for F2 (`hv-cmd-scripts-rename`, TR marked `# Review: PO`).
+
+  The `hui-editor-t2-*` and `hui-editor-paste-confirm-*` ids stay with Task 11.
+- **Icons.** `folder` and `file-text` are new SVGs. `IconName` also gains `Download` and `FileDiff`, whose SVGs already ship.
+- **Placeholders for Task 1a.** `scripts::{DatabaseName, LibraryId, PathError, RelPath}` stand in for Task 1a's `hacivat_scripts` types, which were not on its manifests commit. They copy the API Task 1a merged (`Display` and string serde for `LibraryId`, `RelPath::parse -> Result`, `components`, `DatabaseName::new`), so the controller swaps them for one `pub use` line. `scripts::parse_library_id` and `scripts::file_name` are the app's own helpers over that API. `scripts::tabs::display_name` stands in for Task 4's display escaping.
