@@ -2371,8 +2371,19 @@ mod m4b_t06_tests {
     /// (## m4b-t06-secrets, fix round 2, n3).
     const VOCAB: &str = "PASSWORD|IDENTIFIED|BY|WITH|FOR|REPLACE|RANDOM|SET|INTO|@pw|@@x|:=|PRAGMA|ATTACH|KEY|key|EXPLAIN|crypt|pgp_sym_encrypt|gen_salt|set_config|'app\\.secret'|password_hash|api_key|U&|E|N|\\$\\$|\\$t\\$|'|''|\"|`|\\\\|;|,|=|\\(|\\)|/\\*|\\*/|/\\*!80000|--|#|\n| |\t|ş|İ|ı|x|1|s3cret|tiger|password=|pwd=|\"apiKey\":|Bearer |://u:p@h|\\{|\\}|\\x00|\\x01|\\x1f|\\x0c|\r|\\x7f|\\x{a0}|\\x{85}|\\x{3000}|\\x{feff}|pgp_pub_decrypt|AES_ENCRYPT|password_changed_at|sp_addlogin";
 
+    // ## m4b-t06-secrets (p3)
+    /// The identity proptests' case count: 4,000, or 20,000 with `HACIVAT_IDENTITY_FULL=1`
+    /// (the nightly `build-test`). Read here because `with_cases` overrides `PROPTEST_CASES`.
+    fn identity_cases() -> u32 {
+        if std::env::var("HACIVAT_IDENTITY_FULL").as_deref() == Ok("1") {
+            20_000
+        } else {
+            4_000
+        }
+    }
+
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(20_000))]
+        #![proptest_config(ProptestConfig::with_cases(identity_cases()))]
         #[test]
         fn redact_is_byte_identical_to_m3(
             s in proptest::string::string_regex(&format!("({VOCAB}){{0,48}}")).unwrap()
