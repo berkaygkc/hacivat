@@ -15,14 +15,20 @@ use hacivat_exec::{
     ScriptRunner, SessionLog, run_file,
 };
 
+// ## m4b-t06-secrets (named exception): `secret_spans` is Task 6's now; the seam keeps its
+// shape: no span in a clean text, `Armed` for an armed statement's string (C9), `Value` for a
+// value position.
 #[test]
 fn exec_secret_spans_stub_covers_the_whole_text() {
-    assert_eq!(secret_spans("SELECT 1").len(), 1);
-    assert_eq!(secret_spans("SELECT 1"), [(0..8, SecretSpanKind::Value)]);
-    // A text with no secret at all is still one value span: the stub never says "clean".
+    assert!(secret_spans("SELECT 1").is_empty());
     let t = "SELECT password_hash FROM users WHERE password_hash = 'x'";
-    assert_eq!(secret_spans(t), [(0..t.len(), SecretSpanKind::Value)]);
+    assert_eq!(secret_spans(t), [(54..57, SecretSpanKind::Armed)]);
+    assert_eq!(
+        secret_spans("ALTER ROLE app PASSWORD 'x'"),
+        [(24..27, SecretSpanKind::Value)]
+    );
 }
+// ## m4b-t06-secrets
 
 /// A source that counts how often it is pulled.
 struct Counting {

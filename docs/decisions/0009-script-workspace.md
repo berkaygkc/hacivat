@@ -206,3 +206,33 @@ The controller accepted all deviations (R-T1a-2); their carries go to Tasks 7, 1
 - **Public API (M1).** Type aliases of backend types (transitively) and renames of a backend crate (`use notify as n; pub use n::Config`) count as backend names; a backend trait implemented for a type this file declares private (`impl DebounceEventHandler for Sink` with `struct Sink;`) is allowed.
 - **Sets (M2).** `ScriptsBelowExec` also refuses `hacivat-net`, `hacivat-secrets` and `rustls`, and walks build edges as well as normal ones. `BACKENDS` gains `notify-types`, `file-id`, `inotify`, `inotify-sys`, `kqueue`, `kqueue-sys` and `fsevent-sys` (owner `hacivat-scripts`); the public-API list gains them too.
 - **Types (M3–M5).** `EnvSet`'s bit is an exhaustive `match`. `LibraryId` has no `Default`. `LogicalDb` derives no `PartialEq`/`Eq`/`Hash`/`Ord` (nor do `DbNode` and `ManifestRead`, which hold one); binding uses `LogicalDb::same_db`/`names::same_db` (HV-SCRIPT-02 step 4), a stub answering `false` until Task 3. `LocalPaths::script_recovery_dir` returns `Option<PathBuf>`, `None` unless `lib` is one plain name.
+
+## m4b-t06 — secret-literal scanner
+
+HV-SCRIPT-10; R-M4b-17, -28; alg/28 C9.
+
+- **Two inputs, one crate boundary (R-M4b-28).** `scan_secrets(text, history_spans)` takes the history redactor's spans as an argument; the app passes `hacivat_exec::history::secret_spans(text)` mapped one to one onto `SpanKind`. `hacivat-scripts` still never depends on `hacivat-exec` (dev-dependency only, for the tests).
+- **Value positions only (C9).** `secret_spans` is built from `scan_into`, the scan `redact` itself runs, so every range the history masks lies inside a span (`secret_spans_cover_what_redact_masks`, and a property test in `redact.rs`).
+  - Each mask now records a role: value position, comment value, connection string, meta-command line, or armed. `redact` and `scrub` ignore the role, and their output is unchanged.
+  - A value counts only when the word before it names the value itself: its last `_` part is the secret part (`PASSWORD`, `MASTER_PASSWORD`, `client_secret`, `api_key`, `@pw`). A word that only mentions a secret does not count, so `WHERE password_hash = 'x'` and `passwd_changed = now()` stay quiet. They are still masked in history.
+  - `IDENTIFIED … BY`, crypto-function arguments, `PRAGMA key`, `ATTACH … KEY` and `INTO @pw` always count.
+  - Inside a connection string or a psql meta-command line, the `password=` values, the secret pairs, the `Bearer` credentials and the URI password come back as `ConnectionValue` spans, never the whole string. So `'the password hash'` is quiet.
+  - Code quoted in code (a dollar body, or a string with doubled quotes) is read again, up to the redactor's depth of 3, and only its quoted values count.
+- **Not reported.** Empty and all-`*` literals; bind parameters (`:pw`, `$1`, `?`, `@pw`); templates (`${…}`, `{{…}}`, `<…>`); a bare `NULL`; a bare word that calls a function. A literal default such as `'changeme'` is reported.
+- **Token formats** live in `crates/core/hacivat-scripts/data/secret_patterns.toml`.
+  - Each row has `id`, `kind`, `regex`, `source` (an alg/28 S9–S16 document) and an optional `check`.
+  - The rows cover AWS, the GitHub prefixes and `github_pat_`, Slack, Stripe live keys, Stripe test keys as `TestKey`, the Google API key shape, PEM private-key labels, JWTs (the header must decode to a JSON object naming `alg`), and URI userinfo passwords.
+  - Publishable Stripe keys are never reported. There is no entropy rule (R-M4b-17).
+  - The patterns are written in our own words from those documents; no scanner's rule file was read.
+- **Linear time, no locale casing.** The regexes are compiled once and run on the `regex` crate, which never backtracks. Lines are found by a binary search over the newline offsets, and overlapping findings of one kind are merged. Casing is ASCII only.
+  - Measured on 2 MiB in a release build: `scan_secrets` takes 3 ms; `secret_spans` takes 66 ms, all of it the redactor's two readings.
+  - The app runs both off the UI thread, so the UI-thread share is 0.
+- **Allow marker.** A line holding `hacivat:allow-secret` after a `--`, `#` or `/*` on that same line drops its own findings. Known limit: a block comment opened on an earlier line does not carry the marker forward, and an opener inside a string counts as a comment.
+- **Fail closed.**
+  - A pattern table that fails to parse, has a bad row, a duplicate id, an uncited source or an unknown key answers one `Unscanned` finding over the whole text.
+  - A span outside the text, or one that cuts a character, is reported with its range clamped, never dropped.
+- **Never the value.** `SecretFinding` holds a range, a zero-based line (`\r\n` counts once) and a kind. Nothing in the scanner logs; tests check `Debug`.
+- **Named exceptions.**
+  - `redact.rs`: the role field, set at every mask call site, and the `named` scan flag set where `Expect::Value` is set, all behaviour-neutral for `redact`/`scrub`.
+  - The two stub tests that pinned the fail-closed stubs now pin the filled shape: `hacivat-scripts/tests/seams.rs` `secret_stub_reports_the_whole_text` and `hacivat-exec/tests/m4b_stubs.rs` `exec_secret_spans_stub_covers_the_whole_text`.
+  - `hacivat-exec/tests/history.rs`: new cases only.
