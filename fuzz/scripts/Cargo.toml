@@ -1,0 +1,55 @@
+# The M4b script-workspace fuzz targets (cargo-fuzz; M4b Task 1a, R-M4b-40). Its own workspace,
+# apart from `fuzz/` (the SQL targets) and `fuzz/meta` (M4), so no package compiles another's
+# dependencies under the sanitizer flags and each graph stays what its targets need (the M4
+# T1a fix round 2 lesson).
+#
+# Like `fuzz/`: excluded from the root workspace (`exclude = ["third_party", "fuzz"]` covers
+# this directory), never shipped, `libfuzzer-sys`'s NCSA licence accepted for it only (ADR 0005
+# `m3b-t20`). It depends on `hacivat-scripts` only: that crate never depends on `hacivat-exec`,
+# `hacivat-session` or a driver (R-M4b-28), so the session, network and SSH stack (`russh`)
+# never enters this build.
+#
+# `Cargo.lock` is generated from the root lock (copy `../../Cargo.lock` here, then run
+# `cargo metadata` in this directory); CI builds `--locked` and asserts that `third_party/` and
+# the lockfile are unchanged. Task 20 writes the target bodies; no manifest edit.
+[package]
+name = "hacivat-fuzz-scripts"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/berkaygkc/hacivat"
+description = "Dev-only: cargo-fuzz targets over workspace.toml manifests and library path components (M4b)"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+hacivat-scripts = { path = "../../crates/core/hacivat-scripts" }
+
+# The two targets; bodies: Task 20 (`workspace_toml` over `manifest::read_bytes`, `pathsafe`
+# over `pathsafe::component`).
+[[bin]]
+name = "workspace_toml"
+path = "fuzz_targets/workspace_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pathsafe"
+path = "fuzz_targets/pathsafe.rs"
+test = false
+doc = false
+bench = false
+
+# Copied from the root `Cargo.toml` (P-M3b-15); keep in step with it. None of these is in this
+# graph; they stay so a future edge never reaches the registry crates.
+[patch.crates-io]
+mysql_async = { path = "../../third_party/mysql_async" }
+pg_query = { path = "../../third_party/pg_query" }
+tokio-postgres = { path = "../../third_party/tokio-postgres" }

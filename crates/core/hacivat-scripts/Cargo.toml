@@ -1,0 +1,72 @@
+[package]
+name = "hacivat-scripts"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "The script workspace: library registry, workspace.toml, binding, safe scan, environment scoping, file I/O, recovery copies, watcher, secret literals and the Go-to-script index (HV-SCRIPT-01..10, -12)"
+
+# ## m4b-t01a-manifests (the M4b manifest table; no later task edits this file).
+#
+# Core layer. Never `hacivat-exec`, `hacivat-meta`, `hacivat-session` or a driver as a normal
+# dependency (R-M4b-28, C-M4-6): the history-redaction spans reach `scan_secrets` as an
+# argument from the app, and `fuzz/scripts` builds this crate without the session/SSH stack
+# (R-M4b-40). `notify`, `notify-debouncer-full`, `encoding_rs` and `trash` are owned here
+# (`BackendOutsideOwner`); no type of theirs is public.
+[features]
+# Test doubles (`testing::FakeEventSource`), for this crate's tests and its consumers'
+# dev-dependencies; never in a product build.
+test-support = []
+
+[dependencies]
+hacivat-proto.workspace = true
+# `LocalPaths` (`libraries_toml`, `script_recovery_dir`) and `fsio` (atomic, private writes).
+hacivat-settings.workspace = true
+# The I18N-09 search key for the Go-to-script index (`search::{SearchOpts, build_key}`).
+hacivat-l10n.workspace = true
+# `WorkspaceSnapshot.git` and the debounced status refresh (Task 10). `gix` stays behind it.
+hacivat-git.workspace = true
+arc-swap.workspace = true
+# `DiskStamp.hash` (XXH3-128), tree keys and recovery file names.
+twox-hash.workspace = true
+toml.workspace = true
+# `add_alias` keeps a teammate's comments and formatting (HV-SCRIPT-01 step 4).
+toml_edit.workspace = true
+serde.workspace = true
+uuid.workspace = true
+# Token formats of the secret-literal scanner (HV-SCRIPT-10).
+regex.workspace = true
+# NFC for display, search and logical-database matching (R-M4b-23, HV-SCRIPT-02).
+icu_normalizer.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
+notify.workspace = true
+notify-debouncer-full.workspace = true
+encoding_rs.workspace = true
+trash.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Constants only (`O_NOFOLLOW`, `SF_DATALESS`, `AT_*`) for the fd-relative opens.
+libc.workspace = true
+
+[dev-dependencies]
+# This crate's integration tests use its own test doubles.
+hacivat-scripts = { workspace = true, features = ["test-support"] }
+# `secret_table` maps `hacivat_exec::history::secret_spans` (Task 6) and Task 19's real runs;
+# a dev-dependency only (R-M4b-28).
+hacivat-exec.workspace = true
+# Task 19's `docker_m4b` builds real sessions here (mirroring `hacivat-exec/Cargo.toml`).
+hacivat-session = { workspace = true, features = ["test-support"] }
+hacivat-driver = { workspace = true, features = ["fake"] }
+hacivat-driver-pg.workspace = true
+hacivat-driver-mysql.workspace = true
+hacivat-driver-sqlite.workspace = true
+hacivat-testkit = { workspace = true, features = ["ssh"] }
+hacivat-net.workspace = true
+hacivat-secrets.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tempfile.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
