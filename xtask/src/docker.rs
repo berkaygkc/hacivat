@@ -25,7 +25,7 @@ use anyhow::{Context, Result, bail};
 /// How long `up` waits for every selected service to report healthy.
 const WAIT_TIMEOUT_SECS: u32 = 180;
 /// The crates whose `#[ignore = "docker"]` tests `test` runs when no `-p` is given.
-const DEFAULT_TEST_CRATES: [&str; 7] = [
+const DEFAULT_TEST_CRATES: [&str; 8] = [
     "hacivat-driver-pg",
     "hacivat-driver-mysql",
     "hacivat-driver-sqlite",
@@ -37,6 +37,8 @@ const DEFAULT_TEST_CRATES: [&str; 7] = [
     // ## m4-t01c-fixtures (P-M4-6): the introspectors' Docker tests (Tasks 16–18, 21, 22, 28,
     // 31), so `docker-pr`, `docker-full` and the gate run them.
     "hacivat-introspect",
+    // ## m4b-t01a-seams (R-M4b-36): Task 19's `docker_m4b`.
+    "hacivat-scripts",
 ];
 const COMPOSE_FILE: &str = "docker/m2a/compose.yml";
 /// The Dockerfiles whose `FROM` lines are pinned too.
@@ -820,7 +822,7 @@ mod tests {
             test_args(&[], None).join(" "),
             "test -p hacivat-driver-pg -p hacivat-driver-mysql -p hacivat-driver-sqlite \
              -p hacivat-session -p hacivat-testkit -p hacivat-exec -p hacivat-introspect \
-             -- --ignored"
+             -p hacivat-scripts -- --ignored"
         );
         assert_eq!(
             test_args(&["hacivat-session".to_string()], None).join(" "),
@@ -845,6 +847,19 @@ mod tests {
     #[test]
     fn exec_is_a_default_docker_crate() {
         assert!(DEFAULT_TEST_CRATES.contains(&"hacivat-exec"));
+    }
+
+    // ## m4b-t01a-seams (R-M4b-36): Task 19's `docker_m4b` runs in docker-pr, docker-full and
+    // the gate only if `xtask docker test` without `-p` includes the crate.
+    #[test]
+    fn docker_test_crates_include_hacivat_scripts() {
+        assert!(DEFAULT_TEST_CRATES.contains(&"hacivat-scripts"));
+        let args = test_args(&[], None);
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-p" && w[1] == "hacivat-scripts"),
+            "{args:?}"
+        );
     }
 
     // ## m4-t01c-fixtures

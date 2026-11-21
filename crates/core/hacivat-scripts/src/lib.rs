@@ -1,1 +1,70 @@
-//! The script workspace (HV-SCRIPT-01..10, -12; `docs/research/algorithms/28-script-workspace.md`).
+//! The script workspace (L14, local scope; HV-SCRIPT-01..10, -12 in
+//! `docs/research/algorithms/28-script-workspace.md`, ADR 0009): a folder of plain `.sql`/`.md`
+//! files becomes a script library bound to a logical database, projected under every
+//! connection that shows that database.
+//!
+//! Everything read from a library is untrusted data (ADR 0009 D6), and Hacivat writes into a
+//! library only the bytes of a script the user saved and `.hacivat/workspace.toml` (D7). All
+//! file, watcher and status I/O runs on the core runtime; the UI reads [`WorkspaceSnapshot`]s.
+//!
+//! Core layer: no `gpui`, no UI crate, and never `hacivat-exec`, `hacivat-meta` or
+//! `hacivat-session` as a normal dependency (R-M4b-28). No `notify`, `notify-debouncer-full`,
+//! `encoding_rs` or `trash` type is public (`BackendInPublicApi`, `cargo xtask check-deps`).
+//!
+//! ## m4b-t01a-seams
+//! Task 1a: every module and the types later tasks code against, with fail-closed stubs (F31;
+//! none is wired into a user path until its task merges):
+//! - [`LibraryService::open`] publishes an empty snapshot in
+//!   `LibraryState::Unavailable(NotImplemented)` and scans nothing; every other service call
+//!   answers `NotImplemented` and touches no file;
+//! - [`binding::resolve`] binds nothing; [`envscope::visible`] answers `false`;
+//! - [`scan_secrets`] answers one finding over the whole text (a save asks, never passes);
+//! - [`fileio::read`] and [`fileio::save`] answer `NotImplemented` and read or write nothing;
+//! - [`manifest::read`] reads nothing and binds nothing; [`pathsafe::component`] and
+//!   [`pathsafe::join`] refuse every name;
+//! - [`watch::OsEventSource`] is built only as `new_debouncer_opt::<_, RecommendedWatcher,
+//!   NoCache>` with `follow_symlinks(false)` (R-T0-2) and watches nothing.
+//!
+//! Module owners: `registry`, `manifest`, `binding`, `names` (Task 3); `scan`, `pathsafe`,
+//! `envscope`, `tree`, `dataless` (Task 4); `fileio`, `encoding`, `recovery` (Task 5); `secrets`
+//! (Task 6); `watch` (Task 9); `service`, `index`, `events` (Task 10).
+
+pub mod binding;
+pub mod dataless;
+pub mod encoding;
+pub mod envscope;
+pub mod events;
+pub mod fileio;
+pub mod index;
+pub mod manifest;
+pub mod names;
+pub mod pathsafe;
+pub mod recovery;
+pub mod registry;
+pub mod scan;
+pub mod secrets;
+pub mod service;
+pub mod tree;
+pub mod watch;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+
+pub use binding::{DbNode, resolve};
+pub use envscope::{EnvScope, EnvSet, ScopeProblem, visible};
+pub use events::LibraryEvent;
+pub use fileio::{
+    Decoded, DiskStamp, FileMeta, LineEnding, ReadError, SaveError, SaveText, SizeTier,
+    TextEncoding,
+};
+pub use names::{DatabaseName, LogicalDb, NameError};
+pub use pathsafe::{PathError, RelPath};
+pub use registry::{LibraryId, LibraryRoot, LocalMapping, RegistryError};
+pub use scan::{EntryKind, LinkState, ScriptEntry};
+pub use secrets::{SecretFinding, SecretKind, SpanKind, scan_secrets};
+pub use service::{
+    AttachError, ChunkError, FileOpError, LibraryDiag, LibraryService, LibrarySnapshot,
+    LibraryState, PollReason, ScriptChunks, UnavailableReason, WorkspaceSnapshot,
+};
+pub use watch::{EventSource, HintSink, RawHint, WatchError};
+// ## m4b-t01a-seams

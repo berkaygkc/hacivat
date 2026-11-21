@@ -83,6 +83,17 @@ impl LocalPaths {
     pub fn workspace_json(&self) -> PathBuf {
         self.data.join("workspace.json")
     }
+    // ## m4b-t01a-seams
+    /// `<config>/libraries.toml`: the script-library registry (HV-SCRIPT-01 step 1; 0600).
+    pub fn libraries_toml(&self) -> PathBuf {
+        self.config.join("libraries.toml")
+    }
+    /// `<data>/script-recovery/<library uuid>`: unsaved script text, never inside the library
+    /// (HV-SCRIPT-07 step 5; 0700, files 0600).
+    pub fn script_recovery_dir(&self, lib: &str) -> PathBuf {
+        self.data.join("script-recovery").join(lib)
+    }
+    // ## m4b-t01a-seams
     pub fn ai_broker_db(&self) -> PathBuf {
         self.data.join("ai").join("broker.sqlite")
     }
@@ -134,6 +145,25 @@ mod tests {
         assert_eq!(
             std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+    }
+}
+
+// ## m4b-t01a-seams
+#[cfg(test)]
+mod m4b_tests {
+    use super::*;
+
+    #[test]
+    fn new_paths_are_under_config_and_data() {
+        let root = tempfile::tempdir().unwrap();
+        let p = LocalPaths::under(root.path());
+        assert!(p.libraries_toml().starts_with(&p.config));
+        assert!(p.script_recovery_dir("x").starts_with(&p.data));
+        assert_eq!(p.libraries_toml(), p.config.join("libraries.toml"));
+        assert_eq!(
+            p.script_recovery_dir("x"),
+            p.data.join("script-recovery").join("x")
         );
     }
 }

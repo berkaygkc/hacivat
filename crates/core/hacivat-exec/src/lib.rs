@@ -91,3 +91,9 @@ pub use units::resolve_units_in;
 // refresh coordinator come through here)
 pub use service::CatalogRun;
 pub use sql_safety::{StmtKind, StmtReport};
+// ## m4b-t01a-seams: "Run as script" (Task 12; a fail-closed stub until then).
+pub mod script_run;
+pub use script_run::{
+    ChunkError, RefuseReason as ScriptRefuseReason, ScriptChunks, ScriptRunOutcome,
+    ScriptRunRequest, ScriptRunSummary, ScriptRunner, StopReason as ScriptStopReason, run_file,
+};

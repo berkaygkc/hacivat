@@ -1058,6 +1058,56 @@ jobs:
           path: fuzz/meta/artifacts/
           if-no-files-found: ignore
 
+  # ## m4b-t01a-ci
+  # The M4b script-workspace targets (R-M4b-40): their own cargo-fuzz package `fuzz/scripts`
+  # over `hacivat-scripts` only (no session, network, SSH or `pg_query` crate in the graph, so
+  # no libclang step). Bodies: Task 20; until then the targets build and run their stub calls.
+  fuzz-scripts:
+    name: fuzz-scripts (nightly, 10 min per target)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      FUZZ_NIGHTLY: nightly-2026-11-01
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install the pinned nightly and cargo-fuzz
+        run: |
+          rustup toolchain install "$FUZZ_NIGHTLY" --profile minimal
+          cargo +"$FUZZ_NIGHTLY" install cargo-fuzz --locked
+      - name: Build the fuzz targets (locked)
+        run: |
+          cargo +"$FUZZ_NIGHTLY" metadata --manifest-path fuzz/scripts/Cargo.toml --locked --format-version 1 > /dev/null
+          cargo +"$FUZZ_NIGHTLY" fuzz build --fuzz-dir fuzz/scripts --release
+      - name: The build left third_party and the lockfile untouched
+        run: |
+          test -z "$(git status --porcelain third_party)"
+          git diff --exit-code -- fuzz/scripts/Cargo.lock
+      - name: Seed corpora (small valid and hostile inputs)
+        run: |
+          mkdir -p fuzz/scripts/corpus/workspace_toml fuzz/scripts/corpus/pathsafe
+          printf 'format = 1\ndatabase = "orders"\naliases = ["orders_p"]\n' > fuzz/scripts/corpus/workspace_toml/valid.toml
+          printf 'format = 2\ndatabase = "x"\nhost = "h"\n' > fuzz/scripts/corpus/workspace_toml/newer.toml
+          printf 'rapor.sql' > fuzz/scripts/corpus/pathsafe/plain
+          printf '@production/../a.sql' > fuzz/scripts/corpus/pathsafe/dotdot
+      - name: Run each target for 10 minutes (every target runs; the step fails after all)
+        run: |
+          failed=""
+          for t in workspace_toml pathsafe; do
+            if ! cargo +"$FUZZ_NIGHTLY" fuzz run --fuzz-dir fuzz/scripts --release $t fuzz/scripts/corpus/$t -- -max_total_time=600 -max_len=70000 -rss_limit_mb=4096; then
+              failed="$failed $t"
+            fi
+          done
+          if [ -n "$failed" ]; then echo "fuzz targets that found a failure:$failed"; exit 1; fi
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-scripts-artifacts
+          path: fuzz/scripts/artifacts/
+          if-no-files-found: ignore
+  # ## m4b-t01a-ci
+
   # ## m3b-t20-differential
   # The PostgreSQL regression differential (the P0 exit: our PG split equals libpg_query's on
   # ≥ 99.9 % of the REL_17_2 corpus's statements; the corpus is fetched at a pinned tag and

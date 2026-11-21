@@ -1694,3 +1694,30 @@ mod tests {
         }
     }
 }
+
+// ## m4b-t01a-seams
+/// What a [`secret_spans`] range is (alg/28 C9): the redactor masks every quoted string of an
+/// armed statement, but only a value position is a secret literal for the script workspace's
+/// save warning (`WHERE password_hash = 'x'` must not warn). `hacivat_scripts::SpanKind`
+/// mirrors it (the app maps `Value` → `Password`, `ConnectionValue` → `ConnectionString`,
+/// `Armed` → `Other`; R-M4b-28).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SecretSpanKind {
+    /// The value right after a secret keyword (`PASSWORD 'x'`, `IDENTIFIED BY tiger`).
+    Value,
+    /// A connection-string or URI password value (`password=…`, `scheme://user:pass@host`).
+    ConnectionValue,
+    /// Another string the redactor masks because a secret word armed its statement.
+    Armed,
+}
+
+/// The byte ranges of `text` the history redactor would mask, each with its kind (the script
+/// workspace's secret scanner takes them from the app, R-M4b-28).
+///
+/// Task 1a stub (fail closed): one `Value` span over the whole text, so a caller warns instead
+/// of passing. Task 6 builds the body from `scan_into`'s masks; `redact` and `scrub` stay as
+/// they are.
+pub fn secret_spans(text: &str) -> Vec<(Range<usize>, SecretSpanKind)> {
+    vec![(0..text.len(), SecretSpanKind::Value)]
+}
+// ## m4b-t01a-seams

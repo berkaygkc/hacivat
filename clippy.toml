@@ -7,4 +7,13 @@ disallowed-methods = [
     { path = "str::to_uppercase", reason = "locale-blind casing (INV-3): use hacivat_l10n::case_for_display, or an ASCII method for machine text" },
     { path = "char::to_lowercase", reason = "locale-blind casing (INV-3): use hacivat_l10n::case_for_display, or an ASCII method for machine text" },
     { path = "char::to_uppercase", reason = "locale-blind casing (INV-3): use hacivat_l10n::case_for_display, or an ASCII method for machine text" },
+    # ## m4b-t01a-seams (R-T0-2, alg/28 C5): its default `FileIdMap` cache walks every watched
+    # path with `follow_links(true)`. `check-deps` (`WatcherFollowsLinks`) refuses it too.
+    { path = "notify_debouncer_full::new_debouncer", reason = "R-T0-2: build the watcher with new_debouncer_opt::<_, RecommendedWatcher, NoCache> and Config::with_follow_symlinks(false)", allow-invalid = true },
+]
+
+# ## m4b-t01a-seams (R-T0-2): the debouncer caches that walk through directory links.
+disallowed-types = [
+    { path = "notify_debouncer_full::FileIdMap", reason = "R-T0-2: follows directory links; use NoCache", allow-invalid = true },
+    { path = "notify_debouncer_full::RecommendedCache", reason = "R-T0-2: FileIdMap on macOS and Windows; use NoCache", allow-invalid = true },
 ]
