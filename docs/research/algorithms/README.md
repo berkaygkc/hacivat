@@ -2,7 +2,7 @@
 
 Implementation-grade specs for every algorithm in Hacivat, Karagöz and Perde. Each spec follows the ALG template in [`../README.md`](../README.md): it has a stable ID, inputs/outputs, steps, edge cases, evidence tags and a verification status. Every catalog file ends with a list of unresolved product decisions. Those decisions are consolidated in [`../../decisions/open-product-decisions.md`](../../decisions/open-product-decisions.md).
 
-Total: **341 specs** in 21 files.
+Total: **353 specs** in 22 files.
 
 ## Hacivat: database access (01–04)
 
@@ -35,12 +35,13 @@ File 10 §0.2 holds the shared spec index, priorities, dependency map and crate 
 | [24 — Clipboard, import, export](24-clipboard-import-export.md) | HV-XFER | 13 |
 | [25 — SQL editor component](25-sql-editor-component.md) | UI-EDIT | 24 |
 
-## Cross-cutting (26–27)
+## Cross-cutting (26–28)
 
 | File | Spec ID prefixes | Specs |
 |---|---|---:|
 | [26 — Internationalization](26-i18n.md) | I18N | 24 |
 | [27 — Local MCP server](27-mcp-server.md) | MCP | 23 |
+| [28 — Script workspace](28-script-workspace.md) | HV-SCRIPT | 12 |
 
 ## Karagöz agent (30–31)
 
