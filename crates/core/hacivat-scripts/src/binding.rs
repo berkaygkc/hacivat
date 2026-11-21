@@ -13,7 +13,7 @@ use crate::service::LibrarySnapshot;
 
 /// A database node of the explorer: the profile, the server's exact database name, and the
 /// name binding compares (the database name, or the SQLite file stem; R-M4b-32).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DbNode {
     pub profile: ProfileId,
     pub database: DatabaseName,

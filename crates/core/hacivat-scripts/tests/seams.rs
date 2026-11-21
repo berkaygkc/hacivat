@@ -107,11 +107,40 @@ fn resolve_stub_binds_nothing() {
 /// A `LogicalDb` for the binding stub: `LogicalDb::parse` itself refuses every name until
 /// Task 3, so the test double builds one.
 fn logical_for_test() -> hacivat_scripts::LogicalDb {
-    assert_eq!(
+    assert!(matches!(
         hacivat_scripts::LogicalDb::parse("orders"),
         Err(hacivat_scripts::NameError::NotImplemented)
-    );
+    ));
     hacivat_scripts::testing::logical("orders")
+}
+
+// ## m4b-t01a-fr1 (review M4): binding compares with `same_db`, never `==`; the stub matches
+// nothing (Task 3 writes NFC + ASCII case-insensitive).
+#[test]
+fn same_db_stub_matches_nothing() {
+    let a = hacivat_scripts::testing::logical("orders");
+    assert!(!a.same_db(&a));
+    assert!(!hacivat_scripts::names::same_db("orders", "orders"));
+}
+
+// ## m4b-t01a-fr1 (review M3): one distinct bit per tag, so no tag can stand for another.
+#[test]
+fn env_set_has_one_bit_per_tag() {
+    for tag in EnvTag::ALL {
+        let set = hacivat_scripts::EnvSet::of(tag);
+        for other in EnvTag::ALL {
+            assert_eq!(set.contains(other), other == tag, "{tag:?} {other:?}");
+        }
+    }
+    let all = EnvTag::ALL
+        .iter()
+        .fold(hacivat_scripts::EnvSet::empty(), |s, t| s.with(*t));
+    assert!(EnvTag::ALL.iter().all(|t| all.contains(*t)));
+    assert!(
+        hacivat_scripts::EnvSet::of(EnvTag::Production)
+            .intersect(hacivat_scripts::EnvSet::of(EnvTag::Local))
+            .is_empty()
+    );
 }
 
 #[test]

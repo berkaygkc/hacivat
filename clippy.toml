@@ -10,6 +10,14 @@ disallowed-methods = [
     # ## m4b-t01a-seams (R-T0-2, alg/28 C5): its default `FileIdMap` cache walks every watched
     # path with `follow_links(true)`. `check-deps` (`WatcherFollowsLinks`) refuses it too.
     { path = "notify_debouncer_full::new_debouncer", reason = "R-T0-2: build the watcher with new_debouncer_opt::<_, RecommendedWatcher, NoCache> and Config::with_follow_symlinks(false)", allow-invalid = true },
+    # ## m4b-t01a-fr1 (review I3): every direct watcher constructor, through any type, alias or
+    # generic. The one blessed poll-fallback site (Task 9) carries
+    # `#[expect(clippy::disallowed_methods, reason = "…watcher_config()…")]` and passes
+    # `watcher_config()`, which `check-deps` (`WatcherFollowsLinks`) checks per call site.
+    { path = "notify::recommended_watcher", reason = "R-T0-2: Config::default() follows directory links; use the debouncer built in hacivat_scripts::watch", allow-invalid = true },
+    { path = "notify::Watcher::new", reason = "R-T0-2: a watcher is built only with watcher_config() (follow_symlinks(false)), at the one reviewed site", allow-invalid = true },
+    { path = "notify::PollWatcher::new", reason = "R-T0-2: a watcher is built only with watcher_config() (follow_symlinks(false)), at the one reviewed site", allow-invalid = true },
+    { path = "notify::PollWatcher::with_initial_scan", reason = "R-T0-2: a watcher is built only with watcher_config() (follow_symlinks(false)), at the one reviewed site", allow-invalid = true },
 ]
 
 # ## m4b-t01a-seams (R-T0-2): the debouncer caches that walk through directory links.

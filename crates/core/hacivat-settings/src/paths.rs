@@ -89,9 +89,20 @@ impl LocalPaths {
         self.config.join("libraries.toml")
     }
     /// `<data>/script-recovery/<library uuid>`: unsaved script text, never inside the library
-    /// (HV-SCRIPT-07 step 5; 0700, files 0600).
-    pub fn script_recovery_dir(&self, lib: &str) -> PathBuf {
-        self.data.join("script-recovery").join(lib)
+    /// (HV-SCRIPT-07 step 5; 0700, files 0600). `lib` is a `LibraryId`'s text.
+    ///
+    /// ## m4b-t01a-fr1 (review M5): `None` unless `lib` is one plain name (no separator, no
+    /// `.`/`..`, no drive or root, no `:` or NUL), so it can never leave `<data>`.
+    pub fn script_recovery_dir(&self, lib: &str) -> Option<PathBuf> {
+        let plain = !lib.is_empty()
+            && lib != "."
+            && lib != ".."
+            && !lib.contains(['/', '\\', ':', '\0'])
+            && matches!(
+                Path::new(lib).components().collect::<Vec<_>>().as_slice(),
+                [std::path::Component::Normal(_)]
+            );
+        plain.then(|| self.data.join("script-recovery").join(lib))
     }
     // ## m4b-t01a-seams
     pub fn ai_broker_db(&self) -> PathBuf {
@@ -159,11 +170,38 @@ mod m4b_tests {
         let root = tempfile::tempdir().unwrap();
         let p = LocalPaths::under(root.path());
         assert!(p.libraries_toml().starts_with(&p.config));
-        assert!(p.script_recovery_dir("x").starts_with(&p.data));
+        assert!(p.script_recovery_dir("x").unwrap().starts_with(&p.data));
         assert_eq!(p.libraries_toml(), p.config.join("libraries.toml"));
         assert_eq!(
             p.script_recovery_dir("x"),
-            p.data.join("script-recovery").join("x")
+            Some(p.data.join("script-recovery").join("x"))
         );
+    }
+
+    // ## m4b-t01a-fr1 (review M5)
+    #[test]
+    fn script_recovery_dir_takes_one_plain_component() {
+        let root = tempfile::tempdir().unwrap();
+        let p = LocalPaths::under(root.path());
+        let id = "6f1c2b8e-3c5a-4d2e-9b7a-0c1d2e3f4a5b";
+        assert_eq!(
+            p.script_recovery_dir(id),
+            Some(p.data.join("script-recovery").join(id))
+        );
+        for bad in [
+            "",
+            ".",
+            "..",
+            "/x",
+            "x/y",
+            "x\\y",
+            "../x",
+            "C:",
+            "C:x",
+            "a\0b",
+            "\\\\srv\\share",
+        ] {
+            assert_eq!(p.script_recovery_dir(bad), None, "{bad:?}");
+        }
     }
 }

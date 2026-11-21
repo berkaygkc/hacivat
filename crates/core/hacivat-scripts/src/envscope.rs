@@ -52,8 +52,16 @@ impl EnvSet {
     }
 }
 
+/// ## m4b-t01a-fr1 (review M3): exhaustive, so a new tag fails to compile here instead of
+/// silently sharing another tag's bit.
 fn bit(tag: EnvTag) -> u8 {
-    1 << EnvTag::ALL.iter().position(|t| *t == tag).unwrap_or(0)
+    match tag {
+        EnvTag::Local => 1 << 0,
+        EnvTag::Dev => 1 << 1,
+        EnvTag::Test => 1 << 2,
+        EnvTag::Staging => 1 << 3,
+        EnvTag::Production => 1 << 4,
+    }
 }
 
 /// Why a path is hidden everywhere.

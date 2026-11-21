@@ -17,16 +17,16 @@ use crate::names::DatabaseName;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LibraryId(pub Uuid);
 
+// ## m4b-t01a-fr1 (review M4): no `Default`. A `#[serde(default)]` or `..Default::default()`
+// would silently mint a new library identity; a fresh ID is always an explicit `new()`.
+#[expect(
+    clippy::new_without_default,
+    reason = "a library identity is never a default value (T1a review M4)"
+)]
 impl LibraryId {
     /// A fresh random ID.
     pub fn new() -> Self {
         LibraryId(Uuid::new_v4())
-    }
-}
-
-impl Default for LibraryId {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

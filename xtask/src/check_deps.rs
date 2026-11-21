@@ -131,28 +131,28 @@ pub enum Rule {
     // ## m4-t33a-hygiene
     // ## m4b-t01a-seams
     /// `hacivat-scripts` reaches `hacivat-exec`, `hacivat-meta`, `hacivat-session`,
-    /// `hacivat-introspect`, a driver or `russh` through its normal dependencies (declared,
-    /// optional included, or resolved, at any depth); or `hacivat-exec` depends on
+    /// `hacivat-introspect`, `hacivat-net`, `hacivat-secrets`, a driver, `russh` or `rustls`
+    /// through its normal or build dependencies (declared, optional included, or resolved, at
+    /// any depth; build edges since fix round 1, M2); or `hacivat-exec` depends on
     /// `hacivat-scripts` by any edge (R-M4b-28, C-M4-6: the fuzz package and every test build
     /// would compile the session stack).
     ScriptsBelowExec,
     /// A non-test file of a product crate (every `crates/<layer>/<crate>/` but the bench tool
     /// `hacivat-bench`; everything outside the crate's `tests/`, `#[path]`/`include!` targets
-    /// counted) spells the git program: a string literal (plain, raw, byte, or a
-    /// `concat!` of literals) holding a word whose last path component is `git` or `git.exe`
-    /// (ASCII case-insensitive), or, in `hacivat-git` and `hacivat-scripts`, any
-    /// `process::` path (no subprocess at all there). See [`spawns_git`] for the limits.
+    /// counted; inline `#[cfg(test)]` modules under `src/` count, R-T1a-1) spells the git
+    /// program at compile time: a string literal (plain, raw, byte, C; raw and with its escapes
+    /// resolved), a `concat!` join (char pieces and nested macros included) or a `stringify!`
+    /// holding a word whose last path component is `git` or `git.exe` (ASCII case-insensitive).
+    /// In `hacivat-git` and `hacivat-scripts`, any API that starts a process is refused too
+    /// (fix round 1, I1). See [`spawns_git`] and [`process_api`].
     NoGitSubprocess,
-    /// A non-test file under `crates/` builds a file watcher that can follow directory links
-    /// (R-T0-2, alg/28 C5): it names `new_debouncer` (whose `FileIdMap` walks with
-    /// `follow_links(true)`), `FileIdMap` or `RecommendedCache`, calls
-    /// `with_follow_symlinks(true)`, or names `new_debouncer_opt` without `NoCache` and
-    /// `with_follow_symlinks(false)`, or `PollWatcher` without `with_follow_symlinks(false)`.
+    /// A non-test file of `hacivat-scripts` (the one crate that may depend on `notify`) builds a
+    /// file watcher that can follow directory links (R-T0-2, alg/28 C5), checked per call site
+    /// since fix round 1 (I3). See [`watcher_follows_links`].
     WatcherFollowsLinks,
-    /// A `src/` file of `hacivat-scripts` or `hacivat-git` shows a backend type in a public
-    /// item (`notify`, `notify-debouncer-full`, `encoding_rs`, `trash`; `gix`, `gix-*`): a `pub`
-    /// item's signature (an enum's or trait's whole body), a `pub use`, an `impl` header, or a
-    /// glob import of a backend. See [`backend_in_public_api`].
+    /// A `src/` file of `hacivat-scripts` or `hacivat-git` shows a backend type in its public
+    /// API (`notify`, `notify-debouncer-full`, `notify-types`, `file-id`, `inotify`, `kqueue`,
+    /// `fsevent-sys`, `encoding_rs`, `trash`; `gix`, `gix-*`). See [`backend_in_public_api`].
     BackendInPublicApi,
     // ## m4b-t01a-seams
 }
@@ -234,7 +234,7 @@ const SQL_TESTKIT: &str = "sql-testkit";
 /// ## m4b-t01a-seams (R-M4b-41, ADR 0009 D1): the script workspace's backends; a pattern
 /// ending in `-*` matches every crate with that prefix (`gix-*`: every `gix-` crate as a
 /// direct dependency, any edge kind).
-const BACKENDS: [(&str, &str); 8] = [
+const BACKENDS: [(&str, &str); 15] = [
     ("pg_query", "sql-oracle-pg"),
     ("sqlparser", "sql-safety"),
     ("notify", "hacivat-scripts"),
@@ -243,6 +243,14 @@ const BACKENDS: [(&str, &str); 8] = [
     ("trash", "hacivat-scripts"),
     ("gix", "hacivat-git"),
     ("gix-*", "hacivat-git"),
+    // ## m4b-t01a-fr1 (review M2): the watcher's lower crates.
+    ("notify-types", "hacivat-scripts"),
+    ("file-id", "hacivat-scripts"),
+    ("inotify", "hacivat-scripts"),
+    ("inotify-sys", "hacivat-scripts"),
+    ("kqueue", "hacivat-scripts"),
+    ("kqueue-sys", "hacivat-scripts"),
+    ("fsevent-sys", "hacivat-scripts"),
 ];
 
 /// Whether the package `name` is the backend `pattern` names (exact, or a `-*` prefix).
@@ -319,17 +327,52 @@ fn meta_forbidden(name: &str) -> bool {
 // ## m4b-t01a-seams
 /// The script workspace crate and the run service it never depends on (`ScriptsBelowExec`).
 const SCRIPTS: &str = "hacivat-scripts";
-const SCRIPTS_FORBIDDEN: [&str; 5] = [
+const SCRIPTS_FORBIDDEN: [&str; 8] = [
     "hacivat-exec",
     "hacivat-meta",
     "hacivat-session",
     "hacivat-introspect",
     "russh",
+    // ## m4b-t01a-fr1 (review M2): the network and secrets stack.
+    "hacivat-net",
+    "hacivat-secrets",
+    "rustls",
 ];
 
-/// What `hacivat-scripts`' normal-dependency closure may not contain (R-M4b-28, C-M4-6).
+/// What `hacivat-scripts`' normal and build closure may not contain (R-M4b-28, C-M4-6).
 fn scripts_forbidden(name: &str) -> bool {
     SCRIPTS_FORBIDDEN.contains(&name) || is_driver(name)
+}
+
+/// [`normal_path_to`] over the edge `kinds` (every step), not only normal edges.
+fn kinds_path_to(
+    root: &PackageId,
+    edges: &Edges<'_>,
+    pkgs: &HashMap<&PackageId, &Package>,
+    kinds: &[DependencyKind],
+    bad: impl Fn(&Package) -> bool,
+) -> Option<Vec<String>> {
+    let mut seen: BTreeSet<&PackageId> = BTreeSet::from([root]);
+    let mut queue: VecDeque<(&PackageId, Vec<String>)> = VecDeque::from([(root, vec![])]);
+    while let Some((id, path)) = queue.pop_front() {
+        for (dep_id, dep_kinds) in edges.get(id).into_iter().flatten() {
+            if !dep_kinds.iter().any(|k| kinds.contains(k)) {
+                continue;
+            }
+            let Some(dep) = pkgs.get(dep_id) else {
+                continue;
+            };
+            let mut via = path.clone();
+            via.push(dep.name.to_string());
+            if bad(dep) {
+                return Some(via);
+            }
+            if seen.insert(dep_id) {
+                queue.push_back((dep_id, via));
+            }
+        }
+    }
+    None
 }
 // ## m4b-t01a-seams
 
@@ -787,16 +830,21 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
         // ## m4b-t01a-seams (R-M4b-28, C-M4-6)
         if name == SCRIPTS {
             // Any declared normal edge, optional or not; then the resolved closure.
-            for d in root
-                .dependencies
-                .iter()
-                .filter(|d| d.kind == DependencyKind::Normal && scripts_forbidden(&d.name))
-            {
+            // ## m4b-t01a-fr1 (review M2): build edges too (a build dependency would compile
+            // the session stack into the fuzz build).
+            for d in root.dependencies.iter().filter(|d| {
+                matches!(d.kind, DependencyKind::Normal | DependencyKind::Build)
+                    && scripts_forbidden(&d.name)
+            }) {
                 add(name, Rule::ScriptsBelowExec, vec![d.name.clone()]);
             }
-            if let Some(via) = normal_path_to(&root.id, &edges, &pkgs, |p| {
-                scripts_forbidden(p.name.as_str())
-            }) {
+            if let Some(via) = kinds_path_to(
+                &root.id,
+                &edges,
+                &pkgs,
+                &[DependencyKind::Normal, DependencyKind::Build],
+                |p| scripts_forbidden(p.name.as_str()),
+            ) {
                 add(name, Rule::ScriptsBelowExec, via);
             }
         }
@@ -1097,10 +1145,13 @@ enum SrcTok {
     Punct(char),
     /// A string literal's text (raw), kept only for `#[path]` and `include!` targets.
     Str(String),
+    // ## m4b-t01a-fr1
+    /// A char literal, its escape resolved (`NoGitSubprocess`'s `concat!` joins).
+    Char(char),
 }
 
-/// `src` as tokens, with comments (line, nested block, doc), whitespace, char literals,
-/// lifetimes and numbers dropped, so `MetaQuery :: new`, a path split over lines or a comment
+/// `src` as tokens, with comments (line, nested block, doc), whitespace, lifetimes and
+/// numbers dropped (char literals are `Char` tokens since `m4b-t01a-fr1`), so `MetaQuery :: new`, a path split over lines or a comment
 /// in the middle collapse to the same tokens; string contents never match an identifier.
 fn src_tokens(src: &str) -> Vec<SrcTok> {
     let c: Vec<char> = src.chars().collect();
@@ -1159,13 +1210,21 @@ fn src_tokens(src: &str) -> Vec<SrcTok> {
             out.push(SrcTok::Str(c[begin..j.min(c.len())].iter().collect()));
             i = j + 1;
         } else if ch == '\'' {
+            // ## m4b-t01a-fr1 (review I2): char literals are kept (cooked) as `Char` tokens,
+            // so `concat!("gi", 't')` joins to its compile-time text; the escaped character
+            // itself is skipped, so `'\''` ends at its own closing quote.
             if at(i + 1) == '\\' {
-                let mut j = i + 2;
+                let mut j = i + 3;
                 while j < c.len() && c[j] != '\'' {
                     j += 1;
                 }
+                let raw: String = c[i + 1..j.min(c.len())].iter().collect();
+                if let Some(ch) = unescape(&raw).chars().next() {
+                    out.push(SrcTok::Char(ch));
+                }
                 i = j + 1;
             } else if at(i + 2) == '\'' {
+                out.push(SrcTok::Char(at(i + 1)));
                 i += 3;
             } else {
                 i += 1;
@@ -1687,10 +1746,108 @@ const PUBLIC_API_BACKENDS: [(&str, &[&str]); 2] = [
             "file_id",
             "encoding_rs",
             "trash",
+            // ## m4b-t01a-fr1 (review M2)
+            "inotify",
+            "inotify_sys",
+            "kqueue",
+            "kqueue_sys",
+            "fsevent_sys",
         ],
     ),
     ("hacivat-git", &["gix", "gix_*"]),
 ];
+
+// ## m4b-t01a-fr1 (review I1): what starts a process, for the two crates that never do.
+/// Identifiers refused anywhere in a no-process crate's non-test file: the `process` module
+/// (`std::process`, `tokio::process`, `std::os::unix::process`, a renamed `process as sp`),
+/// `CommandExt`, `gix`'s command crate, the `gix-path` `env` functions that build or run a
+/// program, and the `exec*`/`posix_spawn*`/`popen`/`vfork` libc calls.
+const PROCESS_IDENTS: [&str; 24] = [
+    "process",
+    "CommandExt",
+    "gix_command",
+    "shell_command",
+    "exe_invocation",
+    "core_dir_program",
+    "installation_program",
+    "installation_config",
+    "installation_config_prefix",
+    "system_prefix",
+    "execv",
+    "execve",
+    "execvp",
+    "execvpe",
+    "execvP",
+    "execl",
+    "execlp",
+    "execle",
+    "fexecve",
+    "posix_spawn",
+    "posix_spawnp",
+    "popen",
+    "vfork",
+    "pidfd_spawn",
+];
+/// Module paths refused in a no-process crate, after `use … as` and `extern crate … as`
+/// renames are resolved: names too common to refuse as bare identifiers (`fork`, `system`,
+/// `env`, `command`) are refused through their path.
+const PROCESS_PATHS: [&[&str]; 9] = [
+    &["gix", "command"],
+    &["gix", "path", "env"],
+    &["gix_path", "env"],
+    &["libc", "fork"],
+    &["libc", "system"],
+    &["libc", "syscall"],
+    &["libc", "daemon"],
+    &["std", "process"],
+    &["tokio", "process"],
+];
+
+/// `raw` with Rust's string escapes resolved: `\n \r \t \\ \0 \' \"`, `\xHH`, `\u{…}`, and a
+/// `\`-newline continuation (which drops the next line's leading whitespace, as rustc does).
+fn unescape(raw: &str) -> String {
+    let mut out = String::new();
+    let mut it = raw.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('0') => out.push('\0'),
+            Some('x') => {
+                let hex: String = it.by_ref().take(2).collect();
+                if let Ok(b) = u8::from_str_radix(&hex, 16) {
+                    out.push(char::from(b));
+                }
+            }
+            Some('u') => {
+                if it.peek() == Some(&'{') {
+                    it.next();
+                    let hex: String = it.by_ref().take_while(|c| *c != '}').collect();
+                    if let Some(ch) = u32::from_str_radix(&hex.replace('_', ""), 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                    {
+                        out.push(ch);
+                    }
+                }
+            }
+            Some('\n' | '\r') => {
+                while it.peek().is_some_and(|c| c.is_whitespace()) {
+                    it.next();
+                }
+            }
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    out
+}
+// ## m4b-t01a-fr1
 
 /// Whether a string literal names the git program: some word of it (split at whitespace,
 /// quotes and shell punctuation, so `sh -c "cd x && git status"` counts) has `git` or
@@ -1724,59 +1881,462 @@ fn group_end(t: &[SrcTok], open: usize) -> usize {
     t.len()
 }
 
-/// Whether the tokens spell the git program (`NoGitSubprocess`): a string literal (plain, raw,
-/// byte, C) that [`names_git_program`], or the literals of one `concat!(…)` joined; with
-/// `no_process`, any `process::…` or `…::process` path (`std::process`, `tokio::process`).
-///
-/// Limits: a program name built at run time from characters or escapes (`['g', 'i', 't']`,
-/// `"\u{67}it"`, `format!("{}it", 'g')`) is not seen outside the no-process crates; the price
-/// of the literal rule is that a product string may not use the bare word (say "repository").
-fn spawns_git(t: &[SrcTok], no_process: bool) -> bool {
-    let literal = t
-        .iter()
-        .any(|x| matches!(x, SrcTok::Str(s) if names_git_program(s)));
-    let concat = (0..t.len()).any(|i| {
-        tok_ident(t, i, "concat") && tok_punct(t, i + 1, '!') && {
-            let end = group_end(t, i + 2);
-            let joined: String = t[(i + 2).min(end)..end]
-                .iter()
-                .filter_map(|x| match x {
-                    SrcTok::Str(s) => Some(s.as_str()),
-                    _ => None,
-                })
-                .collect();
-            names_git_program(&joined)
-        }
-    });
-    let process = no_process
-        && (0..t.len()).any(|i| {
-            tok_ident(t, i, "process")
-                && ((tok_punct(t, i + 1, ':') && tok_punct(t, i + 2, ':'))
-                    || (i >= 2 && tok_punct(t, i - 1, ':') && tok_punct(t, i - 2, ':')))
-        });
-    literal || concat || process
+// ## m4b-t01a-fr1 (review I2)
+/// The tokens inside the bracket group that opens at `open` (empty when there is none).
+fn group_inner(t: &[SrcTok], open: usize) -> &[SrcTok] {
+    let end = group_end(t, open);
+    if end <= open + 1 {
+        return &[];
+    }
+    let close = if end <= t.len() && end > open + 1 && end - 1 > open {
+        end - 1
+    } else {
+        t.len()
+    };
+    &t[open + 1..close.max(open + 1)]
 }
 
-/// Whether the tokens build a watcher that can follow directory links (`WatcherFollowsLinks`,
-/// R-T0-2): the variant list is on [`Rule::WatcherFollowsLinks`].
-fn watcher_follows_links(t: &[SrcTok]) -> bool {
-    let names = |n: &str| t.iter().any(|x| *x == SrcTok::Ident(n.into()));
-    let follow = |v: &str| {
-        (0..t.len()).any(|i| {
-            tok_ident(t, i, "with_follow_symlinks")
-                && tok_punct(t, i + 1, '(')
-                && tok_ident(t, i + 2, v)
-                && tok_punct(t, i + 3, ')')
+/// Tokens as `stringify!` would print them (joined by spaces; close enough for the word
+/// split of [`names_git_program`]).
+fn render(t: &[SrcTok]) -> String {
+    t.iter()
+        .map(|x| match x {
+            SrcTok::Ident(s) => s.clone(),
+            SrcTok::Punct(c) | SrcTok::Char(c) => c.to_string(),
+            SrcTok::Str(s) => format!("\"{}\"", unescape(s)),
         })
-    };
-    let never_follows = follow("false");
-    names("new_debouncer")
-        || names("FileIdMap")
-        || names("RecommendedCache")
-        || follow("true")
-        || (names("new_debouncer_opt") && !(names("NoCache") && never_follows))
-        || (names("PollWatcher") && !never_follows)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
+
+/// The compile-time text of a `concat!` group: string pieces cooked, chars, `true`/`false`,
+/// and nested `concat!`/`stringify!` text.
+fn concat_text(inner: &[SrcTok]) -> String {
+    let mut out = String::new();
+    let mut k = 0;
+    while k < inner.len() {
+        match &inner[k] {
+            SrcTok::Str(s) => out.push_str(&unescape(s)),
+            SrcTok::Char(c) => out.push(*c),
+            SrcTok::Ident(name) if tok_punct(inner, k + 1, '!') => {
+                let nested = group_inner(inner, k + 2);
+                match name.as_str() {
+                    "concat" => out.push_str(&concat_text(nested)),
+                    "stringify" => out.push_str(&render(nested).replace(' ', "")),
+                    _ => {}
+                }
+                k = group_end(inner, k + 2).max(k + 1);
+                continue;
+            }
+            SrcTok::Ident(s) => out.push_str(s),
+            _ => {}
+        }
+        k += 1;
+    }
+    out
+}
+
+/// Every compile-time text the tokens spell: each string literal raw and cooked, each
+/// `concat!(…)` joined, each `stringify!(…)` printed.
+fn literal_texts(t: &[SrcTok]) -> Vec<String> {
+    let mut out = Vec::new();
+    for x in t {
+        if let SrcTok::Str(s) = x {
+            out.push(s.clone());
+            out.push(unescape(s));
+        }
+    }
+    for i in 0..t.len() {
+        if !tok_punct(t, i + 1, '!') {
+            continue;
+        }
+        if tok_ident(t, i, "concat") {
+            out.push(concat_text(group_inner(t, i + 2)));
+        } else if tok_ident(t, i, "stringify") {
+            let inner = group_inner(t, i + 2);
+            out.push(render(inner));
+            out.push(render(inner).replace(' ', ""));
+        }
+    }
+    out
+}
+
+/// One `use` tree flattened: every `(full path, local name)` it binds, and its globs.
+fn flatten_use(
+    t: &[SrcTok],
+    mut k: usize,
+    end: usize,
+    prefix: &[String],
+    out: &mut Vec<Import>,
+    globs: &mut Vec<Vec<String>>,
+) -> usize {
+    let mut path = prefix.to_vec();
+    while k < end && tok_punct(t, k, ':') {
+        k += 1;
+    }
+    while k < end {
+        match &t[k] {
+            SrcTok::Ident(s) => {
+                path.push(s.clone());
+                k += 1;
+                if tok_punct(t, k, ':') && tok_punct(t, k + 1, ':') {
+                    k += 2;
+                    continue;
+                }
+                if path.last().is_some_and(|l| l == "self") {
+                    path.pop();
+                }
+                let name = if tok_ident(t, k, "as") {
+                    k += 1;
+                    match t.get(k) {
+                        Some(SrcTok::Ident(a)) => {
+                            k += 1;
+                            a.clone()
+                        }
+                        _ => "_".into(),
+                    }
+                } else {
+                    path.last().cloned().unwrap_or_default()
+                };
+                out.push((path, name));
+                return k;
+            }
+            SrcTok::Punct('{') => {
+                k += 1;
+                while k < end && !tok_punct(t, k, '}') {
+                    let before = k;
+                    k = flatten_use(t, k, end, &path, out, globs);
+                    if tok_punct(t, k, ',') {
+                        k += 1;
+                    }
+                    if k == before {
+                        k += 1;
+                    }
+                }
+                return k + 1;
+            }
+            SrcTok::Punct('*') => {
+                globs.push(path);
+                return k + 1;
+            }
+            _ => return k + 1,
+        }
+    }
+    k
+}
+
+/// An imported path and the local name it binds.
+type Import = (Vec<String>, String);
+
+/// The paths the tokens import (`use`, `extern crate`), their local names, and the globs.
+fn imports(t: &[SrcTok]) -> (Vec<Import>, Vec<Vec<String>>) {
+    let mut out = Vec::new();
+    let mut globs = Vec::new();
+    for i in 0..t.len() {
+        if tok_ident(t, i, "use") {
+            let end = item_end(t, i).saturating_sub(1).max(i + 1);
+            flatten_use(t, i + 1, end, &[], &mut out, &mut globs);
+        } else if tok_ident(t, i, "extern")
+            && tok_ident(t, i + 1, "crate")
+            && let Some(SrcTok::Ident(name)) = t.get(i + 2)
+        {
+            let local = match (tok_ident(t, i + 3, "as"), t.get(i + 4)) {
+                (true, Some(SrcTok::Ident(a))) => a.clone(),
+                _ => name.clone(),
+            };
+            out.push((vec![name.clone()], local));
+        }
+    }
+    (out, globs)
+}
+
+/// `path` with its first segment replaced through the import renames, up to four times.
+fn resolve_path(path: &[String], renames: &HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut p = path.to_vec();
+    for _ in 0..4 {
+        match p.first().and_then(|f| renames.get(f)) {
+            Some(full) if full.len() > 1 || full.first() != p.first() => {
+                let mut next = full.clone();
+                next.extend(p.iter().skip(1).cloned());
+                p = next;
+            }
+            _ => break,
+        }
+    }
+    p
+}
+
+/// Every path expression of the tokens (`a::b::c`, turbofish skipped), as segments.
+fn expr_paths(t: &[SrcTok]) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for i in 0..t.len() {
+        let SrcTok::Ident(first) = &t[i] else {
+            continue;
+        };
+        let continues = i >= 2
+            && tok_punct(t, i - 1, ':')
+            && tok_punct(t, i - 2, ':')
+            && (i >= 3 && (matches!(t[i - 3], SrcTok::Ident(_)) || tok_punct(t, i - 3, '>')));
+        if continues {
+            continue;
+        }
+        let mut segs = vec![first.clone()];
+        let mut k = i + 1;
+        while tok_punct(t, k, ':') && tok_punct(t, k + 1, ':') {
+            match t.get(k + 2) {
+                Some(SrcTok::Ident(s)) => {
+                    segs.push(s.clone());
+                    k += 3;
+                }
+                Some(SrcTok::Punct('<')) => k = skip_angle(t, k + 2),
+                _ => break,
+            }
+        }
+        out.push(segs);
+    }
+    out
+}
+
+/// Whether the tokens reach an API that starts a process (`NoGitSubprocess` in the
+/// no-process crates): an identifier of [`PROCESS_IDENTS`], a path of [`PROCESS_PATHS`]
+/// through any rename (`use gix as g; g::command`), or a glob import from outside the crate
+/// (`use gix::*`, `use libc::*`), which would hide the rest.
+fn process_api(t: &[SrcTok]) -> bool {
+    if t.iter()
+        .any(|x| matches!(x, SrcTok::Ident(s) if PROCESS_IDENTS.contains(&s.as_str())))
+    {
+        return true;
+    }
+    let (imported, globs) = imports(t);
+    let renames: HashMap<String, Vec<String>> = imported
+        .iter()
+        .map(|(path, name)| (name.clone(), path.clone()))
+        .collect();
+    let banned = |p: &[String]| {
+        PROCESS_PATHS
+            .iter()
+            .any(|b| p.len() >= b.len() && p.iter().zip(b.iter()).all(|(a, b)| a == b))
+    };
+    let local_root = |p: &[String]| {
+        p.first()
+            .is_some_and(|f| ["crate", "self", "super"].contains(&f.as_str()))
+    };
+    globs
+        .iter()
+        .any(|g| !local_root(&resolve_path(g, &renames)))
+        || imported
+            .iter()
+            .any(|(p, _)| banned(&resolve_path(p, &renames)))
+        || expr_paths(t)
+            .iter()
+            .any(|p| banned(&resolve_path(p, &renames)))
+}
+// ## m4b-t01a-fr1
+
+/// Whether the tokens spell the git program (`NoGitSubprocess`): a compile-time text of
+/// theirs ([`literal_texts`]: string literals raw and with escapes resolved, `concat!` joins
+/// with char pieces, `stringify!` text) that [`names_git_program`]; with `no_process`, any
+/// API that starts a process ([`process_api`]).
+///
+/// Limits: outside the no-process crates, a program name assembled at run time
+/// (`["gi", "t"].concat()`, `format!`, `env::var`) is not seen; the price of the literal rule is
+/// that a product string may not use the bare word (say "repository"; R-T1a-1: a later need
+/// is met by an exact-literal allow-list reviewed with that task, never a pattern).
+fn spawns_git(t: &[SrcTok], no_process: bool) -> bool {
+    literal_texts(t).iter().any(|s| names_git_program(s)) || (no_process && process_api(t))
+}
+
+// ## m4b-t01a-fr1 (review I3): watcher construction, checked per call site.
+/// The notify watcher types (and the trait) whose constructors take a `Config`.
+const WATCHER_TYPES: [&str; 8] = [
+    "RecommendedWatcher",
+    "PollWatcher",
+    "INotifyWatcher",
+    "FsEventWatcher",
+    "KqueueWatcher",
+    "ReadDirectoryChangesWatcher",
+    "NullWatcher",
+    "Watcher",
+];
+/// Refused outright: they cannot be given a non-following config or cache.
+const WATCHER_BANNED: [&str; 4] = [
+    "new_debouncer",
+    "FileIdMap",
+    "RecommendedCache",
+    "recommended_watcher",
+];
+/// The one shared config builder a constructor may take instead of an inline
+/// `with_follow_symlinks(false)`.
+const WATCHER_CONFIG_FN: &str = "watcher_config";
+
+/// Whether the tokens hold `with_follow_symlinks ( false )`.
+fn says_no_follow(t: &[SrcTok]) -> bool {
+    (0..t.len()).any(|i| {
+        tok_ident(t, i, "with_follow_symlinks")
+            && tok_punct(t, i + 1, '(')
+            && tok_ident(t, i + 2, "false")
+            && tok_punct(t, i + 3, ')')
+    })
+}
+
+/// Whether a constructor's arguments carry a non-following config: the shared
+/// `watcher_config()` or an inline `with_follow_symlinks(false)`.
+fn config_arg_ok(args: &[SrcTok]) -> bool {
+    let shared = (0..args.len()).any(|i| {
+        tok_ident(args, i, WATCHER_CONFIG_FN)
+            && tok_punct(args, i + 1, '(')
+            && tok_punct(args, i + 2, ')')
+    });
+    shared || says_no_follow(args)
+}
+
+/// The generic arguments of the `<…>` that opens at `open`, split at depth-0 commas.
+fn generic_args(t: &[SrcTok], open: usize) -> Vec<&[SrcTok]> {
+    let end = skip_angle(t, open);
+    let inner = &t[(open + 1).min(end)..end.saturating_sub(1).max(open + 1)];
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (k, x) in inner.iter().enumerate() {
+        match x {
+            SrcTok::Punct('<' | '(' | '[') => depth += 1,
+            SrcTok::Punct('>' | ')' | ']') => depth -= 1,
+            SrcTok::Punct(',') if depth == 0 => {
+                parts.push(&inner[start..k]);
+                start = k + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&inner[start..]);
+    parts
+}
+
+/// Whether the tokens (a non-test file of the `notify` owner) build a watcher that can follow
+/// directory links (`WatcherFollowsLinks`, R-T0-2), at any one call site:
+///
+/// - `new_debouncer`, `FileIdMap`, `RecommendedCache` or `recommended_watcher` at all;
+/// - `with_follow_symlinks(…)` with anything but `false`;
+/// - a watcher type or `new_debouncer_opt` renamed (`… as W`) or aliased (`type W = …`);
+/// - `new_debouncer_opt` without a turbofish whose cache is `NoCache`, or without a
+///   non-following config argument ([`config_arg_ok`]);
+/// - `W::new(…)`/`W::with_initial_scan(…)` of a watcher type, directly or qualified
+///   (`<X as Watcher>::new`), without a non-following config argument;
+/// - `Config::default()` whose method chain does not set `with_follow_symlinks(false)`;
+/// - a `fn watcher_config` whose body does not set `with_follow_symlinks(false)`.
+///
+/// Limits: a watcher built in a generic function (`W::new(h, Default::default())` with
+/// `W: Watcher`) is not seen here; `clippy.toml` refuses `notify::Watcher::new` itself.
+fn watcher_follows_links(t: &[SrcTok]) -> bool {
+    let banned = t
+        .iter()
+        .any(|x| matches!(x, SrcTok::Ident(s) if WATCHER_BANNED.contains(&s.as_str())));
+    let follows = (0..t.len()).any(|i| {
+        tok_ident(t, i, "with_follow_symlinks")
+            && !(tok_punct(t, i + 1, '(')
+                && tok_ident(t, i + 2, "false")
+                && tok_punct(t, i + 3, ')'))
+    });
+    let is_watcher = |k: usize| WATCHER_TYPES.iter().any(|w| tok_ident(t, k, w));
+    let renamed = (0..t.len()).any(|i| {
+        (is_watcher(i) || tok_ident(t, i, "new_debouncer_opt")) && tok_ident(t, i + 1, "as")
+    }) || (0..t.len())
+        .any(|i| tok_ident(t, i, "type") && (i + 1..item_end(t, i)).any(&is_watcher));
+    // Imports name the function without calling it; every other mention is a call (or a
+    // function pointer) and is checked.
+    let mut in_use = vec![false; t.len()];
+    for i in 0..t.len() {
+        if tok_ident(t, i, "use") {
+            let end = item_end(t, i).min(t.len());
+            in_use[i..end].iter_mut().for_each(|x| *x = true);
+        }
+    }
+    let debouncer_call = (0..t.len()).any(|i| {
+        if !tok_ident(t, i, "new_debouncer_opt") || in_use[i] {
+            return false;
+        }
+        let turbofish =
+            tok_punct(t, i + 1, ':') && tok_punct(t, i + 2, ':') && tok_punct(t, i + 3, '<');
+        if !turbofish {
+            return true;
+        }
+        let args = generic_args(t, i + 3);
+        let cache_ok = args
+            .get(2)
+            .and_then(|a| a.last())
+            .is_some_and(|x| *x == SrcTok::Ident("NoCache".into()));
+        let open = skip_angle(t, i + 3);
+        !(cache_ok && tok_punct(t, open, '(') && config_arg_ok(group_inner(t, open)))
+    });
+    let ctor = |k: usize| {
+        (tok_ident(t, k, "new") || tok_ident(t, k, "with_initial_scan")) && tok_punct(t, k + 1, '(')
+    };
+    let watcher_ctor_call = (0..t.len()).any(|i| {
+        if !(tok_punct(t, i, ':') && tok_punct(t, i + 1, ':') && ctor(i + 2)) || i == 0 {
+            return false;
+        }
+        let on_watcher = if tok_punct(t, i - 1, '>') {
+            // `<X as Watcher>::new`: the qualified `<…>` that closes at `i - 1`.
+            let mut depth = 0i32;
+            let mut k = i - 1;
+            let mut found = false;
+            loop {
+                if tok_punct(t, k, '>') {
+                    depth += 1;
+                } else if tok_punct(t, k, '<') {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                found |= is_watcher(k);
+                if k == 0 {
+                    break;
+                }
+                k -= 1;
+            }
+            found
+        } else {
+            is_watcher(i - 1)
+        };
+        on_watcher && !config_arg_ok(group_inner(t, i + 3))
+    });
+    let default_config = (0..t.len()).any(|i| {
+        if !(tok_ident(t, i, "Config")
+            && tok_punct(t, i + 1, ':')
+            && tok_punct(t, i + 2, ':')
+            && tok_ident(t, i + 3, "default")
+            && tok_punct(t, i + 4, '('))
+        {
+            return false;
+        }
+        // The method chain after `Config::default()`: `.name(…)` repeated.
+        let mut k = group_end(t, i + 4);
+        let chain_start = k;
+        while tok_punct(t, k, '.')
+            && matches!(t.get(k + 1), Some(SrcTok::Ident(_)))
+            && tok_punct(t, k + 2, '(')
+        {
+            k = group_end(t, k + 2);
+        }
+        !says_no_follow(&t[chain_start..k.min(t.len())])
+    });
+    let shared_fn = (0..t.len()).any(|i| {
+        tok_ident(t, i, "fn")
+            && tok_ident(t, i + 1, WATCHER_CONFIG_FN)
+            && (i + 2..t.len())
+                .find(|k| tok_punct(t, *k, '{'))
+                .is_none_or(|open| !says_no_follow(group_inner(t, open)))
+    });
+    banned
+        || follows
+        || renamed
+        || debouncer_call
+        || watcher_ctor_call
+        || default_config
+        || shared_fn
+}
+// ## m4b-t01a-fr1
 
 /// Whether the backend path segment `seg` is one of `backends` (`gix_*` is a prefix).
 fn is_backend_segment(backends: &[&str], seg: &str) -> bool {
@@ -1818,11 +2378,15 @@ fn header_end(t: &[SrcTok], from: usize, body: bool) -> usize {
 /// Whether a `src/` file of a backend owner shows a backend type publicly
 /// (`BackendInPublicApi`):
 ///
-/// - a `pub use` of a backend path, or a glob import of one (`use notify::*`);
+/// - a `pub use` of a backend path or of a name imported from one (`use notify as n;
+///   pub use n::Config;`), or a glob import of either (`use notify::*`);
 /// - a `pub` item (not `pub(crate)`, `pub(super)`, `pub(in …)`) whose header names a backend
-///   path segment (`notify::…`, `gix_status::…`) or a name imported from a backend (`use
-///   notify::Config;` then `pub fn f() -> Config`); an enum's or a trait's whole body counts;
-/// - an `impl` item header that does the same (`impl From<notify::Error> for X`).
+///   path segment (`notify::…`, `gix_status::…`), a name imported from a backend, or a type
+///   alias of one (`type Inner = notify::Config;`, transitively); an enum's or a trait's whole
+///   body counts;
+/// - an `impl` item header that does the same, except a backend trait implemented for a type
+///   this file declares private (`impl DebounceEventHandler for Sink` with `struct Sink;`),
+///   which leaks nothing.
 ///
 /// `pub` items of private modules count too (fail closed: use `pub(crate)` for internals). A
 /// method called like a backend (`pub fn trash`) is not a path segment and passes.
@@ -1832,34 +2396,56 @@ fn backend_in_public_api(t: &[SrcTok], backends: &[&str]) -> bool {
             && tok_punct(t, k + 1, ':')
             && tok_punct(t, k + 2, ':')
     };
-    // The names imported from backends, and the re-exports and globs.
+    let (paths, globs) = imports(t);
+    // ## m4b-t01a-fr1 (review M1): names bound to a backend, through renames and type
+    // aliases, to a fixed point.
     let mut imported: BTreeSet<String> = BTreeSet::new();
-    for i in 0..t.len() {
-        if !tok_ident(t, i, "use") {
-            continue;
-        }
-        let end = item_end(t, i);
-        let mut first = i + 1;
-        while tok_punct(t, first, ':') {
-            first += 1;
-        }
-        let from_backend =
-            matches!(t.get(first), Some(SrcTok::Ident(s)) if is_backend_segment(backends, s));
-        if !from_backend {
-            continue;
-        }
-        let public = i > 0 && tok_ident(t, i - 1, "pub");
-        let glob = (first..end).any(|k| tok_punct(t, k, '*'));
-        if public || glob {
-            return true;
-        }
-        for k in first..end {
-            if let Some(SrcTok::Ident(s)) = t.get(k)
-                && !["self", "super", "crate", "as"].contains(&s.as_str())
-                && !(tok_punct(t, k + 1, ':') && tok_punct(t, k + 2, ':'))
-                && !tok_ident(t, k + 1, "as")
+    loop {
+        let before = imported.len();
+        for (p, name) in &paths {
+            if p.first()
+                .is_some_and(|f| is_backend_segment(backends, f) || imported.contains(f))
             {
-                imported.insert(s.clone());
+                imported.insert(name.clone());
+            }
+        }
+        for i in 0..t.len() {
+            if tok_ident(t, i, "type")
+                && let Some(SrcTok::Ident(name)) = t.get(i + 1)
+            {
+                let rhs = i + 2..item_end(t, i);
+                if rhs.clone().any(seg_at)
+                    || rhs
+                        .filter_map(|k| match &t[k] {
+                            SrcTok::Ident(s) => Some(s),
+                            _ => None,
+                        })
+                        .any(|s| imported.contains(s))
+                {
+                    imported.insert(name.clone());
+                }
+            }
+        }
+        if imported.len() == before {
+            break;
+        }
+    }
+    let from_backend = |p: &[String]| {
+        p.first()
+            .is_some_and(|f| is_backend_segment(backends, f) || imported.contains(f))
+    };
+    if globs.iter().any(|g| from_backend(g)) {
+        return true;
+    }
+    // A `pub use` of a backend path: the `use` items preceded by a bare `pub`.
+    for i in 1..t.len() {
+        if tok_ident(t, i, "use") && tok_ident(t, i - 1, "pub") {
+            let end = item_end(t, i).saturating_sub(1).max(i + 1);
+            let mut found = Vec::new();
+            let mut g = Vec::new();
+            flatten_use(t, i + 1, end, &[], &mut found, &mut g);
+            if found.iter().any(|(p, _)| from_backend(p)) || g.iter().any(|p| from_backend(p)) {
+                return true;
             }
         }
     }
@@ -1872,13 +2458,33 @@ fn backend_in_public_api(t: &[SrcTok], backends: &[&str]) -> bool {
                 })
                 .any(|s| imported.contains(s))
     };
+    // The types this file declares private (no bare `pub` before the keyword).
+    let private_type = |name: &str| {
+        (0..t.len()).any(|k| {
+            ["struct", "enum", "union"]
+                .iter()
+                .any(|kw| tok_ident(t, k, kw))
+                && tok_ident(t, k + 1, name)
+                && !(k > 0 && tok_ident(t, k - 1, "pub"))
+        })
+    };
     (0..t.len()).any(|i| {
         if tok_ident(t, i, "pub") && !tok_punct(t, i + 1, '(') && !tok_ident(t, i + 1, "use") {
             let body = (i + 1..(i + 4).min(t.len()))
                 .any(|k| tok_ident(t, k, "enum") || tok_ident(t, k, "trait"));
             shows(i + 1..header_end(t, i + 1, body))
         } else if tok_ident(t, i, "impl") && impl_item_header(t, i) {
-            shows(i + 1..header_end(t, i + 1, false))
+            let end = header_end(t, i + 1, false);
+            match (i + 1..end).find(|k| tok_ident(t, *k, "for")) {
+                Some(f) => {
+                    let self_ty = match t.get(f + 1) {
+                        Some(SrcTok::Ident(s)) => s.as_str(),
+                        _ => "",
+                    };
+                    shows(f + 1..end) || (shows(i + 1..f) && !private_type(self_ty))
+                }
+                None => shows(i + 1..end),
+            }
         } else {
             false
         }
@@ -1979,7 +2585,8 @@ pub fn source_violations(workspace: &Path) -> Vec<Violation> {
                 if product_file && spawns_git(&tokens, NO_PROCESS_CRATES.contains(&name.as_str())) {
                     found.insert((name.clone(), Rule::NoGitSubprocess, rel.clone()));
                 }
-                if product_file && watcher_follows_links(&tokens) {
+                // ## m4b-t01a-fr1 (I3): the one crate that may depend on `notify`.
+                if product_file && name == SCRIPTS && watcher_follows_links(&tokens) {
                     found.insert((name.clone(), Rule::WatcherFollowsLinks, rel.clone()));
                 }
                 if let Some(b) = api_backends
@@ -4617,8 +5224,8 @@ mod tests {
             (
                 "crates/core/hacivat-scripts/src/watch/mod.rs",
                 "// never `new_debouncer`: its FileIdMap follows links\n\
-                 fn cfg() -> notify::Config { notify::Config::default().with_follow_symlinks(false) }\n\
-                 fn w() { new_debouncer_opt::<_, RecommendedWatcher, NoCache>(D, None, h, NoCache, cfg()); }",
+                 fn watcher_config() -> notify::Config { notify::Config::default().with_follow_symlinks(false) }\n\
+                 fn w() { new_debouncer_opt::<_, RecommendedWatcher, NoCache>(D, None, h, NoCache, watcher_config()); }",
             ),
             (
                 "crates/core/hacivat-scripts/src/watch/poll.rs",
@@ -4727,4 +5334,334 @@ mod tests {
         }
     }
     // ## m4b-t01a-seams
+
+    // ## m4b-t01a-fr1 (review I1–I3, M1, M2: every probe form is a regression test)
+    /// Writes `forms` under `dir_prefix`, plus `extra` verbatim; asserts every form file is a
+    /// `rule` hit and every `ok` file is not.
+    fn assert_forms(rule: Rule, dir_prefix: &str, forms: &[(&str, &str)], ok: &[(&str, &str)]) {
+        let mut files: Vec<(String, String)> = forms
+            .iter()
+            .chain(ok)
+            .map(|(f, src)| (format!("{dir_prefix}{f}"), src.to_string()))
+            .collect();
+        files.sort();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let dir = source_tree(&refs);
+        let hits: Vec<String> = source_hits(dir.path(), rule)
+            .into_iter()
+            .map(|(_, f)| f)
+            .collect();
+        for (f, _) in forms {
+            let f = format!("{dir_prefix}{f}");
+            assert!(hits.contains(&f), "{rule:?}: {f} not flagged: {hits:?}");
+        }
+        for (f, _) in ok {
+            let f = format!("{dir_prefix}{f}");
+            assert!(!hits.contains(&f), "{rule:?}: {f} flagged: {hits:?}");
+        }
+    }
+
+    /// I1: no process can start from the two M4b crates, however the API is reached.
+    #[test]
+    fn m4b_crates_name_no_process_api() {
+        let forms: [(&str, &str); 17] = [
+            (
+                "shell_command.rs",
+                "fn f(x: &str) { gix::path::env::shell_command().arg(\"-c\").arg(x).spawn(); }",
+            ),
+            (
+                "gix_command.rs",
+                "fn f(x: &str) { gix::command::prepare(x).spawn(); }",
+            ),
+            (
+                "gix_command_crate.rs",
+                "fn f(x: &str) { gix_command::prepare(x).spawn(); }",
+            ),
+            (
+                "renamed.rs",
+                "use std::{fs, process as sp};\nfn f(x: &str) { sp::Command::new(x); }",
+            ),
+            (
+                "tokio.rs",
+                "fn f(x: &str) { tokio::process::Command::new(x); }",
+            ),
+            (
+                "execvp.rs",
+                "fn f(x: *const i8, a: *const *const i8) { unsafe { libc::execvp(x, a); } }",
+            ),
+            ("fork.rs", "fn f() { unsafe { libc::fork(); } }"),
+            (
+                "system_alias.rs",
+                "use libc::system as run;\nfn f(c: *const i8) { unsafe { run(c); } }",
+            ),
+            (
+                "posix_spawn.rs",
+                "use libc::{O_NOFOLLOW, posix_spawn};\nfn f() {}",
+            ),
+            ("syscall.rs", "fn f() { unsafe { libc::syscall(59); } }"),
+            ("command_ext.rs", "fn f(c: &mut impl CommandExt) {}"),
+            (
+                "gix_alias.rs",
+                "use gix as g;\nfn f(x: &str) { g::command::prepare(x).spawn(); }",
+            ),
+            (
+                "env_group.rs",
+                "use gix::path::{env};\nfn f() { env::xdg_config(\"x\", &mut |_| None); }",
+            ),
+            (
+                "gix_path_env.rs",
+                "fn f() { gix_path::env::installation_config(); }",
+            ),
+            (
+                "gix_glob.rs",
+                "use gix::*;\nfn f(x: &str) { command::prepare(x).spawn(); }",
+            ),
+            (
+                "libc_glob.rs",
+                "use libc::*;\nfn f() { unsafe { fork(); } }",
+            ),
+            (
+                "extern_crate.rs",
+                "extern crate std as s;\nfn f(x: &str) { s::process::Command::new(x); }",
+            ),
+        ];
+        let ok: [(&str, &str); 1] = [(
+            "fine.rs",
+            "use libc::{AT_FDCWD, O_NOFOLLOW};\nenum Command { Scan }\n\
+             fn f() { tokio::spawn(async {}); tokio::task::spawn_blocking(|| ()); std::thread::spawn(|| ());\n\
+             let command = Command::Scan; let processed = 1; let o = libc::O_NOFOLLOW;\n\
+             let r = gix::open::Options::isolated().with(gix::sec::Trust::Reduced); let p = gix::path::from_bstr(x); }",
+        )];
+        assert_forms(
+            Rule::NoGitSubprocess,
+            "crates/core/hacivat-git/src/",
+            &forms,
+            &ok,
+        );
+        assert_forms(
+            Rule::NoGitSubprocess,
+            "crates/core/hacivat-scripts/src/",
+            &forms,
+            &ok,
+        );
+    }
+
+    /// I2: the program name spelled at compile time, in any product crate.
+    #[test]
+    fn compile_time_git_spellings_are_flagged() {
+        let forms: [(&str, &str); 10] = [
+            ("stringify.rs", "fn f() { Command::new(stringify!(git)); }"),
+            (
+                "concat_char.rs",
+                "fn f() { Command::new(concat!(\"gi\", 't')); }",
+            ),
+            (
+                "concat_chars.rs",
+                "fn f() { Command::new(concat!('g', 'i', 't')); }",
+            ),
+            (
+                "concat_stringify.rs",
+                "fn f() { Command::new(concat!(\"g\", stringify!(it))); }",
+            ),
+            ("hex_escape.rs", "fn f() { Command::new(\"g\\x69t\"); }"),
+            (
+                "unicode_escape.rs",
+                "fn f() { Command::new(\"\\u{67}it\"); }",
+            ),
+            (
+                "bytes_escape.rs",
+                "fn f() { OsStr::from_bytes(b\"\\x67\\x69\\x74\"); }",
+            ),
+            (
+                "continuation.rs",
+                "fn f() { Command::new(\"gi\\\n        t\"); }",
+            ),
+            (
+                "stringify_path.rs",
+                "fn f() { Command::new(stringify!(/usr/bin/git)); }",
+            ),
+            (
+                "char_escape.rs",
+                "fn f() { Command::new(concat!('\\x67', \"it\")); }",
+            ),
+        ];
+        let ok: [(&str, &str); 1] = [(
+            "fine.rs",
+            "const A: &str = \".git\"; const B: &str = \".git/index\"; const C: &str = \"gitdir: \";\n\
+             const D: &str = \"scripts-git-badge-new\"; const E: &str = \"a .git file\";\n\
+             const F: &str = stringify!(digit); const G: &str = concat!(\"di\", \"g\", \"it\");\n\
+             const H: char = 'g'; const I: &str = \"g\\x69\";",
+        )];
+        assert_forms(
+            Rule::NoGitSubprocess,
+            "crates/app/hacivat-app/src/",
+            &forms,
+            &ok,
+        );
+    }
+
+    /// I3: every watcher construction is checked where it happens.
+    #[test]
+    fn watcher_call_sites_that_can_follow_links_are_flagged() {
+        let forms: [(&str, &str); 12] = [
+            (
+                "recommended.rs",
+                "fn w(h: H) { notify::recommended_watcher(h); }",
+            ),
+            (
+                "new_default.rs",
+                "fn w(h: H) { RecommendedWatcher::new(h, notify::Config::default()); }",
+            ),
+            (
+                "mixed.rs",
+                "use notify_debouncer_full::NoCache;\n\
+                 fn ok() -> notify::Config { notify::Config::default().with_follow_symlinks(false) }\n\
+                 fn w(h: H) { new_debouncer_opt::<_, RecommendedWatcher, WalkingCache>(D, None, h, WalkingCache::new(), notify::Config::default()); }",
+            ),
+            (
+                "poll_variable.rs",
+                "fn p(h: H, follow: bool) { PollWatcher::new(h, watcher_config().with_follow_symlinks(follow)); }",
+            ),
+            (
+                "inferred.rs",
+                "fn w(h: H) { new_debouncer_opt(D, None, h, NoCache, watcher_config()); }",
+            ),
+            (
+                "use_alias.rs",
+                "use notify::RecommendedWatcher as W;\nfn w(h: H) { W::new(h, watcher_config()); }",
+            ),
+            (
+                "type_alias.rs",
+                "type W = notify::PollWatcher;\nfn w(h: H) { W::new(h, watcher_config()); }",
+            ),
+            (
+                "qualified.rs",
+                "fn w(h: H, c: notify::Config) { <notify::INotifyWatcher as notify::Watcher>::new(h, c); }",
+            ),
+            (
+                "variable_config.rs",
+                "fn w(h: H, c: notify::Config) { PollWatcher::new(h, c); }",
+            ),
+            (
+                "bad_shared_config.rs",
+                "fn watcher_config() -> notify::Config { Default::default() }",
+            ),
+            (
+                "initial_scan.rs",
+                "fn w(h: H, s: S) { PollWatcher::with_initial_scan(h, notify::Config::default(), s); }",
+            ),
+            (
+                "fn_pointer.rs",
+                "fn w() { let f = new_debouncer_opt::<_, RecommendedWatcher, NoCache>; }",
+            ),
+        ];
+        let ok: [(&str, &str); 2] = [
+            (
+                "mod.rs",
+                "pub(crate) fn watcher_config() -> notify::Config {\n    notify::Config::default().with_follow_symlinks(false)\n}\n\
+                 fn w(h: H) { new_debouncer_opt::<_, RecommendedWatcher, NoCache>(D, None, h, NoCache, watcher_config()); }",
+            ),
+            (
+                "poll.rs",
+                "use super::watcher_config;\n\
+                 fn p(h: H) { PollWatcher::new(h, watcher_config().with_poll_interval(T)); }\n\
+                 fn q(h: H) { PollWatcher::new(h, notify::Config::default().with_follow_symlinks(false).with_poll_interval(T)); }",
+            ),
+        ];
+        assert_forms(
+            Rule::WatcherFollowsLinks,
+            "crates/core/hacivat-scripts/src/watch/",
+            &forms,
+            &ok,
+        );
+    }
+
+    /// M1: aliases and re-exports cannot hide a backend type; a backend trait implemented for
+    /// a private type leaks nothing.
+    #[test]
+    fn backend_aliases_and_reexports_in_public_api_are_flagged() {
+        let forms: [(&str, &str); 4] = [
+            (
+                "type_alias.rs",
+                "type Inner = notify::Config;\npub fn cfg() -> Inner { todo!() }",
+            ),
+            ("crate_alias.rs", "use notify as n;\npub use n::Config;"),
+            (
+                "alias_chain.rs",
+                "type A = notify::Event;\ntype B = Vec<A>;\npub struct S(pub B);",
+            ),
+            (
+                "public_impl.rs",
+                "pub struct Sink;\nimpl notify_debouncer_full::DebounceEventHandler for Sink { fn handle_event(&mut self, e: R) {} }",
+            ),
+        ];
+        let ok: [(&str, &str); 1] = [(
+            "private_impl.rs",
+            "struct Sink;\n\
+             impl notify_debouncer_full::DebounceEventHandler for Sink {\n\
+                 fn handle_event(&mut self, e: notify_debouncer_full::DebounceEventResult) {}\n\
+             }\n\
+             pub(crate) struct Inner;\nimpl From<notify::Error> for Inner { fn from(e: notify::Error) -> Self { Inner } }",
+        )];
+        assert_forms(
+            Rule::BackendInPublicApi,
+            "crates/core/hacivat-scripts/src/",
+            &forms,
+            &ok,
+        );
+    }
+
+    /// M2: the network and secrets stack, and build-dependency edges.
+    #[test]
+    fn scripts_reaching_net_secrets_rustls_or_by_build_edges_is_flagged() {
+        for bad in ["hacivat-net", "hacivat-secrets", "rustls"] {
+            let md = fx_at(&[("hacivat-scripts", "crates/core", &[bad])]);
+            assert_eq!(
+                rule_of(&md, "hacivat-scripts"),
+                Rule::ScriptsBelowExec,
+                "{bad}"
+            );
+        }
+        let md = fx_kind_at(
+            "hacivat-scripts",
+            "crates/core",
+            "hacivat-session",
+            DepKind::Build,
+            &[],
+        );
+        assert_eq!(rule_of(&md, "hacivat-scripts"), Rule::ScriptsBelowExec);
+        // Through a build edge, then a normal one.
+        let md = metadata(vec![
+            member(
+                "hacivat-scripts",
+                "crates/core",
+                vec![dep("helper", DepKind::Build, &[], None)],
+            ),
+            member("helper", "crates/core", normal(&["russh"])),
+        ]);
+        assert_eq!(rule_of(&md, "hacivat-scripts"), Rule::ScriptsBelowExec);
+    }
+
+    /// M2: the watcher's lower crates are owned by `hacivat-scripts` too.
+    #[test]
+    fn watcher_backend_crates_outside_scripts_are_flagged() {
+        for b in [
+            "notify-types",
+            "file-id",
+            "inotify",
+            "kqueue",
+            "fsevent-sys",
+        ] {
+            let md = fx_at(&[("hacivat-app", "crates/app", &[b])]);
+            assert_eq!(
+                rule_of(&md, "hacivat-app"),
+                Rule::BackendOutsideOwner,
+                "{b}"
+            );
+        }
+    }
+    // ## m4b-t01a-fr1
 }

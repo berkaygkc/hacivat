@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::names::LogicalDb;
 
 /// What reading a library's manifest found.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct ManifestRead {
     /// The `database` key, when the manifest was read and the name passed the rules.
     pub db: Option<LogicalDb>,

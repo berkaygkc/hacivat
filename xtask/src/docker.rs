@@ -818,6 +818,8 @@ mod tests {
 
     #[test]
     fn test_runs_the_ignored_tests_of_the_chosen_crates() {
+        // ## m4b-t01a-seams (named exception, review M6): `-p hacivat-scripts` joins the pinned
+        // default list (R-M4b-36).
         assert_eq!(
             test_args(&[], None).join(" "),
             "test -p hacivat-driver-pg -p hacivat-driver-mysql -p hacivat-driver-sqlite \

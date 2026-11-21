@@ -11,9 +11,21 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// The logical database a library binds (`database` or an alias in `workspace.toml`, or the
 /// folder name): NFC, original case kept for display. Binding compares two of these with
-/// NFC plus ASCII case-insensitive equality (Task 3), never with `==`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// [`LogicalDb::same_db`] (NFC plus ASCII case-insensitive equality, Task 3), never with `==`.
+///
+/// ## m4b-t01a-fr1 (review M4): no `PartialEq`, `Eq`, `Hash` or `Ord`, so exact-text equality
+/// cannot stand in for the binding comparison by accident.
+#[derive(Debug, Clone)]
 pub struct LogicalDb(pub(crate) Arc<str>);
+
+/// Whether two logical-database names bind the same library (HV-SCRIPT-02 step 4: NFC, then
+/// ASCII case-insensitive; `İ` ≠ `I`).
+///
+/// Task 1a stub (fail closed): `false` for every pair, so nothing binds.
+pub fn same_db(a: &str, b: &str) -> bool {
+    let _ = (a, b);
+    false
+}
 
 /// Why a name was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +45,11 @@ impl LogicalDb {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The binding comparison ([`same_db`]).
+    pub fn same_db(&self, other: &LogicalDb) -> bool {
+        same_db(self.as_str(), other.as_str())
     }
 }
 
