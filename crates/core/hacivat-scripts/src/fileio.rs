@@ -443,6 +443,28 @@ pub fn save_with_echo(
     }
 }
 
+// ## m4b-t10-service (named exception): the service's stamp of a changed file.
+/// The current stamp of `rel` under `env`, scoped and located exactly as [`read`] (the same
+/// `join`, `visible_at` and no-follow folder handles), its bytes hashed streaming and dropped:
+/// nothing is decoded or kept. The library service uses it for its echo, change and rename
+/// checks (HV-SCRIPT-08 steps 5–7), so script content is read only here, in `fileio` (T5 mg2).
+pub(crate) fn stamp_of(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+) -> Result<DiskStamp, ReadError> {
+    match locate(root, rel, env).map_err(Refusal::for_read)? {
+        Target::Missing { .. } => Err(ReadError::Io(io::ErrorKind::NotFound)),
+        Target::Existing { dir, name, lstat } => {
+            stamp_streaming(&dir, &name, &lstat).map_err(|e| match e {
+                SaveError::Io(kind) => ReadError::Io(kind),
+                _ => ReadError::PathRefused,
+            })
+        }
+    }
+}
+// ## m4b-t10-service
+
 /// A chunked UTF-8 reader of `rel` in `encoding` for "Run as script" (HV-SCRIPT-12), under
 /// `env` as [`read`]: the source behind `LibraryService::open_stream` (Task 10 wires it). Its
 /// BOM is dropped.

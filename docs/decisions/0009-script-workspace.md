@@ -714,3 +714,82 @@ More than 256 dataless folders answer `Unavailable(Dataless)`, which keeps the e
 - So the doc-hidden hooks stay test-only, whoever depends on the crate.
 
 **Cost.** Measured on macOS, debug build: 170 ms for a 10,000-file status (its 10,100 loose objects are checked) and 345 ms for 20,000 dataless paths.
+
+## m4b-t10 — library service and Go to script index
+
+### The actor (spec §5.4 rule 2; HV-SCRIPT-01..04, -08, -11 step 7)
+
+- `LibraryService::open(&LocalPaths, &Handle)` takes the core runtime's handle (R-T1a-2) and starts **one long-lived task on its blocking pool**. That task alone owns the `LibraryRegistry` (still the only writer of `libraries.toml`), every library's listing, the event source, the settle and echo bookkeeping and the status refresh.
+  - It handles one message at a time from a bounded inbox (1,024): API commands with a `oneshot` reply, hint batches from the source, and its own timers (tokio tasks that sleep and send).
+  - All of its file I/O (registry, manifest, scan, `lstat`, stamps, recovery sweep) runs on that blocking thread. The repository status runs on a separate blocking task, at most one per library.
+  - No lock is held across an `.await`. The only shared lock is the echo table, taken briefly by a save's blocking task and by the actor.
+- **Snapshots.** After each drained burst (at most 64 messages) the actor publishes one new `WorkspaceSnapshot` with `generation + 1` through `arc-swap`, only if something changed.
+  - Then it sends the events: one `Changed { id, generation }` per library that changed, then the file and status events.
+  - A reader gets the old `Arc` or the new one, never a half-built snapshot.
+  - Commands publish before they reply, so `attach`, `detach` and `map` are visible as soon as they return.
+  - `LibrarySnapshot.generation` is the workspace generation of the library's last change; the index can use it to tell what changed.
+- `WorkspaceSnapshot` gains `registry: Arc<[RegistryDiag]>` (what loading `libraries.toml` found) and `git_status(id, rel)`. The status is looked up by the scan's exact `RelPath` text: Task 7 keys it by the disk's spelling (NFD on macOS), and `git_badge_of_an_nfd_named_file_is_found_by_its_scan_path` proves an NFD-named modified file gets its badge (R-T1a-2).
+- `ServiceOptions` carries the timings (settle 150 ms, status debounce 500 ms, poll and recheck 2 s, echo 5 s), the scan and status limits and the home folder for `AttachGuard`. Tests shorten the timers; nothing else changes.
+
+### Hints, probes and rescans (alg/28 C3, C4)
+
+- Until Task 9 merges, the service consumes Task 1a's `EventSource` seam directly: `RawHint`s, not Task 9's reconciled `WatchEvent`s. The reconciliation below is the service's own; when Task 9's `Watcher` lands, the controller can swap it in front (its `EchoTable` and settle queue overlap this task's private ones).
+- A hinted path is mapped into the library first:
+  - outside the canonical root (or the chosen spelling), with a `..` or a non-UTF-8 component, under a skipped name (`.`-prefixed, `node_modules`) or not a valid `RelPath`: dropped;
+  - `.git/index`, `.git/HEAD`, `.git/packed-refs`, `.git/refs/…`: a status refresh;
+  - `.hacivat/…`: the manifest is read again (a teammate's pull can change the binding);
+  - the root itself: a rescan.
+- Every other path is probed through `pathsafe::join` (every component re-validated, no link followed) and, for a plain file, `lstat`.
+  - A plain script file inside a listed folder (or the root) is patched in place: updated, inserted in tree order, or removed.
+  - Anything else rescans the library with `scan::scan` and diffs the listing: a folder, a link, a new folder, an error, a known folder gone, a scan that had stopped at a limit, a batch of more than 1,000 paths, or a batch the full inbox dropped (the sink sets an overflow flag).
+  - So no hint can make the service list something the scan would not: every listing is either the scan's or a patch the scan would agree with.
+- A source that will not start, and `RawHint::Lost`, switch the library to `Polling(BackendLost)`: a rescan and diff every 2 s. **Until Task 9 fills `OsEventSource::watch`, the product's `open` polls every library this way.**
+
+### Settle, echo, rename (HV-SCRIPT-08 steps 5–7)
+
+- A changed file is stamped only after its `(len, mtime)` held for one settle window (re-queued at most 10 times, then stamped anyway). A cloud placeholder is never stamped.
+- Stamps go through a new `fileio::stamp_of` (named exception, fenced): the same `join`, `visible_at` and no-follow handles as `read`, the bytes hashed streaming and dropped. The service passes an environment the entry is shown under, so the scope check is never bypassed, and a file hidden everywhere is never read. Script content is read only in `fileio` (T5 mg2).
+- `save` records the new stamp in the echo table before the rename (`fileio::save_with_echo`). A settled stamp equal to one recorded in the last 5 s announces nothing; otherwise `FileChanged { stamp }`. The hash is compared too, so a foreign write with the same length in the same mtime tick is still announced.
+- A file gone is `FileDeleted`, unless a file of the same length and content hash appeared in the same change: then `FileRenamed`. The old hash is known from a tab's `read`, a `save` or an earlier stamp; a file never opened is never hashed for pairing.
+- A deleted path that comes back is announced as `FileChanged` (a tab showing "Deleted on disk" learns it is back). Other new files raise only `Changed`, so a `git checkout` does not hash every new file.
+
+### Status refresh (HV-SCRIPT-11 step 7)
+
+- Debounced 500 ms after any change to the listing and after a `.git/` hint. A trigger while a status runs queues exactly one more, so a checkout storm costs at most two runs per window.
+- A status equal to the last one publishes nothing and sends no `GitChanged`. The first status runs when a library comes up.
+- **Limit:** the hints come from the library's own watch. When the repository's `.git` sits above the library root (a library inside a monorepo), a commit that changes only `.git/index` is seen at the next change in the library, not at once. A watch of the discovered git dir needs a path from `hacivat-git` (whose discovery is private) and a non-recursive seam; left to Task 9 or Task 13.
+
+### Availability (HV-SCRIPT-01 step 5; the T4 carries)
+
+- Every `RootProblem` is mapped: `Missing`, `Changed` → `RootChanged`, `Unreadable(kind)`, and `InEnvFolder(name)` → `Unavailable(InEnvFolder)` plus `LibraryDiag::RootInEnvFolder(name)`.
+- An unavailable library is unwatched, shows no entries and no status, and is re-checked every 2 s. A folder that comes back is scanned and watched again. A root that now resolves elsewhere stays `RootChanged` for the session (the first canonical root is kept, fail closed).
+- Diagnostics: `LibraryDiag::Scan(scan::Diag)` (including `LinkScope`), `ScanStopped(LimitHit)` and `Suppressed(n)` (R-M4b-14: the limit is visible), `Manifest(manifest::Diag)`, `NoLogicalName`. Names in them are already in display form.
+
+### Commands
+
+- **Attach.** The registry's checks (HV-SCRIPT-01 step 2), then a root inside an environment folder is refused up front (`envscope::root_env_folder`). With `write_manifest`, `manifest::write_new` writes `format`, `database` and `aliases = []` only if the file is absent; an existing manifest is read and never rewritten, and a write that fails (a linked `.hacivat`) refuses the whole attach with nothing registered. `db` is what the manifest says; without one written, the library binds what the folder says, and any other database is a local mapping (`map`). The registry row is saved last; a failed save reloads the registry from the file.
+- **Detach** removes the row and the mappings, stops the watch, drops listing, status, settle, known hashes and echoes, and discards the recovery copies (R-T5-4). The folder is never touched (`detach_stops_watching_and_never_touches_the_folder` compares every byte).
+- **Map** writes the shared alias first (when asked, through `manifest::add_alias`), so a refused alias changes nothing; the mapping goes only into `libraries.toml` (R-M4b-8). `unmap` and `drop_profile` (R-M4b-2) are new.
+- **Read, save, stream** take the tab's environment (R-T5-6) and pass it to `fileio`, which refuses a path not shown under it (`production_path_is_refused_under_staging`; also `None`). They run on the blocking pool. An unknown or unavailable library answers `Io(NotFound)`.
+- **Deviation:** `open_stream` is now `async` and takes the file's `TextEncoding`. Opening is I/O (so it leaves the caller's thread), and `fileio::open_stream` decodes in the file's own encoding (a Windows-1254 script would otherwise not stream). No caller existed yet.
+- `create`, `rename` and `trash` stay Task 1a's fail-closed stubs: the file operations, and the `TrashContext` carry, are Task 13's.
+
+### Launch hygiene (T5 mf4)
+
+- `recovery::sweep_unregistered` (named exception, fenced) removes the copy folders of libraries that are not registered, at launch and only when the registry was read cleanly (not read-only, set aside, newer or unreadable: such a registry lists nothing to keep).
+- Only folders named by a hyphenated library UUID are considered, never `instances` or anything else. Links are never followed. A folder with a file modified in the last 10 minutes is kept, since another instance may have registered that library after this one read the registry.
+
+### Go to script index (HV-SCRIPT-09)
+
+- `ScriptIndex::build(&WorkspaceSnapshot)` touches no file system (names and metadata only, R-M4b-15). It offers every listed script file except those hidden everywhere (unknown `@name`, contradiction) and disabled links. Folders are not offered.
+- Display: the name, the folder and the library's folder name go through `pathsafe::display_name` (NFC, invisible and bidi characters as `<U+XXXX>`; R-M4b-23). Identity stays the scan's exact `RelPath`.
+- Keys: `hacivat_l10n::search::build_key` over the display text, with the caller's `SearchOpts` (the app passes `commands::palette::search_opts(cx)`). Keys are built once per `turkish_tolerant` choice, on first use. `musteri` finds `müşteri_segment.sql` (also NFD-named) for a Turkish user and not otherwise (D-074).
+- Rank: exact name or stem > name prefix > word prefix > substring > subsequence > a match only in the folder or library name (a plain substring there). Ties: shorter path, then library order, then the path's bytes.
+  - alg/28's `goto_ranking_table` lists `orders, reorder, big_orders, o_r_d` "in that order (prefix, word-prefix, substring, subsequence)". The list contradicts its own labels (`reorder` is a substring match, `big_orders` a word prefix). The test follows the labels and the rank rule: `orders, big_orders, reorder, o_r_d`. Reported for the controller.
+- Scope: `query_for(q, opts, limit, env)` keeps only files `envscope::visible` under `env`, the same rule as the tree. A `@production` file never appears for a staging or untagged connection. `query` lists every offered file, and `query_where` takes any filter (Task 15's candidates).
+- Cost: only the best `limit` hits copy their strings. The 10,000-entry query budget (5 ms) is a release budget (`HACIVAT_PERF=1 cargo test --release`); the debug build measures about 31 ms, almost all of it in `hacivat-l10n`'s subsequence matcher.
+
+### Enforcement
+
+- A test tripwire (`service_index_and_events_touch_no_file_themselves`) fails if `service.rs`, `index.rs` or `events.rs` names `std::fs`, `fs::`, `File::`, `OpenOptions`, a read call, `read_dir` or `canonicalize(`. Every touch of the disk goes through `fileio`, `pathsafe`, `scan`, `manifest`, `registry` or `recovery`.
+- A `check-deps` rule was not added: `xtask/src/check_deps.rs` is Task 1a's file, and the tripwire covers this task's own modules. A token rule for the whole crate is a candidate for Task 20.
