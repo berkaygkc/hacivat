@@ -37,8 +37,19 @@ fn fact(line: &str) {
     let _ = out.flush();
 }
 
+/// The canonical path, without Windows' verbatim `\\?\` prefix (which the git CLI and `cmd`
+/// do not take; the product canonicalizes on its own).
 fn canonical(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).expect("canonical path")
+    let c = std::fs::canonicalize(p).expect("canonical path");
+    #[cfg(windows)]
+    if let Some(s) = c
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .filter(|s| !s.starts_with("UNC"))
+    {
+        return PathBuf::from(s);
+    }
+    c
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -217,7 +228,10 @@ fn base(with_submodule: bool) -> Hostile {
                 "mods/sub",
             ],
         );
-        git(&root, &["commit", "-q", "--no-verify", "-m", "add submodule"]);
+        git(
+            &root,
+            &["commit", "-q", "--no-verify", "-m", "add submodule"],
+        );
         // A change inside the submodule's worktree, so a real submodule status would look.
         write(&root.join("mods/sub/s.sql"), b"select 'changed';\n");
     }
@@ -229,7 +243,10 @@ fn base(with_submodule: bool) -> Hostile {
 fn set(file: &Path, key: &str, value: &str) {
     let dir = file.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
-    git(&dir, &["config", "--file", file.to_str().unwrap(), key, value]);
+    git(
+        &dir,
+        &["config", "--file", file.to_str().unwrap(), key, value],
+    );
 }
 
 /// Every program-running key of `alg/28` §0.4 in `file`, each writing its own marker.
@@ -266,11 +283,20 @@ fn hostile_config(h: &Hostile, file: &Path, tag: &str) {
 /// A hooks directory whose `post-index-change` (and friends) write markers.
 fn hooks_dir(h: &Hostile, dir: &Path, tag: &str) {
     std::fs::create_dir_all(dir).unwrap();
-    for hook in ["post-index-change", "reference-transaction", "pre-commit", "post-checkout"] {
+    for hook in [
+        "post-index-change",
+        "reference-transaction",
+        "pre-commit",
+        "post-checkout",
+    ] {
         let p = dir.join(hook);
         write(
             &p,
-            format!("#!/bin/sh\n{}\n", touch_cmd(h, &format!("{tag}-hook-{hook}"))).as_bytes(),
+            format!(
+                "#!/bin/sh\n{}\n",
+                touch_cmd(h, &format!("{tag}-hook-{hook}"))
+            )
+            .as_bytes(),
         );
         #[cfg(unix)]
         {
@@ -303,7 +329,10 @@ fn arm_repository(h: &Hostile) {
         &root.join(".git/info/attributes"),
         b"*.sql filter=x diff=x merge=x\n",
     );
-    write(&root.join(".gitattributes"), b"*.sql filter=x diff=x merge=x\n");
+    write(
+        &root.join(".gitattributes"),
+        b"*.sql filter=x diff=x merge=x\n",
+    );
     // Changed content of another length: status must look at it.
     write(&root.join("a.sql"), b"select 'changed on disk';\n");
     let sub_cfg = root.join(".git/modules/mods/sub/config");
@@ -339,12 +368,18 @@ fn hostile_env(h: &Hostile) -> Vec<(String, String)> {
     hostile_config(h, &e.join("global.cfg"), "global");
     hostile_config(h, &e.join("system.cfg"), "system");
     let d = decoy(h);
-    let mut env = vec![
+    let env = vec![
         ("HOME".to_owned(), home.display().to_string()),
         ("USERPROFILE".to_owned(), home.display().to_string()),
         ("XDG_CONFIG_HOME".to_owned(), xdg.display().to_string()),
-        ("GIT_CONFIG_GLOBAL".to_owned(), e.join("global.cfg").display().to_string()),
-        ("GIT_CONFIG_SYSTEM".to_owned(), e.join("system.cfg").display().to_string()),
+        (
+            "GIT_CONFIG_GLOBAL".to_owned(),
+            e.join("global.cfg").display().to_string(),
+        ),
+        (
+            "GIT_CONFIG_SYSTEM".to_owned(),
+            e.join("system.cfg").display().to_string(),
+        ),
         ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()),
         ("GIT_CONFIG_KEY_0".to_owned(), "core.fsmonitor".to_owned()),
         ("GIT_CONFIG_VALUE_0".to_owned(), touch_cmd(h, "env-count")),
@@ -352,16 +387,29 @@ fn hostile_env(h: &Hostile) -> Vec<(String, String)> {
             "GIT_CONFIG_PARAMETERS".to_owned(),
             format!("'core.fsmonitor'='{}'", touch_cmd(h, "env-parameters")),
         ),
-        ("GIT_EXTERNAL_DIFF".to_owned(), touch_cmd(h, "env-external-diff")),
+        (
+            "GIT_EXTERNAL_DIFF".to_owned(),
+            touch_cmd(h, "env-external-diff"),
+        ),
         ("GIT_SSH_COMMAND".to_owned(), touch_cmd(h, "env-ssh")),
         ("GIT_DIR".to_owned(), d.join(".git").display().to_string()),
         ("GIT_WORK_TREE".to_owned(), d.display().to_string()),
-        ("GIT_INDEX_FILE".to_owned(), d.join(".git/index").display().to_string()),
+        (
+            "GIT_INDEX_FILE".to_owned(),
+            d.join(".git/index").display().to_string(),
+        ),
     ];
+    [env, fake_cli_first_on_path(h)].concat()
+}
+
+/// Unix: a fake program named like the git CLI, first on `PATH`, that writes a marker. On
+/// Windows the real `PATH` stays (a script cannot stand in for an `.exe` there), so any start
+/// of the real CLI is counted by the Job Object instead.
+fn fake_cli_first_on_path(h: &Hostile) -> Vec<(String, String)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let bin = e.join("bin");
+        let bin = h.envdir().join("bin");
         let fake = bin.join("git");
         write(
             &fake,
@@ -369,9 +417,13 @@ fn hostile_env(h: &Hostile) -> Vec<(String, String)> {
         );
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::var("PATH").unwrap_or_default();
-        env.push(("PATH".to_owned(), format!("{}:{path}", bin.display())));
+        vec![("PATH".to_owned(), format!("{}:{path}", bin.display()))]
     }
-    env
+    #[cfg(not(unix))]
+    {
+        let _ = h;
+        Vec::new()
+    }
 }
 
 /// What a child run saw, and what the spawn detector says.
@@ -414,7 +466,11 @@ fn detect(
 ) -> (&'static str, Option<u64>, bool) {
     let sandbox = Path::new("/usr/bin/sandbox-exec");
     if !sandbox.exists() {
-        let st = Command::new(exe).args(args).envs(envs.iter().cloned()).status().unwrap();
+        let st = Command::new(exe)
+            .args(args)
+            .envs(envs.iter().cloned())
+            .status()
+            .unwrap();
         return ("markers", None, st.success());
     }
     let st = Command::new(sandbox)
@@ -444,7 +500,11 @@ fn detect(
         .output()
         .is_ok_and(|o| o.status.success());
     if !has_strace {
-        let st = Command::new(exe).args(args).envs(envs.iter().cloned()).status().unwrap();
+        let st = Command::new(exe)
+            .args(args)
+            .envs(envs.iter().cloned())
+            .status()
+            .unwrap();
         return ("markers", None, st.success());
     }
     let log = dir.join("strace.log");
@@ -482,7 +542,13 @@ fn detect(
         cmdline.push_str(a);
     }
     let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
         .arg(&script)
         .env("HV_T07_JOB_CMD", &cmdline)
         .envs(envs.iter().cloned())
@@ -577,7 +643,11 @@ fn detect(
     envs: &[(String, String)],
     _dir: &Path,
 ) -> (&'static str, Option<u64>, bool) {
-    let st = Command::new(exe).args(args).envs(envs.iter().cloned()).status().unwrap();
+    let st = Command::new(exe)
+        .args(args)
+        .envs(envs.iter().cloned())
+        .status()
+        .unwrap();
     ("markers", None, st.success())
 }
 
@@ -619,7 +689,11 @@ fn hostile_repo_runs_no_program() {
     let h = base(true);
     arm_repository(&h);
     let env = hostile_env(&h);
-    assert!(h.markers().is_empty(), "a marker before the status: {:?}", h.markers());
+    assert!(
+        h.markers().is_empty(),
+        "a marker before the status: {:?}",
+        h.markers()
+    );
     let before = std::fs::read(h.root().join(".git/index")).unwrap();
     let run = run_child("hostile_repo_runs_no_program", &h.root(), &env, &h.envdir());
     let markers = h.markers();
@@ -685,7 +759,12 @@ fn submodule_entry_reads_no_global_config_and_spawns_nothing() {
         run.result.replace('\n', " ")
     ));
     assert!(run.result.ends_with("\nfifo_opened="), "{}", run.result);
-    assert_eq!(badge(&run.result, "mods/sub"), Some("Unknown(Submodule)"), "{}", run.result);
+    assert_eq!(
+        badge(&run.result, "mods/sub"),
+        Some("Unknown(Submodule)"),
+        "{}",
+        run.result
+    );
     assert_eq!(run.spawned.unwrap_or(0), 0);
     release(&fifos.1);
 }
@@ -699,9 +778,19 @@ fn global_and_system_config_are_not_read() {
     let h = base(false);
     write(&h.root().join("a.sql"), b"select 'changed';\n");
     let fifos = fifo_env(&h);
-    let run = run_child("global_and_system_config_are_not_read", &h.root(), &fifos.0, &h.envdir());
+    let run = run_child(
+        "global_and_system_config_are_not_read",
+        &h.root(),
+        &fifos.0,
+        &h.envdir(),
+    );
     assert!(run.result.ends_with("\nfifo_opened="), "{}", run.result);
-    assert_eq!(badge(&run.result, "a.sql"), Some("Modified"), "{}", run.result);
+    assert_eq!(
+        badge(&run.result, "a.sql"),
+        Some("Modified"),
+        "{}",
+        run.result
+    );
     release(&fifos.1);
 }
 
@@ -729,8 +818,14 @@ fn fifo_env(h: &Hostile) -> (Vec<(String, String)>, Vec<PathBuf>) {
     let env = vec![
         ("HOME".to_owned(), home.display().to_string()),
         ("XDG_CONFIG_HOME".to_owned(), xdg.display().to_string()),
-        ("GIT_CONFIG_GLOBAL".to_owned(), e.join("global.cfg").display().to_string()),
-        ("GIT_CONFIG_SYSTEM".to_owned(), e.join("system.cfg").display().to_string()),
+        (
+            "GIT_CONFIG_GLOBAL".to_owned(),
+            e.join("global.cfg").display().to_string(),
+        ),
+        (
+            "GIT_CONFIG_SYSTEM".to_owned(),
+            e.join("system.cfg").display().to_string(),
+        ),
         (CHILD_FIFOS.to_owned(), list.join(";")),
     ];
     (env, paths)
@@ -757,11 +852,22 @@ fn git_dir_env_is_ignored() {
     let env = vec![
         ("GIT_DIR".to_owned(), d.join(".git").display().to_string()),
         ("GIT_WORK_TREE".to_owned(), d.display().to_string()),
-        ("GIT_INDEX_FILE".to_owned(), d.join(".git/index").display().to_string()),
-        ("GIT_COMMON_DIR".to_owned(), d.join(".git").display().to_string()),
+        (
+            "GIT_INDEX_FILE".to_owned(),
+            d.join(".git/index").display().to_string(),
+        ),
+        (
+            "GIT_COMMON_DIR".to_owned(),
+            d.join(".git").display().to_string(),
+        ),
     ];
     let run = run_child("git_dir_env_is_ignored", &h.root(), &env, &h.envdir());
-    assert_eq!(badge(&run.result, "a.sql"), Some("Modified"), "{}", run.result);
+    assert_eq!(
+        badge(&run.result, "a.sql"),
+        Some("Modified"),
+        "{}",
+        run.result
+    );
     assert!(!run.result.contains("decoy-only"), "{}", run.result);
 }
 
@@ -776,8 +882,16 @@ fn trust_is_reduced_even_with_global_safe_directory_star() {
         let h = base(false);
         let root = h.root();
         let cfg = root.join(".git/config");
-        set(&cfg, "filter.x.clean", &touch_cmd(&h, &format!("{case}-clean")));
-        set(&cfg, "filter.x.process", &touch_cmd(&h, &format!("{case}-process")));
+        set(
+            &cfg,
+            "filter.x.clean",
+            &touch_cmd(&h, &format!("{case}-clean")),
+        );
+        set(
+            &cfg,
+            "filter.x.process",
+            &touch_cmd(&h, &format!("{case}-process")),
+        );
         write(&root.join(".git/info/attributes"), b"*.sql filter=x\n");
         // Same length as committed, so the content must be hashed (racy stat).
         write(&root.join("a.sql"), b"select 9;\n");
@@ -790,7 +904,10 @@ fn trust_is_reduced_even_with_global_safe_directory_star() {
         let env = vec![
             ("HOME".to_owned(), home.display().to_string()),
             ("USERPROFILE".to_owned(), home.display().to_string()),
-            ("GIT_CONFIG_GLOBAL".to_owned(), home.join(".gitconfig").display().to_string()),
+            (
+                "GIT_CONFIG_GLOBAL".to_owned(),
+                home.join(".gitconfig").display().to_string(),
+            ),
         ];
         let run = run_child(
             "trust_is_reduced_even_with_global_safe_directory_star",
@@ -835,7 +952,10 @@ fn foreign_owner_repo_is_untrusted() {
     std::os::unix::fs::chown(&dotgit, Some(65534), Some(65534)).unwrap();
     let st = status(&h.root(), &GitLimits::default());
     assert!(
-        matches!(st, GitState::Untrusted(hacivat_git::UntrustReason::ForeignOwner)),
+        matches!(
+            st,
+            GitState::Untrusted(hacivat_git::UntrustReason::ForeignOwner)
+        ),
         "{st:?}"
     );
     fact("t07 foreign_owner_repo_is_untrusted ran as root");

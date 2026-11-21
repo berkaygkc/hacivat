@@ -47,13 +47,26 @@ fn cli_ok(test: &str) -> bool {
     let (maj, min, v) = cli_version();
     let ok = (*maj, *min) >= (2, 30);
     if !ok {
-        fact(&format!("t07 {test} skipped git_version={v} (needs >= 2.30)"));
+        fact(&format!(
+            "t07 {test} skipped git_version={v} (needs >= 2.30)"
+        ));
     }
     ok
 }
 
+/// The canonical path, without Windows' verbatim `\\?\` prefix (which the git CLI does not
+/// take; the product canonicalizes on its own).
 fn canonical(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).expect("canonical path")
+    let c = std::fs::canonicalize(p).expect("canonical path");
+    #[cfg(windows)]
+    if let Some(s) = c
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .filter(|s| !s.starts_with("UNC"))
+    {
+        return PathBuf::from(s);
+    }
+    c
 }
 
 /// A fixture repository: `dir` holds the worktree, `env` the CLI's empty home and global config
@@ -146,7 +159,10 @@ impl Repo {
 
     /// Runs the CLI where failure is the point (a conflicting merge).
     fn git_may_fail(&self, args: &[&str]) {
-        let _ = self.cmd_in(&self.root(), args).output().expect("run the git CLI");
+        let _ = self
+            .cmd_in(&self.root(), args)
+            .output()
+            .expect("run the git CLI");
     }
 
     fn write(&self, rel: &str, bytes: &[u8]) {
@@ -532,7 +548,11 @@ fn nfd_named_modified_file_has_badge() {
 
 #[test]
 fn index_is_never_written() {
-    for fx in ["worktree-modified", "same-size-same-second", "touched-unchanged"] {
+    for fx in [
+        "worktree-modified",
+        "same-size-same-second",
+        "touched-unchanged",
+    ] {
         let repo = build_fixture(fx);
         let before = index_bytes(&repo);
         assert!(!before.is_empty());
@@ -546,7 +566,10 @@ fn index_is_never_written() {
 #[test]
 fn filtered_path_is_unknown() {
     let repo = build_fixture("clean");
-    repo.write(".gitattributes", b"a.sql filter=x\nb.sql filter=lfs\nreports/* -filter\n");
+    repo.write(
+        ".gitattributes",
+        b"a.sql filter=x\nb.sql filter=lfs\nreports/* -filter\n",
+    );
     repo.commit_all();
     repo.write("a.sql", b"select 'changed';\n");
     repo.write("n.sql", b"select 4;\n");
@@ -597,7 +620,9 @@ fn submodule_root_is_unknown() {
     );
     // Nothing inside the submodule is listed: it is not opened.
     assert!(
-        !s.by_path.keys().any(|k| k.as_str().starts_with("mods/sub/")),
+        !s.by_path
+            .keys()
+            .any(|k| k.as_str().starts_with("mods/sub/")),
         "{:?}",
         s.by_path
     );
@@ -649,10 +674,8 @@ fn unreadable(p: &Path) -> impl Drop {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
-                let _ = std::fs::set_permissions(
-                    &self.path,
-                    std::fs::Permissions::from_mode(0o644),
-                );
+                let _ =
+                    std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o644));
             }
         }
     }
@@ -693,7 +716,9 @@ fn unsupported_repo_format_is_unavailable() {
             .output()
             .unwrap();
         if !out.status.success() {
-            fact(&format!("t07 unsupported_format {what} skipped (the CLI cannot create it)"));
+            fact(&format!(
+                "t07 unsupported_format {what} skipped (the CLI cannot create it)"
+            ));
             continue;
         }
         std::fs::write(dir.path().join("a.sql"), b"select 1;\n").unwrap();
@@ -725,7 +750,11 @@ fn linked_worktree_and_shared_clone_are_read() {
     for fx in ["linked-worktree", "shared-clone"] {
         let repo = build_fixture(fx);
         let got = ours(&repo.status());
-        assert_eq!(got.get("a.sql").map(String::as_str), Some("Modified"), "{fx}");
+        assert_eq!(
+            got.get("a.sql").map(String::as_str),
+            Some("Modified"),
+            "{fx}"
+        );
     }
 }
 
@@ -854,7 +883,10 @@ fn status_of_10k_files_under_1s() {
     let t = std::time::Instant::now();
     let got = ours(&repo.status());
     let ms = t.elapsed().as_millis();
-    fact(&format!("t07 perf status_10k_ms={ms} changed={}", got.len()));
+    fact(&format!(
+        "t07 perf status_10k_ms={ms} changed={}",
+        got.len()
+    ));
     assert_eq!(got.len(), 100);
     assert!(ms < 1000, "{ms} ms");
 }
@@ -870,11 +902,16 @@ fn status_with_20k_excludes_under_1s() {
         repo.write(&format!("d{}/f{i}.sql", i % 100), b"select 1;\n");
     }
     repo.commit_all();
-    let names: Vec<String> = (0..20_000).map(|i| format!("d{}/f{i}.sql", i % 100)).collect();
+    let names: Vec<String> = (0..20_000)
+        .map(|i| format!("d{}/f{i}.sql", i % 100))
+        .collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let t = std::time::Instant::now();
-    let st =
-        hacivat_git::testing::status_treating_as_dataless(&repo.library(), &GitLimits::default(), &refs);
+    let st = hacivat_git::testing::status_treating_as_dataless(
+        &repo.library(),
+        &GitLimits::default(),
+        &refs,
+    );
     let ms = t.elapsed().as_millis();
     let n = match &st {
         GitState::Ready(s) => s.by_path.len(),

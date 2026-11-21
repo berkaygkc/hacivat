@@ -171,7 +171,8 @@ pub(crate) fn is_dataless(md: &std::fs::Metadata) -> bool {
         use std::os::windows::fs::MetadataExt as _;
         const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
         const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-        md.file_attributes() & (FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+        md.file_attributes()
+            & (FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
             != 0
     }
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -236,7 +237,11 @@ mod tests {
         b.add("outside.sql".into(), FileStatus::Modified);
         let out = b.into_library("lib", &lib, &never);
         let want_key = format!("{nfd_dir}/{nfd_file}");
-        assert_eq!(out.get(want_key.as_str()), Some(&FileStatus::Modified), "{out:?}");
+        assert_eq!(
+            out.get(want_key.as_str()),
+            Some(&FileStatus::Modified),
+            "{out:?}"
+        );
         assert_eq!(out.get("plain.sql"), Some(&FileStatus::New));
         assert_eq!(out.len(), 2, "{out:?}");
     }

@@ -15,8 +15,19 @@ use hacivat_git::{FileStatus, GitLimits, GitState, status};
 const CHILD_LIB: &str = "HV_T07_CHILD_LIB";
 const CHILD_OUT: &str = "HV_T07_CHILD_OUT";
 
+/// The canonical path, without Windows' verbatim `\\?\` prefix (which the git CLI does not
+/// take; the product canonicalizes on its own).
 fn canonical(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).expect("canonical path")
+    let c = std::fs::canonicalize(p).expect("canonical path");
+    #[cfg(windows)]
+    if let Some(s) = c
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .filter(|s| !s.starts_with("UNC"))
+    {
+        return PathBuf::from(s);
+    }
+    c
 }
 
 fn git(cwd: &Path, args: &[&str]) {
@@ -24,7 +35,12 @@ fn git(cwd: &Path, args: &[&str]) {
     let empty = cwd.join("hv-t07-no-global-config");
     let mut c = Command::new("git");
     c.current_dir(cwd).args(args);
-    for k in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_PARAMETERS"] {
+    for k in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_CONFIG_PARAMETERS",
+    ] {
         c.env_remove(k);
     }
     c.env("GIT_CONFIG_NOSYSTEM", "1")
@@ -111,13 +127,23 @@ fn discovery_stops_at_home_and_fs_boundary() {
     // A repository above home: never claimed either.
     let home = repo.join("lib");
     write(&home.join("sub/s.sql"), b"select 3;\n");
-    let out = in_child("discovery_stops_at_home_and_fs_boundary", &home.join("sub"), &home, &top);
+    let out = in_child(
+        "discovery_stops_at_home_and_fs_boundary",
+        &home.join("sub"),
+        &home,
+        &top,
+    );
     assert_eq!(out, "NotARepo", "the repository is above home");
     // Control: home elsewhere, the same library has its badges (the committed file changed,
     // and the untracked one written above).
     let elsewhere = top.join("elsewhere-home");
     std::fs::create_dir_all(&elsewhere).unwrap();
-    let out = in_child("discovery_stops_at_home_and_fs_boundary", &lib, &elsewhere, &top);
+    let out = in_child(
+        "discovery_stops_at_home_and_fs_boundary",
+        &lib,
+        &elsewhere,
+        &top,
+    );
     assert_eq!(out, "Ready a.sql=Modified;sub/s.sql=New");
 }
 

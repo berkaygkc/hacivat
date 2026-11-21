@@ -155,7 +155,10 @@ fn gitfile_layout(found: &Found, owned: Owner<'_>) -> Result<Layout, GitState> {
     let commondir = t.join("commondir");
     // A linked worktree: `<common>/worktrees/<name>`, whose `commondir` leads back.
     let parent = t.parent();
-    if parent.and_then(Path::file_name).is_some_and(|n| n == "worktrees") {
+    if parent
+        .and_then(Path::file_name)
+        .is_some_and(|n| n == "worktrees")
+    {
         let common = parent.and_then(Path::parent).map(Path::to_path_buf);
         let Some(text) = small_text(&commondir) else {
             return redirected();
@@ -464,7 +467,8 @@ mod tests {
             level: 0,
             trust,
         };
-        let mut f = gix::config::File::new(meta(gix::config::Source::Local, gix::sec::Trust::Reduced));
+        let mut f =
+            gix::config::File::new(meta(gix::config::Source::Local, gix::sec::Trust::Reduced));
         f.new_section("core", None).unwrap();
         assert!(!promoted_sections(&f));
         f.new_section_with_meta(
@@ -473,7 +477,10 @@ mod tests {
             meta(gix::config::Source::User, gix::sec::Trust::Full),
         )
         .unwrap();
-        assert!(!promoted_sections(&f), "a user section is not a repository section");
+        assert!(
+            !promoted_sections(&f),
+            "a user section is not a repository section"
+        );
         f.new_section_with_meta(
             "filter",
             Some("y".into()),

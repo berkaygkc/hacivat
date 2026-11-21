@@ -55,7 +55,9 @@ use crate::{FileStatus, GitError, GitLimits, GitState, GitStatus, UnknownWhy};
 static RUNNING: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
 fn running() -> std::sync::MutexGuard<'static, BTreeSet<PathBuf>> {
-    RUNNING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    RUNNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Removes its library from [`RUNNING`] when the worker ends (also on a panic).
@@ -80,9 +82,11 @@ pub(crate) fn status_with(
 ) -> GitState {
     let root = library_root.to_path_buf();
     let limits = *limits;
-    run_timed(library_root.to_path_buf(), limits.timeout, move |interrupt| {
-        pipeline(&root, &limits, &dataless, interrupt)
-    })
+    run_timed(
+        library_root.to_path_buf(),
+        limits.timeout,
+        move |interrupt| pipeline(&root, &limits, &dataless, interrupt),
+    )
 }
 
 /// Runs `work` on a worker thread and waits at most `timeout` for its answer (m3).
@@ -268,12 +272,16 @@ fn collect(
         ))
     };
     let prefix = found.prefix.as_str();
-    let index = repo.index_or_empty().map_err(gix_failed("index read"))?;
+    let on_disk = repo.index_or_empty().map_err(gix_failed("index read"))?;
     let mut badges = Badges::default();
 
-    // Gitlinks are Unknown(Submodule); dataless tracked files are Unknown(Dataless) and leave
-    // the pathspec, so gix never opens them (I2: [Observed] it never reads an excluded path;
-    // [Inferred] that this keeps the OS from downloading one).
+    // Gitlinks are Unknown(Submodule). Dataless tracked files are Unknown(Dataless) and are
+    // removed from an in-memory copy of the index (never written), so gix neither compares
+    // nor hashes them: the walk sees an untracked name (an `lstat`, no open), which the
+    // precedence turns back into Unknown(Dataless). [Observed] such a path is never read
+    // (`excluded_path_is_never_opened_by_status`); [Inferred] that this keeps the OS from
+    // downloading it (I2, n6). `alg/28` step 6 named `:(exclude)` pathspecs; 20,000 of them
+    // made the walk quadratic (U-05: past the 5 s budget), so Task 7 drops entries instead.
     let extra: BTreeSet<BString> = extra_dataless
         .iter()
         .map(|l| {
@@ -284,10 +292,10 @@ fn collect(
             }
         })
         .collect();
-    let mut excludes: Vec<BString> = Vec::new();
+    let mut dataless_paths: BTreeSet<BString> = BTreeSet::new();
     let mut tracked: Vec<(BString, gix::index::entry::Mode)> = Vec::new();
-    for entry in index.entries() {
-        let path = entry.path(&index);
+    for entry in on_disk.entries() {
+        let path = entry.path(&on_disk);
         if !map::under_prefix(path, prefix) {
             continue;
         }
@@ -301,9 +309,7 @@ fn collect(
                 .and_then(|p| std::fs::symlink_metadata(found.worktree.join(p)).ok())
                 .is_some_and(|m| map::is_dataless(&m));
         if dataless {
-            if badges.get(path).is_none() {
-                excludes.push(format!(":(exclude,top,literal){path}").into());
-            }
+            dataless_paths.insert(path.to_owned());
             badges.add(path, FileStatus::Unknown(UnknownWhy::Dataless));
             continue;
         }
@@ -312,15 +318,22 @@ fn collect(
     if interrupt.load(Ordering::SeqCst) {
         return Err(timed_out());
     }
+    let without_dataless;
+    let index: &gix::index::State = if dataless_paths.is_empty() {
+        &on_disk
+    } else {
+        let mut copy = gix::index::State::clone(&on_disk);
+        copy.remove_entries(|_, path, _| dataless_paths.contains(path));
+        // The cache-tree extension may name the removed paths; nothing here needs it.
+        copy.remove_tree();
+        without_dataless = copy;
+        &without_dataless
+    };
 
     let mut patterns: Vec<BString> = Vec::new();
     if !prefix.is_empty() {
         patterns.push(format!(":(top,literal){prefix}").into());
-    } else if !excludes.is_empty() {
-        // Exclusions alone would match nothing: start from the whole worktree.
-        patterns.push(":(top)".into());
     }
-    patterns.extend(excludes);
 
     // Index vs worktree.
     let submodules = NoopSubmodules::default();
@@ -341,7 +354,7 @@ fn collect(
         thread_limit: None,
     };
     let walked = repo.index_worktree_status(
-        &index,
+        index,
         &patterns,
         &mut rec,
         gix::status::plumbing::index_as_worktree::traits::FastEq,
@@ -379,7 +392,7 @@ fn collect(
             false,
             &patterns,
             true,
-            &index,
+            index,
             gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
         )
         .map_err(gix_failed("pathspec"))?;
@@ -387,7 +400,7 @@ fn collect(
     let mut overflow = false;
     repo.tree_index_status(
         &head_tree,
-        &index,
+        index,
         Some(&mut pathspec),
         gix::status::tree_index::TrackRenames::Disabled,
         |change, _, _| {
@@ -425,15 +438,13 @@ fn collect(
     // path's bytes are not what the index compares, so its badge is Unknown, never Modified.
     let mut attrs = repo
         .attributes_only(
-            &index,
+            index,
             gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
         )
         .map_err(gix_failed("attribute setup"))?;
     let changed = badges.paths();
-    let mut probe: Vec<(BString, Option<gix::index::entry::Mode>)> = tracked
-        .into_iter()
-        .map(|(p, m)| (p, Some(m)))
-        .collect();
+    let mut probe: Vec<(BString, Option<gix::index::entry::Mode>)> =
+        tracked.into_iter().map(|(p, m)| (p, Some(m))).collect();
     probe.extend(changed.into_iter().map(|p| (p, None)));
     for (path, mode) in probe {
         if interrupt.load(Ordering::SeqCst) {
@@ -515,7 +526,10 @@ mod tests {
             i.store(flag.load(Ordering::SeqCst), Ordering::SeqCst);
             GitState::NotARepo
         });
-        assert!(matches!(st, GitState::Unavailable(GitError::Timeout)), "{st:?}");
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Timeout)),
+            "{st:?}"
+        );
         let s2 = Arc::clone(&started);
         let second = run_timed(k.clone(), Duration::from_secs(5), move |_| {
             s2.fetch_add(1, Ordering::SeqCst);
@@ -525,7 +539,10 @@ mod tests {
         release_tx.send(()).unwrap();
         wait_released(&k);
         assert_eq!(started.load(Ordering::SeqCst), 1, "a second worker started");
-        assert!(saw_interrupt.load(Ordering::SeqCst), "the interrupt flag was not set");
+        assert!(
+            saw_interrupt.load(Ordering::SeqCst),
+            "the interrupt flag was not set"
+        );
         // Once released, the library runs again.
         let third = run_timed(k, Duration::from_secs(5), |_| GitState::NotARepo);
         assert!(matches!(third, GitState::NotARepo));
@@ -535,7 +552,10 @@ mod tests {
     fn a_panicking_worker_is_unavailable_and_released() {
         let k = key("panics");
         let st = run_timed(k.clone(), Duration::from_secs(5), |_| panic!("boom"));
-        assert!(matches!(st, GitState::Unavailable(GitError::Failed(_))), "{st:?}");
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Failed(_))),
+            "{st:?}"
+        );
         wait_released(&k);
     }
 }
