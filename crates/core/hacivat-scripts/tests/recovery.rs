@@ -115,7 +115,8 @@ fn recovery_lives_outside_the_library_and_is_private() {
         let stem = f.file_stem().unwrap().to_str().unwrap();
         assert_eq!(stem.len(), 32);
         assert!(stem.bytes().all(|b| b.is_ascii_hexdigit()), "{stem}");
-        assert!(!f.to_string_lossy().contains("a.sql"));
+        // (The stem is hex only, so it holds no part of the script's name. A substring check
+        // on the whole path flaked: a stem ending in `a` before `.sql` contains "a.sql".)
     }
     #[cfg(unix)]
     {
