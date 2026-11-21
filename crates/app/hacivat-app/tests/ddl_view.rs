@@ -877,6 +877,12 @@ fn reload_clears_couldnt_check_on_a_stale_namespace(cx: &mut TestAppContext) {
 // ## m4-t33b-carries (T25 review m-5, NOTES surface 11 "Keyboard"): the notice's Reload is the
 // first Tab stop after the toolbar, though it is drawn below the options strip: Shift-Tab from
 // it reaches the toolbar's last button (Open in console), not the strip.
+//
+// ## m4-t33-flaky2: the keys are pressed and released (a button clicks on the key-up, which
+// `simulate_keystrokes` never sends), and the profile stays disconnected: before, neither
+// Reload nor the toolbar's buttons were Tab stops, so Shift-Tab reached the explorer, whose
+// Enter connected the profile, and the console it counted was the one a connect opens once the
+// fake's connect finished on a Tokio thread (a race `run_until_parked` does not wait for).
 #[gpui::test]
 fn the_notice_button_is_the_first_tab_stop_after_the_toolbar(cx: &mut TestAppContext) {
     let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
@@ -888,23 +894,51 @@ fn the_notice_button_is_the_first_tab_stop_after_the_toolbar(cx: &mut TestAppCon
             .notices
             .contains(&"hv-ddl-view-unknown".to_string())
     );
-    let reload = vcx.cx.read(|cx| {
-        ddl_view::view_of(id, &users_key(), cx)
-            .expect("the view")
-            .read(cx)
-            .reload_focus()
-            .clone()
+    let (reload, console_button) = vcx.cx.read(|cx| {
+        let v = ddl_view::view_of(id, &users_key(), cx).expect("the view");
+        let v = v.read(cx);
+        (v.reload_focus().clone(), v.console_focus().clone())
     });
+    let focused = |vcx: &VisualTestContext, h: &gpui::FocusHandle| {
+        in_window(vcx, |window, _| h.is_focused(window))
+    };
     in_window(vcx, |window, cx| window.focus(&reload, cx));
     vcx.run_until_parked();
-    let consoles = vcx.cx.read(|cx| Consoles::ids(cx).len());
-    vcx.simulate_keystrokes("shift-tab enter");
-    vcx.run_until_parked();
+    // Both are Tab stops: Shift-Tab from Reload is Open in console, Tab comes back.
+    press(vcx, "shift-tab");
+    assert!(
+        focused(vcx, &console_button),
+        "Shift-Tab from Reload is Open in console"
+    );
+    press(vcx, "tab");
+    assert!(focused(vcx, &reload), "Tab from Open in console is Reload");
+    let (consoles, tabs) = (vcx.cx.read(|cx| Consoles::ids(cx).len()), tab_count(vcx));
+    press(vcx, "shift-tab enter");
     assert_eq!(
         vcx.cx.read(|cx| Consoles::ids(cx).len()),
         consoles + 1,
-        "Shift-Tab from Reload is Open in console"
+        "Enter on Open in console opens a console"
     );
+    assert_eq!(tab_count(vcx), tabs + 1, "a new console tab");
+    // Open in console itself, not a connect (whose console opens later, off this thread).
+    assert!(
+        matches!(
+            live(vcx, "app-dev"),
+            hacivat_session::LiveState::Disconnected
+        ),
+        "nothing connected"
+    );
+    assert_eq!(fake(vcx).connect_calls(), 0, "no connect was asked for");
+}
+
+/// Presses and releases each of `keys` (a button clicks on the key-up).
+fn press(vcx: &mut VisualTestContext, keys: &'static str) {
+    for key in keys.split(' ') {
+        let keystroke = gpui::Keystroke::parse(key).expect("a keystroke");
+        vcx.simulate_keystrokes(key);
+        vcx.simulate_event(gpui::KeyUpEvent { keystroke });
+        vcx.run_until_parked();
+    }
 }
 
 /// T25 round 1 (coordinator item 2): only Task 22's `Current` verdict shows the text as
