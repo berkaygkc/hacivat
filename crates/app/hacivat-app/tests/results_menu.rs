@@ -230,10 +230,9 @@ impl Tile {
     }
 
     fn redraw(&self) {
-        for _ in 0..3 {
-            in_window(self.vcx, |window, _| window.refresh());
-            self.vcx.run_until_parked();
-        }
+        // ## m4-t33d (T33 flaky3 follow-up): the last frame renders every view (a frame
+        // after `run_until_parked` may reuse a cached view, which records no texts).
+        redraw_full(self.vcx);
     }
 
     /// Each row of the menu over `target`: "|" for a separator, else "✓ " when checked, the

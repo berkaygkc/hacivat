@@ -189,10 +189,15 @@ pub struct DdlView {
     seen: Option<Arc<CatalogSnapshot>>,
     // ## m4-t33b-carries (T25 review m-5): the notices' Reload button.
     reload_focus: FocusHandle,
-    // ## m4-t33-flaky2 (NOTES surface 10 "Keyboard": the toolbar is Tab stops in visual order)
+    // ## m4-t33d (T33 flaky2 review I1, NOTES surface 11 "Keyboard"): the "no longer exists"
+    // notice's Close tab, a Tab stop the tests can name.
+    close_focus: FocusHandle,
+    // ## m4-t33-flaky2 (NOTES surface 10 "Keyboard": the toolbar and the strip are Tab stops
+    // in visual order; surface 11 "Keyboard": the notice's button is the first Tab stop after
+    // the toolbar)
     /// The toolbar's buttons: Refresh, Copy, Open in console, and each provided action's (by
-    /// command). A button is a Tab stop only through a handle that is one (GPUI takes the stop
-    /// from the tracked handle; a button's own handle is not one).
+    /// command). The view owns them so focus survives a re-render and the tests can name them
+    /// (a Button's own handle is a Tab stop too since T33d, R-T33-1).
     toolbar_focus: ToolbarFocus,
     _subscriptions: Vec<Subscription>,
 }
@@ -282,6 +287,7 @@ impl DdlView {
             check_seq: 0,
             seen: None,
             reload_focus: tab_stop(cx),
+            close_focus: tab_stop(cx),
             toolbar_focus: ToolbarFocus {
                 refresh: tab_stop(cx),
                 copy: tab_stop(cx),
@@ -309,6 +315,48 @@ impl DdlView {
     /// The toolbar's Open in console button (tests: its place in the Tab order).
     pub fn console_focus(&self) -> &FocusHandle {
         &self.toolbar_focus.console
+    }
+
+    // ## m4-t33d (T33 flaky2 review m1)
+    /// The toolbar's Refresh button (tests: its place in the Tab order).
+    pub fn refresh_focus(&self) -> &FocusHandle {
+        &self.toolbar_focus.refresh
+    }
+
+    // ## m4-t33d (T33 flaky2 review m1)
+    /// The toolbar's Copy button (tests: its place in the Tab order).
+    pub fn copy_focus(&self) -> &FocusHandle {
+        &self.toolbar_focus.copy
+    }
+
+    // ## m4-t33d (T33 flaky2 review I1)
+    /// The "no longer exists" notice's Close tab button (tests: its place in the Tab order).
+    pub fn close_focus(&self) -> &FocusHandle {
+        &self.close_focus
+    }
+
+    // ## m4-t33d (T33 flaky2 review I2)
+    /// The focus sat on a control this frame no longer draws (Reload once its notice is gone,
+    /// Copy or Open in console once disabled): it moves to the code area when the text is
+    /// shown, else to Refresh. Left there, GPUI would fall back to the window root, where F5
+    /// and the view's other bindings do nothing and Tab restarts at the window's first stop.
+    fn keep_focus_drawn(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let reload_drawn = matches!(self.freshness, Freshness::Changed | Freshness::Unknown);
+        let close_drawn = self.freshness == Freshness::Gone;
+        let toolbar = &self.toolbar_focus;
+        let lost = (!reload_drawn && self.reload_focus.is_focused(window))
+            || (!close_drawn && self.close_focus.is_focused(window))
+            || (!self.can_copy()
+                && (toolbar.copy.is_focused(window) || toolbar.console.is_focused(window)));
+        if !lost {
+            return;
+        }
+        let target = if self.body == Body::Script {
+            self.editor.focus_handle(cx)
+        } else {
+            toolbar.refresh.clone()
+        };
+        cx.defer_in(window, move |_, window, cx| window.focus(&target, cx));
     }
 
     /// The object shown (its key follows a rename).
@@ -1333,6 +1381,8 @@ impl DdlView {
                     Some(
                         Button::new("ddl-close", tr(cx, ids::hv::DDL_VIEW_CLOSE_TAB, NoArgs))
                             .compact(true)
+                            // ## m4-t33d (T33 flaky2 review I1, NOTES surface 11 "Keyboard")
+                            .focus_handle(self.close_focus.clone())
                             .on_click(on_view(&w, |v, window, cx| v.close_tab(window, cx))),
                     ),
                     "ddl-gone",
@@ -1472,7 +1522,9 @@ impl DdlView {
 }
 
 impl Render for DdlView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // ## m4-t33d (T33 flaky2 review I2)
+        self.keep_focus_drawn(window, cx);
         let theme = *Theme::get(cx);
         let c = &theme.tokens.colors;
         let weak = cx.entity().downgrade();
@@ -1492,10 +1544,12 @@ impl Render for DdlView {
                     .border_color(c.seam.to_hsla())
                     .child(toolbar),
             )
-            // ## m4-t33b-carries (T25 review m-5, NOTES surface 11 "Keyboard"): the notices'
-            // buttons are the first Tab stops after the toolbar, though they are drawn below
-            // the options strip. Tab follows paint order, so the notices come first in the
-            // tree and a reversed column draws the strip above them.
+            // ## m4-t33b-carries (T25 review m-5, NOTES surface 11 "Keyboard": the notice's
+            // button is the first Tab stop after the toolbar; surface 10 "Keyboard": the
+            // toolbar and the strip are Tab stops in visual order): the notices' buttons come
+            // right after the toolbar, though they are drawn below the options strip. Tab
+            // follows paint order, so the notices come first in the tree and a reversed column
+            // draws the strip above them.
             .child(
                 div()
                     .flex()

@@ -680,6 +680,43 @@ fn home_entry_points_are_buttons(cx: &mut TestAppContext) {
     assert_eq!(connect_calls(vcx), ["a"]);
 }
 
+// ## m4-t33d (R-T33-1): the home entries are Tab stops in their visual order (the comment at
+// `connections/home.rs` said so; before T33d a Button's own handle was no stop).
+#[gpui::test]
+fn home_entry_points_are_tab_stops_in_order(cx: &mut TestAppContext) {
+    let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    let new = handle_of(vcx, "button-home-new");
+    let paste = handle_of(vcx, "button-home-paste");
+    let palette = handle_of(vcx, "button-home-palette");
+    // Nothing selected: Connect is disabled, so Tab skips it.
+    let order = tab_order(vcx);
+    assert_consecutive(
+        &order,
+        &[
+            ("New connection", &new),
+            ("Paste", &paste),
+            ("Palette", &palette),
+        ],
+    );
+    focus_list(vcx); // selects a: Connect is enabled
+    let connect = handle_of(vcx, "button-home-connect");
+    assert!(
+        layer_ids(vcx).is_empty(),
+        "learning the handles opened nothing"
+    );
+    assert!(connect_calls(vcx).is_empty(), "nor connected");
+    let order = tab_order(vcx);
+    assert_consecutive(
+        &order,
+        &[
+            ("New connection", &new),
+            ("Paste", &paste),
+            ("Connect", &connect),
+            ("Palette", &palette),
+        ],
+    );
+}
+
 // ## m2a-t21-shots
 
 #[gpui::test]

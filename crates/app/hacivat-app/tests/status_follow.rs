@@ -606,6 +606,45 @@ fn cursor_open_segment_closes_the_cursor(cx: &mut TestAppContext) {
     stop_core_runtime_test(cx);
 }
 
+// ## m4-t33d (R-T33-1, M3a NOTES surface 6 "Keyboard": Cursor open is a button, a Tab stop in
+// the status bar's focus group; Enter or Space closes the cursor).
+#[gpui::test]
+fn cursor_open_segment_is_a_tab_stop_and_enter_closes(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging_id = profile_id(vcx, STAGING);
+    let (h, _fake) = session_over(
+        vcx,
+        staging_id,
+        pg().tracks_transactions()
+            .queries(vec![select("SELECT", 1_000_000)]),
+    );
+    let console = register_test_console(vcx, staging_id, h.clone());
+    focus_console(vcx, console);
+    let _ticket = run_one(&h, "SELECT * FROM big", true);
+    poll_until("the cursor to open", || snapshot(&h).cursor.is_some());
+    wait_until(vcx, "the cursor segment", |vcx| {
+        status(vcx).contains("Cursor open")
+    });
+    let segment = handle_of(vcx, "button-status-cursor");
+    assert!(
+        snapshot(&h).cursor.is_some(),
+        "learning the handle clicked nothing"
+    );
+    assert!(
+        tab_order(vcx).contains(&segment),
+        "Cursor open is a Tab stop"
+    );
+    in_window(vcx, |window, cx| window.focus(&segment, cx));
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    wait_until(vcx, "the cursor to close", |_| {
+        snapshot(&h).cursor.is_none()
+    });
+    stop_core_runtime_test(cx);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The narrow window
 

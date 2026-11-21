@@ -267,6 +267,19 @@ pub fn full_frame(vcx: &VisualTestContext) -> Vec<RenderedText> {
         .collect()
 }
 
+// ## m4-t33d (T33 flaky3 follow-up)
+/// Brings the window up to date with every view rendered in its last frame: the app settles, a
+/// frame renders every view again, the app settles on what that frame started, and a last
+/// frame renders every view again. Nothing runs after that frame, so a getter that reads the
+/// last frame ([`registry_frame`], `debug_bounds`) sees every view, not a frame that reused a
+/// cached one (see [`full_frame`]). The `redraw()` helpers of the test targets use it.
+pub fn redraw_full(vcx: &VisualTestContext) {
+    vcx.run_until_parked();
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+    in_window(vcx, |window, _| window.refresh());
+}
+
 /// Texts drawn by `file` (a path suffix such as `hacivat-ui/src/toast.rs`), in paint order.
 fn texts_from(vcx: &VisualTestContext, file: &str) -> Vec<String> {
     let needle = format!("{file}:");
@@ -411,6 +424,72 @@ pub fn context_stack(vcx: &VisualTestContext) -> ContextStack {
 /// The focused element's handle.
 pub fn focused(vcx: &VisualTestContext) -> Option<FocusHandle> {
     in_window(vcx, |window, cx| window.focused(cx))
+}
+
+// ## m4-t33d (R-T33-1)
+/// The focus handle of the element drawn as `selector` (a `button-<id>`, whose own handle a
+/// test cannot name): a press focuses it, and the release lands outside the window, so nothing
+/// clicks. The focus stays there.
+pub fn handle_of(vcx: &mut VisualTestContext, selector: &'static str) -> FocusHandle {
+    let at = vcx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("`{selector}` is drawn"))
+        .center();
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+    vcx.simulate_mouse_up(
+        gpui::point(gpui::px(-100.0), gpui::px(-100.0)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    focused(vcx).unwrap_or_else(|| panic!("`{selector}` takes the focus"))
+}
+
+// ## m4-t33d (R-T33-1)
+/// The window's Tab order: every stop Tab visits from nothing focused, once each, in order
+/// (GPUI's `focus_next` over the last frame). The focus ends on the last stop.
+pub fn tab_order(vcx: &mut VisualTestContext) -> Vec<FocusHandle> {
+    vcx.run_until_parked();
+    in_window(vcx, |window, cx| {
+        window.blur(cx);
+        let mut seen = Vec::new();
+        for _ in 0..512 {
+            window.focus_next(cx);
+            match window.focused(cx) {
+                Some(h) if seen.contains(&h) => break,
+                Some(h) => seen.push(h),
+                None => break,
+            }
+        }
+        seen
+    })
+}
+
+// ## m4-t33d (R-T33-1)
+/// Asserts that `stops` come one right after the other in `order` (Tab from each is the next).
+#[track_caller]
+pub fn assert_consecutive(order: &[FocusHandle], stops: &[(&str, &FocusHandle)]) {
+    let at = |(name, h): &(&str, &FocusHandle)| {
+        order
+            .iter()
+            .position(|o| o == *h)
+            .unwrap_or_else(|| panic!("{name} is not a Tab stop"))
+    };
+    for pair in stops.windows(2) {
+        assert_eq!(
+            at(&pair[1]),
+            at(&pair[0]) + 1,
+            "Tab from {} is {}",
+            pair[0].0,
+            pair[1].0
+        );
+    }
+}
+
+/// Asserts that `handle` is not in `order`.
+#[track_caller]
+pub fn assert_not_a_stop(order: &[FocusHandle], name: &str, handle: &FocusHandle) {
+    assert!(!order.contains(handle), "{name} is not a Tab stop");
 }
 
 /// The fill of the largest quad the last frame painted (the root's background).

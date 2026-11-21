@@ -104,12 +104,12 @@ fn wait_session(vcx: &VisualTestContext, id: ConsoleId) -> SessionHandle {
 }
 
 /// Every text the last frame drew, joined.
+// ## m4-t33d (T33 flaky3 follow-up): a frame that renders every view (`full_frame` strips the
+// isolation marks).
 fn frame_text(vcx: &VisualTestContext) -> String {
-    in_window(vcx, |window, _| window.refresh());
-    vcx.run_until_parked();
-    registry_frame(vcx)
+    full_frame(vcx)
         .into_iter()
-        .map(|r| r.text.to_string().replace(['\u{2068}', '\u{2069}'], ""))
+        .map(|r| r.text.to_string())
         .collect::<Vec<_>>()
         .join(" | ")
 }
@@ -1008,6 +1008,32 @@ fn toolbar_run_ends_a_composition_and_keeps_the_editor_focused(cx: &mut TestAppC
     // discard of its own (`end_composition` covers a Run that finds the composition still open).
     assert_eq!(vcx.cx.read(|cx| editor.read(cx).marked_text_discards()), 0);
     drop(runs);
+    stop_core_runtime_test(cx);
+}
+
+// ## m4-t33d (R-T33-1, M3a NOTES surface 2): the toolbar's Run is a Tab stop like its notice
+// and ⋯ (a Button is one by default); Enter on it runs.
+#[gpui::test]
+fn the_toolbar_run_button_is_a_tab_stop(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    let id = wait_active_console(vcx);
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    let runs = record_runs(vcx, &editor);
+    vcx.simulate_input("SELECT 1;");
+    vcx.run_until_parked();
+    let run = handle_of(vcx, "button-console-run");
+    assert!(runs.borrow().is_empty(), "learning the handle ran nothing");
+    assert!(tab_order(vcx).contains(&run), "Run is a Tab stop");
+    in_window(vcx, |window, cx| window.focus(&run, cx));
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    vcx.run_until_parked();
+    assert_eq!(runs.borrow().len(), 1, "Enter on Run ran once");
     stop_core_runtime_test(cx);
 }
 

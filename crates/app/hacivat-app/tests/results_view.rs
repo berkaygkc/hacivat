@@ -221,8 +221,9 @@ impl Tile {
     }
 
     fn redraw(&self) {
-        in_window(self.vcx, |window, _| window.refresh());
-        self.vcx.run_until_parked();
+        // ## m4-t33d (T33 flaky3 follow-up): the last frame renders every view (a frame
+        // after `run_until_parked` may reuse a cached view, which records no texts).
+        redraw_full(self.vcx);
     }
 
     fn host(&self) -> Entity<ResultsHost> {
@@ -468,6 +469,47 @@ fn suspended_strip_buttons_reach_the_source(cx: &mut TestAppContext) {
     );
 }
 
+// ## m4-t33d (R-T33-1, M3a NOTES surface 11 "Keyboard": the strip's buttons are in the results
+// tile's Tab order after the grid): Tab from the grid reaches Close cursor, Fetch more and
+// Fetch all, in visual order.
+#[gpui::test]
+fn the_strip_buttons_follow_the_grid_in_the_tab_order(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    let control = Arc::new(Control::default());
+    t.apply(&[tab(
+        1,
+        source(
+            store_of(10, 1, Completeness::Suspended(cursor())),
+            control.clone(),
+        ),
+    )]);
+    let more = handle_of(t.vcx, "button-strip-fetch-more");
+    let all = handle_of(t.vcx, "button-strip-fetch-all");
+    let close = handle_of(t.vcx, "button-strip-close-cursor");
+    let grid = grid_of(t.vcx, t.console, 0);
+    let grid = t.vcx.cx.read(|cx| grid.read(cx).focus_handle(cx));
+    let order = tab_order(t.vcx);
+    assert_consecutive(
+        &order,
+        &[
+            ("Close cursor", &close),
+            ("Fetch more", &more),
+            ("Fetch all", &all),
+        ],
+    );
+    // The grid is no Tab stop of its own (⌘3 focuses the tile); Tab in it leaves for the strip.
+    assert_not_a_stop(&order, "the grid", &grid);
+    in_window(t.vcx, |window, cx| window.focus(&grid, cx));
+    t.vcx.simulate_keystrokes("tab");
+    t.vcx.run_until_parked();
+    assert_eq!(
+        focused(t.vcx),
+        Some(close),
+        "Tab from the grid is Close cursor"
+    );
+    assert!(control.closes.lock().unwrap().is_empty(), "nothing clicked");
+}
+
 #[gpui::test]
 fn rerun_names_the_unit(cx: &mut TestAppContext) {
     let mut t = tile(cx, "en", None);
@@ -684,8 +726,10 @@ fn ten_thousand_log_lines_render_at_constant_cost(cx: &mut TestAppContext) {
     let shown = visible.end - visible.start;
     assert!((1..=60).contains(&shown), "{visible:?}");
     // A frame builds the visible rows only, wherever the list is scrolled.
+    // ## m4-t33d: one frame exactly (`redraw` draws two since T33d).
+    t.vcx.run_until_parked();
     t.vcx.read(|cx| list.read(cx).rows().reset_built());
-    t.redraw();
+    in_window(t.vcx, |window, _| window.refresh());
     let built = t.vcx.read(|cx| list.read(cx).rows().built());
     // ## m4-t32-shots (named exception; carries-w4, Windows CI 44629840018): Windows may lay a
     // frame out twice, so there a frame builds the visible rows at most once per layout pass:

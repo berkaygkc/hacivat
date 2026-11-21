@@ -874,9 +874,11 @@ fn reload_clears_couldnt_check_on_a_stale_namespace(cx: &mut TestAppContext) {
     assert_eq!(state(vcx, id, &users_key()).freshness, Freshness::Unknown);
 }
 
-// ## m4-t33b-carries (T25 review m-5, NOTES surface 11 "Keyboard"): the notice's Reload is the
-// first Tab stop after the toolbar, though it is drawn below the options strip: Shift-Tab from
-// it reaches the toolbar's last button (Open in console), not the strip.
+// ## m4-t33b-carries (T25 review m-5), m4-t33d (T33 flaky2 review m1, m2, m4): NOTES surface
+// 10 "Keyboard" (the toolbar and the strip are Tab stops in visual order) and surface 11
+// "Keyboard" (the notice's button is the first Tab stop after the toolbar, though it is drawn
+// below the options strip). The whole order is walked: Refresh → Copy → Open in console →
+// Reload → the strip's first control (Qualification), and back.
 //
 // ## m4-t33-flaky2: the keys are pressed and released (a button clicks on the key-up, which
 // `simulate_keystrokes` never sends), and the profile stays disconnected: before, neither
@@ -894,33 +896,58 @@ fn the_notice_button_is_the_first_tab_stop_after_the_toolbar(cx: &mut TestAppCon
             .notices
             .contains(&"hv-ddl-view-unknown".to_string())
     );
-    let (reload, console_button) = vcx.cx.read(|cx| {
-        let v = ddl_view::view_of(id, &users_key(), cx).expect("the view");
-        let v = v.read(cx);
-        (v.reload_focus().clone(), v.console_focus().clone())
-    });
-    let focused = |vcx: &VisualTestContext, h: &gpui::FocusHandle| {
-        in_window(vcx, |window, _| h.is_focused(window))
-    };
-    in_window(vcx, |window, cx| window.focus(&reload, cx));
+    let h = handles(vcx, id);
+    in_window(vcx, |window, cx| window.focus(&h.refresh, cx));
     vcx.run_until_parked();
-    // Both are Tab stops: Shift-Tab from Reload is Open in console, Tab comes back.
-    press(vcx, "shift-tab");
+    press(vcx, "tab");
+    assert!(focused_on(vcx, &h.copy), "Tab from Refresh is Copy");
+    press(vcx, "tab");
     assert!(
-        focused(vcx, &console_button),
-        "Shift-Tab from Reload is Open in console"
+        focused_on(vcx, &h.console),
+        "Tab from Copy is Open in console"
     );
     press(vcx, "tab");
-    assert!(focused(vcx, &reload), "Tab from Open in console is Reload");
+    assert!(
+        focused_on(vcx, &h.reload),
+        "Tab from Open in console is Reload"
+    );
+    // Reload → the strip's first control, Qualification (its pressed segment): → presses the
+    // next segment there.
+    press(vcx, "tab");
+    assert!(
+        ![&h.refresh, &h.copy, &h.console, &h.reload]
+            .iter()
+            .any(|f| focused_on(vcx, f)),
+        "Tab from Reload leaves the toolbar and the notice"
+    );
+    assert_eq!(state(vcx, id, &users_key()).options.qualify, Qualify::Auto);
+    press(vcx, "right");
+    assert_eq!(
+        state(vcx, id, &users_key()).options.qualify,
+        Qualify::Never,
+        "Tab from Reload is the strip's Qualification"
+    );
+    press(vcx, "shift-tab");
+    assert!(
+        focused_on(vcx, &h.reload),
+        "Shift-Tab from the strip is Reload"
+    );
+    press(vcx, "shift-tab");
+    assert!(
+        focused_on(vcx, &h.console),
+        "Shift-Tab from Reload is Open in console"
+    );
     let (consoles, tabs) = (vcx.cx.read(|cx| Consoles::ids(cx).len()), tab_count(vcx));
-    press(vcx, "shift-tab enter");
+    press(vcx, "enter");
+    // The console count rules a connect out: Open in console opens its console synchronously
+    // (during the flush), while a connect's console would arrive later, off this thread. The
+    // two checks after it alone would pass for a connect asked for but not yet started.
     assert_eq!(
         vcx.cx.read(|cx| Consoles::ids(cx).len()),
         consoles + 1,
         "Enter on Open in console opens a console"
     );
     assert_eq!(tab_count(vcx), tabs + 1, "a new console tab");
-    // Open in console itself, not a connect (whose console opens later, off this thread).
     assert!(
         matches!(
             live(vcx, "app-dev"),
@@ -929,6 +956,144 @@ fn the_notice_button_is_the_first_tab_stop_after_the_toolbar(cx: &mut TestAppCon
         "nothing connected"
     );
     assert_eq!(fake(vcx).connect_calls(), 0, "no connect was asked for");
+}
+
+// ## m4-t33d (T33 flaky2 review m1): a provided action (M7's Edit source) is a Tab stop in
+// its place, before Refresh (NOTES surface 10 "Keyboard": visual order).
+#[gpui::test]
+fn a_provided_action_is_the_tab_stop_before_refresh(cx: &mut TestAppContext) {
+    let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
+    let (vcx, _s, id) = pg_shell(cx, "en", cat);
+    let ran = Rc::new(Cell::new(0));
+    let seen = ran.clone();
+    vcx.cx.update(|cx| {
+        register_action_provider(Rc::new(EditSource), cx);
+        let _ = cx.default_global::<ActionRegistry>().register(ActionDef {
+            id: "test.edit_source",
+            title_id: "hv-ddl-view-copy",
+            context: "Workspace",
+            run: Rc::new(move |_, _| seen.set(seen.get() + 1)),
+            enabled: |_| true,
+        });
+    });
+    open_view(vcx, id, &users_key());
+    let h = handles(vcx, id);
+    in_window(vcx, |window, cx| window.focus(&h.refresh, cx));
+    vcx.run_until_parked();
+    press(vcx, "shift-tab");
+    assert!(!focused_on(vcx, &h.refresh));
+    press(vcx, "enter");
+    assert_eq!(
+        ran.get(),
+        1,
+        "Shift-Tab from Refresh is the provided action"
+    );
+    press(vcx, "tab");
+    assert!(
+        focused_on(vcx, &h.refresh),
+        "Tab from the action is Refresh"
+    );
+}
+
+// ## m4-t33d (T33 flaky2 review I1, NOTES surface 11 "Keyboard"): the "no longer exists"
+// notice's Close tab is the first Tab stop after the toolbar too, and Enter there closes.
+#[gpui::test]
+fn the_gone_notice_close_tab_is_a_tab_stop(cx: &mut TestAppContext) {
+    let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
+    let (vcx, s, id) = pg_shell(cx, "en", cat);
+    s.check.set(Some(Answer::Hold));
+    open_view(vcx, id, &users_key());
+    show(vcx, id, pg_cat(2, vec![], false));
+    fake_of(&s, id).answer("check users", 2);
+    assert_eq!(state(vcx, id, &users_key()).freshness, Freshness::Gone);
+    let h = handles(vcx, id);
+    in_window(vcx, |window, cx| window.focus(&h.console, cx));
+    vcx.run_until_parked();
+    press(vcx, "tab");
+    assert!(
+        focused_on(vcx, &h.close),
+        "Tab from Open in console is Close tab"
+    );
+    press(vcx, "shift-tab");
+    assert!(
+        focused_on(vcx, &h.console),
+        "Shift-Tab from Close tab goes back"
+    );
+    press(vcx, "tab");
+    assert!(focused_on(vcx, &h.close));
+    let tabs = tab_count(vcx);
+    press(vcx, "enter");
+    assert_eq!(
+        tab_count(vcx),
+        tabs - 1,
+        "Enter on Close tab closes the tab"
+    );
+}
+
+// ## m4-t33d (T33 flaky2 review I2): Reload pressed from the keyboard takes its notice away
+// (Checking has no button); the focus moves to the code area, so F5 and Tab keep working,
+// instead of falling to the window root.
+#[gpui::test]
+fn reload_from_the_keyboard_keeps_the_focus_in_the_view(cx: &mut TestAppContext) {
+    let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
+    let (vcx, s, id) = pg_shell(cx, "en", cat);
+    s.verdict.set(Some(Staleness::Unknown));
+    open_view(vcx, id, &users_key());
+    let h = handles(vcx, id);
+    in_window(vcx, |window, cx| window.focus(&h.reload, cx));
+    vcx.run_until_parked();
+    assert!(
+        focused_on(vcx, &h.reload),
+        "Reload has the focus before Enter"
+    );
+    s.verdict.set(Some(Staleness::Current));
+    press(vcx, "enter");
+    let st = state(vcx, id, &users_key());
+    assert_eq!(st.freshness, Freshness::Current, "Enter reloaded");
+    assert!(!st.notices.iter().any(|n| n.starts_with("hv-ddl-view-")));
+    assert!(focused_on(vcx, &h.code), "the focus moved to the code area");
+    assert!(
+        context_stack(vcx)
+            .0
+            .contains(&ddl_view::DDL_VIEW_CODE_CONTEXT),
+        "the view's bindings are live"
+    );
+    s.verdict.set(Some(Staleness::Unknown));
+    press(vcx, "f5");
+    assert_eq!(
+        state(vcx, id, &users_key()).freshness,
+        Freshness::Unknown,
+        "F5 still reloads"
+    );
+}
+
+/// The DDL view's focus handles the Tab-order tests name.
+struct ViewHandles {
+    refresh: gpui::FocusHandle,
+    copy: gpui::FocusHandle,
+    console: gpui::FocusHandle,
+    reload: gpui::FocusHandle,
+    close: gpui::FocusHandle,
+    code: gpui::FocusHandle,
+}
+
+fn handles(vcx: &VisualTestContext, id: ProfileId) -> ViewHandles {
+    vcx.cx.read(|cx| {
+        let v = ddl_view::view_of(id, &users_key(), cx).expect("the view");
+        let v = v.read(cx);
+        ViewHandles {
+            refresh: v.refresh_focus().clone(),
+            copy: v.copy_focus().clone(),
+            console: v.console_focus().clone(),
+            reload: v.reload_focus().clone(),
+            close: v.close_focus().clone(),
+            code: gpui::Focusable::focus_handle(v.editor().read(cx), cx),
+        }
+    })
+}
+
+fn focused_on(vcx: &VisualTestContext, h: &gpui::FocusHandle) -> bool {
+    in_window(vcx, |window, _| h.is_focused(window))
 }
 
 /// Presses and releases each of `keys` (a button clicks on the key-up).

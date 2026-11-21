@@ -138,8 +138,9 @@ fn label(vcx: &VisualTestContext, id: &str) -> Option<RenderedText> {
 }
 
 fn redraw(vcx: &VisualTestContext) {
-    in_window(vcx, |window, _| window.refresh());
-    vcx.run_until_parked();
+    // ## m4-t33d (T33 flaky3 follow-up): the last frame renders every view (a frame after
+    // `run_until_parked` may reuse a cached view, which records no texts).
+    redraw_full(vcx);
 }
 
 fn t(vcx: &VisualTestContext, id: hacivat_l10n::MsgRef<hacivat_l10n::NoArgs>) -> String {
@@ -332,6 +333,34 @@ impl RunObserver for Stores {
     }
 
     fn event(&self, _: &RunEvent) {}
+}
+
+// ## m4-t33d (R-T33-1, M3b NOTES surface 4 "Keyboard": the badge buttons are Tab stops in the
+// toolbar): Commit, then Roll back; Enter on the focused Commit commits.
+#[gpui::test]
+fn the_badge_buttons_are_tab_stops(cx: &mut TestAppContext) {
+    let vcx = shell_staging(cx, "en");
+    let (_console, h) = console_over(vcx, pg().tracks_transactions());
+    redraw(vcx);
+    user_exec(&h, "BEGIN");
+    user_exec(&h, "UPDATE t SET a = 1");
+    wait_until(vcx, "the badge", |vcx| {
+        label(vcx, "tx-badge-text").is_some()
+    });
+    let commit = handle_of(vcx, "button-tx-badge-commit");
+    let rollback = handle_of(vcx, "button-tx-badge-rollback");
+    assert_ne!(commit, rollback);
+    let order = tab_order(vcx);
+    assert_consecutive(&order, &[("Commit", &commit), ("Roll back", &rollback)]);
+    assert_eq!(snapshot(&h).tx.status, TxStatus::InTx, "nothing clicked");
+    in_window(vcx, |window, cx| window.focus(&commit, cx));
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    wait_until(vcx, "the commit", |_| {
+        snapshot(&h).tx.status == TxStatus::Idle
+    });
 }
 
 #[gpui::test]

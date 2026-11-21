@@ -229,8 +229,9 @@ impl Tile {
     }
 
     fn redraw(&self) {
-        in_window(self.vcx, |window, _| window.refresh());
-        self.vcx.run_until_parked();
+        // ## m4-t33d (T33 flaky3 follow-up): the last frame renders every view (a frame
+        // after `run_until_parked` may reuse a cached view, which records no texts).
+        redraw_full(self.vcx);
     }
 
     fn set_mode(&self, mode: ViewMode) -> bool {
@@ -762,6 +763,30 @@ fn truncated_value_offers_a_rerun_with_the_raised_limit(cx: &mut TestAppContext)
     assert_eq!((v.truncated, v.rerun), (None, None));
 }
 
+// ## m4-t33d (R-T33-1, M3b NOTES surface 22): "Keyboard" lists Re-run → Copy raw value in the
+// viewer's Tab cycle; "Header" keeps the × out of it (like T2a's dialogs; Escape closes).
+#[gpui::test]
+fn the_value_viewer_tabs_to_copy_and_never_to_its_close_button(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let cut = Value::Truncated(Box::new(TruncatedVal {
+        prefix: Value::Text("a".repeat(1 << 20).into()),
+        total_len: Some(5 << 20),
+        unit: LenUnit::Bytes,
+    }));
+    let _grid = t.show(store(one("note", text(), pg(25, "text")), vec![vec![cut]]));
+    in_window(t.vcx, |_, cx| value_viewer::open(t.console, cell(0, 0), cx));
+    t.redraw();
+    t.redraw();
+    let [rerun, copy, close] = t
+        .vcx
+        .cx
+        .read(|cx| value_viewer::tab_handles(t.console, cx))
+        .expect("the viewer");
+    let order = tab_order(t.vcx);
+    assert_consecutive(&order, &[("Re-run", &rerun), ("Copy raw value", &copy)]);
+    assert_not_a_stop(&order, "the viewer's ×", &close);
+}
+
 // ---- the re-run over a session ----------------------------------------------------------------
 
 /// `answer` for the SQL-context probes of a PostgreSQL console.
@@ -918,8 +943,9 @@ impl Console {
     }
 
     fn redraw(&self) {
-        in_window(self.vcx, |window, _| window.refresh());
-        self.vcx.run_until_parked();
+        // ## m4-t33d (T33 flaky3 follow-up): the last frame renders every view (a frame
+        // after `run_until_parked` may reuse a cached view, which records no texts).
+        redraw_full(self.vcx);
     }
 
     /// Waits for the result tab, shows it, and opens the viewer on its first cell.
