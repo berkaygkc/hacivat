@@ -13,8 +13,7 @@ use hacivat_scripts::{
     AttachError, DatabaseName, DbNode, EntryKind, EnvScope, EventSource, FileOpError, LibraryId,
     LibraryRoot, LibraryService, LibraryState, LinkState, LocalMapping, PathError, RawHint,
     ReadError, RegistryError, RelPath, SaveError, SaveText, ScriptEntry, SecretKind, SpanKind,
-    UnavailableReason, WatchError, binding, envscope, fileio, manifest, pathsafe, scan_secrets,
-    visible,
+    UnavailableReason, WatchError, binding, envscope, manifest, pathsafe, scan_secrets, visible,
 };
 use hacivat_settings::LocalPaths;
 
@@ -189,31 +188,8 @@ fn manifest_and_pathsafe_stubs_read_and_accept_nothing() {
     );
 }
 
-#[test]
-fn fileio_stubs_read_and_write_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.sql"), b"SELECT 1;").unwrap();
-    let before = tree(dir.path());
-    let root = LibraryRoot {
-        id: LibraryId::new(),
-        path: dir.path().into(),
-        canonical: dir.path().canonicalize().unwrap(),
-    };
-    assert!(matches!(
-        fileio::read(&root, &rel("a.sql"), Default::default()),
-        Err(ReadError::NotImplemented)
-    ));
-    assert!(matches!(
-        fileio::save(&root, &rel("a.sql"), text("DROP TABLE t;"), None),
-        Err(SaveError::NotImplemented)
-    ));
-    assert!(matches!(
-        fileio::save(&root, &rel("new.sql"), text("x"), None),
-        Err(SaveError::NotImplemented)
-    ));
-    assert_eq!(tree(dir.path()), before);
-}
-
+// ## m4b-t05-fileio: `fileio::{read, save}` are real now (tests/fileio.rs); the service's
+// own read/save stubs below stay until Task 10.
 #[tokio::test]
 async fn save_stub_writes_nothing() {
     let (s, app, dir) = service_with_library();
