@@ -18,16 +18,21 @@
 //! 4. Listed: `.sql` and `.md` files (ASCII case-insensitive extension) and the folders that
 //!    hold one at any depth. FIFOs, sockets and devices are never listed (so never opened).
 //! 5. Links: a link to a folder is never followed and never listed. A file link (its own name
-//!    ends in `.sql`/`.md`) is resolved once: a regular script file inside the root, in no
-//!    skipped folder, is `InsideLink`, with the target's metadata and the intersection of the
-//!    link's and the target's environment scope (a plain `a.sql` pointing into `@staging/`
-//!    shows on staging only); a loop is `Loop`; anything else (outside, dangling, a folder, a
-//!    FIFO, a target under `.git/`) is `OutsideLink`, and the outside target is not even
-//!    `lstat`ed. Both are listed disabled.
+//!    ends in `.sql`/`.md`) is resolved once, as text inside the root
+//!    ([`pathsafe::resolve_link`](crate::pathsafe::resolve_link); fix round 1, I3): a regular
+//!    script file inside the root, in no skipped folder, is `InsideLink`, with the target's
+//!    metadata, the target's name (`ScriptEntry::target`) and the intersection of the link's
+//!    and the target's environment scope (a plain `a.sql` pointing into `@staging/` shows on
+//!    staging only; one hidden that way gets `Diag::LinkScope`); a loop is `Loop`; anything
+//!    else (outside, dangling, a folder, a FIFO, a target under `.git/`) is `OutsideLink`. Both
+//!    are listed disabled. No system call names a path outside the root.
 //! 6. Limits ([`Limits`]): 20,000 listed files, depth 32 (a listed entry has at most 32
-//!    components), 200,000 visited names, 256 diagnostics (environment diagnostics first, the
-//!    rest counted in [`ScanResult::suppressed`]). Hitting the first three stops the whole scan
-//!    where it is and keeps what was found ([`ScanResult::stopped`]).
+//!    components), 200,000 visited names (applied while a folder is read, not after), 256
+//!    diagnostics (environment diagnostics first, the rest counted in
+//!    [`ScanResult::suppressed`]). Hitting the first three stops the whole scan where it is
+//!    and keeps what was found ([`ScanResult::stopped`]). A dataless (cloud placeholder)
+//!    folder is listed as a disabled row and never entered, since reading it would download
+//!    it (fix round 1, m2).
 //! 7. Environment diagnostics come from the listed folders, one per unknown `@name` and one
 //!    per folder where a chain becomes contradictory.
 //!
@@ -53,10 +58,14 @@ pub struct ScriptEntry {
     pub kind: EntryKind,
     pub scope: EnvScope,
     pub link: LinkState,
-    /// A cloud placeholder: listed from metadata only, never read by a scan (R-M4b-15).
+    /// A cloud placeholder: listed from metadata only, never read by a scan (R-M4b-15). A
+    /// dataless folder is listed but never entered (fix round 1, m2).
     pub dataless: bool,
     pub len: u64,
     pub mtime: SystemTime,
+    /// ## m4b-t04-scanner fix round 1 (I2): for an `InsideLink`, the target it resolved to
+    /// when scanned (`pathsafe::join_entry` refuses the entry once it points elsewhere).
+    pub target: Option<RelPath>,
 }
 
 /// What an entry is.
@@ -103,11 +112,19 @@ pub struct Meta {
     pub dataless: bool,
 }
 
-/// What a link resolves to.
+/// What a link resolves to ([`pathsafe::resolve_link`](crate::pathsafe::resolve_link)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
-    /// The canonical path of the final target.
-    Target(PathBuf),
+    /// A real, link-free path inside the root, its library-relative name (every component
+    /// one the scan would list or enter) and its metadata.
+    Target {
+        path: PathBuf,
+        rel: RelPath,
+        meta: Meta,
+    },
+    /// The text leaves the root, or lands on a name the scan would not list; nothing outside
+    /// was touched.
+    Outside,
     Dangling,
     Loop,
     Error(io::ErrorKind),
@@ -115,16 +132,18 @@ pub enum Resolved {
 
 /// The file-system calls a scan may make. There is no call that reads a file: the scan lists
 /// names and metadata only (R-M4b-15; a library on iCloud Drive or OneDrive is not
-/// downloaded). Tests inject an in-memory one.
+/// downloaded). Every path a scan or `join` passes is inside the library root (fix round 1,
+/// I3). Tests inject an in-memory one.
 pub trait Fs {
-    /// The names in `dir` (no `.` or `..`), in any order.
-    fn read_dir(&self, dir: &Path) -> io::Result<Vec<OsString>>;
+    /// At most `cap` names in `dir` (no `.` or `..`), in any order; reading stops at the cap
+    /// (fix round 1, m3).
+    fn read_dir(&self, dir: &Path, cap: usize) -> io::Result<Vec<OsString>>;
     /// `lstat`: a link is described, not followed.
     fn symlink_metadata(&self, path: &Path) -> io::Result<Meta>;
-    /// `realpath`.
+    /// `realpath`; called only on paths that are inside the root and hold no link.
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
-    /// `realpath` of a link, with loops and dangling links told apart.
-    fn resolve(&self, link: &Path) -> Resolved;
+    /// The text of the link at `link` (`readlink`), never followed.
+    fn read_link(&self, link: &Path) -> io::Result<PathBuf>;
 }
 
 /// The real file system (`std::fs`).
@@ -132,8 +151,9 @@ pub trait Fs {
 pub struct RealFs;
 
 impl Fs for RealFs {
-    fn read_dir(&self, dir: &Path) -> io::Result<Vec<OsString>> {
+    fn read_dir(&self, dir: &Path, cap: usize) -> io::Result<Vec<OsString>> {
         std::fs::read_dir(dir)?
+            .take(cap)
             .map(|e| e.map(|e| e.file_name()))
             .collect()
     }
@@ -162,26 +182,9 @@ impl Fs for RealFs {
         std::fs::canonicalize(path)
     }
 
-    fn resolve(&self, link: &Path) -> Resolved {
-        match std::fs::canonicalize(link) {
-            Ok(target) => Resolved::Target(target),
-            Err(e) if is_loop(&e) => Resolved::Loop,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Resolved::Dangling,
-            Err(e) => Resolved::Error(e.kind()),
-        }
+    fn read_link(&self, link: &Path) -> io::Result<PathBuf> {
+        std::fs::read_link(link)
     }
-}
-
-/// `ELOOP` on Unix; `ERROR_CANT_RESOLVE_FILENAME` (1921) on Windows. (`ErrorKind::
-/// FilesystemLoop` is not stable.)
-fn is_loop(e: &io::Error) -> bool {
-    #[cfg(unix)]
-    let code = libc::ELOOP;
-    #[cfg(windows)]
-    let code = 1921;
-    #[cfg(not(any(unix, windows)))]
-    let code = i32::MIN;
-    e.raw_os_error() == Some(code)
 }
 
 /// A scan's bounds (R-M4b-14).
@@ -217,7 +220,7 @@ pub enum LimitHit {
 }
 
 /// Why nothing was listed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootProblem {
     /// The folder is gone or unmounted.
     Missing,
@@ -225,6 +228,9 @@ pub enum RootProblem {
     /// or a link on its path was repointed).
     Changed,
     Unreadable(io::ErrorKind),
+    /// ## m4b-t04-scanner fix round 1 (m7): the root is inside (or is) an environment folder,
+    /// named here in its display form. Scoping is relative to the root, so the scan refuses.
+    InEnvFolder(String),
 }
 
 /// A scan diagnostic. Names are in their display form ([`display_name`]).
@@ -249,6 +255,9 @@ pub enum Diag {
         folder: RelPath,
         kind: io::ErrorKind,
     },
+    /// ## m4b-t04-scanner fix round 1 (m4): the file link `rel` is hidden everywhere because
+    /// its target's environment folders contradict its own (or name no tag).
+    LinkScope { rel: RelPath },
 }
 
 /// What a scan found.
@@ -307,15 +316,18 @@ pub fn scan(root: &LibraryRoot, limits: &Limits, fs: &dyn Fs) -> ScanResult {
     }
 
     // Folders that hold a listed file at any depth.
+    // A dataless folder is kept (a disabled "not downloaded" row, fix round 1, m2), with its
+    // ancestors.
     let mut holding: HashSet<&str> = HashSet::new();
-    for f in &walk.files {
+    let dataless = walk.folders.iter().filter(|d| d.dataless);
+    for f in walk.files.iter().chain(dataless) {
         let s = f.rel.as_str();
         holding.extend(s.match_indices('/').map(|(i, _)| &s[..i]));
     }
     let mut entries: Vec<ScriptEntry> = walk
         .folders
         .iter()
-        .filter(|d| holding.contains(d.rel.as_str()))
+        .filter(|d| d.dataless || holding.contains(d.rel.as_str()))
         .cloned()
         .collect();
     entries.append(&mut walk.files);
@@ -343,6 +355,9 @@ fn check_root(root: &LibraryRoot, fs: &dyn Fs) -> Result<(), RootProblem> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(RootProblem::Missing),
             Err(e) => return Err(RootProblem::Unreadable(e.kind())),
         }
+    }
+    if let Some(name) = envscope::root_env_folder(&root.canonical) {
+        return Err(RootProblem::InEnvFolder(name));
     }
     Ok(())
 }
@@ -379,7 +394,8 @@ impl Walk<'_> {
             depth: 0,
         }];
         while let Some(frame) = stack.pop() {
-            let mut names = match self.fs.read_dir(&frame.dir) {
+            let cap = self.limits.max_visited.saturating_sub(self.visited) + 1;
+            let mut names = match self.fs.read_dir(&frame.dir, cap) {
                 Ok(names) => names,
                 Err(e) => {
                     match &frame.rel {
@@ -463,10 +479,15 @@ impl Walk<'_> {
                 rel: rel.clone(),
                 kind: EntryKind::Folder,
                 link: LinkState::Plain,
-                dataless: false,
+                dataless: meta.dataless,
                 len: meta.len,
                 mtime: meta.mtime,
+                target: None,
             });
+            if meta.dataless {
+                // Listing it would download it (fileproviderd, OneDrive); fail closed.
+                return Step::Go;
+            }
             subfolders.push(Frame {
                 dir: path,
                 rel: Some(rel),
@@ -488,14 +509,16 @@ impl Walk<'_> {
                 dataless: meta.dataless,
                 len: meta.len,
                 mtime: meta.mtime,
+                target: None,
             }
         };
         self.files.push(entry);
         Step::Go
     }
 
-    /// The entry for the file link at `path` (resolved once; see the module docs, step 5).
-    fn link_entry(&self, path: &Path, rel: RelPath, kind: EntryKind, own: Meta) -> ScriptEntry {
+    /// The entry for the file link at `path` (resolved once, as text inside the root; see the
+    /// module docs, step 5).
+    fn link_entry(&mut self, path: &Path, rel: RelPath, kind: EntryKind, own: Meta) -> ScriptEntry {
         let here = envscope::scope_of(&rel);
         let disabled = |link| ScriptEntry {
             rel: rel.clone(),
@@ -505,29 +528,31 @@ impl Walk<'_> {
             dataless: false,
             len: own.len,
             mtime: own.mtime,
+            target: None,
         };
-        let target = match self.fs.resolve(path) {
-            Resolved::Target(target) => target,
+        let (target, meta) = match pathsafe::resolve_link(self.fs, &self.root.canonical, path) {
+            Resolved::Target { rel, meta, .. } => (rel, meta),
             Resolved::Loop => return disabled(LinkState::Loop),
-            Resolved::Dangling | Resolved::Error(_) => return disabled(LinkState::OutsideLink),
+            Resolved::Outside | Resolved::Dangling | Resolved::Error(_) => {
+                return disabled(LinkState::OutsideLink);
+            }
         };
-        let Some(target_rel) = pathsafe::inside_rel(&self.root.canonical, &target) else {
-            return disabled(LinkState::OutsideLink);
-        };
-        if script_kind(target_rel.name()).is_none() {
+        if meta.kind != MetaKind::File || script_kind(target.name()).is_none() {
             return disabled(LinkState::OutsideLink);
         }
-        match self.fs.symlink_metadata(&target) {
-            Ok(meta) if meta.kind == MetaKind::File => ScriptEntry {
-                scope: envscope::combine(&here, &envscope::scope_of(&target_rel)),
-                rel,
-                kind,
-                link: LinkState::InsideLink,
-                dataless: meta.dataless,
-                len: meta.len,
-                mtime: meta.mtime,
-            },
-            _ => disabled(LinkState::OutsideLink),
+        let scope = envscope::combine(&here, &envscope::scope_of(&target));
+        if matches!(scope, EnvScope::Hidden(_)) && !matches!(here, EnvScope::Hidden(_)) {
+            self.diags.push(Diag::LinkScope { rel: rel.clone() });
+        }
+        ScriptEntry {
+            scope,
+            rel,
+            kind,
+            link: LinkState::InsideLink,
+            dataless: meta.dataless,
+            len: meta.len,
+            mtime: meta.mtime,
+            target: Some(target),
         }
     }
 }

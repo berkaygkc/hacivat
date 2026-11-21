@@ -15,11 +15,15 @@
 //!   superscript `COM¹²³`/`LPT¹²³`) with any extension. [`component_on`] applies either host's
 //!   rules, so every runner tests the Windows ones.
 //! - [`join`] re-validates every component (and refuses the skipped ones: a leading `.`,
-//!   `node_modules`), re-checks that the root is still its canonical self, walks the folders with
-//!   `symlink_metadata` refusing any link or junction on the way, and confirms with `realpath`
-//!   that what it answers is inside the root. A final file link answers its canonical target
-//!   only when the target is itself a listable script inside the library (alg/28 step 5).
-//!   Containment is a component-wise byte comparison of canonical paths, never a case fold.
+//!   `node_modules`), re-checks that the root is still its canonical self (and in no
+//!   environment folder), walks the folders with `symlink_metadata` refusing any link or
+//!   junction on the way, and confirms with `realpath` that each name it answers is the one
+//!   asked for, byte for byte. A final file link answers its target only when the target is
+//!   itself a listable script inside the library (alg/28 step 5). It answers a [`Joined`]:
+//!   what it resolved, which the caller re-checks for scope (see [`Joined`]).
+//! - ## m4b-t04-scanner fix round 1 (I2, I3, m1, m7; rulings R-T4-1, R-T4-2): links are
+//!   resolved as text inside the root ([`resolve_link`]); no system call names a path outside
+//!   it. [`join_entry`] refuses an entry that changed since the scan ([`PathError::Changed`]).
 //! - [`display_name`] is the only display form: NFC, then every control and invisible
 //!   formatting character (the chooser's set, `Default_Ignorable_Code_Point` and the
 //!   interlinear annotation controls) as `<U+XXXX>` (R-M4b-23). Identity stays the OS bytes.
@@ -27,9 +31,8 @@
 //! `join` answers a path, so its checks are only as fresh as the call: the opens that follow
 //! (Task 5) are relative to a directory handle with `O_NOFOLLOW` (HV-SCRIPT-03 step 8).
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
-use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -37,8 +40,9 @@ use std::sync::Arc;
 use icu_normalizer::ComposingNormalizerBorrowed;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::envscope::root_env_folder;
 use crate::registry::LibraryRoot;
-use crate::scan;
+use crate::scan::{self, EntryKind, Fs, LinkState, MetaKind, RealFs, Resolved, ScriptEntry};
 
 /// A path inside a library, relative to its root, `/`-separated. Identity is the exact text
 /// (the OS bytes the scan saw, NFD on macOS included); display goes through
@@ -65,6 +69,14 @@ pub enum PathError {
     OutsideRoot,
     /// The library root is gone, or no longer resolves to its canonical path.
     RootChanged,
+    /// ## m4b-t04-scanner fix round 1 (m7): the root sits inside an environment folder.
+    RootInEnvFolder,
+    /// ## m4b-t04-scanner fix round 1 (m1): the path resolves to another spelling of a name
+    /// (an 8.3 short name on Windows, a case or normalisation variant).
+    Alias,
+    /// ## m4b-t04-scanner fix round 1 (I2): what is on disk is not what the scan listed (a
+    /// plain file became a link, a link points elsewhere, a kind changed).
+    Changed,
     /// The file system refused a lookup on the way.
     Io(io::ErrorKind),
 }
@@ -262,76 +274,302 @@ fn listable(name: &str) -> Result<(), PathError> {
     Ok(())
 }
 
+/// What [`join`] resolved (fix round 1, I2: `join` answers what it resolved, not only a path).
+///
+/// **Caller contract.** Before opening, the caller (the read and save of Task 5, the tab of
+/// Task 14, "Go to script" of Task 15) re-applies the environment scope to what was resolved:
+/// [`envscope::visible_at(rel, kind, joined.target.as_ref(), env)`](crate::envscope::visible_at).
+/// A path that was a plain file when it was scanned may be a link now, and a link may point
+/// elsewhere now; the scope of the file actually opened is the one that counts. With a scanned
+/// entry in hand, use [`join_entry`], which also refuses such a change outright.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Joined {
+    /// What to open: the path itself, or for a file link its canonical target.
+    pub path: PathBuf,
+    /// For a file link, the target inside the library (it passed every scan rule).
+    pub target: Option<RelPath>,
+    pub kind: JoinedKind,
+}
+
+/// What [`join`] found at the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinedKind {
+    /// Nothing yet: a new script or folder may be created there.
+    Absent,
+    File,
+    Folder,
+}
+
 /// The absolute path of `rel` under `root`, after re-validating every component and the
-/// canonical root (HV-SCRIPT-03 step 8). A missing last component is answered (a new script
-/// or folder); a missing folder on the way is `Io(NotFound)`, never created.
-pub fn join(root: &LibraryRoot, rel: &RelPath) -> Result<PathBuf, PathError> {
+/// canonical root (HV-SCRIPT-03 step 8), through the real file system. A missing last
+/// component is answered (a new script or folder); a missing folder on the way is
+/// `Io(NotFound)`, never created. See [`Joined`] for the caller's scope re-check.
+pub fn join(root: &LibraryRoot, rel: &RelPath) -> Result<Joined, PathError> {
+    join_with(&RealFs, root, rel)
+}
+
+/// [`join`] through `fs` (tests inject a file system that refuses every path outside the
+/// root).
+pub fn join_with(fs: &dyn Fs, root: &LibraryRoot, rel: &RelPath) -> Result<Joined, PathError> {
     let parts: Vec<&str> = rel.components().collect();
     for part in &parts {
         listable(part)?;
     }
-    check_root(root)?;
+    check_root(fs, root)?;
     let Some((last, folders)) = parts.split_last() else {
         return Err(PathError::Malformed);
     };
+    let io = |e: io::Error| PathError::Io(e.kind());
     let mut path = root.canonical.clone();
     for folder in folders {
         path.push(folder);
-        let meta = fs::symlink_metadata(&path).map_err(|e| PathError::Io(e.kind()))?;
-        if meta.file_type().is_symlink() {
-            return Err(PathError::LinkOnPath);
-        }
-        if !meta.is_dir() {
-            return Err(PathError::NotAFolder);
+        let meta = fs.symlink_metadata(&path).map_err(io)?;
+        match meta.kind {
+            MetaKind::Symlink => return Err(PathError::LinkOnPath),
+            MetaKind::Dir => {}
+            MetaKind::File | MetaKind::Other => return Err(PathError::NotAFolder),
         }
     }
-    let parent = fs::canonicalize(&path).map_err(|e| PathError::Io(e.kind()))?;
-    if !parent.starts_with(&root.canonical) {
-        return Err(PathError::OutsideRoot);
+    // Identity (fix round 1, m1): the folders on the way are the ones asked for, byte for
+    // byte, not an 8.3 short-name alias (`GIT~1` for `.git`) or a case variant.
+    if !folders.is_empty() {
+        let real = fs.canonicalize(&path).map_err(io)?;
+        let asked = RelPath::parse(&folders.join("/")).map_err(|_| PathError::Malformed)?;
+        same_name(&root.canonical, &real, &asked)?;
     }
     path.push(last);
-    let meta = match fs::symlink_metadata(&path) {
+    let meta = match fs.symlink_metadata(&path) {
         Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(path),
-        Err(e) => return Err(PathError::Io(e.kind())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(Joined {
+                path,
+                target: None,
+                kind: JoinedKind::Absent,
+            });
+        }
+        Err(e) => return Err(io(e)),
     };
-    if meta.file_type().is_symlink() {
-        return link_target(root, &path);
-    }
-    if !meta.is_file() && !meta.is_dir() {
-        return Err(PathError::NotAFile);
-    }
-    let real = fs::canonicalize(&path).map_err(|e| PathError::Io(e.kind()))?;
-    if real.starts_with(&root.canonical) && real != root.canonical {
-        Ok(path)
-    } else {
-        Err(PathError::OutsideRoot)
+    let kind = match meta.kind {
+        MetaKind::Symlink => return link_target(fs, root, &path),
+        MetaKind::File => JoinedKind::File,
+        MetaKind::Dir => JoinedKind::Folder,
+        MetaKind::Other => return Err(PathError::NotAFile),
+    };
+    let real = fs.canonicalize(&path).map_err(io)?;
+    same_name(&root.canonical, &real, rel)?;
+    Ok(Joined {
+        path,
+        target: None,
+        kind,
+    })
+}
+
+/// `real` (canonical) is `asked` under `root`, byte for byte: `Alias` for another spelling
+/// inside the root (an 8.3 short name, a case variant, a skipped folder reached through one),
+/// `OutsideRoot` for anything else.
+fn same_name(root: &Path, real: &Path, asked: &RelPath) -> Result<(), PathError> {
+    match inside_rel(root, real) {
+        Some(got) if &got == asked => Ok(()),
+        Some(_) => Err(PathError::Alias),
+        None if real.starts_with(root) && real != root => Err(PathError::Alias),
+        None => Err(PathError::OutsideRoot),
     }
 }
 
-/// The root still resolves, as chosen and as stored, to its canonical path.
-fn check_root(root: &LibraryRoot) -> Result<(), PathError> {
+/// [`join`] for an entry the scan listed: refuses with [`PathError::Changed`] when what is on
+/// disk now is not what was scanned (a plain file that became a link, a link that points
+/// elsewhere, a link that became a plain file, a file that became a folder), and refuses a
+/// disabled link (`OutsideLink`, `Loop`) outright (fix round 1, I2).
+pub fn join_entry(root: &LibraryRoot, entry: &ScriptEntry) -> Result<Joined, PathError> {
+    join_entry_with(&RealFs, root, entry)
+}
+
+/// [`join_entry`] through `fs`.
+pub fn join_entry_with(
+    fs: &dyn Fs,
+    root: &LibraryRoot,
+    entry: &ScriptEntry,
+) -> Result<Joined, PathError> {
+    match entry.link {
+        LinkState::OutsideLink | LinkState::Loop => return Err(PathError::OutsideRoot),
+        LinkState::Plain | LinkState::InsideLink => {}
+    }
+    let joined = join_with(fs, root, &entry.rel)?;
+    let want = match entry.kind {
+        EntryKind::Folder => JoinedKind::Folder,
+        EntryKind::Sql | EntryKind::Markdown => JoinedKind::File,
+    };
+    if joined.kind == JoinedKind::Absent {
+        return Err(PathError::Io(io::ErrorKind::NotFound));
+    }
+    if joined.kind != want || joined.target != entry.target {
+        return Err(PathError::Changed);
+    }
+    Ok(joined)
+}
+
+/// The root still resolves, as chosen and as stored, to its canonical path, and sits in no
+/// environment folder.
+fn check_root(fs: &dyn Fs, root: &LibraryRoot) -> Result<(), PathError> {
     for p in [&root.canonical, &root.path] {
-        match fs::canonicalize(p) {
+        match fs.canonicalize(p) {
             Ok(real) if real == root.canonical => {}
             _ => return Err(PathError::RootChanged),
         }
     }
+    if root_env_folder(&root.canonical).is_some() {
+        return Err(PathError::RootInEnvFolder);
+    }
     Ok(())
 }
 
-/// The canonical target of the file link at `link`, when it is a regular script file the scan
-/// would list inside the root; `OutsideRoot` otherwise (out, dangling, a loop, a folder, a
-/// skipped place such as `.git/`, another kind of file).
-fn link_target(root: &LibraryRoot, link: &Path) -> Result<PathBuf, PathError> {
-    let target = fs::canonicalize(link).map_err(|_| PathError::OutsideRoot)?;
-    let rel = inside_rel(&root.canonical, &target).ok_or(PathError::OutsideRoot)?;
-    let meta = fs::symlink_metadata(&target).map_err(|_| PathError::OutsideRoot)?;
-    if meta.is_file() && scan::script_kind(rel.name()).is_some() {
-        Ok(target)
-    } else {
-        Err(PathError::OutsideRoot)
+/// What the file link at `link` resolves to, when it is a regular script file the scan would
+/// list inside the root; `OutsideRoot` otherwise (out, dangling, a loop, a folder, a skipped
+/// place such as `.git/`, another kind of file).
+fn link_target(fs: &dyn Fs, root: &LibraryRoot, link: &Path) -> Result<Joined, PathError> {
+    match resolve_link(fs, &root.canonical, link) {
+        Resolved::Target { path, rel, meta }
+            if meta.kind == MetaKind::File && scan::script_kind(rel.name()).is_some() =>
+        {
+            Ok(Joined {
+                path,
+                target: Some(rel),
+                kind: JoinedKind::File,
+            })
+        }
+        _ => Err(PathError::OutsideRoot),
     }
+}
+
+/// The most links one resolution follows (the kernel's own limit).
+const MAX_HOPS: usize = 40;
+
+/// One step left to walk in [`resolve_link`].
+enum Step {
+    Parent,
+    Name(OsString),
+}
+
+/// Resolves the link at `link` (inside the canonical `root`, under real folders) as **text
+/// only, inside the root** (fix round 1, I3; ruling R-T4-1, which replaces "resolved with
+/// `realpath`"):
+/// 1. read the link text (`read_link`, an `lstat`-class call on the link itself);
+/// 2. a relative text is walked from the link's folder; an absolute one must start with the
+///    canonical root, component for component, or it is `Outside`, so UNC, device and `\\?\`
+///    targets, another drive and any other root are refused on Windows without being touched;
+/// 3. walk the steps one by one: `..` pops (above the root: `Outside`), a name is `lstat`ed,
+///    always inside the root; a link met on the way is read and its text spliced in (at most
+///    [`MAX_HOPS`] links, then `Loop`);
+/// 4. the final path, which has no link left on it, is canonicalised (so `realpath` stays
+///    inside) and must be a name the scan would list ([`inside_rel`]); that also catches an
+///    8.3 alias or a case-folded spelling of a skipped folder.
+///
+/// No system call ever names a path outside the root.
+pub fn resolve_link(fs: &dyn Fs, root: &Path, link: &Path) -> Resolved {
+    let Some(parent) = link.parent() else {
+        return Resolved::Outside;
+    };
+    let mut done = parent.to_path_buf();
+    let mut todo: Vec<Step> = Vec::new(); // a stack: the next step is at the end
+    let mut hops = 1;
+    let mut text = match fs.read_link(link) {
+        Ok(text) => text,
+        Err(e) => return Resolved::Error(e.kind()),
+    };
+    'splice: loop {
+        if !splice(root, &text, &mut done, &mut todo) {
+            return Resolved::Outside;
+        }
+        while let Some(step) = todo.pop() {
+            match step {
+                Step::Parent => {
+                    if done.as_path() == root || !done.pop() {
+                        return Resolved::Outside;
+                    }
+                }
+                Step::Name(name) => {
+                    done.push(&name);
+                    let meta = match fs.symlink_metadata(&done) {
+                        Ok(meta) => meta,
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                            return Resolved::Dangling;
+                        }
+                        Err(e) => return Resolved::Error(e.kind()),
+                    };
+                    match meta.kind {
+                        MetaKind::Symlink => {
+                            hops += 1;
+                            if hops > MAX_HOPS {
+                                return Resolved::Loop;
+                            }
+                            text = match fs.read_link(&done) {
+                                Ok(text) => text,
+                                Err(e) => return Resolved::Error(e.kind()),
+                            };
+                            done.pop();
+                            continue 'splice;
+                        }
+                        MetaKind::Dir => {}
+                        // A file with steps after it (ENOTDIR).
+                        MetaKind::File | MetaKind::Other if !todo.is_empty() => {
+                            return Resolved::Dangling;
+                        }
+                        MetaKind::File | MetaKind::Other => {}
+                    }
+                }
+            }
+        }
+        break;
+    }
+    if done.as_path() == root || !done.starts_with(root) {
+        return Resolved::Outside;
+    }
+    let meta = match fs.symlink_metadata(&done) {
+        Ok(meta) => meta,
+        Err(e) => return Resolved::Error(e.kind()),
+    };
+    let Ok(real) = fs.canonicalize(&done) else {
+        return Resolved::Outside;
+    };
+    match inside_rel(root, &real) {
+        Some(rel) => Resolved::Target {
+            path: real,
+            rel,
+            meta,
+        },
+        None => Resolved::Outside,
+    }
+}
+
+/// Puts the steps of the link text `text` on top of `todo`; an absolute text restarts from
+/// the root. `false` when the text leaves the root (no file-system call is made).
+fn splice(root: &Path, text: &Path, done: &mut PathBuf, todo: &mut Vec<Step>) -> bool {
+    let absolute = text
+        .components()
+        .next()
+        .is_some_and(|c| matches!(c, Component::Prefix(_) | Component::RootDir));
+    let rest: &Path = if absolute {
+        match text.strip_prefix(root) {
+            Ok(rest) => {
+                *done = root.to_path_buf();
+                rest
+            }
+            Err(_) => return false,
+        }
+    } else {
+        text
+    };
+    let mut steps = Vec::new();
+    for c in rest.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => steps.push(Step::Parent),
+            Component::Normal(name) => steps.push(Step::Name(name.to_os_string())),
+            Component::Prefix(_) | Component::RootDir => return false,
+        }
+    }
+    todo.extend(steps.into_iter().rev());
+    true
 }
 
 /// `target` (canonical) as a library-relative path, when it lies strictly inside `root`

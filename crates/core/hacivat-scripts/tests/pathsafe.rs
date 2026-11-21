@@ -6,8 +6,10 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use hacivat_scripts::pathsafe::{self, Host, NameProblem, component, component_on, join};
-use hacivat_scripts::{LibraryId, LibraryRoot, PathError, RelPath};
+use hacivat_scripts::pathsafe::{
+    self, Host, JoinedKind, NameProblem, component, component_on, join, join_entry,
+};
+use hacivat_scripts::{LibraryId, LibraryRoot, LinkState, PathError, RelPath};
 
 fn rel(s: &str) -> RelPath {
     RelPath::parse(s).unwrap()
@@ -155,6 +157,10 @@ fn windows_rules_on_any_host() {
         "a*b",
         "a\"b",
         "C:",
+        // ## m4b-t04-scanner fix round 1 (m6): alternate data streams.
+        "a.sql:stream",
+        "a.sql::$DATA",
+        "a.sql:x:$DATA",
     ] {
         assert!(
             component_on(OsStr::new(bad), Host::Windows).is_err(),
@@ -255,19 +261,22 @@ fn join_a_plain_file_a_nested_one_and_a_new_one() {
     fs::write(d.path().join("x/b.sql"), "SELECT 2;").unwrap();
     let root = root_at(d.path());
     assert_eq!(
-        join(&root, &rel("a.sql")).unwrap(),
+        join(&root, &rel("a.sql")).unwrap().path,
         root.canonical.join("a.sql")
     );
     assert_eq!(
-        join(&root, &rel("x/b.sql")).unwrap(),
+        join(&root, &rel("x/b.sql")).unwrap().path,
         root.canonical.join("x/b.sql")
     );
     // A name that does not exist yet (New script, Save as) joins under an existing folder.
     assert_eq!(
-        join(&root, &rel("x/new.sql")).unwrap(),
+        join(&root, &rel("x/new.sql")).unwrap().path,
         root.canonical.join("x/new.sql")
     );
-    assert_eq!(join(&root, &rel("x")).unwrap(), root.canonical.join("x"));
+    assert_eq!(
+        join(&root, &rel("x")).unwrap().path,
+        root.canonical.join("x")
+    );
     // A missing folder on the way is refused, never created.
     assert_eq!(
         join(&root, &rel("nope/new.sql")),
@@ -323,7 +332,10 @@ fn root_is_compared_canonically() {
         canonical: canonical.clone(),
     };
     for root in [&through_canonical, &chosen] {
-        assert_eq!(join(root, &rel("a.sql")).unwrap(), canonical.join("a.sql"));
+        assert_eq!(
+            join(root, &rel("a.sql")).unwrap().path,
+            canonical.join("a.sql")
+        );
     }
     // A case-only different spelling on a case-insensitive volume (APFS, NTFS default):
     // `realpath` answers the stored case, so it is the same library.
@@ -339,7 +351,7 @@ fn root_is_compared_canonically() {
             "realpath gives the stored case"
         );
         assert_eq!(
-            join(&via_upper, &rel("a.sql")).unwrap(),
+            join(&via_upper, &rel("a.sql")).unwrap().path,
             canonical.join("a.sql")
         );
     }
@@ -417,7 +429,7 @@ mod links {
         symlink("shared/q.sql", d.path().join("q.sql")).unwrap();
         let root = root_at(d.path());
         assert_eq!(
-            join(&root, &rel("q.sql")).unwrap(),
+            join(&root, &rel("q.sql")).unwrap().path,
             root.canonical.join("shared/q.sql")
         );
     }
@@ -553,10 +565,208 @@ fn a_case_variant_on_a_case_insensitive_volume_stays_inside() {
     let insensitive = d.path().join("SHARED").exists();
     let r = join(&root, &rel("SHARED/A.SQL"));
     if insensitive {
-        let p = r.unwrap();
-        assert!(p.starts_with(&root.canonical));
-        assert!(canon(&p).starts_with(&root.canonical));
+        // ## m4b-t04-scanner fix round 1 (m1): `join` answers only the name that was asked
+        // for, byte for byte; a case variant is another spelling, refused as an alias.
+        assert_eq!(r, Err(PathError::Alias));
+        assert_eq!(join(&root, &rel("Shared/A.SQL")), Err(PathError::Alias));
+        assert!(join(&root, &rel("Shared/a.sql")).is_ok());
     } else {
         assert_eq!(r, Err(PathError::Io(std::io::ErrorKind::NotFound)));
+    }
+}
+
+// ## m4b-t04-scanner fix round 1 (review I2, m1, m7).
+
+#[test]
+fn join_answers_what_it_resolved() {
+    let d = lib();
+    fs::create_dir(d.path().join("x")).unwrap();
+    fs::write(d.path().join("x/a.sql"), "x").unwrap();
+    let root = root_at(d.path());
+    let file = join(&root, &rel("x/a.sql")).unwrap();
+    assert_eq!(file.kind, JoinedKind::File);
+    assert_eq!(file.target, None);
+    assert_eq!(join(&root, &rel("x")).unwrap().kind, JoinedKind::Folder);
+    let new = join(&root, &rel("x/new.sql")).unwrap();
+    assert_eq!(new.kind, JoinedKind::Absent);
+    assert_eq!(new.path, root.canonical.join("x/new.sql"));
+}
+
+#[test]
+fn a_root_inside_an_env_folder_is_refused_by_join() {
+    // m7: the same rule as the scan, so nothing opens under such a root either.
+    let d = lib();
+    fs::create_dir_all(d.path().join("@production/reports")).unwrap();
+    fs::write(d.path().join("@production/reports/purge.sql"), "x").unwrap();
+    let root = root_at(&d.path().join("@production/reports"));
+    assert_eq!(
+        join(&root, &rel("purge.sql")),
+        Err(PathError::RootInEnvFolder)
+    );
+}
+
+#[test]
+fn join_entry_refuses_disabled_and_changed_kinds() {
+    use hacivat_scripts::scan::{Limits, RealFs, scan};
+    let d = lib();
+    fs::write(d.path().join("a.sql"), "x").unwrap();
+    fs::create_dir(d.path().join("b.sql")).unwrap();
+    fs::write(d.path().join("b.sql/c.sql"), "x").unwrap();
+    let root = root_at(d.path());
+    let r = scan(&root, &Limits::default(), &RealFs);
+    let a = r
+        .entries
+        .iter()
+        .find(|e| e.rel.as_str() == "a.sql")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        join_entry(&root, &a).unwrap().path,
+        root.canonical.join("a.sql")
+    );
+    // A file that became a folder.
+    fs::remove_file(d.path().join("a.sql")).unwrap();
+    fs::create_dir(d.path().join("a.sql")).unwrap();
+    assert_eq!(join_entry(&root, &a), Err(PathError::Changed));
+    // A file that is gone.
+    fs::remove_dir(d.path().join("a.sql")).unwrap();
+    assert_eq!(
+        join_entry(&root, &a),
+        Err(PathError::Io(std::io::ErrorKind::NotFound))
+    );
+    // A disabled link is refused whatever is on disk now.
+    let mut out = a.clone();
+    out.link = LinkState::OutsideLink;
+    assert_eq!(join_entry(&root, &out), Err(PathError::OutsideRoot));
+    out.link = LinkState::Loop;
+    assert_eq!(join_entry(&root, &out), Err(PathError::OutsideRoot));
+}
+
+#[cfg(unix)]
+mod changed {
+    use std::os::unix::fs::symlink;
+
+    use hacivat_proto::EnvTag::{Production, Staging};
+    use hacivat_scripts::envscope::visible_at;
+    use hacivat_scripts::scan::{Limits, RealFs, scan};
+    use hacivat_scripts::{EntryKind, ScriptEntry, visible};
+
+    use super::{PathError, fs, join, join_entry, lib, root_at};
+
+    /// Reviewer probe p2's library: `@production/secret.sql`, `shared/a.sql`, a plain
+    /// `plain.sql` and `link.sql -> shared/a.sql`, scanned.
+    fn scanned() -> (
+        tempfile::TempDir,
+        hacivat_scripts::LibraryRoot,
+        ScriptEntry,
+        ScriptEntry,
+    ) {
+        let d = lib();
+        fs::create_dir(d.path().join("@production")).unwrap();
+        fs::write(
+            d.path().join("@production/secret.sql"),
+            "DELETE FROM accounts;",
+        )
+        .unwrap();
+        fs::create_dir(d.path().join("shared")).unwrap();
+        fs::write(d.path().join("shared/a.sql"), "SELECT 1;").unwrap();
+        fs::write(d.path().join("plain.sql"), "SELECT 2;").unwrap();
+        symlink("shared/a.sql", d.path().join("link.sql")).unwrap();
+        let root = root_at(d.path());
+        let r = scan(&root, &Limits::default(), &RealFs);
+        let get = |n: &str| {
+            r.entries
+                .iter()
+                .find(|e| e.rel.as_str() == n)
+                .unwrap()
+                .clone()
+        };
+        let (plain, link) = (get("plain.sql"), get("link.sql"));
+        assert!(visible(&plain, Some(Staging)));
+        assert!(visible(&link, Some(Staging)));
+        assert_eq!(
+            link.target.as_ref().map(|t| t.as_str()),
+            Some("shared/a.sql")
+        );
+        assert!(join_entry(&root, &plain).is_ok());
+        assert_eq!(
+            join_entry(&root, &link).unwrap().path,
+            root.canonical.join("shared/a.sql")
+        );
+        (d, root, plain, link)
+    }
+
+    #[test]
+    fn a_plain_entry_swapped_for_a_link_is_changed() {
+        let (d, root, plain, _) = scanned();
+        fs::remove_file(d.path().join("plain.sql")).unwrap();
+        symlink("@production/secret.sql", d.path().join("plain.sql")).unwrap();
+        assert_eq!(join_entry(&root, &plain), Err(PathError::Changed));
+        // Without the entry, `join` answers what it resolved, and the caller's scope re-check
+        // hides it from staging.
+        let j = join(&root, &plain.rel).unwrap();
+        assert_eq!(
+            j.target.as_ref().map(|t| t.as_str()),
+            Some("@production/secret.sql")
+        );
+        assert!(!visible_at(
+            &plain.rel,
+            EntryKind::Sql,
+            j.target.as_ref(),
+            Some(Staging)
+        ));
+        assert!(visible_at(
+            &plain.rel,
+            EntryKind::Sql,
+            j.target.as_ref(),
+            Some(Production)
+        ));
+    }
+
+    #[test]
+    fn a_repointed_link_is_changed() {
+        let (d, root, _, link) = scanned();
+        fs::remove_file(d.path().join("link.sql")).unwrap();
+        symlink("@production/secret.sql", d.path().join("link.sql")).unwrap();
+        assert_eq!(join_entry(&root, &link), Err(PathError::Changed));
+        let j = join(&root, &link.rel).unwrap();
+        assert!(!visible_at(
+            &link.rel,
+            EntryKind::Sql,
+            j.target.as_ref(),
+            Some(Staging)
+        ));
+    }
+
+    #[test]
+    fn a_link_that_became_a_plain_file_is_changed() {
+        let (d, root, _, link) = scanned();
+        fs::remove_file(d.path().join("link.sql")).unwrap();
+        fs::write(d.path().join("link.sql"), "x").unwrap();
+        assert_eq!(join_entry(&root, &link), Err(PathError::Changed));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_short_name_alias_is_refused() {
+    // m1: on a volume with 8.3 names, `GIT~1` is `.git` and `NODE_M~1` is `node_modules`;
+    // both pass the name rules but are refused as aliases (the test is a no-op on a volume
+    // without short names).
+    let d = lib();
+    fs::create_dir(d.path().join(".git")).unwrap();
+    fs::write(d.path().join(".git/config"), "[core]\n").unwrap();
+    fs::create_dir(d.path().join("node_modules")).unwrap();
+    fs::write(d.path().join("node_modules/x.sql"), "x").unwrap();
+    fs::write(d.path().join("longername.sql"), "x").unwrap();
+    let root = root_at(d.path());
+    for (short, rest) in [("GIT~1", "config"), ("NODE_M~1", "x.sql")] {
+        if d.path().join(short).exists() {
+            let r = join(&root, &rel(&format!("{short}/{rest}")));
+            assert_eq!(r, Err(PathError::Alias), "{short}");
+        }
+    }
+    if d.path().join("LONGER~1.SQL").exists() {
+        assert_eq!(join(&root, &rel("LONGER~1.SQL")), Err(PathError::Alias));
     }
 }

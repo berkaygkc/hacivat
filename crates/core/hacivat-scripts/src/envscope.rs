@@ -12,10 +12,14 @@
 //!   `@productİon` and `@productıon` are not `@production` in any locale.
 //! - Any other `@name` is unknown and hides the file everywhere, with a "did you mean" tag
 //!   ([`classify`]). So does a folder that a person would read as an environment folder but
-//!   that is not spelled with a plain `@` and nothing invisible: a full-width or small
-//!   commercial at (`＠`, `﹫`), or an invisible formatting character anywhere in it
-//!   (`\u{200B}@production`, `@production\u{200B}`, a bidi override). Treating those as plain
+//!   whose `@` is a full-width or small commercial at (`＠`, `﹫`), or that has an invisible
+//!   character after its `@` (`@production\u{200B}`, a bidi override). Treating those as plain
 //!   folders would show a "production-only" script on staging.
+//! - ## m4b-t04-scanner fix round 1 (I1): characters a person does not see in front of the
+//!   `@` (white space, NBSP, U+3000, default-ignorables, combining marks, blank glyphs) are
+//!   skipped first, so ` @production` and `\u{200B}@production` scope like `@production`.
+//! - ## m4b-t04-scanner fix round 1 (m7): a library root inside an environment folder is
+//!   refused ([`root_env_folder`]), because scoping is relative to the root.
 //! - The allowed set is the intersection over the path's environment folders; an empty
 //!   intersection is a contradiction and hides the file. An untagged connection sees only
 //!   files with no environment folder.
@@ -26,9 +30,13 @@
 //!   in the entry (the scan narrows a file link's scope to its target's, [`combine`]); the
 //!   stricter of the two wins, so an entry built by hand with `EnvScope::Any` cannot widen it.
 
-use hacivat_proto::EnvTag;
+use std::path::{Component, Path};
+use std::sync::LazyLock;
 
-use crate::pathsafe::{RelPath, display_name, is_invisible_format};
+use hacivat_proto::EnvTag;
+use regex::Regex;
+
+use crate::pathsafe::{RelPath, display_name};
 use crate::scan::{EntryKind, ScriptEntry};
 
 /// Where a file may be shown.
@@ -112,25 +120,78 @@ fn is_at_like(c: char) -> bool {
     matches!(c, '@' | '\u{FF20}' | '\u{FE6B}')
 }
 
+/// A run of characters a person does not see at the start of a name (fix round 1, I1):
+/// Unicode `White_Space` (NBSP, U+3000, the en/em spaces), default-ignorable code points,
+/// combining marks (`M*`), controls, format, private-use and unassigned code points, and the
+/// blank glyphs (Braille blank U+2800, the Hangul fillers, the musical null notehead U+1D159).
+static UNSEEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^[\p{White_Space}\p{Default_Ignorable_Code_Point}\p{M}\p{Cc}\p{Cf}\p{Co}\p{Cn}\u{2800}\u{3164}\u{FFA0}\u{115F}\u{1160}\u{1D159}]+",
+    )
+    .expect("a constant pattern")
+});
+
+/// Whether `c` is one of the [`UNSEEN`] characters.
+fn is_unseen(c: char) -> bool {
+    if c.is_ascii_graphic() {
+        return false;
+    }
+    let mut buf = [0u8; 4];
+    UNSEEN.is_match(c.encode_utf8(&mut buf))
+}
+
 /// Classifies one folder name.
+///
+/// Leading characters a person does not see are skipped (fix round 1, I1, controller
+/// ruling): a name whose first visible character is `@` is an environment folder. It scopes
+/// when that `@` is the ASCII one and the rest is exactly a tag (ASCII case-insensitive);
+/// anything else (a lookalike `@`, a misspelt tag, an invisible character after the `@`) is
+/// unknown and hides everything under it.
 pub fn classify(name: &str) -> EnvFolder {
-    // What a person sees: invisible formatting characters do not show.
-    let seen: String = name.chars().filter(|c| !is_invisible_format(*c)).collect();
-    let mut chars = seen.chars();
+    // Fast path: a name that starts with an ASCII letter, digit or punctuation other than `@`
+    // starts with a visible character that is not `@`.
+    if name
+        .as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_graphic() && *b != b'@')
+    {
+        return EnvFolder::NotEnv;
+    }
+    let lead = if name.starts_with('@') {
+        0
+    } else {
+        UNSEEN.find(name).map_or(0, |m| m.end())
+    };
+    let mut chars = name[lead..].chars();
     if !chars.next().is_some_and(is_at_like) {
         return EnvFolder::NotEnv;
     }
-    let seen_rest = chars.as_str();
-    if let Some(rest) = name.strip_prefix('@')
+    let after = chars.as_str();
+    if name[lead..].starts_with('@')
         && let Some(tag) = EnvTag::ALL
             .into_iter()
-            .find(|t| rest.eq_ignore_ascii_case(t.id()))
+            .find(|t| after.eq_ignore_ascii_case(t.id()))
     {
         return EnvFolder::Tag(tag);
     }
+    let seen: String = after.chars().filter(|c| !is_unseen(*c)).collect();
     EnvFolder::Unknown {
-        suggestion: suggest(seen_rest),
+        suggestion: suggest(&seen),
     }
+}
+
+/// The first component of a library root's canonical path (its own name included) that is an
+/// environment folder, as [`display_name`] shows it (fix round 1, m7). Scoping is relative to
+/// the root, so such a root would show `@production/reports/purge.sql` everywhere: the scan
+/// and `join` refuse it instead, and attach (Tasks 3, 16) can say so before it is added.
+pub fn root_env_folder(canonical: &Path) -> Option<String> {
+    canonical.components().find_map(|c| match c {
+        Component::Normal(name) => {
+            let name = name.to_string_lossy();
+            (classify(&name) != EnvFolder::NotEnv).then(|| display_name(&name))
+        }
+        _ => None,
+    })
 }
 
 /// The tag a misspelt `rest` most likely means: an ASCII case-insensitive match, else the
@@ -259,5 +320,23 @@ pub fn admits(scope: &EnvScope, env: Option<EnvTag>) -> bool {
 /// path gives it now and the scope the scan stored must admit `env`.
 pub fn visible(entry: &ScriptEntry, env: Option<EnvTag>) -> bool {
     admits(&entry_scope(&entry.rel, entry.kind), env) && admits(&entry.scope, env)
+}
+
+/// Whether what [`pathsafe::join`](crate::pathsafe::join) resolved for `rel` may be opened
+/// under a connection whose environment is `env` (fix round 1, I2): the scope of `rel` and, when
+/// `rel` was a link, the scope of the target it resolved to now. The open (Task 5) and the tab
+/// (Task 14) call this on `join`'s answer before they read a byte.
+pub fn visible_at(
+    rel: &RelPath,
+    kind: EntryKind,
+    target: Option<&RelPath>,
+    env: Option<EnvTag>,
+) -> bool {
+    let here = entry_scope(rel, kind);
+    let scope = match target {
+        Some(t) => combine(&here, &scope_of(t)),
+        None => here,
+    };
+    admits(&scope, env)
 }
 // ## m4b-t04-scanner

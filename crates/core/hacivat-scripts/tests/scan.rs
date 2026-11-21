@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use hacivat_proto::EnvTag::{self, Production, Staging};
-use hacivat_scripts::pathsafe::{NameProblem, display_name};
+use hacivat_scripts::pathsafe::{NameProblem, display_name, resolve_link};
 use hacivat_scripts::scan::{
     Diag, Fs, LimitHit, Limits, Meta, MetaKind, RealFs, Resolved, RootProblem, ScanResult, scan,
 };
@@ -25,7 +25,12 @@ use hacivat_scripts::{
 #[derive(Debug, Clone)]
 enum Node {
     Dir,
-    File { len: u64, dataless: bool },
+    /// A dataless (cloud placeholder) folder: listing it would download it.
+    CloudDir,
+    File {
+        len: u64,
+        dataless: bool,
+    },
     Link(PathBuf),
     Fifo,
 }
@@ -39,8 +44,20 @@ struct FakeFs {
     chain: Option<usize>,
     read_dirs: Cell<usize>,
     lstats: Cell<usize>,
-    resolves: Cell<usize>,
+    read_links: Cell<usize>,
     canonicalizes: Cell<usize>,
+    /// The largest `cap` a `read_dir` was asked for, and the most names it answered.
+    max_cap: Cell<usize>,
+    max_listed: Cell<usize>,
+}
+
+/// Every call names a path inside the library root (fix round 1, I3): the fake fails the
+/// test on any other path, so "nothing outside is touched" is checked by every scan test.
+fn inside(path: &Path) {
+    assert!(
+        path.starts_with(ROOT),
+        "the scan touched a path outside the library: {path:?}"
+    );
 }
 
 const ROOT: &str = "/lib";
@@ -75,7 +92,7 @@ impl FakeFs {
     fn put(&mut self, path: PathBuf, node: Node) {
         let parent = path.parent().unwrap().to_path_buf();
         let name = path.file_name().unwrap().to_os_string();
-        if matches!(node, Node::Dir) {
+        if matches!(node, Node::Dir | Node::CloudDir) {
             self.children.entry(path.clone()).or_default();
         }
         if self.nodes.insert(path, node).is_none() {
@@ -135,6 +152,11 @@ impl FakeFs {
         self
     }
 
+    fn cloud_dir(&mut self, rel: &str) -> &mut Self {
+        self.insert(Self::abs(rel), Node::CloudDir);
+        self
+    }
+
     fn fifo(&mut self, rel: &str) -> &mut Self {
         self.insert(Self::abs(rel), Node::Fifo);
         self
@@ -185,20 +207,31 @@ impl FakeFs {
 }
 
 impl Fs for FakeFs {
-    fn read_dir(&self, dir: &Path) -> io::Result<Vec<OsString>> {
+    fn read_dir(&self, dir: &Path, cap: usize) -> io::Result<Vec<OsString>> {
+        inside(dir);
         self.read_dirs.set(self.read_dirs.get() + 1);
+        self.max_cap.set(self.max_cap.get().max(cap));
+        assert!(
+            !matches!(self.nodes.get(dir), Some(Node::CloudDir)),
+            "a dataless folder was listed (that downloads it)"
+        );
         if let Some((k, false)) = self.on_chain(dir) {
             let n = self.chain.unwrap_or(0);
             let next = if k + 1 == n { "f.sql" } else { "d" };
             return Ok(vec![OsString::from(next)]);
         }
-        self.children
+        let mut names = self
+            .children
             .get(dir)
             .cloned()
-            .ok_or_else(|| io::ErrorKind::NotFound.into())
+            .ok_or(io::ErrorKind::NotFound)?;
+        names.truncate(cap);
+        self.max_listed.set(self.max_listed.get().max(names.len()));
+        Ok(names)
     }
 
     fn symlink_metadata(&self, path: &Path) -> io::Result<Meta> {
+        inside(path);
         self.lstats.set(self.lstats.get() + 1);
         if let Some((k, file)) = self.on_chain(path)
             && k > 0
@@ -214,6 +247,7 @@ impl Fs for FakeFs {
         let node = self.nodes.get(path).ok_or(io::ErrorKind::NotFound)?;
         let (kind, len, dataless) = match node {
             Node::Dir => (MetaKind::Dir, 0, false),
+            Node::CloudDir => (MetaKind::Dir, 0, true),
             Node::File { len, dataless } => (MetaKind::File, *len, *dataless),
             Node::Link(t) => (MetaKind::Symlink, t.as_os_str().len() as u64, false),
             Node::Fifo => (MetaKind::Other, 0, false),
@@ -227,18 +261,19 @@ impl Fs for FakeFs {
     }
 
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        inside(path);
         self.canonicalizes.set(self.canonicalizes.get() + 1);
-        self.real(path, &mut 0)
+        let real = self.real(path, &mut 0)?;
+        inside(&real);
+        Ok(real)
     }
 
-    fn resolve(&self, link: &Path) -> Resolved {
-        self.resolves.set(self.resolves.get() + 1);
-        let mut hops = 0;
-        match self.real(link, &mut hops) {
-            Ok(t) => Resolved::Target(t),
-            Err(_) if hops > 40 => Resolved::Loop,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Resolved::Dangling,
-            Err(e) => Resolved::Error(e.kind()),
+    fn read_link(&self, link: &Path) -> io::Result<PathBuf> {
+        inside(link);
+        self.read_links.set(self.read_links.get() + 1);
+        match self.nodes.get(link) {
+            Some(Node::Link(t)) => Ok(t.clone()),
+            _ => Err(io::ErrorKind::InvalidInput.into()),
         }
     }
 }
@@ -646,8 +681,9 @@ fn fake_links_resolve_once() {
     // A link to a folder is not followed; one named like a script is listed disabled.
     assert!(!names(&r).iter().any(|n| n.starts_with("dirlink")));
     assert_eq!(find(&r, "dir.sql").link, LinkState::OutsideLink);
-    // Never `lstat` outside the root: the outside target is resolved, not inspected.
-    assert_eq!(fs.resolves.get(), 6);
+    // Nothing outside the root is touched (the fake fails the test otherwise), and the
+    // outside link was read once and refused from its text.
+    assert!(fs.read_links.get() >= 6);
 }
 
 #[test]
@@ -706,7 +742,7 @@ fn scan_never_reads_contents() {
     assert_eq!(files(&r).len(), 500);
     assert_eq!(fs.read_dirs.get(), 1 + 5);
     assert_eq!(fs.lstats.get(), 500 + 5);
-    assert_eq!(fs.resolves.get(), 0);
+    assert_eq!(fs.read_links.get(), 0);
     assert_eq!(
         fs.canonicalizes.get(),
         2,
@@ -1171,4 +1207,320 @@ fn scan_20k_files_under_300ms() {
         return;
     }
     assert!(timed_scan(20_000) < Duration::from_millis(300));
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m4b-t04-scanner fix round 1 (review I1, I3, m2, m3, m4, m6, m7).
+
+#[test]
+fn a_blank_before_at_scopes_the_folder() {
+    // I1 (reviewer probe p1): NBSP is macOS Option+Space, an easy typo in Finder.
+    let r = scan_fixture(&["\u{00A0}@production/purge.sql", "\u{3000}@prod/a.sql"]);
+    let p = find(&r, "\u{00A0}@production/purge.sql");
+    assert_eq!(p.scope, EnvScope::Only(EnvSet::of(Production)));
+    assert!(!visible(p, Some(Staging)));
+    assert!(!visible(p, None));
+    assert!(visible(p, Some(Production)));
+    assert!(matches!(
+        find(&r, "\u{3000}@prod/a.sql").scope,
+        EnvScope::Hidden(ScopeProblem::Unknown(_))
+    ));
+    assert!(
+        r.diags.iter().any(|d| matches!(
+            d,
+            Diag::UnknownEnvFolder {
+                suggestion: Some(Production),
+                ..
+            }
+        )),
+        "{:?}",
+        r.diags
+    );
+}
+
+#[test]
+fn outside_link_texts_are_refused_without_touching_outside() {
+    // I3: every text that leaves the root is refused from the text alone; the fake fails the
+    // test on any call that names a path outside `/lib`.
+    let mut fs = FakeFs::new();
+    fs.file("ok.sql")
+        .link("abs.sql", "/elsewhere/x.sql")
+        .link("rel.sql", "../elsewhere/x.sql")
+        .link("deep.sql", "../../../../../../etc/passwd")
+        .link("back_in.sql", "/lib/../elsewhere/x.sql")
+        .link("x/up.sql", "../../elsewhere/x.sql")
+        .link("unc.sql", "\\\\host\\share\\x.sql")
+        .link("drive.sql", "C:\\x.sql")
+        .link("verbatim.sql", "\\\\?\\UNC\\host\\share\\x.sql");
+    fs.insert(
+        PathBuf::from("/elsewhere/x.sql"),
+        Node::File {
+            len: 1,
+            dataless: false,
+        },
+    );
+    let r = scan_fake(&fs);
+    for n in [
+        "abs.sql",
+        "rel.sql",
+        "deep.sql",
+        "back_in.sql",
+        "x/up.sql",
+        "unc.sql",
+        "drive.sql",
+        "verbatim.sql",
+    ] {
+        assert_eq!(find(&r, n).link, LinkState::OutsideLink, "{n}");
+        assert_eq!(find(&r, n).target, None, "{n}");
+    }
+}
+
+#[test]
+fn unc_and_drive_link_texts_are_outside() {
+    // I3 on Windows: UNC, device and `\\?\` texts and another drive are `Outside` without a
+    // lookup. On Unix the same text is one odd file name inside the root (dangling).
+    let mut fs = FakeFs::new();
+    for (name, text) in [
+        ("unc.sql", "\\\\host\\share\\x.sql"),
+        ("dev.sql", "\\\\.\\pipe\\x"),
+        ("verbatim.sql", "\\\\?\\UNC\\host\\share\\x.sql"),
+        ("drive.sql", "D:\\x.sql"),
+        ("driverel.sql", "D:x.sql"),
+        ("rooted.sql", "\\x.sql"),
+    ] {
+        fs.link(name, text);
+        let got = resolve_link(&fs, Path::new(ROOT), &Path::new(ROOT).join(name));
+        if cfg!(windows) {
+            assert_eq!(got, Resolved::Outside, "{text}");
+        } else {
+            assert!(!matches!(got, Resolved::Target { .. }), "{text}: {got:?}");
+        }
+    }
+}
+
+#[test]
+fn link_chains_resolve_inside_with_a_hop_limit() {
+    let mut fs = FakeFs::new();
+    fs.file("@production/p.sql")
+        .link("@staging/hop.sql", "../@production/p.sql")
+        .link("chain.sql", "@staging/hop.sql")
+        .link("via/dir.sql", "../d/x.sql")
+        .link("d", "real")
+        .file("real/x.sql");
+    // A chain of 45 links is a loop.
+    for i in 0..45 {
+        fs.link(&format!("l{i}.sql"), &format!("l{}.sql", i + 1));
+    }
+    fs.file("l45.sql");
+    let r = scan_fake(&fs);
+    let chain = find(&r, "chain.sql");
+    assert_eq!(chain.link, LinkState::InsideLink);
+    assert_eq!(
+        chain.target.as_ref().map(|t| t.as_str()),
+        Some("@production/p.sql")
+    );
+    assert_eq!(chain.scope, EnvScope::Only(EnvSet::of(Production)));
+    // A folder link met on the way inside is followed by the resolution (as the kernel
+    // would), never by the walk.
+    assert_eq!(
+        find(&r, "via/dir.sql").target.as_ref().map(|t| t.as_str()),
+        Some("real/x.sql")
+    );
+    assert_eq!(find(&r, "l0.sql").link, LinkState::Loop);
+    assert_eq!(find(&r, "l10.sql").link, LinkState::InsideLink);
+}
+
+#[test]
+fn a_link_hidden_by_its_target_scope_gets_a_diagnostic() {
+    // m4: `@staging/p.sql -> @production/p.sql` is hidden everywhere; it says why.
+    let mut fs = FakeFs::new();
+    fs.file("@production/p.sql")
+        .link("@staging/p.sql", "/lib/@production/p.sql")
+        .file("@prod/q.sql")
+        .link("q.sql", "/lib/@prod/q.sql")
+        .link("fine.sql", "/lib/@production/p.sql");
+    let r = scan_fake(&fs);
+    let mut links: Vec<&str> = r
+        .diags
+        .iter()
+        .filter_map(|d| match d {
+            Diag::LinkScope { rel } => Some(rel.as_str()),
+            _ => None,
+        })
+        .collect();
+    links.sort();
+    assert_eq!(links, ["@staging/p.sql", "q.sql"]);
+}
+
+#[test]
+fn a_dataless_folder_is_listed_but_never_entered() {
+    // m2: listing a cloud placeholder folder downloads it; it is a disabled row instead.
+    let mut fs = FakeFs::new();
+    fs.cloud_dir("x/cloud").file("x/cloud/a.sql").file("ok.sql");
+    let r = scan_fake(&fs);
+    assert_eq!(names(&r), ["x", "x/cloud", "ok.sql"]);
+    let c = find(&r, "x/cloud");
+    assert_eq!(c.kind, EntryKind::Folder);
+    assert!(c.dataless);
+    // The fake fails the test if the folder is listed; the root and `x` are.
+    assert_eq!(fs.read_dirs.get(), 2);
+}
+
+#[test]
+fn the_visited_limit_applies_while_a_folder_is_read() {
+    // m3: one folder of 1,000 names under a limit of 100 is read 101 names at most.
+    let mut fs = FakeFs::new();
+    for i in 0..1_000 {
+        fs.file(&format!("n{i:04}.txt"));
+    }
+    let limits = Limits {
+        max_visited: 100,
+        ..Limits::default()
+    };
+    let r = scan(&root_of(&fs), &limits, &fs);
+    assert_eq!(r.stopped, Some(LimitHit::Visited(100)));
+    assert_eq!(fs.max_cap.get(), 101);
+    assert!(fs.max_listed.get() <= 101);
+}
+
+#[test]
+fn a_root_inside_an_env_folder_is_refused() {
+    // m7 (reviewer probe p4): scoping is relative to the root, so `<tmp>/@production/reports`
+    // would show `purge.sql` on staging. The scan refuses the root and lists nothing.
+    let d = tempfile::tempdir().unwrap();
+    fs::create_dir_all(d.path().join("@production/reports")).unwrap();
+    fs::write(d.path().join("@production/reports/purge.sql"), "x").unwrap();
+    fs::create_dir_all(d.path().join("\u{00A0}@prod/lib")).unwrap();
+    fs::write(d.path().join("\u{00A0}@prod/lib/a.sql"), "x").unwrap();
+    fs::create_dir_all(d.path().join("@staging")).unwrap();
+    fs::write(d.path().join("@staging/a.sql"), "x").unwrap();
+    for (dir, name) in [
+        ("@production/reports", "@production"),
+        ("\u{00A0}@prod/lib", "\u{00A0}@prod"),
+        ("@staging", "@staging"),
+    ] {
+        let r = scan(&real_root(&d.path().join(dir)), &Limits::default(), &RealFs);
+        assert_eq!(r.root, Some(RootProblem::InEnvFolder(name.into())), "{dir}");
+        assert!(r.entries.is_empty());
+    }
+    // `me@corp` is not an environment folder ('@' only at a name's start scopes).
+    fs::create_dir_all(d.path().join("me@corp/lib")).unwrap();
+    let r = scan(
+        &real_root(&d.path().join("me@corp/lib")),
+        &Limits::default(),
+        &RealFs,
+    );
+    assert_eq!(r.root, None);
+}
+
+#[cfg(unix)]
+mod unix_fr1 {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    use super::{
+        EnvScope, EnvSet, Limits, LinkState, Production, RealFs, Resolved, Staging, find, fs,
+        real_root, resolve_link, scan, visible,
+    };
+    use hacivat_scripts::scan::Diag;
+
+    #[test]
+    fn an_outside_target_in_a_mode_000_folder_is_outside_without_a_lookup() {
+        // I3 (reviewer probe p3): `realpath` searched the locked folder (PermissionDenied);
+        // the text-only resolution answers "outside" without asking the outside file system.
+        let d = tempfile::tempdir().unwrap();
+        let o = tempfile::tempdir().unwrap();
+        fs::create_dir(o.path().join("locked")).unwrap();
+        fs::write(o.path().join("locked/a.sql"), "x").unwrap();
+        fs::set_permissions(o.path().join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        symlink(o.path().join("locked/a.sql"), d.path().join("x.sql")).unwrap();
+        let root = real_root(d.path());
+        let got = resolve_link(&RealFs, &root.canonical, &root.canonical.join("x.sql"));
+        let r = scan(&root, &Limits::default(), &RealFs);
+        fs::set_permissions(o.path().join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(got, Resolved::Outside);
+        assert_eq!(find(&r, "x.sql").link, LinkState::OutsideLink);
+        assert!(
+            !r.diags.iter().any(|d| matches!(d, Diag::Unreadable { .. })),
+            "{:?}",
+            r.diags
+        );
+    }
+
+    #[test]
+    fn symlink_loop_is_disabled() {
+        // alg/28 HV-SCRIPT-03 test name (m6).
+        let d = tempfile::tempdir().unwrap();
+        symlink("b.sql", d.path().join("a.sql")).unwrap();
+        symlink("a.sql", d.path().join("b.sql")).unwrap();
+        symlink("x/../c.sql", d.path().join("c.sql")).unwrap();
+        fs::create_dir(d.path().join("x")).unwrap();
+        let r = scan(&real_root(d.path()), &Limits::default(), &RealFs);
+        for n in ["a.sql", "b.sql", "c.sql"] {
+            let e = find(&r, n);
+            assert_eq!(e.link, LinkState::Loop, "{n}");
+            assert_eq!(e.target, None);
+        }
+    }
+
+    #[test]
+    fn dir_symlink_is_not_followed() {
+        // alg/28 HV-SCRIPT-03 test name (m6): a link to a folder with scripts lists nothing.
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join("real")).unwrap();
+        fs::write(d.path().join("real/a.sql"), "x").unwrap();
+        symlink("real", d.path().join("alias")).unwrap();
+        symlink("real", d.path().join("alias.sql")).unwrap();
+        let r = scan(&real_root(d.path()), &Limits::default(), &RealFs);
+        assert!(
+            !r.entries
+                .iter()
+                .any(|e| e.rel.as_str().starts_with("alias/"))
+        );
+        assert!(!r.entries.iter().any(|e| e.rel.as_str() == "alias"));
+        assert_eq!(find(&r, "alias.sql").link, LinkState::OutsideLink);
+    }
+
+    #[test]
+    fn link_chains_and_case_variants_keep_the_target_scope() {
+        // Reviewer probe p5, as a named test: no link shows a production script on staging.
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join("@production")).unwrap();
+        fs::create_dir(d.path().join("@staging")).unwrap();
+        fs::write(d.path().join("@production/p.sql"), "x").unwrap();
+        symlink("../@production/p.sql", d.path().join("@staging/hop.sql")).unwrap();
+        symlink("@staging/hop.sql", d.path().join("chain.sql")).unwrap();
+        symlink("@PRODUCTION/p.sql", d.path().join("case.sql")).unwrap();
+        let canonical = fs::canonicalize(d.path()).unwrap();
+        let up = canonical.to_string_lossy().to_ascii_uppercase();
+        symlink(
+            format!("{up}/@production/p.sql"),
+            d.path().join("abscase.sql"),
+        )
+        .unwrap();
+        let r = scan(&real_root(d.path()), &Limits::default(), &RealFs);
+        for n in ["chain.sql", "case.sql", "abscase.sql", "@staging/hop.sql"] {
+            let e = find(&r, n);
+            // An openable link never shows a production script on staging; a disabled row
+            // (outside, loop) may be listed but never opens.
+            assert!(
+                e.link != LinkState::InsideLink || !visible(e, Some(Staging)),
+                "{n} on staging: {e:?}"
+            );
+        }
+        assert_eq!(
+            find(&r, "chain.sql").scope,
+            EnvScope::Only(EnvSet::of(Production))
+        );
+        // An absolute text spelling the root another way is outside (a text comparison with
+        // the canonical root, never a case fold).
+        assert_eq!(find(&r, "abscase.sql").link, LinkState::OutsideLink);
+        // On a case-insensitive volume the case variant lands on the stored name.
+        let case = find(&r, "case.sql");
+        if case.link == LinkState::InsideLink {
+            assert_eq!(
+                case.target.as_ref().map(|t| t.as_str()),
+                Some("@production/p.sql")
+            );
+        }
+    }
 }

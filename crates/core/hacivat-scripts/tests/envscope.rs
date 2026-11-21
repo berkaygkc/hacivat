@@ -30,6 +30,7 @@ fn entry_kind(p: &str, kind: EntryKind) -> ScriptEntry {
         dataless: false,
         len: 0,
         mtime: SystemTime::UNIX_EPOCH,
+        target: None,
     }
 }
 
@@ -178,13 +179,14 @@ fn did_you_mean_suggestions() {
 
 #[test]
 fn at_lookalikes_and_invisible_characters_fail_closed() {
-    // A full-width or small commercial at, or an invisible character, makes a folder that
-    // reads as `@production` to a person: it must not be an ordinary folder (visible on
-    // staging), so it is an unknown environment folder, hidden everywhere.
+    // A full-width or small commercial at, or an invisible character after the `@`, makes a
+    // folder that reads as `@production` to a person: it must not be an ordinary folder
+    // (visible on staging), so it is an unknown environment folder, hidden everywhere. (An
+    // invisible character *before* the `@` is skipped: fix round 1, I1, below.)
     for name in [
         "\u{FF20}production",
         "\u{FE6B}production",
-        "\u{200B}@production",
+        " \u{FF20}production",
         "@production\u{200B}",
         "@pro\u{200D}duction",
         "@\u{202E}noitcudorp",
@@ -281,4 +283,158 @@ fn nfd_names_do_not_change_ascii_tags() {
         EnvScope::Only(EnvSet::of(Production))
     );
     assert!(visible(&entry("@dev/rapor\u{0308}.sql"), Some(Dev)));
+}
+
+// ## m4b-t04-scanner fix round 1 (review I1, m7, I2).
+
+/// Characters a person does not see in front of the `@` are skipped (controller ruling on I1):
+/// the reviewer's seven names, the zero-width control, and more of the same classes.
+const UNSEEN_LEADS: [&str; 19] = [
+    " ",                        // SPACE
+    "\u{00A0}",                 // NO-BREAK SPACE (macOS Option+Space)
+    "\u{2002}",                 // EN SPACE
+    "\u{3000}",                 // IDEOGRAPHIC SPACE
+    "\u{2800}",                 // BRAILLE PATTERN BLANK
+    "\u{0301}",                 // COMBINING ACUTE ACCENT
+    "\u{1D159}",                // MUSICAL SYMBOL NULL NOTEHEAD
+    "\u{200B}",                 // ZERO WIDTH SPACE
+    "\u{202F}",                 // NARROW NO-BREAK SPACE
+    "\u{2003}\u{2009}",         // EM SPACE, THIN SPACE
+    "\u{FEFF}",                 // BOM
+    "\u{0345}",                 // COMBINING GREEK YPOGEGRAMMENI (an alphabetic mark)
+    "\u{0E31}",                 // THAI CHARACTER MAI HAN-AKAT (a mark of class 0)
+    "\u{20DD}",                 // COMBINING ENCLOSING CIRCLE (Me)
+    "\u{3164}",                 // HANGUL FILLER
+    "\u{115F}",                 // HANGUL CHOSEONG FILLER
+    "\u{E000}",                 // a private-use character
+    "\u{202E}",                 // RIGHT-TO-LEFT OVERRIDE
+    "\u{00A0}\u{0301}\u{200B}", // a mixed run
+];
+
+#[test]
+fn leading_blanks_and_marks_before_at_scope_like_at() {
+    for lead in UNSEEN_LEADS {
+        let name = format!("{lead}@production");
+        assert_eq!(classify(&name), EnvFolder::Tag(Production), "{name:?}");
+        let p = format!("{name}/purge.sql");
+        assert!(!visible(&entry(&p), Some(Staging)), "{p:?} on staging");
+        assert!(!visible(&entry(&p), None), "{p:?} untagged");
+        assert!(visible(&entry(&p), Some(Production)), "{p:?} on production");
+        let staging = format!("{lead}@STAGING");
+        assert_eq!(classify(&staging), EnvFolder::Tag(Staging), "{staging:?}");
+    }
+}
+
+#[test]
+fn leading_blanks_before_an_unknown_at_name_hide_with_a_suggestion() {
+    for lead in UNSEEN_LEADS {
+        for (rest, want) in [
+            ("@prod", Some(Production)),
+            ("@stagin", Some(Staging)),
+            ("@x", None),
+        ] {
+            let name = format!("{lead}{rest}");
+            assert_eq!(
+                classify(&name),
+                EnvFolder::Unknown { suggestion: want },
+                "{name:?}"
+            );
+            let p = format!("{name}/a.sql");
+            for tag in EnvTag::ALL {
+                assert!(!visible(&entry(&p), Some(tag)), "{p:?} {tag:?}");
+            }
+        }
+    }
+    // A lookalike `@` after the blanks is unknown, never a tag.
+    assert_eq!(
+        classify("\u{00A0}\u{FF20}production"),
+        EnvFolder::Unknown {
+            suggestion: Some(Production)
+        }
+    );
+}
+
+#[test]
+fn visible_characters_before_at_are_ordinary_folders() {
+    for name in [
+        "x@production",
+        "1@production",
+        "(@production)",
+        "é@production",
+        "İ@production",
+    ] {
+        assert_eq!(classify(name), EnvFolder::NotEnv, "{name:?}");
+    }
+}
+
+#[test]
+fn root_env_folder_names_the_first_env_component() {
+    use std::path::Path;
+    assert_eq!(
+        envscope::root_env_folder(Path::new("/x/@production/reports")),
+        Some("@production".into())
+    );
+    assert_eq!(
+        envscope::root_env_folder(Path::new("/x/@prod")),
+        Some("@prod".into())
+    );
+    assert_eq!(
+        envscope::root_env_folder(Path::new("/x/\u{00A0}@staging/y")),
+        Some("\u{00A0}@staging".into())
+    );
+    assert_eq!(
+        envscope::root_env_folder(Path::new("/x/@pro\u{202E}d/y")),
+        Some("@pro<U+202E>d".into())
+    );
+    assert_eq!(
+        envscope::root_env_folder(Path::new("/Users/me@corp/lib")),
+        None
+    );
+    assert_eq!(envscope::root_env_folder(Path::new("/x/reports")), None);
+}
+
+#[test]
+fn visible_at_uses_the_resolved_target() {
+    // I2: the caller of `join` re-checks the scope of what was resolved.
+    let link = rel("a.sql");
+    let prod = rel("@production/secret.sql");
+    assert!(envscope::visible_at(
+        &link,
+        EntryKind::Sql,
+        None,
+        Some(Staging)
+    ));
+    assert!(!envscope::visible_at(
+        &link,
+        EntryKind::Sql,
+        Some(&prod),
+        Some(Staging)
+    ));
+    assert!(envscope::visible_at(
+        &link,
+        EntryKind::Sql,
+        Some(&prod),
+        Some(Production)
+    ));
+    assert!(!envscope::visible_at(
+        &link,
+        EntryKind::Sql,
+        Some(&prod),
+        None
+    ));
+    let staged = rel("@staging/p.sql");
+    for tag in EnvTag::ALL {
+        assert!(!envscope::visible_at(
+            &staged,
+            EntryKind::Sql,
+            Some(&prod),
+            Some(tag)
+        ));
+    }
+    assert!(!envscope::visible_at(
+        &rel("@production"),
+        EntryKind::Folder,
+        None,
+        Some(Staging)
+    ));
 }

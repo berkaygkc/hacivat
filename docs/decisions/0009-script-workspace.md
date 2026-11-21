@@ -228,14 +228,14 @@ Task 4 fills `pathsafe`, `scan`, `envscope`, `tree` and `dataless` (HV-SCRIPT-03
   - absent: the path is answered (new script);
   - a FIFO, socket or device: `NotAFile`;
   - a file or folder: its `realpath` must lie under the root;
-  - a file link: answers its canonical target only when the scan would list that target itself (a regular `.sql`/`.md` file inside the root, in no skipped folder). Otherwise `OutsideRoot`, which covers out, dangling, a loop, a folder, `.git/config`, `notes.txt` and the root itself.
+  - a file link: answers its target only when the scan would list that target itself (a regular `.sql`/`.md` file inside the root, in no skipped folder). Otherwise `OutsideRoot`, which covers out, dangling, a loop, a folder, `.git/config`, `notes.txt` and the root itself. The link is resolved as text inside the root (fix round 1 below).
 - Containment is a component-wise byte prefix of canonical paths, never a case fold. On a case-insensitive volume, `realpath` returns the stored case on both sides.
-- `join` is a check, as fresh as the call. Task 5 still opens relative to a directory handle with `O_NOFOLLOW` (HV-SCRIPT-03 step 8, carries n8).
+- `join` is a check, as fresh as the call. Task 5 still opens relative to a directory handle with `O_NOFOLLOW` (HV-SCRIPT-03 step 8, carries n8). Since fix round 1 it answers a `Joined` (what it resolved), and the caller re-checks scope.
 
 ### The scan (`scan::scan`)
 
-- Through the `Fs` seam, which has `read_dir` (names), `symlink_metadata`, `canonicalize` and `resolve`. It has no read method, so a scan cannot read contents by construction.
-  - `resolve` is new beside the plan's sketch. `ErrorKind::FilesystemLoop` is unstable, so loops are told apart by `ELOOP`, or 1921 on Windows.
+- Through the `Fs` seam, which has `read_dir` (names, capped), `symlink_metadata`, `canonicalize` and `read_link`. It has no read method, so a scan cannot read contents by construction.
+  - Fix round 1 replaced the first round's `resolve` (OS `realpath`, which walked outside paths) with `read_link`, and loops are counted as hops.
   - Tests inject an in-memory `Fs`.
 - The walk is iterative, with an explicit stack. Names are visited in byte order, so a stop is deterministic. The output is in tree order (`tree::order`): an ancestor before its contents, folders before files among siblings, then the name's bytes.
 - Not listed:
@@ -245,7 +245,7 @@ Task 4 fills `pathsafe`, `scan`, `envscope`, `tree` and `dataless` (HV-SCRIPT-03
   - folders without a listed file below them.
 - File links are resolved once:
   - `InsideLink` takes the target's metadata. Its scope is the intersection of the link's scope and the target's (`envscope::combine`). Without that, a plain `a.sql` pointing at `@staging/drop_all.sql` would show a staging-only script on production.
-  - A target outside the root is never `lstat`ed.
+  - No system call names a path outside the root (fix round 1, I3; the first round's `realpath` did).
   - A link to a folder is never followed. One named like a script is listed as `OutsideLink`; any other is not listed.
 - Limits are R-M4b-14 plus two the plan did not name:
   - 20,000 files;
@@ -287,3 +287,33 @@ Task 4 fills `pathsafe`, `scan`, `envscope`, `tree` and `dataless` (HV-SCRIPT-03
 ### Named exception
 
 `tests/seams.rs` (Task 1a's file): the stub assertions for `visible`, `pathsafe::component` and `pathsafe::join` are removed, with fenced `// ## m4b-t04-scanner` notes in their place. Their real rules are tested in `tests/{envscope,pathsafe,scan}.rs`.
+
+### Fix round 1 (review I1–I3, m1–m9; rulings R-T4-1, R-T4-2)
+
+- **I1, leading characters before `@`.** `classify` first skips a leading run that a person does not see: Unicode `White_Space` (NBSP, U+3000, the en and em spaces), `Default_Ignorable_Code_Point`, combining marks (`\p{M}`), controls, format, private-use and unassigned code points, and the blank glyphs (U+2800, the Hangul fillers, U+1D159).
+  - The classes come from `regex`'s Unicode tables, already a dependency, so there is no manifest change.
+  - A name whose first visible character is the ASCII `@` scopes when the rest is exactly a tag: ` @production` and `\u{200B}@production` are `Tag(Production)`, per the controller's ruling.
+  - Anything else is unknown and hidden with "did you mean": a lookalike `@` after the blanks, a misspelt tag, an invisible character after the `@`. A visible character before the `@` (`x@`, `(@`, `é@`) keeps an ordinary folder.
+  - First-round change: `\u{200B}@production` was `Unknown`; it now scopes. Both answers keep it off staging.
+- **I2, `join` answers what it resolved (R-T4-2).** `join` and `join_with` answer `Joined { path, target, kind }`, where `target` is the link's target inside the library and `kind` is `Absent`, `File` or `Folder`.
+  - **The caller contract** is in the `Joined` doc. Before opening, the Task 5 read and save, the Task 14 tab and the Task 15 chooser re-apply `envscope::visible_at(rel, kind, joined.target, env)`, which combines the scope of `rel` with the scope of the resolved target.
+  - `join_entry(root, &ScriptEntry)` refuses with `PathError::Changed` when a scanned plain file is now a link, a link points elsewhere (`ScriptEntry::target`, new, records the scanned target), a link became a file, or a file became a folder. It refuses `OutsideLink` and `Loop` entries outright.
+- **I3, link resolution is text-only inside the root (R-T4-1, which replaces the plan's "resolved once with `realpath`").** `pathsafe::resolve_link`, used by both the scan and `join`:
+  1. reads the link text (`read_link`, on the link itself);
+  2. walks a relative text from the link's real folder; an absolute text must begin with the canonical root, component for component, or the link is `Outside` with no further call;
+  3. pops on `..`, refusing to pop above the root;
+  4. `lstat`s each name inside the root, and splices in any link it meets, with at most 40 hops before `Loop`;
+  5. canonicalises the link-free final path, which stays inside the root, and requires a name the scan would list.
+  - On Windows a UNC, device, `\\?\`, other-drive, drive-relative or rooted text is refused from its components alone, so no SMB connection is ever made.
+  - An absolute link that spells the root another way (for example `/var/…` for `/private/var/…`, or another case) is `Outside`: the rule is a text comparison with the canonical root.
+  - A link hidden by its target's scope gets `Diag::LinkScope { rel }` (m4).
+- **m1, identity.** `join` canonicalises the folders on the way, and the final file or folder, and requires `inside_rel` to equal the requested `RelPath` byte for byte. Otherwise it answers `PathError::Alias`: an 8.3 short name (`GIT~1/config`, `NODE_M~1/x.sql`) or a case or normalisation variant. Scan-produced paths are the OS's stored bytes, so they always match.
+- **m2, dataless folders.** A folder with the dataless flag is listed as a disabled row (`ScriptEntry.dataless = true`, `kind = Folder`), with its ancestors, and is never read. The test double fails on any `read_dir` of such a folder. Running the scan thread under `setiopolicy_np(IOPOL_MATERIALIZE_DATALESS_FILES_OFF)` would need FFI and `unsafe`, which this crate may not use. Not done.
+- **m3.** `Fs::read_dir(dir, cap)` stops reading at `max_visited − visited + 1` names.
+- **m5.** `ScanResult.stopped` and `.suppressed` must be shown by Task 10 (R-M4b-14). The controller routes this carry.
+- **m6.** Tests named `symlink_loop_is_disabled` and `dir_symlink_is_not_followed` were added, and ADS names (`a.sql:stream`, `a.sql::$DATA`) are rows of the Windows table.
+- **m7, chosen: refuse.** A library root whose canonical path has an environment folder anywhere, its own name included, is refused: `RootProblem::InEnvFolder(name)` in the scan, `PathError::RootInEnvFolder` in `join`. `envscope::root_env_folder` is public, so attach (Tasks 3, 16) can refuse before adding the library.
+  - Why not scope by the ancestor: every consumer would have to carry the root's scope (the index, the chooser, `visible_at`), and one that forgot would fail open. A refusal cannot be forgotten.
+  - Cost: a user who keeps libraries under `…/@production/` moves them, or attaches the parent.
+- **m8.** Left as it is (plan-mandated); it is on the PO queue.
+- **m9.** `lib.rs` gains a fenced `## m4b-t04-scanner` note (named exception): `visible`, `component`, `join` and `scan` are no longer stubs. T1a's bullets are untouched, so the merge with Task 3 stays clean.
