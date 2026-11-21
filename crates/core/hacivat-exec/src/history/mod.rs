@@ -22,6 +22,9 @@
 //!   only wait on channels, so the UI thread may await them.
 
 mod redact;
+// ## m4b-t01a-seams: the spans the script workspace's secret scanner takes from the app
+// (R-M4b-28; alg/28 C9). Task 6 writes the body.
+pub use redact::{SecretSpanKind, secret_spans};
 mod schema;
 mod search;
 mod writer;

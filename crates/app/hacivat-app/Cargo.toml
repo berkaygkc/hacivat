@@ -17,6 +17,9 @@ shots = [
     # ## m3a-t01b-seams: the result fixtures and the synthetic grid source of the M3 shots.
     "hacivat-results/test-support",
     "hacivat-ui-grid/test-support",
+    # ## m4b-t01a-manifests: the script-workspace shots drive libraries through the fake
+    # watcher source (Tasks 13-18).
+    "hacivat-scripts/test-support",
 ]
 # M2b (Task 1, fix round 1, M5): test seams (`events::handled_events`, the session crate's
 # `publish_event`), enabled only by this crate's own dev-dependency on itself below.
@@ -71,6 +74,11 @@ hacivat-introspect.workspace = true
 hacivat-ddl.workspace = true
 sql-catalog.workspace = true
 twox-hash.workspace = true
+# ## m4b-t01a-manifests: the script workspace (Tasks 13-18). The app is the only crate that sees
+# these and UI types together; it maps `hacivat_exec::history::SecretSpanKind` onto
+# `hacivat_scripts::SpanKind` (R-M4b-28).
+hacivat-scripts.workspace = true
+hacivat-git.workspace = true
 
 [dev-dependencies]
 hacivat-driver = { workspace = true, features = ["fake"] }
@@ -87,6 +95,8 @@ hacivat-results = { workspace = true, features = ["test-support"] }
 hacivat-ui-grid = { workspace = true, features = ["test-support"] }
 # ## m4-t33b-carries (ruling R-W3-7): the introspection fakes the explorer tests drive.
 hacivat-introspect = { workspace = true, features = ["test-fakes"] }
+# ## m4b-t01a-manifests: the fake watcher source for the script-workspace tests.
+hacivat-scripts = { workspace = true, features = ["test-support"] }
 
 # The screenshot harness owns `main` (Task 18): on macOS the platform text system can only be
 # created on the main thread, and libtest runs every test on a spawned thread.

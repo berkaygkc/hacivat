@@ -79,6 +79,10 @@ hacivat-meta = { path = "crates/core/hacivat-meta", default-features = false }
 hacivat-introspect = { path = "crates/core/hacivat-introspect" }
 hacivat-ddl = { path = "crates/core/hacivat-ddl" }
 sql-catalog = { path = "crates/sql/sql-catalog" }
+# ## m4b-t01a-manifests: the script workspace (library model, files, watcher, secrets, index)
+# and read-only git status, both Core (R-M4b-1). Membership comes from the `crates/core/*` glob.
+hacivat-scripts = { path = "crates/core/hacivat-scripts" }
+hacivat-git = { path = "crates/core/hacivat-git" }
 
 # Localization (Fluent + ICU4X 2.4).
 fluent-bundle = "0.16.0"
@@ -194,6 +198,21 @@ icu_collator = "2.4.0"
 # are zstd frames (R-M4-17, R-M4-33). Pinned exactly: the committed bytes depend on the libzstd
 # version. No default features (no `legacy`, no `arrays`, no `zdict_builder`).
 zstd = { version = "=0.13.3", default-features = false }
+# ## m4b-t01a-manifests (the M4b manifest table, exhaustive; pins from ADR 0009 D2-D5 and
+# alg/28 §2, R-T0-1, R-T0-2). Each has one owner crate (`BackendOutsideOwner`).
+# Git status in-process, `hacivat-git` only (every `gix-*` crate too, as a direct dependency).
+# No default features and no `parallel` (R-T0-1): `status` and `sha1` only, so no network,
+# credential or prompt crate enters the graph.
+gix = { version = "=0.90.0", default-features = false, features = ["status", "sha1"] }
+# File watching, `hacivat-scripts` only. 8.2.2 / 0.7.0, not 9.0.0 / 0.8.0 (BSL-1.0
+# `xxhash-rust`; alg/28 C7). The debouncer is built with `new_debouncer_opt` and `NoCache` only
+# (R-T0-2; `clippy.toml` bans `new_debouncer`).
+notify = "=8.2.2"
+notify-debouncer-full = "=0.7.0"
+# Legacy script encodings (UI-EDIT-02), `hacivat-scripts` only; already in the lock.
+encoding_rs = "=0.8.44"
+# "Move to Trash" (Q11), `hacivat-scripts` only. 5.3.0, not the four-day-old 5.4.0 (alg/28 C8).
+trash = "=5.3.0"
 
 # M2b secure network and sessions (Task 1). SSH uses ring, never aws-lc (Q28): no default
 # features, so russh's `aws-lc-rs` default is off.
