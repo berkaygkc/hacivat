@@ -1,0 +1,37 @@
+# owner: Task 10 (the interim backend's statement table; SQLite, R-M3-54).
+#
+# One row per `sqlparser` 0.64.0 `Statement` variant (its name as `Debug` prints it) the
+# interim backend accepts on SQLite, with the statement's kind and base effects (`alg/13`
+# SQL-SAFE-02, the SQLite statement table). `PRAGMA` is not here: the pre-scan's `PRAGMA`
+# grammar classifies it against `sqlite_read_pragmas()`. A variant without a row is `UNKNOWN`
+# with `EffectsUnknown` (fail closed). Names are checked by `tests/interim.rs`.
+version = 1
+rows = [
+  # Reads.
+  { variant = "Query", kind = "Select", effects = ["READ"] },
+  { variant = "Explain", kind = "Explain", effects = ["READ"] },
+  # Data changes (`INSERT OR REPLACE`, UPSERT and `RETURNING` included).
+  { variant = "Insert", kind = "Insert", effects = ["WRITE_DATA"] },
+  { variant = "Update", kind = "Update", effects = ["WRITE_DATA"] },
+  { variant = "Delete", kind = "Delete", effects = ["WRITE_DATA"] },
+  # Schema changes. `ANALYZE` writes `sqlite_stat*`; `VACUUM` rewrites the file.
+  { variant = "CreateTable", kind = "CreateTable", effects = ["DDL"] },
+  { variant = "CreateView", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "CreateIndex", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "CreateTrigger", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "AlterTable", kind = "Alter", effects = ["DDL"] },
+  { variant = "Drop", kind = "Drop", effects = ["DDL"] },
+  { variant = "DropTrigger", kind = "Drop", effects = ["DDL"] },
+  { variant = "Analyze", kind = "Other", effects = ["DDL"], reasons = ["SchemaChange"] },
+  { variant = "Vacuum", kind = "Other", effects = ["DDL"], reasons = ["SchemaChange"] },
+  # A virtual table's module may read or write files (`csv`, `fileio`): external I/O.
+  { variant = "CreateVirtualTable", kind = "CreateTable", effects = ["DDL", "EXTERNAL_IO"], reasons = ["ExternalFile"] },
+  # `ATTACH` of a new file creates a writable database, even on `mode=ro` (`alg/13` L2).
+  { variant = "AttachDatabase", kind = "Other", effects = ["EXTERNAL_IO", "SESSION_STATE"], reasons = ["ExternalFile"] },
+  # Transaction control.
+  { variant = "StartTransaction", kind = "Begin", effects = ["TXN_CONTROL"] },
+  { variant = "Commit", kind = "Commit", effects = ["TXN_CONTROL"] },
+  { variant = "Rollback", kind = "Rollback", effects = ["TXN_CONTROL"] },
+  { variant = "Savepoint", kind = "Savepoint", effects = ["TXN_CONTROL"] },
+  { variant = "ReleaseSavepoint", kind = "Savepoint", effects = ["TXN_CONTROL"] },
+]

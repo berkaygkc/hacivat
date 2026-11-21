@@ -23,14 +23,19 @@ use std::time::Duration;
 use hacivat_ui::text::{Label, TextFn, TextSource};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Context, Div, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, ParentElement, Render, Role, ScrollEvent, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, Task, Window, div, px,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render, Role, ScrollEvent,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription, Task, Window, div,
+    point, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
 use crate::element::{self, FrameLog, FrameStats, Geometry, PaintState};
-use crate::model::{self, ColumnLayout, KeyCtx, KeyOutcome, ScrollState, ViewMap};
-use crate::source::{ColId, ColumnSpec, GRID_CONTEXT, GridDataSource, ModelCell, RowCount};
+use crate::model::{self, ColumnLayout, KeyCtx, KeyOutcome, ScrollState, SortSpec, ViewMap};
+// ## m3c-t37
+use crate::model::{GotoError, GotoPlace, GotoTarget};
+use crate::source::{
+    ColId, ColumnSpec, GRID_CONTEXT, GridDataSource, ModelCell, ModelRow, RowCount,
+};
 
 /// The grid's own text (the app passes Fluent text).
 #[derive(Clone)]
@@ -42,7 +47,30 @@ pub struct GridLabels {
     // ## m3a-t30-results-view (ledger: the "No rows" text is built in Task 30)
     /// A finished result without rows: "No rows" (12.5 `text-3`) in the body, under the header.
     pub no_rows: TextFn,
+    // ## m3c-t35
+    /// A frozen column's header tooltip: "Frozen: stays in place when you scroll sideways".
+    pub frozen_tip: TextFn,
+    /// The resize tag's hint after the width: "Drag to resize · double-click to fit".
+    pub resize_tip: TextFn,
+    /// A column width in the resize tag: "136 px" (a Fluent number with its unit).
+    pub width: WidthFn,
 }
+
+// ## m3c-t37
+/// What a find marks in one cell: the matched byte ranges of the cell's display text, in order,
+/// and the index of the current match among them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CellMarks {
+    pub ranges: smallvec::SmallVec<[Range<u32>; 2]>,
+    pub current: Option<usize>,
+}
+
+/// A find's marks: each painted cell's [`CellMarks`] (`None`: nothing in it).
+pub type Highlights = Rc<dyn Fn(ModelRow, ColId) -> Option<CellMarks>>;
+
+// ## m3c-t35
+/// Text for a width in logical px (the resize tag's "136 px").
+pub type WidthFn = Rc<dyn Fn(f32, &App) -> SharedString>;
 
 impl std::fmt::Debug for GridLabels {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -63,6 +91,10 @@ pub struct GridConfig {
     pub labels: GridLabels,
     /// Role `Grid` with this label (R-M3-32).
     pub a11y_label: TextFn,
+    // ## m3b-t01b-seams
+    /// Rows as columns (Task 38's Transposed view; `GridView::set_transposed` sets it, Task
+    /// 38's `element/transpose.rs` hook swaps the axes). Off: M3a.
+    pub transposed: bool,
 }
 
 impl std::fmt::Debug for GridConfig {
@@ -71,6 +103,7 @@ impl std::fmt::Debug for GridConfig {
             .field("row_height", &self.row_height)
             .field("zebra", &self.zebra)
             .field("auto_size", &self.auto_size)
+            .field("transposed", &self.transposed)
             .finish_non_exhaustive()
     }
 }
@@ -78,19 +111,60 @@ impl std::fmt::Debug for GridConfig {
 /// A grid command (keymap rows `grid.*`, the app's commands).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GridCommand {
-    Move { dir: model::Dir, extend: bool },
-    JumpEdge { dir: model::Dir, extend: bool },
-    Home { extend: bool },
-    End { extend: bool },
-    FirstRow { extend: bool },
-    LastRow { extend: bool },
-    Page { up: bool, extend: bool },
-    NextCell { back: bool },
+    Move {
+        dir: model::Dir,
+        extend: bool,
+    },
+    JumpEdge {
+        dir: model::Dir,
+        extend: bool,
+    },
+    Home {
+        extend: bool,
+    },
+    End {
+        extend: bool,
+    },
+    FirstRow {
+        extend: bool,
+    },
+    LastRow {
+        extend: bool,
+    },
+    Page {
+        up: bool,
+        extend: bool,
+    },
+    NextCell {
+        back: bool,
+    },
     SelectAll,
     SelectRow,
     SelectColumn,
-    Copy { headers: bool },
+    Copy {
+        headers: bool,
+    },
     Escape,
+    // ## m3b-t01b-seams: Task 35 fills grow/shrink, freeze/unfreeze and auto-fit; Find,
+    // GotoRow, OpenValue and ContextMenu tell the host (`GridEvent`), which Tasks 37, 38 and 39
+    // answer.
+    /// Cell → row segment (the on-screen columns around the focus) → row → all (## m3c-t35).
+    GrowSelection,
+    /// The grow steps back down to the focus cell.
+    ShrinkSelection,
+    Find,
+    GotoRow,
+    OpenValue,
+    ContextMenu,
+    /// Fits the selected whole columns, else the focus column, to their sampled cells.
+    AutoFit,
+    /// Freezes the columns up to and including the focus column (refused when they would leave
+    /// less than `MIN_WIDTH` of the body to scroll).
+    Freeze,
+    Unfreeze,
+    // ## m3c-t37
+    /// Selects the find's matches (`grid.select_all_occurrences`; the host answers).
+    SelectAllOccurrences,
 }
 
 /// What a grid tells its host.
@@ -115,7 +189,43 @@ pub enum GridEvent {
         col: ColId,
         width: f32,
     },
+    // ## m3b-t01b-seams
+    /// Sort by these keys (Task 36 sorts and publishes `ViewMap::Permuted`).
+    SortRequested(SortSpec),
+    /// `grid.find` (Task 37 opens the find bar).
+    FindRequested,
+    /// `grid.goto_row` (Task 37 opens the go-to field).
+    GotoRequested,
+    /// `grid.open_value` on the focus cell (Task 38 opens the value viewer).
+    ValueRequested(ModelCell),
+    /// `grid.context_menu` (Shift+F10: under the focus cell) or a right click (Task 39's menu).
+    ContextMenuRequested {
+        at: Point<Pixels>,
+        cell: Option<ModelCell>,
+        header: Option<ColId>,
+        // ## m3c-t39 (named exception: Task 1b's event)
+        /// A right press on a row number (the gutter): `cell` is that row in the focus column.
+        row_number: bool,
+        /// A right press asked (`at` is the pointer); else the keys or a screen reader did
+        /// (`at` is under the focus cell), and the menu opens with its first item active.
+        pointer: bool,
+    },
+    /// The frozen column count changed (Task 35): `grid.freeze`, `grid.unfreeze`, never
+    /// `GridView::set_frozen` (the host's own change).
+    FrozenChanged(usize),
+    // ## m3c-t35 fix round 1 (M3)
+    /// `grid.freeze` was refused: the columns up to the focus would leave less than
+    /// `MIN_WIDTH` of the body to scroll (the host says so).
+    FreezeRefused,
+    // ## m3c-t37
+    /// `grid.select_all_occurrences` (the host's find selects its matches).
+    SelectAllOccurrencesRequested,
 }
+
+// ## m3c-t35
+/// While the pointer drags a selection past the body's edge and stays still, the grid scrolls
+/// on at this interval (ledger 213).
+pub const AUTOSCROLL_TICK: Duration = Duration::from_millis(16);
 
 /// How long the visible region stays still before [`GridEvent::VisibleRegion`] fires.
 pub const VISIBLE_REGION_DEBOUNCE: Duration = Duration::from_millis(50);
@@ -177,6 +287,42 @@ pub struct GridView {
     visible: VisibleState,
     /// The label was read this many times (only while assistive technology is active).
     a11y_reads: u64,
+    // ## m3b-t01b-seams
+    /// The view map the host set (`set_view_map`); `None`: the identity over the loaded rows.
+    /// The frame, the keys and the pointer read it (## m3c-t35).
+    view_map: Option<ViewMap>,
+    /// The identity over the loaded rows, kept for [`GridView::view_map`] while no map is set.
+    identity_map: ViewMap,
+    /// The cells a find marks (Task 37), as model row and column.
+    /// ## m3c-t37 (named exception, Task 1b seam): what each cell marks ([`CellMarks`]).
+    pub(crate) highlights: Option<Highlights>,
+    // ## m3c-t35
+    /// The edge autoscroll's timer while a drag rests past the body's edge.
+    pub(crate) autoscroll: Option<Task<()>>,
+    // ## m3c-t35 fix round 1 (I3)
+    /// Blur and window-deactivation subscriptions that end a drag (set by the first frame).
+    pub(crate) drag_hooks: Option<(Subscription, Subscription)>,
+    // ## m3c-t36
+    /// The sort the header shows (`set_sort`).
+    pub(crate) sort: SortShown,
+    // ## m3c-t40
+    /// The AccessKit rows and cells of the last frame, and the live announcement (only while
+    /// assistive technology is active; `element::a11y_rows`).
+    pub(crate) a11y: element::a11y_rows::A11yState,
+    // ## m3c-t38 fix round 1 (I4, named exception)
+    /// The host shows another view in this grid's place (it keeps taking frames at no size):
+    /// no accessibility node, subtree or announcement.
+    pub(crate) a11y_hidden: bool,
+}
+
+// ## m3c-t36
+/// The sort the header shows: the keys, each key's tooltip, and the level numbers (two or more
+/// keys only, NOTES M3c-19), shaped once per `set_sort`.
+#[derive(Clone, Default)]
+pub(crate) struct SortShown {
+    pub spec: SortSpec,
+    pub tips: Vec<TextFn>,
+    pub levels: Vec<SharedString>,
 }
 
 impl std::fmt::Debug for GridView {
@@ -211,6 +357,16 @@ impl GridView {
             autosize,
             visible: VisibleState::default(),
             a11y_reads: 0,
+            view_map: None,
+            identity_map: ViewMap::identity(0),
+            highlights: None,
+            autoscroll: None,
+            drag_hooks: None,
+            sort: SortShown::default(),
+            // ## m3c-t40
+            a11y: Default::default(),
+            // ## m3c-t38 fix round 1 (I4)
+            a11y_hidden: false,
         }
     }
 
@@ -248,17 +404,24 @@ impl GridView {
                     layout.set_width(*id, w);
                 }
             }
+            // ## m3c-t35: the same columns keep their frozen ones.
+            layout.set_frozen(self.layout.frozen());
         } else {
             self.autosize.restart();
         }
         self.columns = columns;
         self.layout = layout;
-        self.scroll.set_content_width(self.layout.total_width());
+        self.scroll.set_content_width(self.layout.scroll_width());
     }
 
     /// Runs `cmd`.
     pub fn dispatch(&mut self, cmd: GridCommand, window: &mut Window, cx: &mut Context<Self>) {
-        let map = ViewMap::identity(self.data.count.loaded);
+        // ## m3b-t01b-seams: the M3b commands that only tell the host, and Task 35's.
+        if self.dispatch_m3b(cmd, cx) {
+            return;
+        }
+        // ## m3c-t35: keys move through the view map (an `Arc` clone, no copy of the rows).
+        let map = self.view_map().clone();
         let ctx = KeyCtx {
             map: &map,
             order: self.layout.visible(),
@@ -298,12 +461,458 @@ impl GridView {
         }
     }
 
-    /// Scrolls `cell` into view, both ways.
+    // ## m3b-t01b-seams
+    /// The M3b commands: `true` when `cmd` is one (handled here, never by the key model).
+    fn dispatch_m3b(&mut self, cmd: GridCommand, cx: &mut Context<Self>) -> bool {
+        match cmd {
+            GridCommand::Find => cx.emit(GridEvent::FindRequested),
+            // ## m3c-t37
+            GridCommand::SelectAllOccurrences => cx.emit(GridEvent::SelectAllOccurrencesRequested),
+            GridCommand::GotoRow => cx.emit(GridEvent::GotoRequested),
+            GridCommand::OpenValue => {
+                if let Some(cell) = self.selection.focus() {
+                    cx.emit(GridEvent::ValueRequested(cell));
+                }
+            }
+            GridCommand::ContextMenu => {
+                let cell = self.selection.focus();
+                cx.emit(GridEvent::ContextMenuRequested {
+                    at: self.menu_point(cell),
+                    cell,
+                    header: None,
+                    // ## m3c-t39
+                    row_number: false,
+                    pointer: false,
+                });
+            }
+            // ## m3c-t35
+            GridCommand::GrowSelection | GridCommand::ShrinkSelection => {
+                let grow = cmd == GridCommand::GrowSelection;
+                self.grow_or_shrink(grow, cx);
+            }
+            GridCommand::AutoFit => self.auto_fit(cx),
+            GridCommand::Freeze => self.freeze_to_focus(cx),
+            GridCommand::Unfreeze => {
+                if self.layout.frozen() > 0 {
+                    self.set_frozen(0, cx);
+                    cx.emit(GridEvent::FrozenChanged(0));
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    // ## m3c-t35
+    /// Grows (or shrinks) the selection one step; the row segment is the pane holding the
+    /// focus: the frozen columns, or the columns after them (never the horizontal scroll).
+    fn grow_or_shrink(&mut self, grow: bool, cx: &mut Context<Self>) {
+        let map = self.view_map().clone();
+        let order = self.layout.visible().to_vec();
+        let segment = self.focus_segment();
+        let before_focus = self.selection.focus();
+        let changed = if grow {
+            self.selection.grow(&map, &order, segment)
+        } else {
+            self.selection.shrink(&map, &order, segment)
+        };
+        if changed {
+            self.selection_dirty = true;
+            if self.selection.focus() != before_focus {
+                if let Some(focus) = self.selection.focus() {
+                    self.reveal(focus);
+                }
+                cx.emit(GridEvent::FocusChanged(self.selection.focus()));
+            }
+            cx.notify();
+        }
+    }
+
+    /// The pane of visible columns that holds the focus column (## m3c-t35 fix round 1, M2:
+    /// ruling 2 as the controller changed it): the frozen columns, or every column after them.
+    /// With nothing frozen it is the whole row, so the grow ladder skips the segment step.
+    fn focus_segment(&self) -> Range<usize> {
+        let frozen = self.layout.frozen_shown();
+        let at = self
+            .selection
+            .focus()
+            .and_then(|f| self.layout.index_of(f.col));
+        match at {
+            Some(ix) if ix < frozen => 0..frozen,
+            _ => frozen..self.layout.len(),
+        }
+    }
+
+    /// `grid.auto_fit`: the selected whole columns, else the focus column, fitted in the coming
+    /// frames (`element::autosize`).
+    fn auto_fit(&mut self, cx: &mut Context<Self>) {
+        let mut queued = false;
+        if !self.selection.is_all() {
+            let order: Vec<ColId> = self.layout.visible().to_vec();
+            for col in order
+                .into_iter()
+                .filter(|c| self.selection.col_selected(*c))
+            {
+                self.autosize.queue_fit(col);
+                queued = true;
+            }
+        }
+        if !queued && let Some(focus) = self.selection.focus() {
+            self.autosize.queue_fit(focus.col);
+            queued = true;
+        }
+        if queued {
+            cx.notify();
+        }
+    }
+
+    /// `grid.freeze`: the columns up to and including the focus column, when they leave
+    /// `MIN_WIDTH` of the last frame's body to scroll; else the host hears why
+    /// ([`GridEvent::FreezeRefused`], ## m3c-t35 fix round 1, M3). Without a focus there is
+    /// nothing to freeze up to.
+    fn freeze_to_focus(&mut self, cx: &mut Context<Self>) {
+        // ## m3c-t39: the header menu freezes through its own column (`freeze_through`).
+        if let Some(focus) = self.selection.focus() {
+            self.freeze_through(focus.col, cx);
+        }
+    }
+
+    // ## m3c-t39 (named exception: Task 35's freeze, reached from the header menu)
+    /// Freezes the visible columns up to and including `col` ("Freeze up to here" on its
+    /// header), as `grid.freeze` does for the focus column: [`GridEvent::FrozenChanged`], or
+    /// [`GridEvent::FreezeRefused`] when they would leave less than `MIN_WIDTH` of the last
+    /// frame's body to scroll. A hidden column freezes nothing.
+    pub fn freeze_through(&mut self, col: ColId, cx: &mut Context<Self>) {
+        let Some(ix) = self.layout.index_of(col) else {
+            return;
+        };
+        let n = ix + 1;
+        let body_w = self
+            .geometry
+            .as_ref()
+            .map_or(0.0, |g| f32::from(g.body.size.width));
+        if n == self.layout.frozen() {
+            return;
+        }
+        if self.layout.frozen_fitting(n, body_w) < n {
+            cx.emit(GridEvent::FreezeRefused);
+            return;
+        }
+        self.set_frozen(n, cx);
+        cx.emit(GridEvent::FrozenChanged(n));
+    }
+
+    /// Freezes the first `n` visible columns (`0`: none), as the host restores or sets them
+    /// (Task 39's menu). No event: the host knows. A count that later stops fitting a narrower
+    /// pane is kept; the frame shows the frozen columns that fit
+    /// (`ColumnLayout::frozen_shown`).
+    pub fn set_frozen(&mut self, n: usize, cx: &mut Context<Self>) {
+        if self.layout.frozen() != n.min(self.layout.len()) {
+            self.layout.set_frozen(n);
+            self.scroll.set_content_width(self.layout.scroll_width());
+            cx.notify();
+        }
+    }
+
+    /// The frozen column count the user set (`ColumnLayout::frozen`).
+    pub fn frozen(&self) -> usize {
+        self.layout.frozen()
+    }
+
+    /// The resize tag: the column whose right edge the pointer is on (or drags) and its width.
+    /// The view draws it under the header edge ("136 px · Drag to resize · double-click to
+    /// fit").
+    pub fn resize_tag(&self) -> Option<(ColId, f32)> {
+        if let Some(resizing) = self.pointer.resizing() {
+            return Some(resizing);
+        }
+        if self.pointer.drag.is_some() {
+            return None;
+        }
+        let ix = self.pointer.border?;
+        Some((*self.layout.visible().get(ix)?, self.layout.width_at(ix)))
+    }
+
+    /// Where a keyboard context menu opens: under the focus cell of the last frame, clamped
+    /// into the body; the body's corner without a focus; the origin before the first frame.
+    fn menu_point(&self, cell: Option<ModelCell>) -> Point<Pixels> {
+        let Some(g) = self.geometry.as_ref() else {
+            return Point::default();
+        };
+        let at = cell.and_then(|cell| {
+            let ix = self.layout.index_of(cell.col)?;
+            let x = f32::from(g.body.left()) + self.layout.screen_x(ix, self.scroll.left_x) as f32;
+            let row = self.view_row_of(cell.row);
+            let y = f32::from(g.body.top()) + self.scroll.row_top(row) as f32 + g.row_h;
+            Some((x, y))
+        });
+        let (x, y) = at.unwrap_or((f32::from(g.body.left()), f32::from(g.body.top())));
+        let x = x.clamp(f32::from(g.body.left()), f32::from(g.body.right()));
+        let y = y.clamp(f32::from(g.body.top()), f32::from(g.body.bottom()));
+        point(px(x), px(y))
+    }
+
+    /// Sets the view map (a local sort, Task 36; filter rows, Task 37); `ViewMap::Identity`
+    /// goes back to the source order.
+    ///
+    /// ## m3c-t35: the frame, the keys and the pointer read it. The selection follows (digest
+    /// 04 R15): the focus and the row and column sets stay with their data, rectangles (view
+    /// rows of the old order) clear (`Selection::on_view_map_changed`). A sort's map follows the
+    /// rows that arrive after it (they join its unsorted tail, `ViewMap::with_loaded`). **A
+    /// re-run drops the map** (the new rows have no order yet): the host publishes a new one.
+    pub fn set_view_map(&mut self, map: ViewMap, cx: &mut Context<Self>) {
+        let map = match map {
+            ViewMap::Identity { .. } => None,
+            ViewMap::Permuted { .. } => Some(map.with_loaded(self.data.count.loaded)),
+            filtered @ ViewMap::Filtered { .. } => Some(filtered),
+        };
+        if map == self.view_map {
+            return;
+        }
+        self.view_map = map;
+        let map = self.view_map().clone();
+        self.selection.on_view_map_changed(&map);
+        self.data.rows = self.scroll_rows();
+        self.selection_dirty = true;
+        cx.notify();
+    }
+
+    /// The view map: the one set, else the identity over the loaded rows.
+    pub fn view_map(&self) -> &ViewMap {
+        self.view_map.as_ref().unwrap_or(&self.identity_map)
+    }
+
+    /// Follows the loaded rows in the view map [`GridView::view_map`] answers (each frame's
+    /// data sync): the identity's count, and a sort's unsorted tail.
+    pub(crate) fn note_loaded(&mut self, loaded: u64) {
+        if self.identity_map.len() != loaded {
+            self.identity_map = ViewMap::identity(loaded);
+        }
+        // ## m3c-t35
+        if let Some(map @ ViewMap::Permuted { .. }) = self.view_map.as_ref()
+            && map.len() != loaded
+        {
+            self.view_map = Some(map.with_loaded(loaded));
+        }
+    }
+
+    // ## m3c-t35
+    /// A re-run's new rows have no order yet: back to the source order.
+    pub(crate) fn drop_view_map(&mut self) {
+        self.view_map = None;
+        // ## m3c-t36: and no sort indicator (the host sorts again only when asked).
+        self.sort = SortShown::default();
+    }
+
+    // ## m3c-t36
+    /// Shows `spec`'s indicators in the header (NOTES surface 18): a 12 px blue arrow after the
+    /// sorted columns' names (up ascending, down descending) and, with two or more keys, the
+    /// level number; `tips[i]` is key `i`'s tooltip ("Sort level 1, ascending. Text compares
+    /// by the column's collation, tr-x-icu."). The host calls it when it publishes the order
+    /// (`set_view_map`); an empty spec clears them. A re-run clears them with the map.
+    pub fn set_sort(&mut self, spec: SortSpec, tips: Vec<TextFn>, cx: &mut Context<Self>) {
+        let levels = if spec.keys.len() >= 2 {
+            (1..=spec.keys.len())
+                .map(|l| SharedString::from(l.to_string()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.sort = SortShown { spec, tips, levels };
+        cx.notify();
+    }
+
+    // ## m3c-t36 fix round 1 (m3)
+    /// The source generation the grid last painted (`None` before its first frame): a host
+    /// publishes an order only for the rows the grid has adopted.
+    pub fn generation(&self) -> Option<u64> {
+        self.data.generation
+    }
+
+    /// The sort the header shows.
+    pub fn sort(&self) -> &SortSpec {
+        &self.sort.spec
+    }
+
+    /// Each sort key's header tooltip, as the host set them.
+    pub fn sort_tips(&self) -> &[TextFn] {
+        &self.sort.tips
+    }
+
+    /// Asks the host to sort by `spec` (`GridEvent::SortRequested`; an empty spec clears the
+    /// sort): the sort commands and the context menu (Task 39) come through here.
+    pub fn request_sort(&mut self, spec: SortSpec, cx: &mut Context<Self>) {
+        cx.emit(GridEvent::SortRequested(spec));
+    }
+
+    /// The view row of the first row of a sort's unsorted tail (rows that arrived after the
+    /// sort), when it has one: the dashed boundary line sits above it.
+    pub fn tail_boundary(&self) -> Option<u64> {
+        match self.view_map.as_ref()? {
+            ViewMap::Permuted {
+                order,
+                tail_from,
+                loaded,
+                ..
+            } if loaded > tail_from => Some(order.len() as u64),
+            _ => None,
+        }
+    }
+
+    /// The rows the grid scrolls over: a filter's kept rows; else the exact total when known,
+    /// the skeleton rows while the first rows are arriving, the loaded rows otherwise.
+    pub(crate) fn scroll_rows(&self) -> u64 {
+        match self.view_map.as_ref() {
+            Some(map @ ViewMap::Filtered { .. }) => map.len(),
+            _ => element::scroll_rows(&self.data.count),
+        }
+    }
+
+    /// The view row that shows model row `row` (its own number when the map hides it).
+    pub(crate) fn view_row_of(&self, row: ModelRow) -> u64 {
+        self.view_map().model_to_view(row).map_or(row.0, |v| v.0)
+    }
+
+    /// Shows rows as columns (Task 38's Transposed view): stored in the config; Task 38's
+    /// `element/transpose.rs` hook swaps the axes at render.
+    pub fn set_transposed(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.config.transposed != on {
+            self.config.transposed = on;
+            cx.notify();
+        }
+    }
+
+    /// Whether the grid shows rows as columns.
+    pub fn transposed(&self) -> bool {
+        self.config.transposed
+    }
+
+    // ## m3c-t38 fix round 1 (I4, named exception)
+    /// Hides the grid from assistive technology while the host shows another view in its place
+    /// (the Transposed and Text views keep the table grid taking frames at no size): no node,
+    /// no rows, no announcement.
+    pub fn set_a11y_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        if self.a11y_hidden != hidden {
+            self.a11y_hidden = hidden;
+            cx.notify();
+        }
+    }
+
+    /// Whether the grid is hidden from assistive technology.
+    pub fn a11y_hidden(&self) -> bool {
+        self.a11y_hidden
+    }
+
+    /// Marks the cells `cells` answers `true` for (a find's matches, Task 37); `None` clears.
+    ///
+    /// ## m3c-t37 (named exception, Task 1b seam R3): `cells` answers each painted cell's
+    /// [`CellMarks`] (the matched byte ranges of its display text, and the current one), and
+    /// layer 5 paints them: a 1 px `text-3` outline around each matching text, the current one
+    /// filled `blue-tint-strong` inside a blue outline (NOTES surface 19, M3c-25). The grid
+    /// asks only for the cells it paints.
+    pub fn set_highlights(&mut self, cells: Option<Highlights>, cx: &mut Context<Self>) {
+        self.highlights = cells;
+        cx.notify();
+    }
+
+    /// The cells a find marks, as last set.
+    pub fn highlights(&self) -> Option<&Highlights> {
+        self.highlights.as_ref()
+    }
+
+    // ## m3c-t37 (named exception: the public "focus this cell", carries-w10 T37)
+    /// Focuses `cell` alone (a click's selection): it scrolls into view, and the host hears
+    /// [`GridEvent::FocusChanged`]. Go to row and the find's steps come through here.
+    pub fn focus_cell(&mut self, cell: ModelCell, cx: &mut Context<Self>) {
+        let map = self.view_map().clone();
+        self.selection.select_cell(cell, &map);
+        self.reveal(cell);
+        self.selection_dirty = true;
+        cx.emit(GridEvent::FocusChanged(Some(cell)));
+        cx.notify();
+    }
+
+    /// Goes to `target` (1-based **view** rows: a filter's rows count 1…n): the cell in its
+    /// column (else the focus column, else the first visible one) takes the focus
+    /// ([`focus_cell`](Self::focus_cell)). A hidden column is refused; past the fetched rows of
+    /// a result that may have more answers [`GotoPlace::NotFetched`] and moves nothing (the
+    /// host fetches, then asks again); past a known total names the last row.
+    pub fn go_to(
+        &mut self,
+        target: GotoTarget,
+        cx: &mut Context<Self>,
+    ) -> Result<GotoPlace, GotoError> {
+        if let Some(col) = target.col()
+            && self.layout.index_of(col).is_none()
+        {
+            return Err(GotoError::HiddenColumn(col));
+        }
+        let map = self.view_map().clone();
+        let (shown, total) = match &map {
+            ViewMap::Filtered { .. } => (map.len(), Some(map.len())),
+            _ => (self.data.count.loaded, self.data.known_total()),
+        };
+        let place = model::place_row(target.row(), shown, total)?;
+        if let GotoPlace::Shown(view) = place {
+            let col = target
+                .col()
+                .or_else(|| self.selection.focus().map(|f| f.col))
+                .filter(|c| self.layout.index_of(*c).is_some())
+                .or_else(|| self.layout.visible().first().copied());
+            if let (Some(row), Some(col)) = (map.view_to_model(view), col) {
+                self.focus_cell(ModelCell { row, col }, cx);
+            }
+        }
+        Ok(place)
+    }
+
+    /// Selects each of `cells` as its own range (Select all occurrences), `cells[focus]` the
+    /// focus, in one selection change.
+    pub fn select_cells(&mut self, cells: &[ModelCell], focus: usize, cx: &mut Context<Self>) {
+        if cells.is_empty() {
+            return;
+        }
+        let map = self.view_map().clone();
+        self.selection.select_cells(cells, focus, &map);
+        if let Some(f) = self.selection.focus() {
+            self.reveal(f);
+            cx.emit(GridEvent::FocusChanged(Some(f)));
+        }
+        self.selection_dirty = true;
+        cx.notify();
+    }
+
+    /// Hides or shows column `col` ("Show it and go"; Task 39's menu hides). The scroll keeps
+    /// its place.
+    pub fn set_column_hidden(&mut self, col: ColId, hidden: bool, cx: &mut Context<Self>) {
+        let body_w = self
+            .geometry
+            .as_ref()
+            .map_or(0.0, |g| f32::from(g.body.size.width));
+        let is_hidden = self.layout.hidden().contains(&col);
+        if is_hidden == hidden {
+            return;
+        }
+        let left = if hidden {
+            self.layout.hide(col, self.scroll.left_x, body_w)
+        } else {
+            self.layout.show(col, self.scroll.left_x, body_w)
+        };
+        self.scroll.set_content_width(self.layout.scroll_width());
+        self.scroll.set_left_x(left);
+        cx.notify();
+    }
+
+    /// Scrolls `cell` into view, both ways: its view row (## m3c-t35), and its column unless it
+    /// is frozen (a scrolling column comes out from under the frozen ones).
     pub(crate) fn reveal(&mut self, cell: ModelCell) {
-        self.scroll.scroll_into_view(cell.row.0);
-        if let Some(ix) = self.layout.index_of(cell.col) {
+        self.scroll.scroll_into_view(self.view_row_of(cell.row));
+        if let Some(ix) = self.layout.index_of(cell.col)
+            && ix >= self.layout.frozen_shown()
+        {
+            let fw = self.layout.frozen_width();
             self.scroll
-                .scroll_x_into_view(self.layout.x_of(ix), self.layout.x_of(ix + 1));
+                .scroll_x_into_view(self.layout.x_of(ix) - fw, self.layout.x_of(ix + 1) - fw);
         }
     }
 
@@ -330,7 +939,7 @@ impl GridView {
             .set_width(col, model::autosize::clamp_user_width(width));
         if set {
             self.autosize.mark_user_sized(col);
-            self.scroll.set_content_width(self.layout.total_width());
+            self.scroll.set_content_width(self.layout.scroll_width());
             cx.notify();
         }
         set
@@ -408,11 +1017,20 @@ impl GridView {
             return el;
         }
         let (role, label) = self.a11y_declaration(cx);
-        let rows = self.data.known_total().unwrap_or(self.data.count.loaded);
-        el.role(role)
+        // ## m3c-t35 fix round 1 (M7): a filter announces the rows it keeps.
+        // ## m3c-t40: the header row counts (it is row 0, view row `v` is row `v + 1`); a
+        // result that may have more rows counts the loaded ones and says more are available.
+        let (rows, more) = element::a11y_rows::row_total(self);
+        let el = el
+            .role(role)
             .aria_label(label)
-            .aria_row_count(usize::try_from(rows).unwrap_or(usize::MAX))
-            .aria_column_count(self.layout.len())
+            .aria_row_count(usize::try_from(rows.saturating_add(1)).unwrap_or(usize::MAX))
+            .aria_column_count(self.layout.len());
+        if more {
+            el.aria_description(element::a11y_rows::more_rows(cx))
+        } else {
+            el
+        }
     }
 
     /// Whether the last frame showed a result known to have no rows (its header stays): an exact
@@ -527,14 +1145,21 @@ impl Render for GridView {
         // An ellipsized header name keeps its whole text in a tooltip (NOTES rule 7): one hover
         // area per such header of the last frame (a frame whose headers differ asks for this
         // render again). The areas take no click: the element's own hitbox handles the pointer.
+        // ## m3c-t35: a frozen column's header says so ("Frozen: stays in place when you scroll
+        // sideways"), after its whole name when that is ellipsized.
         let origin = self.geometry.as_ref().map(|g| g.bounds.origin);
+        let frozen_tip = self.config.labels.frozen_tip.clone();
+        // ## m3c-t36: a sorted column's header names its level, direction and collation.
+        let sort_tips = self.sort.tips.clone();
         let tips: Vec<_> = self
             .paint
             .header_tips
             .iter()
             .filter_map(|tip| {
                 let origin = origin?;
-                let name = tip.name.clone();
+                let name = tip.ellipsized.then(|| tip.name.clone());
+                let frozen = tip.frozen.then(|| frozen_tip.clone());
+                let sorted = tip.sort.and_then(|level| sort_tips.get(level).cloned());
                 Some(
                     div()
                         .id(("hv-grid-header-tip", tip.col.0 as usize))
@@ -543,16 +1168,25 @@ impl Render for GridView {
                         .top(tip.bounds.top() - origin.y)
                         .w(tip.bounds.size.width)
                         .h(tip.bounds.size.height)
-                        .tooltip(move |_, cx| HeaderNameTip::view(name.clone(), cx)),
+                        .tooltip(move |_, cx| {
+                            let frozen = frozen.as_ref().map(|f| f(cx));
+                            let sorted = sorted.as_ref().map(|f| f(cx));
+                            HeaderNameTip::view(name.clone(), frozen, sorted, cx)
+                        }),
                 )
             })
             .collect();
+        let resize_tag = self.resize_tag_element(cx);
         let root = div()
             .id(("hv-grid-view", cx.entity_id()))
             .key_context(GRID_CONTEXT)
             .track_focus(&self.focus);
         // ## m3a-t30-results-view: the accessibility node is the element that tracks the focus.
-        let root = self.a11y_node(root, window.is_a11y_active(), cx);
+        // ## m3c-t38 fix round 1 (I4): none while the host hides the grid.
+        let root = self.a11y_node(root, window.is_a11y_active() && !self.a11y_hidden, cx);
+        // ## m3c-t40: the rows and cells, the active descendant and the live region (only
+        // while assistive technology is active).
+        let (root, a11y_rows) = element::a11y_rows::subtree(self, root, window, cx);
         let no_rows = self.no_rows_label(cx);
         root.size_full()
             .relative()
@@ -561,18 +1195,87 @@ impl Render for GridView {
             .child(grid)
             .children(tips)
             .children(no_rows)
+            .children(resize_tag)
+            .children(a11y_rows)
     }
 }
 
-/// The tooltip of an ellipsized header: the column's whole name on a popover surface. The
-/// name is catalog text, never translated.
+impl GridView {
+    // ## m3c-t35
+    /// The resize tag (NOTES surface 18, M3c-23): under the header, beside the edge being
+    /// hovered or dragged (on the side with room), the width in mono and the hint ("136 px ·
+    /// Drag to resize · double-click to fit"), on the popover anatomy. Never over the header.
+    fn resize_tag_element(&self, cx: &App) -> Option<AnyElement> {
+        let (col, width) = self.resize_tag()?;
+        let g = self.geometry.as_ref()?;
+        let ix = self.layout.index_of(col)?;
+        let edge = f32::from(g.body.left())
+            + self.layout.screen_x(ix, self.scroll.left_x) as f32
+            + self.layout.width_at(ix);
+        let local = edge - f32::from(g.bounds.left());
+        let grid_w = f32::from(g.bounds.size.width);
+        let top = f32::from(g.header.bottom()) - f32::from(g.bounds.top()) + RESIZE_TAG_GAP_PX;
+        let theme = *Theme::get(cx);
+        let t = theme.tokens;
+        let labels = &self.config.labels;
+        // ## m3c-t35 fix round 1 (M4): the tag stays inside the grid: right of an edge in the
+        // grid's left half, left of an edge in its right half (it never hangs over a
+        // neighbouring pane).
+        let tag = popover_surface(&theme).absolute().top(px(top));
+        let tag = if local <= grid_w / 2.0 {
+            tag.left(px(local + RESIZE_TAG_GAP_PX))
+        } else {
+            tag.right(px((grid_w - local + RESIZE_TAG_GAP_PX).max(0.0)))
+        };
+        Some(
+            tag.px(px(8.0))
+                .py(px(4.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(Label::new(
+                    (labels.width)(width.round(), cx),
+                    TextSource::Fluent,
+                    t.type_ramp.mono_kbd,
+                    t.colors.text.to_hsla(),
+                ))
+                .child(Label::new(
+                    (labels.resize_tip)(cx),
+                    TextSource::Fluent,
+                    t.type_ramp.caption,
+                    t.colors.text_2.to_hsla(),
+                ))
+                .into_any_element(),
+        )
+    }
+}
+
+/// The resize tag's offset from the column edge and the header's bottom.
+const RESIZE_TAG_GAP_PX: f32 = 6.0;
+
+/// The tooltip of a header: the column's whole name when it is ellipsized (catalog text, never
+/// translated) and, for a frozen column (## m3c-t35), that it is frozen, on a popover surface.
+/// ## m3c-t36: a sorted column's tooltip names its sort level, direction and collation.
 struct HeaderNameTip {
-    name: SharedString,
+    name: Option<SharedString>,
+    frozen: Option<SharedString>,
+    sorted: Option<SharedString>,
 }
 
 impl HeaderNameTip {
-    fn view(name: SharedString, cx: &mut App) -> AnyView {
-        cx.new(|_| HeaderNameTip { name }).into()
+    fn view(
+        name: Option<SharedString>,
+        frozen: Option<SharedString>,
+        sorted: Option<SharedString>,
+        cx: &mut App,
+    ) -> AnyView {
+        cx.new(|_| HeaderNameTip {
+            name,
+            frozen,
+            sorted,
+        })
+        .into()
     }
 }
 
@@ -583,11 +1286,32 @@ impl Render for HeaderNameTip {
         popover_surface(&theme)
             .px(px(8.0))
             .py(px(4.0))
-            .child(Label::new(
-                self.name.clone(),
-                TextSource::Catalog,
-                t.type_ramp.body_sm,
-                t.colors.text.to_hsla(),
-            ))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children(self.name.clone().map(|name| {
+                Label::new(
+                    name,
+                    TextSource::Catalog,
+                    t.type_ramp.body_sm,
+                    t.colors.text.to_hsla(),
+                )
+            }))
+            .children(self.frozen.clone().map(|frozen| {
+                Label::new(
+                    frozen,
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    t.colors.text_2.to_hsla(),
+                )
+            }))
+            .children(self.sorted.clone().map(|sorted| {
+                Label::new(
+                    sorted,
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    t.colors.text_2.to_hsla(),
+                )
+            }))
     }
 }

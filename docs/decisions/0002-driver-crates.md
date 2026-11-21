@@ -1293,3 +1293,268 @@ is folded into the bullets below.
   within 1 s), a short rest drained to `Completed`, `CALL` with three sets (one kept, two
   counted), the 1295 routes, a value past `max_allowed_packet` (NULL and a warning), DML/DDL
   results, the idle bound, and the `net_write_timeout` loss.
+
+## m3b-t01c — core seams
+
+M3b Task 1c adds the driver seams the M3b drivers fill (Task 13); no real driver changes
+behaviour.
+
+- **Notices.** `hacivat_driver::Notice { severity, code, text }` (`Eq`, `Hash`: it rides in
+  `RunEvent`; P-M3b-23) reuses `NoticeSeverity`. `Notice::new` caps the text at 16 KiB, cut at
+  a character boundary. `QueryEvent::Notice` may come before any event but `Done`; it changes
+  nothing in the grammar around it. Server text: never in tracing logs or the history.
+- **Warnings.** `RawConn::warnings()` (provided, `Ok(vec![])`) is MySQL/MariaDB's `SHOW
+  WARNINGS` after a `Done` with `warnings > 0` (Task 13; not on read-only sessions).
+- **FakeDriver (working).** `FakeQuery::{notices, warnings}`: the notices come first, the
+  warnings are what `warnings()` answers once the query is `Done` (counted in
+  `QueryDone::warnings`, taken once, cleared by the next query). A query with binds logs
+  `FakeTypedCall::Binds(..)` right after its `Query` (a query without binds logs as in M3a);
+  `FakeDriver::binds_seen()` keeps every query's binds. Sent statements are asserted on
+  `call_log()` (`executed()` records only execute/batch text; P-M3b-18).
+- **Named exception:** `hacivat-driver-sqlite/src/typed.rs` gains `QueryEvent::Notice` in one
+  exhaustive match (SQLite has none).
+
+## m3b-t07 — type matrix
+
+M3b Task 7 (R-M3-67) closes M3a's R-M3-31 deferral: the types M3a kept as `Value::Opaque`
+get their own logical type, and the ones with a stable binary format decode in binary.
+
+- **PostgreSQL arrays** (`decode/array.rs`) of every type with a binary decoder (M3a's scalars,
+  enums, the network types, bit strings) are requested in binary and kept as `Value::Text` of
+  the literal `array_out` writes, under `LogicalType::Array(elem)`: lower bounds as `[lb:ub]`
+  when any is not 1 (`[0:2]={1,2,3}`), nested braces, `NULL`, `array_out`'s quoting (empty,
+  the word `NULL` in any case, `"`, `\`, braces, `,`, the six `array_isspace` characters).
+  Elements are spelled by `valfmt::raw_text` (PostgreSQL's spellings, checked against the
+  server's output on pg14–18) but `bool` is `t`/`f`, and a `timestamptz` element is written in
+  UTC (`+00`): a literal has no display zone and the instant round-trips. `int2vector` and
+  `oidvector` (`Kind::Array` in `postgres-types`) print space-separated lists and stay opaque
+  text; arrays of types without a binary decoder (`money[]`, `record[]`, composites) are text
+  typed `Array(elem)`.
+- **Hostile arrays** never panic and never show a partial array: more than 6 dimensions, a
+  negative or zero dimension, flags other than 0/1, another element OID than the column's, more
+  elements than the bytes can hold (checked before any loop), an upper bound past `i32`, an
+  element length below -1 or past the buffer, trailing bytes, or any element its own decoder
+  refuses make the whole cell `Error` (`pg-array`).
+- **Large arrays** are written under the cell cap: bytes past it are only counted, so the cell
+  is `Truncated` with the literal's exact total length (M3a's 1 MiB cap, R-M3-82).
+- **Network and bit types** (`decode/network.rs`) decode in binary to `network_out`'s text
+  (`inet`: no `/bits` at full width; `cidr`: always; IPv6 with the first longest zero run of
+  two or more shortened and an embedded IPv4 for `::a.b.c.d` / `::ffff:a.b.c.d`), lower-case
+  `macaddr`/`macaddr8`, and `bit`/`varbit` digits, as `Value::Text` under
+  `LogicalType::Network` / `BitString { len: typmod }`. A family, width, address length or cidr
+  flag no server sends is an `Error` cell.
+- **Typed text.** `money` (`Money`), `xml` (`Xml`), composites and `record` (`Composite` with
+  the fields' logical types, 8 levels deep at most, then `Opaque`), ranges and multiranges
+  (`Range` of the element), the geometric types (`Geometry { srid: None }`) stay text format
+  in a `Var(Text)` buffer. **`money` is the server's `lc_monetary` text verbatim**: never
+  parsed, never regrouped by the region, no currency guessed; it is right-aligned as a number.
+  Copy gives the same text, which the same server reads back under the same `lc_monetary`.
+  `tsvector`, `reg*`, `pg_lsn` and extension types keep `Opaque`.
+- **MySQL/MariaDB.** `BIT(n)` is `Text` of its `n` digits under `BitString { len: Some(n) }`
+  (P-M3b-26); `GEOMETRY` is `Text` of its internal value as `HEX()` prints it, under
+  `Geometry { srid: None }` — the SRID (4 bytes little-endian) is kept before the WKB, never
+  stripped (the per-value SRID has no column-level place); `VECTOR` stays opaque. A `TIMESTAMP`
+  column's `NativeType::MySql.time_zone` names the session `time_zone` read at connect in the
+  same round trip as `net_write_timeout` (no extra query; ledger 194). **Known limit:** a later
+  `SET time_zone` in the session is not followed (mysql_async does not surface session-state
+  tracking); the values themselves are the server's text, so only the label could be stale.
+  Named exceptions: `typed.rs` (`TypedState.time_zone`, the setup query, two `Plan` sites) and
+  `connect.rs` (one line), owned by Task 13 in W2.
+- **SQLite** decoders are unchanged.
+- **Display (`hacivat-values`).** MySQL, MariaDB, TiDB and SQLite floats print in the shortest
+  round-trip form (fixed for decimal exponents −6..=20, else `1e+21`/`1.5e-7`; an `f32` at its
+  own width, never widened), not PostgreSQL's spelling (ledger 177); PostgreSQL keeps its own.
+  `valfmt::type_label` names MySQL columns from their definition (`decimal(14,2)`,
+  `bigint unsigned`, `varchar(40)` — a text length only for the character sets it knows, never
+  a wrong one), and the app's header uses it for MySQL/MariaDB (ledger 246; named exception in
+  `results/adapter.rs`). Raw text stays locale-free.
+- **Goldens.** `tests/data/types_pg.sql` (72 cases after fix round 1) and `tests/data/types_mysql.sql` (31 cases,
+  both protocols) run through the wrapper on pg14–18 and mysql80/84 + mariadb106/1011/114; the
+  PostgreSQL cases also compare with the server's own output text.
+- **Fix round 1 (review).**
+  - I-1: a scalar `bit`/`varbit` cell honours the cell cap: at most `cap` digits are written and
+    a longer value is `Truncated` with its exact bit count (a 1 MiB `varbit` is 1 MiB of digits,
+    never 8 MiB).
+  - m-2: only types named like PostgreSQL arrays (`_elem`) are requested as binary arrays; a
+    user or extension type with `ELEMENT = …` (tokio-postgres's `Kind::Array`) stays opaque text.
+  - m-3: a `"char"` array element with the high bit set is `charout`'s PostgreSQL 15+ `\ooo` on
+    every line (PostgreSQL 14 printed the raw byte, which is not text in a UTF-8 literal).
+  - m-4 (**copy**): a `timestamptz[]` cell copies with `+00` offsets, while a scalar
+    `timestamptz` copies in the console's display zone; psql in a non-UTC session prints the
+    array in its own zone. Same instants, different spelling — a decision, recorded here.
+  - m-8: `LogicalType::Geometry` documents MySQL's 4-byte SRID prefix before the WKB.
+  - m-9: a MySQL type code without an SQL name gets an empty `type_label`; the app names it
+    through Fluent (`hv-results-type-mysql-code`, TR for PO review) and rebuilds that label when
+    the language changes.
+  - m-11: the collation-width table was checked against every MySQL/MariaDB line's
+    `information_schema` (`COLLATIONS`, plus MariaDB 10.10+'s
+    `COLLATION_CHARACTER_SET_APPLICABILITY`) by a Docker test: every ID it names that a server
+    knows has that width, MariaDB included.
+  - Carries: T13 (simple protocol: binary-decoded columns must take the server's text, review
+    m-10); T18 (fold the `sql_mode` read into the same setup query) and the settings model
+    (`EnvStep::TimeZone` must refresh `TypedState.time_zone`); session-state tracking for
+    `time_zone` needs a vendored mysql_async patch (`CLIENT_SESSION_TRACK`) first.
+
+## m3b-t13 — binds and result sets
+
+HV-EXEC-03 driver half; R-M3-60 (Run as one), R-M3-66 (result sets), R-M3-77 (notices and
+warnings), R-M3-79 (bind values). `TypedCaps.binds` is `true` on all three drivers.
+
+- **Binds are data, never text.** No driver puts a bind value into SQL text, and none re-sends a
+  bound statement another way. The statement's own placeholder count must equal `binds.len()`
+  (PostgreSQL `statement.params()`, MySQL `num_params()`, SQLite
+  `sqlite3_bind_parameter_count`), else `Unsupported` before anything runs: a missing bind never
+  becomes NULL (closes the SQLite "would run as NULL" note of `m3a-t15`), an extra one is never
+  ignored.
+  - **PostgreSQL:** text-format parameters (format code 0, the value's text, or NULL) in the
+    Bind of patch §1's `query_with_formats`/`bind_with_formats`; the server parses each with its
+    parameter type's input function. Patch §1's entry points already take any `ToSql`, whose
+    `encode_format` picks the format, so **no change to the vendored copy** (the Task 13 named
+    exception in `PATCHES.md` §2 is not taken). The parameter's `Debug` never shows the value.
+  - **MySQL:** binary-protocol parameters of `COM_STMT_EXECUTE`: `Int`/`UInt` when the hint is a
+    signed/unsigned integer and the text is one, else `Bytes` of the text, NULL as NULL. Only the
+    prepared route carries binds; a `SET` (routed over `COM_QUERY`), a statement the server cannot
+    prepare (1295) and the text-protocol test seam are `Unsupported` with binds.
+  - **SQLite:** bound by position by hint: `INTEGER` (integer hint and text), `REAL` (float hint,
+    finite), `INTEGER` 1/0 (bool hint, `true`/`false`/`1`/`0`), `BLOB` (bytes hint, `\x` + hex
+    pairs, the raw text Hacivat shows for bytes), `NULL`, else `TEXT` (a decimal stays exact;
+    the column's affinity may convert it).
+- **Run as one** (`Protocol::Simple`; never with binds: `Unsupported`; never suspends).
+  - **PostgreSQL:** one simple `Query`. Each statement is one result; every column
+    `LogicalType::Text` with `NativeType::Unknown`, decoded from the server's text only (T7
+    review m-10: binary decoders never see simple-protocol bytes); a cell that is not UTF-8 is an
+    error cell (`pg-text`), the row kept. Limits: a set's `command_tag` is `None` (only the last
+    tag is observed, and a later statement's may already have been read), and `rows_affected` is
+    the `CommandComplete` count of a column-less statement when positive, else `None`.
+    `close_query` reads the rest to its end, as for the unnamed portal. A `COPY` inside the text
+    (past the first-keyword check) is answered by the wire observer (`FROM STDIN`) or breaks the
+    connection (`TO STDOUT`): fail-closed.
+  - **MySQL:** one `COM_QUERY`, only on a read-write connection (a read-only one has no
+    multi-statement capability: `Unsupported` before sending); results after the first carry no
+    command tag.
+  - **SQLite:** `rusqlite::Batch`: each statement prepared and judged by the read-only checks only
+    when the one before it ended, each its own result; a statement with a parameter is
+    `Unsupported`; `close_query` ends it and the statements not reached never run.
+- **Result sets (R-M3-66).** The first `max_result_sets` results are kept; every later one is
+  read (or stepped) to its end and counted in `QueryDone::skipped_result_sets`, never dropped
+  silently. MySQL keeps its M3a rule (a column-less OK between results is not a set).
+- **Notices (R-M3-77, PostgreSQL).** The connection task keeps, besides the M2b codes, the text
+  of the open typed query's notices: the first 100 of the query, each `Notice::new` (severity,
+  SQLSTATE, the server's message verbatim, cut at 16 KiB on a character boundary). They leave
+  the driver only as `QueryEvent::Notice`, before the next event (so all of a statement's before
+  `Done`); notices raised before a server error come out before that error (it is held for the
+  next call). A statement run beside a suspended query (the guard's canary) never lends the
+  query its notices; text is never logged and never kept between queries. Only the message is
+  kept (`DETAIL`/`HINT` are not).
+- **Warnings (R-M3-77, MySQL).** `RawConn::warnings` runs `SHOW WARNINGS` when the last
+  statement's count is positive, keeping at most 100 rows as `Notice`s (`Note` → `Notice`,
+  `Warning`/`Error` → `Warning`, the code, the message cut at 16 KiB); never on a read-only
+  connection (the count only: the guard's `ROLLBACK` follows at once), never while a query is
+  open (`Unsupported`); like the other calls it poisons the connection if dropped mid-read.
+- **`Notice` is `#[non_exhaustive]`** (T1c review M4): outside `hacivat-driver` it is built only
+  through `Notice::new`, so no driver can skip the 16 KiB cap; its fields stay readable.
+- **Fix round 1 (review; controller rulings).** These rules replace the earlier bullets where
+  they differ.
+  - **I-1, closing a PG Run as one** (ruling (a)). When a Run as one is closed before its end,
+    the driver sends the connection's protocol cancel at once, whatever `how` and the
+    transaction status. It skips the cancel only when the server has already answered the
+    whole text, because a late cancel could then reach the next statement. It then reads the
+    rest, undecoded. The answer:
+    - **The rest ends in a server error** (the cancel's 57014, or a statement's own): that
+      error.
+    - **It ends cleanly with nothing after the closed result:** `Completed { rows }`.
+    - **It ends cleanly but later statements ran** (the cancel came too late):
+      `Closed { rows: delivered }`, never `Completed`.
+    - In the error case and the late-cancel case, `RawConn::take_close_report()` answers
+      `CloseReport { statements_ran, rest_not_run }`, once. It gives how many statements after
+      the closed result ran unseen, and whether the rest stopped.
+    - This is a new provided `RawConn` method, a named exception in `hacivat-driver` approved
+      by the controller. It defaults to `None`: MySQL kills its batch, and SQLite never runs
+      the statements it has not reached. Its consumers (the session, and the "N statements
+      ran, not shown" log/UI) are T11's follow-up and T16.
+    - The session's `close_fire` also cancels a Run as one at once (ruling (b), T11), as
+      defence in depth.
+  - **M-2, PG Run as one is one implicit transaction.** Without its own `BEGIN`, PostgreSQL runs
+    the simple `Query` as one implicit transaction. An error (a cancel included) in statement
+    *k* rolls back statements 1…*k*−1, whose `ResultEnd`/`rows_affected` were already handed
+    out. Inside a user transaction, the transaction is failed. MySQL and SQLite keep the
+    statements that ran. T16/T25 must say so (controller carry).
+  - **M-3, dropped notices.** PostgreSQL counts the notices of a typed query past its 100-notice
+    cap. `RawConn::take_notices_dropped()` answers the count, once; it is a provided method,
+    default 0. The count restarts with each typed query.
+  - **I-2 and M-1, bind values are the same on every engine.**
+    - **Bytes hint, `\x` with pairs of hex digits:** the decoded bytes. MySQL sends `Bytes` of
+      them, SQLite a `BLOB`, and PostgreSQL the text, which `bytea` input decodes.
+    - **Bytes hint, malformed `\x` or `\X` text:** `Unsupported` before anything is sent, on all
+      three engines.
+    - **Bytes hint, no `\x`:** the text's own bytes. MySQL sends `Bytes`, SQLite a `BLOB`, and
+      PostgreSQL `bytea`'s escape-format input reads the text (its backslashes are escapes
+      there).
+    - **Integer hint:** an integer is bound only for the value's canonical decimal spelling.
+      Optional `-` for signed, no `+`, no leading zero, ASCII digits, in range:
+      `n.to_string() == text`. Anything else is the text, for the server to convert or refuse.
+  - **M-4, held errors on a named portal.** A server error held behind notices is the answer of
+    `close_query` for a named portal too; it is never swallowed.
+  - **Notices come out while a statement runs.** Found by the I-1 Docker test: the backend flushes
+    its output only at a statement's end or on a notice, and `next_event` used to wait for the
+    next protocol message. Now a kept notice wakes the open typed query through a per-query
+    signal (a `futures` channel, set up by `collect_notice_texts`), on both the extended and the
+    simple path. A PL/pgSQL loop's `RAISE NOTICE` progress therefore arrives as it is raised.
+    Waiting on the stream is cancel-safe: `try_next` dropped unfinished loses nothing.
+
+## m4-pgcancel — hacivat-driver-pg
+
+- **A protocol cancel ends once the server acted on it.** PostgreSQL answers nothing to a
+  `CancelRequest`: the server process that reads it signals the backend, then closes the
+  connection. `tokio-postgres`'s `cancel_query_raw` returned as soon as the request was
+  written, so `CancelHandle::cancel()` could end while the request was still on its way, and a
+  cancel meant for statement *N* could land on statement *N*+1. Every caller that awaits the
+  cancel before its next statement (the session's `settle`, the cursor's `guard`) relied on a
+  promise the driver did not keep. CI run 44595239297 (pg15, `docker_typed_m3b.rs`
+  `stop_during_run_as_one_never_runs_the_rest`): the `SELECT count(*)` right after a Stop
+  failed with 57014.
+- **The fix, without patching the vendored copy:** the cancel stream (`cancel::AwaitClose`,
+  below TLS) makes its shutdown, the request's last step, read and drop everything until the
+  server closes the connection, as libpq's `PQcancel` does. `CANCEL_TIMEOUT` (10 s) now bounds
+  the wait too. Once the close is seen, the backend already holds the signal. PostgreSQL drops
+  a cancel that reaches an idle session (`ProcessInterrupts` under `DoingCommandRead`, step (5)
+  of `PostgresMain`), so the signal can no longer reach the next statement.
+- **The close of a Run as one awaits its own cancel.** `close_simple` used to fire the cancel
+  and forget it, and answered as soon as the statement ended. If the statement ended on its own
+  first (or through an earlier signal), the cancel landed later. It now runs the cancel
+  alongside the read of the rest and answers once both have ended. A cancel that timed out may
+  still land, so it breaks the connection (`wire.mark_broken()`), as the session does with its
+  own cancel (review C1).
+- **The earlier signal, named (fix round 1, M4).** A PostgreSQL server sends one cancel as two
+  signals. The process that reads the request calls `signal_child`, which does `kill(pid,
+  SIGINT)` and, with `setsid`, `kill(-pid, SIGINT)` (PG ≤ 17; PG 18's `SendCancelRequest`
+  also signals before the process exits). If that process is preempted between the two kills,
+  the first ends the statement with 57014, and the second can reach the next statement of a
+  client that did not wait for the close. This is the likely mechanism of the CI failure.
+  Waiting for the close covers both kills.
+- **Fix round 1.**
+  - **I1, ruling: fail closed.** A cancel or kill that answers `Err(Timeout)` (class
+    `NetworkTimeout`) may still land. So the session now treats it as unsettled and breaks the
+    connection (`cursor::cancel_may_still_land`). This covers the ladder (`mechanism_done` and
+    `settle`) and the cursor guard (in the loop and after the call). Session tests use the
+    fake's new `cancel_times_out()`: `cancel.rs`
+    `a_cancel_that_timed_out_never_reaches_the_next_request`, and `run.rs`
+    `an_overdue_typed_cancel_that_timed_out_breaks_the_session` and
+    `a_typed_cancel_beside_the_close_that_timed_out_breaks_the_session`.
+  - **M1.** Once the rest has ended, `close_simple` waits at most `CLOSE_CANCEL_WAIT` (2 s,
+    equal to the session's `CANCEL_WAIT`) for its cancel, then breaks the connection.
+  - **Tests R2 and R7.** `wire.rs` `a_cancel_whose_connection_never_closes_times_out` and
+    `typed_m3b.rs` `a_close_whose_cancel_never_settles_breaks_the_connection`.
+  - **M2, accepted as is.** Over TLS, a peer that reset the connection before the client's
+    `close_notify` makes the cancel answer `Err(Io)` although the server acted. This can show a
+    spurious "cancel failed", but nothing can land.
+- **Tests.**
+  - Scripted servers that close the cancel connection only after they set a mark:
+    `wire.rs` `a_cancel_ends_only_once_the_server_closed_the_cancel_connection` and
+    `cancel_goes_over_tls_with_the_session_key` (TLS), and `typed_m3b.rs`
+    `a_closed_run_as_one_that_{failed,completed}_answers_after_its_cancel_settled`.
+  - Docker: `docker_exec.rs` `an_ended_cancel_never_reaches_the_next_statement` (an idle cancel
+    followed by a 200 ms statement, PG 13–18 and `pg17-tls`) and `docker_typed_m3b.rs`
+    `a_stop_never_cancels_the_next_statement` (on an `hvm4_pgcancel_stop_*` table, dropped by a
+    guard; a probabilistic reproducer).
+  - The fake driver's cancel is a latch (ADR 0006), so it cannot model a late landing.

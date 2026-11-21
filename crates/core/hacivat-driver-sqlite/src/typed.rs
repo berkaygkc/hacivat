@@ -7,8 +7,9 @@
 //! across threads:
 //! 1. prepare: on a read-only profile the authorizer judges every action here, then
 //!    `sqlite3_stmt_readonly` must hold (`readonly-required`, the journal-mode query exempt),
-//!    exactly as `execute` (`exec.rs`); a statement with a parameter is `Unsupported` (binds
-//!    are M3b; an unbound parameter would run as NULL); the cancel latch is read;
+//!    exactly as `execute` (`exec.rs`); the binds are bound, one per parameter, else
+//!    `Unsupported` (m3b-t13: a parameter without a bind never runs as NULL); the cancel latch
+//!    is read;
 //! 2. `Started`: `query` returns here, so a statement SQLite refuses fails `query` itself;
 //! 3. step rows into a `ChunkBuilder` (`with_schema`), sealing a chunk at `first_rows` rows (the
 //!    first one) or `chunk_rows` (later ones), at `chunk_bytes`, or when the builder is full, and
@@ -49,18 +50,38 @@
 //! change a journal mode or the list of databases; never on the first-chunk path. Another
 //! process can only switch a file into WAL while this connection is open (out of WAL needs the
 //! file to itself), so a stale bound is the cautious 30 s until the next `probe`.
+//!
+//! ## m3b-t13-drivers (HV-EXEC-03 driver half; R-M3-60, -66, -79)
+//!
+//! **Binds.** `spec.binds` are bound to the prepared statement by position ([`sqlite_value`]:
+//! by the hint, an `INTEGER`, a `REAL`, `TEXT`, a `BLOB` or `NULL`; a malformed `\x` bytes
+//! value is `Unsupported`), never put into the SQL text. The statement's parameter count (`sqlite3_bind_parameter_count`, the largest index)
+//! must equal `binds.len()`, else `Unsupported` before the first step: a placeholder without a
+//! bind never runs as NULL, and an extra bind is never ignored.
+//!
+//! **Run as one** (`Protocol::Simple`, R-M3-60): the text runs statement by statement through
+//! `rusqlite::Batch`, each one prepared (and judged by the read-only checks above) only when the
+//! one before it has ended, each one its own result; the first `max_result_sets` are kept, the
+//! rest stepped to their end, undecoded, and counted (`QueryDone::skipped_result_sets`,
+//! R-M3-66). It never suspends and takes no binds (`Unsupported`); a statement with a
+//! parameter is `Unsupported` too. `query` answers once the first statement is prepared and
+//! checked; a later statement's refusal or error ends the query after the results before it.
+//! `close_query` ends it like any query, and the statements not yet reached never run.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use hacivat_driver::{
-    CloseHow, Closed, QueryDone, QueryEvent, QuerySpec, RawError, RawErrorKind, ResultEnd,
-    TxStatus, TypedCaps,
+    CloseHow, Closed, Protocol, QueryDone, QueryEvent, QuerySpec, RawError, RawErrorKind,
+    ResultEnd, TxStatus, TypedCaps,
 };
-use hacivat_values::{BufKind, ChunkBuilder, ColumnMeta, ResultSchema, Value};
+use hacivat_values::{
+    BindValue, BufKind, ChunkBuilder, ColumnMeta, LogicalType, ResultSchema, Value,
+};
+use rusqlite::fallible_iterator::FallibleIterator as _;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, Rows};
+use rusqlite::{Batch, Connection, Rows, Statement};
 use tokio::sync::mpsc;
 
 use crate::decode::{self, ColKind, Column, Rule};
@@ -74,15 +95,103 @@ pub(crate) const ROLLBACK_IDLE_BOUND: Duration = Duration::from_secs(30);
 /// The depth of a typed query's event channel: chunks in flight at most.
 pub(crate) const EVENT_DEPTH: usize = 4;
 
-/// What the SQLite typed path can do: suspend, no binds yet (M3b), closes by finalizing (no
+/// What the SQLite typed path can do: suspend, bind (m3b-t13), closes by finalizing (no
 /// server-side kill), and the journal mode's idle bound.
 pub(crate) fn caps(idle_bound: Option<Duration>) -> TypedCaps {
     TypedCaps {
         suspend: true,
-        binds: false,
+        binds: true,
         close_needs_kill: false,
         idle_bound,
     }
+}
+
+// ## m3b-t13-drivers
+/// One bind as an SQLite value, by its hint (R-M3-79); `None` refuses it: an integer hint and
+/// the integer's canonical decimal text (no `+`, no leading zero) → `INTEGER`; a float hint
+/// and a finite number → `REAL`; a bool hint and `true`/`false`/`1`/`0` (ASCII case) →
+/// `INTEGER` 1/0; a bytes hint → `BLOB` of the decoded `\x` hex (the raw text Hacivat shows
+/// for bytes), or of the text's own bytes without `\x`, refused when `\x`/`\X` is malformed;
+/// NULL → `NULL`; anything else `TEXT`, which the column's affinity may convert (a decimal stays
+/// exact as text).
+pub fn sqlite_value(b: &BindValue) -> Option<rusqlite::types::Value> {
+    use rusqlite::types::Value as V;
+    let BindValue::Typed { hint, text } = b else {
+        return Some(V::Null);
+    };
+    let typed = match hint {
+        // Fix round 1 (M-1): only the canonical decimal spelling is an integer.
+        LogicalType::Int { .. } => text
+            .parse::<i64>()
+            .ok()
+            .filter(|n| n.to_string() == **text)
+            .map(V::Integer),
+        LogicalType::Float { .. } => text
+            .parse::<f64>()
+            .ok()
+            .filter(|f| f.is_finite())
+            .map(V::Real),
+        LogicalType::Bool => match text.to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(V::Integer(1)),
+            "false" | "0" => Some(V::Integer(0)),
+            _ => None,
+        },
+        // Fix round 1 (I-2): the same bytes as MySQL and PostgreSQL store.
+        LogicalType::Bytes { .. } => match hex_bytes(text) {
+            HexText::Bytes(bytes) => Some(V::Blob(bytes)),
+            HexText::Malformed => return None,
+            HexText::NotHex => Some(V::Blob(text.as_bytes().to_vec())),
+        },
+        _ => None,
+    };
+    Some(typed.unwrap_or_else(|| V::Text(text.to_string())))
+}
+
+/// A bytes-hinted text (fix round 1, I-2; the same rule on all three drivers).
+#[derive(Debug, PartialEq, Eq)]
+pub enum HexText {
+    /// `\x` and pairs of hex digits (either case): these bytes (`\x` alone: none).
+    Bytes(Vec<u8>),
+    /// Starts with `\x` or `\X` but is not that: refused on every engine.
+    Malformed,
+    /// No `\x` prefix: the text's own bytes.
+    NotHex,
+}
+
+/// Reads a bytes-hinted text.
+pub fn hex_bytes(text: &str) -> HexText {
+    if text.starts_with("\\X") {
+        return HexText::Malformed;
+    }
+    let Some(hex) = text.strip_prefix("\\x") else {
+        return HexText::NotHex;
+    };
+    let hex = hex.as_bytes();
+    if hex.len() % 2 != 0 {
+        return HexText::Malformed;
+    }
+    let digit = |c: u8| (c as char).to_digit(16);
+    hex.chunks(2)
+        .map(|p| Some((digit(p[0])? * 16 + digit(p[1])?) as u8))
+        .collect::<Option<Vec<u8>>>()
+        .map_or(HexText::Malformed, HexText::Bytes)
+}
+
+/// Binds `binds` to `stmt` by position, once its parameter count is theirs and every value is
+/// one the hint allows (else `Unsupported`: nothing is bound or stepped).
+fn bind_all(stmt: &mut Statement<'_>, binds: &[BindValue]) -> Result<(), RawError> {
+    if stmt.parameter_count() != binds.len() {
+        return Err(unsupported());
+    }
+    let values = binds
+        .iter()
+        .map(sqlite_value)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(unsupported)?;
+    for (i, v) in values.into_iter().enumerate() {
+        stmt.raw_bind_parameter(i + 1, v).map_err(raw_error)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn unsupported() -> RawError {
@@ -217,6 +326,13 @@ pub(crate) struct Job {
     events: mpsc::Sender<Msg>,
     cmds: mpsc::UnboundedReceiver<Cmd>,
     pace: Arc<Pace>,
+    // ## m3b-t13-drivers
+    binds: Vec<BindValue>,
+    /// Run as one (`Protocol::Simple`): every statement of the text, each its own result.
+    simple: bool,
+    max_sets: u32,
+    /// Results past `max_result_sets`, stepped and counted.
+    skipped: u32,
 }
 
 /// How a job's statement ended.
@@ -267,6 +383,10 @@ pub(crate) fn start(
         events: events_tx,
         cmds: cmds_rx,
         pace,
+        binds: spec.binds.to_vec(),
+        simple: spec.protocol == Protocol::Simple,
+        max_sets: spec.max_result_sets.max(1),
+        skipped: 0,
     };
     (job, open)
 }
@@ -289,7 +409,7 @@ impl Job {
                 QueryDone {
                     tx,
                     warnings: 0,
-                    skipped_result_sets: 0,
+                    skipped_result_sets: self.skipped,
                 },
                 after,
             ),
@@ -312,6 +432,10 @@ impl Job {
 
     /// Prepares, checks and streams the statement; it is finalized when this returns.
     fn query(&mut self, conn: &Connection) -> Outcome {
+        // ## m3b-t13-drivers: Run as one.
+        if self.simple {
+            return self.query_batch(conn);
+        }
         if let Some(trail) = &self.trail {
             trail.clear();
         }
@@ -334,9 +458,13 @@ impl Job {
             {
                 return Outcome::Failed(readonly_required());
             }
-            if stmt.parameter_count() > 0 {
-                return Outcome::Failed(unsupported());
+            // ## m3b-t13-drivers: one bind per parameter, bound before any step (closes
+            // "an unbound parameter would run as NULL").
+            if let Err(e) = bind_all(&mut stmt, &self.binds) {
+                return Outcome::Failed(e);
             }
+        } else if !self.binds.is_empty() {
+            return Outcome::Failed(unsupported());
         }
         if self.cancel.cancelled(self.ticket) {
             return Outcome::Failed(interrupted());
@@ -345,28 +473,34 @@ impl Job {
             return Outcome::Gone;
         }
         if empty {
-            let schema = Arc::new(ResultSchema {
-                columns: Arc::from([]),
-            });
-            let end = ResultEnd {
-                rows: 0,
-                kept: 0,
-                rows_affected: None,
-                command_tag: None,
-            };
-            return self.finish_empty(schema, end);
+            return self.finish_empty(empty_schema(), empty_end());
         }
-        let columns = decode::columns(&stmt);
+        let tag = first_keyword(&self.sql);
+        let suspendable = self.suspendable;
+        match self.result(conn, &mut stmt, tag, suspendable) {
+            Ok(()) => Outcome::Ended,
+            Err(outcome) => outcome,
+        }
+    }
+
+    // ## m3b-t13-drivers
+    /// Streams one prepared, checked and bound statement as a result, ending with its
+    /// `ResultEnd` (the statement is finalized by its owner).
+    fn result(
+        &mut self,
+        conn: &Connection,
+        stmt: &mut Statement<'_>,
+        tag: Option<String>,
+        suspendable: bool,
+    ) -> Result<(), Outcome> {
+        let columns = decode::columns(stmt);
         let writes = !stmt.readonly();
         let before = conn.total_changes();
-        let tag = first_keyword(&self.sql);
-        let mut set = ResultSet::new(columns, self.limits, self.suspendable);
+        let mut set = ResultSet::new(columns, self.limits, suspendable);
         let mut rows = stmt.raw_query();
         let stepped = self.stream(&mut set, &mut rows);
         drop(rows);
-        if let Err(outcome) = stepped {
-            return outcome;
-        }
+        stepped?;
         let rows_affected = writes.then(|| {
             if conn.total_changes() > before {
                 conn.changes()
@@ -381,9 +515,88 @@ impl Job {
             command_tag: tag,
         };
         if !self.send(Msg::Event(QueryEvent::ResultEnd(end))) {
+            return Err(Outcome::Gone);
+        }
+        Ok(())
+    }
+
+    /// Steps a statement past `max_result_sets` to its end, its rows dropped; a `Close` ends
+    /// it (and the query) at the next row.
+    fn skip(&mut self, stmt: &mut Statement<'_>) -> Result<(), Outcome> {
+        let mut rows = stmt.raw_query();
+        loop {
+            match self.cmds.try_recv() {
+                Ok(Cmd::Close(_)) => return Err(Outcome::Closed(None)),
+                Ok(Cmd::FetchMore(_)) | Err(mpsc::error::TryRecvError::Empty) => {}
+                Err(mpsc::error::TryRecvError::Disconnected) => return Err(Outcome::Gone),
+            }
+            match rows.next() {
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(()),
+                Err(e) => return Err(Outcome::Failed(raw_error(e))),
+            }
+        }
+    }
+
+    /// Run as one: each statement of the text in turn (`rusqlite::Batch`), prepared and judged
+    /// only when the one before it ended; the first `max_result_sets` kept as results, the rest
+    /// stepped and counted. `Started` follows the first statement's checks.
+    fn query_batch(&mut self, conn: &Connection) -> Outcome {
+        let sql = self.sql.clone();
+        let mut batch = Batch::new(conn, &sql);
+        let mut started = false;
+        let mut kept = 0_u32;
+        loop {
+            if let Some(trail) = &self.trail {
+                trail.clear();
+            }
+            let mut stmt = match batch.next() {
+                Ok(Some(s)) => s,
+                Ok(None) => break,
+                Err(e) => return Outcome::Failed(raw_error(e)),
+            };
+            if let Some(trail) = &self.trail
+                && !stmt.readonly()
+                && !trail.only_journal_mode_query()
+            {
+                return Outcome::Failed(readonly_required());
+            }
+            // No binds here: a parameter would run as NULL.
+            if stmt.parameter_count() > 0 {
+                return Outcome::Failed(unsupported());
+            }
+            if self.cancel.cancelled(self.ticket) {
+                return Outcome::Failed(interrupted());
+            }
+            if !started {
+                if !self.send(Msg::Started) {
+                    return Outcome::Gone;
+                }
+                started = true;
+            }
+            let stepped = if kept < self.max_sets {
+                kept += 1;
+                let tag = stmt.expanded_sql().as_deref().and_then(first_keyword);
+                self.result(conn, &mut stmt, tag, false)
+            } else {
+                self.skipped = self.skipped.saturating_add(1);
+                self.skip(&mut stmt)
+            };
+            if let Err(outcome) = stepped {
+                return outcome;
+            }
+        }
+        if started {
+            return Outcome::Ended;
+        }
+        // No statement at all (whitespace, comments, `;`): one empty result, as `query`'s.
+        if self.cancel.cancelled(self.ticket) {
+            return Outcome::Failed(interrupted());
+        }
+        if !self.send(Msg::Started) {
             return Outcome::Gone;
         }
-        Outcome::Ended
+        self.finish_empty(empty_schema(), empty_end())
     }
 
     fn finish_empty(&mut self, schema: Arc<ResultSchema>, end: ResultEnd) -> Outcome {
@@ -499,6 +712,24 @@ impl Job {
         };
         self.cancel.set_deadline(None);
         Outcome::Closed(completed.then_some(total))
+    }
+}
+
+// ## m3b-t13-drivers
+/// The schema of a result without columns.
+fn empty_schema() -> Arc<ResultSchema> {
+    Arc::new(ResultSchema {
+        columns: Arc::from([]),
+    })
+}
+
+/// The end of a text with no statement.
+fn empty_end() -> ResultEnd {
+    ResultEnd {
+        rows: 0,
+        kept: 0,
+        rows_affected: None,
+        command_tag: None,
     }
 }
 
@@ -787,7 +1018,9 @@ pub(crate) async fn next_event(
                     QueryEvent::Rows(chunk) => q.delivered += u64::from(chunk.rows()),
                     QueryEvent::Suspended => q.stage = Stage::Suspended,
                     QueryEvent::ResultEnd(end) => q.completed = Some(end.rows),
-                    QueryEvent::ResultStart(_) | QueryEvent::Done(_) => {}
+                    // ## m3b-t01c-core-seams (named exception): `Notice` is new; SQLite has
+                    // none (R-M3-77).
+                    QueryEvent::ResultStart(_) | QueryEvent::Done(_) | QueryEvent::Notice(_) => {}
                 }
                 Ok(event)
             }
@@ -922,9 +1155,10 @@ mod tests {
     }
 
     #[test]
-    fn caps_suspend_without_binds_or_kills() {
+    fn caps_suspend_and_bind_without_kills() {
         let c = caps(Some(ROLLBACK_IDLE_BOUND));
-        assert!(c.suspend && !c.binds && !c.close_needs_kill);
+        // ## m3b-t13-drivers: binds.
+        assert!(c.suspend && c.binds && !c.close_needs_kill);
         assert_eq!(c.idle_bound, Some(Duration::from_secs(30)));
         assert_eq!(caps(None).idle_bound, None);
     }

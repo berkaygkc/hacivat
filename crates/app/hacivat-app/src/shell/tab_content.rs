@@ -17,7 +17,20 @@ pub enum TabKind {
     },
     /// Content registered under this kind in the [`TabContentRegistry`].
     Registered(&'static str),
+    // ## m4-t01b-seams (ruling R-W0-1): one tab per object; `crate::ddl_view` gives its title,
+    // view and key context, so Task 25 never edits the shell. Not saved in `workspace.json`.
+    /// The DDL view of `object` (an interned `ObjectKey`, `ddl_view::object_id`) of `profile`.
+    DdlView {
+        profile: hacivat_proto::ProfileId,
+        object: DdlObjectId,
+    },
 }
+
+// ## m4-t01b-seams (ruling R-W0-1)
+/// A DDL view tab's object: a handle `crate::ddl_view` interns per (profile, object), so the
+/// tab kind stays `Copy` and the same object always gets the same handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DdlObjectId(pub u64);
 
 /// Builds a registered tab's view (once per tab).
 pub type BuildFn = Rc<dyn Fn(&mut Window, &mut App) -> AnyView>;

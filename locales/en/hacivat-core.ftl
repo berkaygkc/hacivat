@@ -312,8 +312,6 @@ error-exec-sqlite-busy-hint = Another program has locked this database file. Run
 # Durations and sizes in the output log, the gutter and the result strip (NOTES rule 6): each is
 # one message with its unit inside. Every number arrives pre-formatted in the format locale.
 
-# A duration under one millisecond.
-exec-dur-lt-ms = <1 ms
 # A duration under one second.
 # Variables:
 #   $ms (String) - the milliseconds, e.g. "340".
@@ -322,11 +320,6 @@ exec-dur-ms = { $ms } ms
 # Variables:
 #   $s (String) - the seconds, e.g. "2".
 exec-dur-s = { $s } s
-# A duration of seconds and milliseconds, under a minute.
-# Variables:
-#   $s (String) - the seconds, e.g. "2".
-#   $ms (String) - the milliseconds past them, e.g. "340".
-exec-dur-s-ms = { $s } s { $ms } ms
 # A duration of whole minutes.
 # Variables:
 #   $min (String) - the minutes, e.g. "3".
@@ -389,7 +382,7 @@ exec-tx-rolled-back = Transaction rolled back
 #   $executed (Number) - the statements that ran, e.g. 2.
 #   $total (Number) - the statements in the run, e.g. 3.
 #   $failed (Number) - the statements that failed, e.g. 1.
-#   $duration (String) - how long the run took (an exec-dur-* message), e.g. "1 s 200 ms".
+#   $duration (String) - how long the run took (an exec-dur-* message), e.g. "1.20 s".
 exec-summary = { $total ->
         [one] { $executed } of { $total } statement executed, { $failed } failed, in { $duration }
        *[other] { $executed } of { $total } statements executed, { $failed } failed, in { $duration }
@@ -400,7 +393,7 @@ exec-summary = { $total ->
 exec-error = Statement { $n } failed
 # The statement in flight was cancelled.
 # Variables:
-#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "2 s".
+#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "2.00 s".
 exec-cancelled = Cancelled after { $duration }
 # A statement returned more than one result set (R-M3-25).
 # Variables:
@@ -431,8 +424,6 @@ exec-copy-unsupported = Not sent: COPY … FROM STDIN and TO STDOUT need the cli
 # A run that never started: its session was closed or lost before anything ran. The reason
 # (an exec-error-* sentence) follows on its own row.
 exec-not-started = Nothing ran.
-# Run refused to send a selection as one statement.
-exec-run-as-one-unsupported = Not sent: Hacivat runs a selection statement by statement, and can't send it as one.
 
 # A released console cursor (R-M3-23): the reason, and, when Hacivat's own transaction around
 # it ended in a rollback, the sentence that says so (cursor-closed-rolled-back).
@@ -607,3 +598,1156 @@ exec-uncertain-comment-end = Where an executable comment or optimizer hint ends 
 exec-uncertain-client-command = A client command inside the statement can't be run as written.
 # Several carets or selections share part of one statement.
 exec-uncertain-overlapping-units = Two of the carets or selections share part of a statement, which would run it twice.
+
+## m3b-t04-safety
+
+# The classifier's classes, reasons and destructive patterns (sql-safety, Task 4). A class is
+# a short label for what a statement does (badges, dialog headings); a reason is one sentence
+# on why a statement is refused or needs a confirmation; a destructive pattern is one sentence
+# naming the table it touches. SQL keywords stay in English.
+
+# Class: the statement only reads.
+safety-class-read = Reads data
+# Class: transaction control or session settings.
+safety-class-session = Changes the session
+# Class: the statement changes rows (or locks them).
+safety-class-write = Modifies data
+# Class: the statement changes the schema.
+safety-class-ddl = Changes the schema
+# Class: privileges, server administration, files, network or programs on the server.
+safety-class-admin = Administrative or external side effects
+# Class: Hacivat can't tell what the statement does.
+safety-class-unknown = Effects can't be determined
+
+# Reason: the check isn't built yet, so nothing runs.
+safety-reason-not-implemented = Hacivat can't check this statement yet.
+# Reason: an unterminated quote or comment, or a character the lexer rejects.
+safety-reason-lex-error = The statement has a quote, comment or character Hacivat can't read.
+# Reason: a psql or mysql client command (\copy, DELIMITER, …) inside the text.
+safety-reason-client-command = The text contains a client command, which the server can't run.
+# Reason: a template variable such as ${name} that nobody filled in.
+safety-reason-template-variable = The text contains a template variable that hasn't been filled in.
+# Reason: only comments or semicolons.
+safety-reason-no-statement = There's no statement to run.
+# Reason: a unit holds more than one statement.
+safety-reason-multi-statement = The text holds more than one statement.
+# Reason: the statement boundary is uncertain.
+safety-reason-ambiguous-boundary = Where the statement ends is uncertain.
+# Reason: the parser rejected the statement.
+safety-reason-parse-error = The statement couldn't be parsed.
+# Reason: two parsers read the statement differently.
+safety-reason-parser-disagreement = Hacivat's two readings of the statement disagree.
+# Reason: the statement is past the size, token or nesting limits.
+safety-reason-too-complex = The statement is too large or too deeply nested to check.
+# Reason: syntax from a newer server version than this build knows.
+safety-reason-syntax-newer-than-agent = The statement uses syntax newer than this version of Hacivat knows.
+# Reason: no classifier for this database yet.
+safety-reason-unsupported-dialect = Hacivat can't check statements for this database yet.
+# Reason: a function known to have side effects.
+# Variables:
+#   $name (String) - the function's name as written in the statement, e.g. "pg_sleep".
+safety-reason-fn-denylisted = { $name } is on the list of functions with side effects.
+# Reason: a function Hacivat has no data on.
+# Variables:
+#   $name (String) - the function's name as written in the statement.
+safety-reason-fn-unknown = Hacivat doesn't know what { $name } does.
+# Reason: an operator Hacivat has no data on.
+# Variables:
+#   $name (String) - the operator as written, e.g. "###".
+safety-reason-operator-unknown = Hacivat doesn't know what the operator { $name } does.
+# Reason: a cast to a type Hacivat has no data on.
+# Variables:
+#   $name (String) - the target type's name as written.
+safety-reason-cast-unknown = Hacivat doesn't know what a conversion to { $name } does.
+# Reason: a MySQL/MariaDB executable comment.
+safety-reason-executable-comment = An executable comment (/*! … */) runs code that's hidden in a comment.
+# Reason: SET sql_mode, NAMES, standard_conforming_strings and the like.
+safety-reason-lex-mode-change = The statement changes how the server reads SQL text.
+# Reason: SET ROLE, SET SESSION AUTHORIZATION and the like.
+safety-reason-privilege-change = The statement changes roles or privileges.
+# Reason: WITH x AS (DELETE …) and the like.
+safety-reason-data-modifying-cte = A WITH clause changes data.
+# Reason: FOR UPDATE, FOR SHARE, LOCK IN SHARE MODE.
+safety-reason-locking-clause = The statement locks rows.
+# Reason: EXPLAIN ANALYZE executes its statement.
+safety-reason-explain-analyze = EXPLAIN ANALYZE runs the statement.
+# Reason: SQL assembled from text at run time (EXECUTE, query_to_xml, …).
+safety-reason-dynamic-sql = The statement runs SQL that's built from text.
+# Reason: DO blocks and other procedural code.
+safety-reason-procedural-code = The statement runs procedural code.
+# Reason: BEGIN, COMMIT, ROLLBACK, SAVEPOINT.
+safety-reason-txn-control = The statement controls the transaction.
+# Reason: SET, RESET, USE, LISTEN and the like.
+safety-reason-session-state = The statement changes the session's settings.
+# Reason: reading or writing server files.
+safety-reason-external-file = The statement reads or writes files on the server.
+# Reason: dblink, foreign tables and the like.
+safety-reason-external-network = The statement reaches another server over the network.
+# Reason: COPY … PROGRAM and the like.
+safety-reason-process-exec = The statement runs a program on the server.
+# Reason: server administration (CHECKPOINT, ALTER SYSTEM, KILL, …).
+safety-reason-admin-control = The statement administers the server.
+# Reason: txid_current() and the like.
+safety-reason-xid-consume = The statement uses up a transaction ID.
+# Reason: nextval() and the like.
+safety-reason-sequence-advance = The statement advances a sequence.
+# Reason: writes to temporary tables.
+safety-reason-write-temp = The statement writes to a temporary table.
+# Reason: MAX_EXECUTION_TIME(0) or another hint that lifts the time limit.
+safety-reason-hint-exec-time = An optimizer hint lifts the time limit.
+# Reason: a SET_VAR optimizer hint.
+safety-reason-hint-set-var = An optimizer hint changes a setting.
+# Reason: CALL of a routine.
+safety-reason-routine-call = The statement calls a routine whose effects can't be checked.
+# Reason: SET of a variable that isn't on the harmless list, on a read-only connection.
+# Variables:
+#   $name (String) - the setting's name as written in the statement, e.g. "work_mem".
+safety-reason-set-not-allowlisted = On a read-only connection only harmless settings can be changed, and { $name } isn't one of them.
+# Reason: INSERT, UPDATE, DELETE, MERGE.
+safety-reason-write-data = The statement changes data.
+# Reason: CREATE, ALTER, DROP.
+safety-reason-schema-change = The statement changes the schema.
+# Reason: LOCK TABLE(S).
+safety-reason-table-lock = The statement locks whole tables.
+# Reason: pg_advisory_lock(), GET_LOCK() and the like.
+safety-reason-advisory-lock = The statement takes an advisory lock.
+# Reason: files or the network outside the database.
+safety-reason-external-io = The statement reaches files or the network outside the database.
+# Reason: PREPARE.
+safety-reason-prepared-statement = The statement prepares another statement to run later.
+# Reason: NOTIFY.
+safety-reason-notify = The statement sends a notification to other sessions.
+# Reason: the classifier couldn't determine the effects.
+safety-reason-effects-unknown = What the statement does can't be determined.
+# Reason: a destructive pattern (the patterns below say which).
+safety-reason-destructive = The statement can change or remove a lot of data.
+# Reason: GRANT, REVOKE, CREATE ROLE and the like.
+safety-reason-privilege-grant = The statement grants or revokes privileges or roles.
+# Reason: a volatile function no allowlist covers (its effects can't be checked).
+safety-reason-volatile-function = The statement calls a volatile function whose effects can't be checked.
+
+# Destructive pattern: UPDATE or DELETE without WHERE.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-no-where = { $table } has no WHERE clause, so every row changes.
+# Destructive pattern: a WHERE that is always true (1=1, TRUE, …).
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-always-true = The WHERE clause on { $table } is always true, so every row changes.
+# Destructive pattern: a DELETE/UPDATE join that never limits the target's rows.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-join-without-on = The join never limits the rows of { $table }, so every row can change.
+# Destructive pattern: DROP.
+# Variables:
+#   $table (String) - the object's name as written in the statement.
+safety-destructive-drop = Removes { $table }.
+# Destructive pattern: DROP … CASCADE.
+# Variables:
+#   $table (String) - the object's name as written in the statement.
+safety-destructive-drop-cascade = Removes { $table } and everything that depends on it.
+# Destructive pattern: TRUNCATE.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-truncate = Removes every row of { $table }.
+# ## m3c-p2-07 (fix round 4, S2) Destructive pattern: PostgreSQL TRUNCATE … CASCADE.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-truncate-cascade = Removes every row of { $table } and of every table that references it (CASCADE).
+# Destructive pattern: ALTER … DROP COLUMN.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-drop-column = Removes a column of { $table } and its data.
+# Destructive pattern: ALTER … DROP CONSTRAINT.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-drop-constraint = Removes a constraint of { $table }.
+# Destructive pattern: ALTER … TYPE (rewrites the column).
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-alter-type = Changes a column type of { $table }, which rewrites its data.
+# Destructive pattern: MERGE … WHEN MATCHED THEN DELETE.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-merge-delete = The MERGE deletes rows of { $table }.
+# Destructive pattern: MySQL UPDATE … LIMIT without ORDER BY.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-update-limit-no-order = UPDATE … LIMIT on { $table } without ORDER BY changes rows in no fixed order.
+
+## m3b-t16-run
+
+# A duration of a second or more (the one duration rule of the log, the gutter and the status
+# bar: milliseconds under a second, else seconds with two decimals).
+# Variables:
+#   $seconds (Decimal) - seconds with two decimals, e.g. 2.45.
+exec-dur-seconds = { NUMBER($seconds, minimumFractionDigits: 2) } s
+# A server message the statement produced (PostgreSQL DEBUG). The server's own text follows on
+# its own row, verbatim.
+exec-notice-debug = Server debug message
+# A server message the statement produced (PostgreSQL LOG).
+exec-notice-log = Server log message
+# A server message the statement produced (PostgreSQL INFO).
+exec-notice-info = Server info message
+# A server notice the statement produced (PostgreSQL NOTICE, MySQL Note).
+exec-notice-notice = Server notice
+# A server warning the statement produced (PostgreSQL WARNING, MySQL Warning).
+exec-notice-warning = Server warning
+# Server notices past the per-statement limit were counted and not shown.
+# Variables:
+#   $n (Number) - the notices not shown, e.g. 12.
+exec-notices-dropped = { $n ->
+        [one] { $n } more server notice was not shown.
+       *[other] { $n } more server notices were not shown.
+    }
+# A statement returned more result sets than a run keeps (R-M3-66).
+# Variables:
+#   $total (Number) - the result sets it returned, e.g. 150.
+#   $limit (Number) - the result sets kept, e.g. 100.
+exec-result-set-limit = The statement returned { $total } result sets; the first { $limit } are shown.
+# The user skipped statements in the confirmation before the run.
+# Variables:
+#   $n (Number) - the statements skipped, e.g. 2.
+exec-skipped-by-user = { $n ->
+        [one] { $n } statement skipped at your request.
+       *[other] { $n } statements skipped at your request.
+    }
+# A failed statement was run again (the error bar's Retry).
+# Variables:
+#   $n (String) - the statement's number in the run, e.g. "3".
+exec-retried = Running statement { $n } again
+# A background result was closed to free memory; its first rows stay.
+# Variables:
+#   $rows (Number) - the rows kept, e.g. 1000.
+cursor-closed-evicted = { $rows ->
+        [one] Closed to free memory; { $rows } row kept.
+       *[other] Closed to free memory; { $rows } rows kept.
+    }
+# A text run as one was stopped; statements after the stopped result ran, and their results
+# are not shown.
+# Variables:
+#   $n (Number) - the statements that ran, e.g. 2.
+exec-run-as-one-closed-early = { $n ->
+        [one] Stopped. { $n } more statement ran; its result isn't shown.
+       *[other] Stopped. { $n } more statements ran; their results aren't shown.
+    }
+# As exec-run-as-one-closed-early, and the rest of the text did not run.
+# Variables:
+#   $n (Number) - the statements that ran, e.g. 2.
+exec-run-as-one-closed-early-rest = { $n ->
+        [one] Stopped. { $n } more statement ran (its result isn't shown); the rest didn't run.
+       *[other] Stopped. { $n } more statements ran (their results aren't shown); the rest didn't run.
+    }
+# PostgreSQL ran a text sent as one in a single transaction, so a failure rolled back the
+# statements before it too.
+exec-run-as-one-rolled-back = PostgreSQL ran the text as one transaction, so the statements before the failing one were rolled back too, unless the text committed them itself.
+# A text run as one failed or was stopped inside the user's open transaction on PostgreSQL:
+# nothing was rolled back yet, but the transaction failed (fix round 1, review m9).
+exec-run-as-one-tx-failed = The transaction failed: nothing more runs in it until you roll it back.
+
+## m3b-t15-gate
+
+# The exec gate (Task 15, R-M3-55): why Run sends nothing for a statement, and the extra
+# reasons a confirmation lists. Shown in the Output log and in the confirmation dialog.
+
+# The check no longer matches the text that would be sent (it changed after the check).
+exec-gate-stale-classification = Not sent: the statement changed after Hacivat checked it. Run it again.
+# The statement checker isn't available in this build.
+exec-gate-not-classified = Not sent: Hacivat couldn't check this statement.
+# A read-only connection runs reads only.
+# Variables:
+#   $class (String) - what the statement does: session, tx, lock, routine, dml, ddl, admin or unknown.
+exec-gate-read-only = { $class ->
+        [session] Not sent: this connection is read-only, and the statement changes the session's settings.
+        [tx] Not sent: this connection is read-only, and the statement controls the transaction.
+        [lock] Not sent: this connection is read-only, and the statement locks data.
+        [routine] Not sent: this connection is read-only, and the routine it calls may change data.
+        [dml] Not sent: this connection is read-only, and the statement changes data.
+        [ddl] Not sent: this connection is read-only, and the statement changes the schema.
+        [admin] Not sent: this connection is read-only, and the statement administers the server or reaches outside the database.
+       *[other] Not sent: this connection is read-only, and Hacivat can't tell what the statement does.
+    }
+# The safety policy never runs this statement on a production connection.
+exec-gate-policy-denied = Not sent: Hacivat doesn't run this statement on a production connection.
+# MySQL, MariaDB or TiDB, a transaction is open, and the statement makes the server commit it
+# first (DDL, GRANT, BEGIN, LOCK TABLES and the like).
+exec-gate-implicit-commit = The server commits your open transaction before it runs this statement, so your earlier changes are committed too.
+# Fix round 1 (I1): off production, a statement Hacivat couldn't analyse whose words may change data.
+exec-gate-not-analysed = Hacivat couldn't analyse this statement, and it may change data. Check it before you run it.
+# Fix round 1 (I2, M7): on production, what the rollback around EXPLAIN ANALYZE doesn't undo.
+exec-explain-analyze-not-undone = EXPLAIN ANALYZE runs the statement and then rolls it back, but a rollback doesn't undo sequence advances, advisory locks, changes made through dblink or other files and network, or writes to non-transactional (MyISAM) tables.
+# (Named exception, Task 15: exec-run-as-one-unsupported was removed from the m3a-t23 block; it
+# was unused once a selection runs as one.)
+# EXPLAIN ANALYZE runs its statement; Hacivat rolls it back, which can't undo a routine call, an
+# administrative statement or a MySQL schema change.
+exec-explain-analyze-refused = Not sent: EXPLAIN ANALYZE would run a statement that a rollback can't undo.
+# On production, a statement that may change every row of a table Hacivat couldn't name.
+exec-unsafe-no-target = Not sent: the statement may change every row, and Hacivat can't tell which table to ask you to confirm.
+# On production, a run with more than one destructive target that asks for a typed name (two
+# tables, the same table twice, a table and a schema): one typed name confirms exactly one
+# (m3c-p2-07 fix round 3).
+exec-unsafe-several-targets = Not sent: a typed name confirms one destructive target; this run has several. Run each on its own.
+
+# Why a statement's parameters keep it from being sent (HV-EXEC-03).
+
+# A template variable such as ${name} next to the statement's parameters.
+exec-param-template-variable = Not sent: the statement holds a template variable, which can't be sent as a parameter.
+# PostgreSQL: ? is an operator unless the setting makes it a parameter.
+exec-param-question-mark-off = On PostgreSQL, ? is an operator here, not a parameter. Settings › Execution can make it a parameter.
+# A parameter inside CREATE, ALTER or DROP while the setting is off.
+exec-param-in-ddl = Not sent: parameters inside a schema change are off. Settings › Execution can turn them on.
+# :name and ? (or $1) in one statement.
+exec-param-mixed-styles = Not sent: the statement mixes parameter styles. Use one style per statement.
+# More parameters than the protocol carries.
+exec-param-too-many-binds = Not sent: the statement has more than 65,535 parameters.
+# A marker the server would read as a parameter, but Hacivat can't give it a value.
+exec-param-unbindable = Not sent: the statement holds a parameter marker Hacivat can't fill, so the server would get no value for it.
+
+## m3b-t19-confirm-tx
+
+# Confirm-in-transaction (HV-EXEC-04; D-014, R-M3-55, P-M3b-1). Output log lines and the
+# titles of the errors the session ends a confirmed statement with.
+
+# The user committed (or kept) the confirmed statement.
+exec-confirm-committed = Committed: the confirmed statement's changes are saved.
+# Savepoint form: the user undid the confirmed statement; their transaction stays open.
+exec-confirm-undone = Undone: the confirmed statement was rolled back, and your transaction is still open.
+# Hacivat's own transaction: the user rolled the confirmed statement back (or the console closed).
+exec-confirm-rolled-back = Rolled back: the confirmed statement's changes were discarded.
+# Nobody answered in time (D-014): the confirmed statement was rolled back.
+exec-confirm-rolled-back-deadline = Rolled back: no answer came in time, so the confirmed statement's changes were discarded.
+# Savepoint form: the confirmed statement failed; only it was rolled back.
+exec-confirm-statement-failed = The confirmed statement failed. Only it was rolled back; your transaction is intact.
+# MySQL/MariaDB: a statement the user confirmed committed their open transaction before it ran.
+exec-implicit-commit = The server committed your open transaction before it ran this statement.
+# MySQL/MariaDB: a statement would commit a transaction an earlier statement of the run opened.
+exec-error-tx-implicit-commit = Not sent: this statement would commit the transaction an earlier statement of this run opened, which you didn't confirm. Run it on its own.
+# The server committed the statement on its own (autocommit was on), so nothing could be asked.
+exec-confirm-already-committed = Already committed: the server committed this statement on its own, so Hacivat couldn't ask first. The rest of the run wasn't sent.
+# The deadline rolled the confirmed statement back; the run stopped.
+exec-error-confirm-timed-out = Rolled back: no answer came in time, so the statement was undone and the rest of the run wasn't sent.
+# The user rolled the confirmed statement back; the run treats it as not run.
+exec-error-confirm-undone = Rolled back at your request: the statement's changes were discarded.
+# MySQL/MariaDB: starting a transaction would release the user's LOCK TABLES locks.
+exec-error-tx-table-locks = Not sent: your LOCK TABLES locks are held, and starting a transaction would release them. Run UNLOCK TABLES first.
+# A statement failed and the server rolled back the whole open transaction with it.
+exec-tx-rolled-back-by-server = The server rolled back your whole transaction: every change since it began is gone.
+# A statement failed and the user's transaction ended with it, but the statement may have committed it first (fix round 2).
+exec-tx-ended-by-statement = Your transaction ended with this statement. Check whether your earlier changes were committed.
+# EXPLAIN ANALYZE ran with no transaction open, so what it changed couldn't be rolled back; the run stopped.
+exec-explain-not-rolled-back = EXPLAIN ANALYZE ran outside a transaction, so its changes couldn't be rolled back. The rest of the run wasn't sent.
+
+## m3b-t22-tx-ui
+
+# A transaction's age under a minute (the badge, the idle toast); whole minutes are exec-dur-min.
+exec-dur-lt-min = <1 min
+# Output: the profile's startup script did not run, because this console's session is
+# read-only (a read-only session never runs it). The script's SQL is never shown.
+exec-startup-script-skipped-read-only = The connection's startup script was not run: this session is read-only.
+
+## m3b-t18-safe06
+
+# A read-only console refused a statement before sending it: Hacivat's classifier couldn't
+# confirm that it only reads (or found that it doesn't). One sentence for every classifier
+# denial (T1c review M2).
+exec-deny-classifier = Not sent: this console is read-only, and Hacivat couldn't confirm that the statement only reads.
+
+## m3b-t23-escalation
+
+# Terminate on server ended the session (design/m3b-safe surface 6).
+# Variables:
+#   $n (Number) - statements in the user's open transaction it rolled back, e.g. 3.
+exec-terminated = { $n ->
+        [one] Session terminated on the server; its open transaction ({ $n } statement) was rolled back.
+       *[other] Session terminated on the server; its open transaction ({ $n } statements) was rolled back.
+    }
+# As exec-terminated when no user transaction was open.
+exec-terminated-no-tx = Session terminated on the server.
+exec-terminate-failed = Couldn't terminate the session on the server.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+exec-disconnected = Disconnected { $name }. The statement may still be running on the server.
+# As exec-disconnected for a SQLite file: the statement stopped with its connection (fix round 1).
+# Variables:
+#   $name (String) - the connection's name, e.g. "app-local".
+exec-disconnected-local = Disconnected { $name }. SQLite stopped the statement when its connection closed.
+# The user answered Stop to the error bar (surface 7).
+# Variables:
+#   $i (String) - the failed statement's number in the run, e.g. "2".
+exec-run-stopped = Stopped at statement { $i }: you chose Stop.
+# Variables:
+#   $i (String) - the number of the statement that runs next, e.g. "4".
+exec-run-rolled-back-continue = Transaction rolled back; continuing with statement { $i }.
+
+## m3b-t24-exec-ui
+
+# The run UI's lines before a run is sent (Task 24): what the user answered, or why nothing
+# was sent. A statement number is raw digits.
+# The user cancelled the parameter prompt: nothing was sent.
+exec-params-cancelled = Nothing was sent: you cancelled the parameter values.
+# The connection's lexing settings couldn't be read, and the statement's parameters read
+# differently under them: nothing was sent.
+exec-param-modes-unknown = Not sent: Hacivat couldn't read this connection's settings, and the statement's parameters read differently under them.
+# "Run as one" can't send a statement that needs its own transaction or its rollback wrap.
+exec-gate-run-as-one-refused = Not sent: this statement can't run as part of one request here. Run its statements one at a time.
+# The user cancelled at a confirmation: nothing of the run was sent.
+# Variables:
+#   $n (String) - the statement's position in the run, from 1.
+exec-confirm-cancelled = Nothing was sent: you cancelled at statement { $n }.
+# The user chose Skip for a statement at the confirmation.
+# Variables:
+#   $n (String) - the statement's position in the run, from 1.
+exec-confirm-skipped = Statement { $n } skipped: you chose Skip.
+# A statement ran without the confirmation the user turned off for statements like it.
+# Variables:
+#   $console (String) - the console's title, e.g. "orders-dev (2)".
+exec-confirm-suppressed = Ran without asking: you chose not to be asked again for statements like this in { $console }.
+# Fix round 1 (I4): this statement was not sent because another statement of the same run was
+# refused (nothing of a run is sent then).
+# Variables:
+#   $n (String) - the refused statement's position in the run, from 1.
+exec-gate-run-refused = Not sent: statement { $n } of this run was refused, so nothing of the run was sent.
+# Fix round 1 (I1): the connection now reads statements with other settings than the console
+# split them with.
+exec-run-context-changed = Not sent: this connection's settings changed since Run read them. Run it again.
+# Fix round 1 (M4): the console reconnected while the run was being prepared.
+exec-run-connection-changed = Not sent: the connection changed while this run was being prepared. Run it again.
+# Fix round 1 (M1): Run as one sends one request, which carries no parameter values.
+exec-param-run-as-one = Not sent: Run as one can't take parameter values. Run the statements one at a time.
+# Fix round 1 (M2): Run as one on a read-only connection.
+exec-gate-run-as-one-read-only = Not sent: Run as one doesn't work on a read-only connection, whose guard checks one statement at a time.
+
+## m3b-t26-prod-unlock
+
+# Task 26 (carry MUST 2): on a production or read-only connection, Run could not read the
+# connection's settings in time before sending (the read timed out), so it can't prove they
+# are the ones it checked the statement under: nothing was sent.
+exec-run-context-unconfirmed = Not sent: Hacivat couldn't confirm this connection's settings in time. Run it again.
+# Fix round 1 (ruling on non-transactional tables): the confirmed statement's rollback ran, but
+# the server said a table does not support transactions (MySQL/MariaDB 1196), so its changes
+# stay.
+exec-confirm-not-undone = Not undone: the table doesn't support transactions, so the statement's changes stay.
+# The unit's error for the same case.
+exec-error-confirm-not-undone = Not undone: the table doesn't support transactions, so this statement's changes stay.
+
+## m3c-p2-07
+
+# PO P2-07, destructive pattern: PostgreSQL DROP OWNED BY (the role's objects go, not the role).
+# Variables:
+#   $role (String) - the role's name as written in the statement (CURRENT_USER and the like
+#                    as written too).
+safety-destructive-drop-owned = Removes every object { $role } owns in this database. It also revokes the role's privileges here and on shared objects such as databases and tablespaces, and its default privileges.
+# PO P2-07, destructive pattern: DROP OWNED BY … CASCADE.
+# Variables:
+#   $role (String) - the role's name as written in the statement.
+safety-destructive-drop-owned-cascade = Removes every object { $role } owns in this database and everything that depends on those objects. It also revokes the role's privileges here and on shared objects such as databases and tablespaces, and its default privileges.
+# PO P2-07: on production DROP OWNED asks for one role's name typed, and this run has more
+# than one destructive target (several roles, the same role twice, or a role beside another
+# statement that asks for a name).
+exec-drop-owned-several-targets = Not sent: a typed role name confirms one DROP OWNED; this run has other targets. Run it on its own.
+# PO P2-07: on production, a DROP OWNED whose role Hacivat couldn't name.
+exec-drop-owned-no-target = Not sent: Hacivat can't tell whose objects this DROP OWNED removes, so it can't ask you to type the role's name.
+
+## m4-t01a-model
+
+# Object kind labels of the metadata model (alg/02 HV-MODEL-01): one whole-phrase message
+# per kind, `model-kind-<id>` with `<id>` the kind's stable machine id, overridable per
+# dialect (`model-kind-schema-mysql`). The label alone, never joined to a number in code;
+# the count only selects the form.
+
+# Kind label (root).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-root = { $count ->
+        [one] server
+       *[other] servers
+    }
+# Kind label (database).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-database = { $count ->
+        [one] database
+       *[other] databases
+    }
+# Kind label (schema).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-schema = { $count ->
+        [one] schema
+       *[other] schemas
+    }
+# Kind label (table).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-table = { $count ->
+        [one] table
+       *[other] tables
+    }
+# Kind label (view).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-view = { $count ->
+        [one] view
+       *[other] views
+    }
+# Kind label (materialized-view).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-materialized-view = { $count ->
+        [one] materialized view
+       *[other] materialized views
+    }
+# Kind label (foreign-table).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-foreign-table = { $count ->
+        [one] foreign table
+       *[other] foreign tables
+    }
+# Kind label (virtual-table).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-virtual-table = { $count ->
+        [one] virtual table
+       *[other] virtual tables
+    }
+# Kind label (column).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-column = { $count ->
+        [one] column
+       *[other] columns
+    }
+# Kind label (index).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-index = { $count ->
+        [one] index
+       *[other] indexes
+    }
+# Kind label (primary-key).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-primary-key = { $count ->
+        [one] primary key
+       *[other] primary keys
+    }
+# Kind label (unique-key).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-unique-key = { $count ->
+        [one] unique key
+       *[other] unique keys
+    }
+# Kind label (foreign-key).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-foreign-key = { $count ->
+        [one] foreign key
+       *[other] foreign keys
+    }
+# Kind label (check).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-check = { $count ->
+        [one] check constraint
+       *[other] check constraints
+    }
+# Kind label (exclusion).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-exclusion = { $count ->
+        [one] exclusion constraint
+       *[other] exclusion constraints
+    }
+# Kind label (default).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-default = { $count ->
+        [one] default
+       *[other] defaults
+    }
+# Kind label (trigger).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-trigger = { $count ->
+        [one] trigger
+       *[other] triggers
+    }
+# Kind label (rule).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-rule = { $count ->
+        [one] rule
+       *[other] rules
+    }
+# Kind label (policy).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-policy = { $count ->
+        [one] policy
+       *[other] policies
+    }
+# Kind label (partition).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-partition = { $count ->
+        [one] partition
+       *[other] partitions
+    }
+# Kind label (subpartition).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-subpartition = { $count ->
+        [one] subpartition
+       *[other] subpartitions
+    }
+# Kind label (routine).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-routine = { $count ->
+        [one] function
+       *[other] functions
+    }
+# Kind label (procedure).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-procedure = { $count ->
+        [one] procedure
+       *[other] procedures
+    }
+# Kind label (aggregate).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-aggregate = { $count ->
+        [one] aggregate function
+       *[other] aggregate functions
+    }
+# Kind label (argument).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-argument = { $count ->
+        [one] argument
+       *[other] arguments
+    }
+# Kind label (sequence).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-sequence = { $count ->
+        [one] sequence
+       *[other] sequences
+    }
+# Kind label (domain).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-domain = { $count ->
+        [one] domain
+       *[other] domains
+    }
+# Kind label (enum-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-enum-type = { $count ->
+        [one] enum type
+       *[other] enum types
+    }
+# Kind label (composite-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-composite-type = { $count ->
+        [one] composite type
+       *[other] composite types
+    }
+# Kind label (range-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-range-type = { $count ->
+        [one] range type
+       *[other] range types
+    }
+# Kind label (alias-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-alias-type = { $count ->
+        [one] alias type
+       *[other] alias types
+    }
+# Kind label (table-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-table-type = { $count ->
+        [one] table type
+       *[other] table types
+    }
+# Kind label (synonym).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-synonym = { $count ->
+        [one] synonym
+       *[other] synonyms
+    }
+# Kind label (extension).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-extension = { $count ->
+        [one] extension
+       *[other] extensions
+    }
+# Kind label (collation).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-collation = { $count ->
+        [one] collation
+       *[other] collations
+    }
+# Kind label (operator).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-operator = { $count ->
+        [one] operator
+       *[other] operators
+    }
+# Kind label (operator-class).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-operator-class = { $count ->
+        [one] operator class
+       *[other] operator classes
+    }
+# Kind label (operator-family).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-operator-family = { $count ->
+        [one] operator family
+       *[other] operator families
+    }
+# Kind label (cast).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-cast = { $count ->
+        [one] cast
+       *[other] casts
+    }
+# Kind label (language).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-language = { $count ->
+        [one] language
+       *[other] languages
+    }
+# Kind label (access-method).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-access-method = { $count ->
+        [one] access method
+       *[other] access methods
+    }
+# Kind label (foreign-data-wrapper).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-foreign-data-wrapper = { $count ->
+        [one] foreign-data wrapper
+       *[other] foreign-data wrappers
+    }
+# Kind label (foreign-server).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-foreign-server = { $count ->
+        [one] foreign server
+       *[other] foreign servers
+    }
+# Kind label (user-mapping).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-user-mapping = { $count ->
+        [one] user mapping
+       *[other] user mappings
+    }
+# Kind label (event-trigger).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-event-trigger = { $count ->
+        [one] event trigger
+       *[other] event triggers
+    }
+# Kind label (role).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-role = { $count ->
+        [one] role
+       *[other] roles
+    }
+# Kind label (user).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-user = { $count ->
+        [one] user
+       *[other] users
+    }
+# Kind label (login).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-login = { $count ->
+        [one] login
+       *[other] logins
+    }
+# Kind label (tablespace).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-tablespace = { $count ->
+        [one] tablespace
+       *[other] tablespaces
+    }
+# Kind label (event).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-event = { $count ->
+        [one] event
+       *[other] events
+    }
+# Kind label (virtual-table-module).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-virtual-table-module = { $count ->
+        [one] virtual table module
+       *[other] virtual table modules
+    }
+# Kind label (dictionary).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-dictionary = { $count ->
+        [one] dictionary
+       *[other] dictionaries
+    }
+# Kind label (row-policy).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-row-policy = { $count ->
+        [one] row policy
+       *[other] row policies
+    }
+# Kind label (settings-profile).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-settings-profile = { $count ->
+        [one] settings profile
+       *[other] settings profiles
+    }
+# Kind label (quota).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-quota = { $count ->
+        [one] quota
+       *[other] quotas
+    }
+# Kind label (projection).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-projection = { $count ->
+        [one] projection
+       *[other] projections
+    }
+# Kind label (package).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-package = { $count ->
+        [one] package
+       *[other] packages
+    }
+# Kind label (package-body).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-package-body = { $count ->
+        [one] package body
+       *[other] package bodies
+    }
+# Kind label (object-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-object-type = { $count ->
+        [one] object type
+       *[other] object types
+    }
+# Kind label (db-link).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-db-link = { $count ->
+        [one] database link
+       *[other] database links
+    }
+# Kind label (collection).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-collection = { $count ->
+        [one] collection
+       *[other] collections
+    }
+# Kind label (mongo-view).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-mongo-view = { $count ->
+        [one] view
+       *[other] views
+    }
+# Kind label (time-series).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-time-series = { $count ->
+        [one] time series collection
+       *[other] time series collections
+    }
+# Kind label (inferred-field).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-inferred-field = { $count ->
+        [one] inferred field
+       *[other] inferred fields
+    }
+# Kind label (redis-database).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-redis-database = { $count ->
+        [one] database
+       *[other] databases
+    }
+# Kind label (redis-module).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-redis-module = { $count ->
+        [one] module
+       *[other] modules
+    }
+# Kind label (unknown).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-unknown = { $count ->
+        [one] object of an unknown kind
+       *[other] objects of an unknown kind
+    }
+# Kind label (schema-mysql).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-schema-mysql = { $count ->
+        [one] database
+       *[other] databases
+    }
+# The explorer badge on an object name that holds characters a reader cannot see (bidi
+# controls, zero-width characters); the name itself is shown verbatim.
+model-name-has-invisible-chars = This name contains characters that can't be seen.
+# Notice when a connection's cached metadata could not be used and the cache was started again.
+# Variables:
+#   $reason (String) - why: "corrupt", "server-changed", "wrong-key" or "incompatible".
+model-cache-rebuilt = { $reason ->
+        [corrupt] The cached metadata was damaged, so it was cleared and is being read again.
+        [server-changed] This connection now reaches a different server, so its cached metadata is being read again.
+        [wrong-key] The key that protects this connection's cached metadata has changed, so the cache was cleared and is being read again.
+       *[incompatible] The cached metadata was written by a different version, so it is being read again.
+    }
+# Strip above the explorer while the connection is offline or not yet connected.
+# Variables:
+#   $date (String) - when the metadata was read, preformatted for the UI locale, e.g. "17 November 2026 14:05".
+model-cache-offline = Showing cached metadata from { $date }
+# Notice when a policy keeps this connection's metadata out of the cache (memory only).
+model-cache-disabled-by-policy = Metadata for this connection isn't cached on disk.
+
+# DDL generation (alg/03 HV-DDL-07, -09, -10, -11). Generated SQL itself is never translated.
+# Variables:
+#   $dbms (String) - the engine's product name, e.g. "PostgreSQL".
+#   $kind (String) - the object kind's label, e.g. "table".
+ddl-unsupported-kind = { $dbms } doesn't support generating DDL for this kind of object ({ $kind }).
+# Warning on server text that holds MySQL executable comments (`/*! … */`): they run as SQL.
+# m4-t25-ddl-view (named exception in m4-t01a-model's block): the binding wording of
+# design/m4-explorer NOTES surface 10.
+ddl-warn-executable-comment = This text contains MySQL executable comments (/*! … */). MySQL runs what is inside them as SQL.
+# Notice when a SQLite change needs the table to be rebuilt (create, copy, drop, rename).
+ddl-sqlite-rebuild-notice = SQLite can't change this in place, so the script rebuilds the table and copies its rows.
+# Notice when SQLite forces constraints inside the table although another placement was chosen.
+ddl-sqlite-placement-forced = SQLite keeps constraints inside the table, so they're placed there.
+# Notice when the grants of an object have not been read: the script has no GRANT statements.
+ddl-grants-not-loaded = Grants haven't been read for this object, so the script has no GRANT statements.
+# Notice when only some grants could be read (the login can't see them all).
+ddl-grants-partial = Only the grants this login can see are included; others may exist.
+# Notice when a PostgreSQL table has row-level security: its policies are not read in this version.
+ddl-policies-not-loaded = Row-level security policies aren't read yet, so the script doesn't include them.
+
+## m4-t19-produce (named exception inside m4-t01a-model's DDL block)
+# Warning when a column's type is not in the loaded catalog: the script writes it as the server reported it.
+# Variables:
+#   $type (String) - the type's name as the server spells it, e.g. "public.citext".
+ddl-warn-unknown-type = The type { $type } isn't in the loaded catalog. It's written as the server reported it, so make sure it exists before you run the script.
+# Notice when the server doesn't enforce a constraint and this database version can't say so in DDL: the constraint is left out.
+# Variables:
+#   $name (String) - the constraint's name, or its kind when it has none, e.g. "orders_chk_1".
+ddl-warn-not-enforced = The constraint { $name } isn't enforced on the server, and this version can't write NOT ENFORCED, so the script leaves it out.
+## m4-t01a-model
+
+# Generator option labels (HV-DDL-09, -10, -11).
+ddl-opt-placement = Constraints
+ddl-opt-placement-inside-column = Inside column
+ddl-opt-placement-inside-table = Inside table
+ddl-opt-placement-after-table = After table
+ddl-opt-qualify = Qualification
+ddl-opt-qualify-auto = Auto
+ddl-opt-qualify-never = Never
+ddl-opt-qualify-always = Always
+ddl-opt-or-replace = Use OR REPLACE
+ddl-opt-or-replace-tooltip = Write CREATE OR REPLACE where the database supports it.
+ddl-opt-if-not-exists = Use IF NOT EXISTS
+ddl-opt-if-not-exists-tooltip = Write IF NOT EXISTS where the database supports it.
+ddl-opt-skip-grants = Skip grants
+ddl-opt-skip-grants-tooltip = Leave out GRANT statements.
+ddl-opt-skip-owner = Skip owner
+ddl-opt-skip-owner-tooltip = Leave out ownership statements.
+ddl-opt-skip-definer = Skip DEFINER
+ddl-opt-skip-definer-tooltip = Leave out the DEFINER clause of MySQL and MariaDB views, routines, triggers and events.
+ddl-opt-surrogate-names = Name unnamed constraints
+ddl-opt-surrogate-names-tooltip = Write the names the database generated for unnamed constraints.
+ddl-opt-server-definitions = Definitions provided by server
+ddl-opt-server-definitions-tooltip = Show the definition text the database reports instead of generated DDL.
+# Generator categories (HV-DDL-11).
+ddl-cat-create = Create
+ddl-cat-drop = Drop
+ddl-cat-truncate = Truncate
+ddl-cat-server-definitions = Definitions provided by server
+ddl-cat-alter = Alter
+
+## m4-t01c-core
+
+# Introspection notices (alg/02 HV-INTRO-01..03, -05, -11..13, -15, -16). Codes travel from the
+# core; the text is chosen at the edge. Names are user data: the caller isolates them
+# (FSI/PDI) and never case-maps or translates them. Counts are Number arguments.
+
+# How long ago a namespace was read.
+# Variables:
+#   $ago (String) - the relative time, preformatted for the UI locale, e.g. "5 minutes ago".
+intro-freshness-loaded-ago = Loaded { $ago }
+# Why an object lookup has no answer: the namespace has not been read yet.
+intro-unknown-not-loaded = This object hasn't been read yet.
+# Why an object lookup has no answer: the namespace is outside the connection's scope.
+intro-unknown-out-of-scope = This object is outside the connection's scope, so it isn't read.
+# A lookup in loaded metadata found no object of that name.
+intro-missing-not-found = No object with this name is in the loaded metadata.
+# Back-pressure (HV-INTRO-01 step 7): reading a namespace timed out twice, so its automatic
+# level was lowered by one.
+# Variables:
+#   $name (String) - the namespace, e.g. "public".
+#   $level (String) - the new level, a selector: "names" or "structure".
+intro-hint-level-lowered = { $level ->
+        [names] Reading { $name } timed out twice, so it is now read by name only.
+       *[structure] Reading { $name } timed out twice, so it is now read without definitions.
+    }
+# The one-time prompt before a PostgreSQL scope that reads every database (HV-INTRO-02).
+# Variables:
+#   $count (Number) - how many databases the server lists, e.g. 12.
+intro-scope-all-databases-cost = { $count ->
+        [one] Reading { $count } database opens one more connection for it. Read it?
+       *[other] Reading all { $count } databases opens one more connection for each. Read them all?
+    }
+# A scope pattern that does not parse, at a character position (Unicode scalar values).
+# Variables:
+#   $column (Number) - the 1-based character position, e.g. 7.
+intro-scope-syntax-error = The pattern has an error at character { $column }.
+# Variables:
+#   $column (Number) - the 1-based character position, e.g. 7.
+intro-scope-err-unclosed-brace = The pattern has an error at character { $column }: a brace isn't closed.
+# Variables:
+#   $column (Number) - the 1-based character position, e.g. 7.
+intro-scope-err-bad-regex = The pattern has an error at character { $column }: the regular expression isn't valid.
+# `@` in a scope pattern when the current database or schema cannot be detected.
+intro-scope-current-unknown = The current database or schema couldn't be detected, so @ selects nothing.
+# Object filter errors (HV-INTRO-03). Kind words in the grammar are English tokens.
+# Variables:
+#   $item (String) - the filter item as typed, e.g. "tabel:orders".
+intro-filter-unknown-kind = { $item } doesn't name a kind of object.
+# Variables:
+#   $item (String) - the filter item as typed, e.g. "/a(/".
+intro-filter-bad-regex = { $item } isn't a valid regular expression.
+# Variables:
+#   $item (String) - the filter item as typed, e.g. "a[b".
+intro-filter-bad-glob = { $item } isn't a valid name pattern.
+# Why a namespace was read in full instead of only its changes (HV-INTRO-05, -07).
+# Variables:
+#   $reason (String) - the reason code, a selector: "no-watermark", "restart", "identity",
+#     "version", "standby", "wraparound", "mass-change" or "schema-rename".
+intro-full-reason = { $reason ->
+        [no-watermark] Read in full: there was no earlier read to compare with.
+        [restart] Read in full: the server restarted since the last read.
+        [identity] Read in full: this connection now reaches a different server or database.
+        [version] Read in full: the server's version changed.
+        [standby] Read in full: the server is a standby, where only full reads are reliable.
+        [wraparound] Read in full: too many transactions ran since the last read.
+        [mass-change] Read in full: a large part of the schema changed.
+       *[schema-rename] Read in full: a schema that other objects refer to was renamed.
+    }
+# Progress of an incremental read (determinate; repainted when the count changes).
+# Variables:
+#   $count (Number) - how many changed tables are being read, e.g. 3.
+intro-progress-tables-incremental = { $count ->
+        [one] Reading { $count } changed table…
+       *[other] Reading { $count } changed tables…
+    }
+# The mass-deletion guard (D-039, HV-INTRO-11).
+# Variables:
+#   $count (Number) - how many objects are no longer visible, e.g. 120.
+#   $schema (String) - the namespace, e.g. "public".
+intro-mass-drop-confirm = { $count ->
+        [one] { $count } object in { $schema } is no longer visible to this connection. Remove it from the cached metadata?
+       *[other] { $count } objects in { $schema } are no longer visible to this connection. Remove them from the cached metadata?
+    }
+# More than half of a namespace vanished in one pass: the login's privileges may have changed.
+# Variables:
+#   $schema (String) - the namespace, e.g. "public".
+intro-visibility-changed = Most objects in { $schema } are no longer visible to this connection. Its privileges may have changed.
+# Badge on a namespace the server changed after it was read.
+intro-stale-namespace-badge = out of date
+# Variables:
+#   $name (String) - the object, e.g. "orders".
+intro-stale-object = { $name } changed on the server since it was loaded.
+# Variables:
+#   $name (String) - the object, e.g. "orders".
+intro-dropped-object = { $name } no longer exists on the server.
+# An object whose definition refers to something that could not be resolved (kept, flagged).
+# Variables:
+#   $name (String) - the object, e.g. "orders_pk".
+intro-object-broken = { $name } refers to a column that couldn't be resolved.
+# Badge on the built-in objects read from a shipped system-catalog snapshot (HV-INTRO-16).
+# Variables:
+#   $version (String) - the server line the snapshot was made from, e.g. "17".
+intro-pre-introspected-badge = Built-in catalog (version { $version })
+# Refresh after DDL, "Ask" preference (HV-INTRO-12).
+# Variables:
+#   $count (Number) - how many objects changed, e.g. 3.
+intro-refresh-after-ddl-ask = { $count ->
+        [one] Refresh the database explorer to reflect { $count } changed object?
+       *[other] Refresh the database explorer to reflect { $count } changed objects?
+    }
+# A statement whose effects cannot be read in advance (dynamic SQL, DO, CALL, an executable
+# comment) refreshed the whole schema.
+intro-refresh-broad-dynamic-sql = The script ran SQL whose changes can't be read in advance, so the whole schema is being refreshed.
+# A list the server filtered with the object filter (HV-INTRO-03 pushdown).
+intro-remote-filtered-notice = The server filtered this list: objects that don't match the filter weren't read.
+# Debug-level: whether a non-ASCII name matches depends on the server (R-M4-41).
+intro-name-server-dependent = Whether this name matches depends on the server's settings.
+# Log only: a read failed because an object was dropped meanwhile, and was retried once
+# (PostgreSQL "cache lookup failed").
+# Variables:
+#   $schema (String) - the namespace, e.g. "public".
+intro-catalog-race-retried = An object in { $schema } was dropped while it was being read, so the read was retried.
+
+## m4-t20-scope
+
+# A scope pattern applies, but part of it is ignored (HV-INTRO-02 edge 11): a `db:` prefix on a
+# one-level engine (MySQL, MariaDB, SQLite).
+# Variables:
+#   $column (Number) - the 1-based character position, e.g. 7.
+intro-scope-warn-db-term-ignored = The database part at character { NUMBER($column, useGrouping: "false") } is ignored: this engine has no databases above its schemas.
+# An object filter applies, but part of it is ignored (HV-INTRO-03 edge 5): an empty item
+# between two separators.
+# Variables:
+#   $column (Number) - the 1-based character position, e.g. 7.
+intro-filter-warn-empty-item = The empty part at character { NUMBER($column, useGrouping: "false") } is ignored.
+
+## m4-t24-live
+# A cache write failed for lack of disk space; the explorer keeps working from memory (shown
+# once per connection; HV-MODEL-03, T11 carry).
+model-cache-write-failed = The cached metadata couldn't be saved because the disk is full. The explorer keeps working; the metadata is read again on the next connect.

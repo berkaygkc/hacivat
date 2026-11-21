@@ -6,6 +6,7 @@
 //! HACIVAT_DOCKER_SET=pr cargo run --release -p hacivat-app --features bench --example b1_real
 //! HACIVAT_DOCKER_SET=pr cargo run --release -p hacivat-app --features bench --example b1_real -- --size 2560x1440
 //! HACIVAT_DOCKER_SET=pr cargo run --release -p hacivat-app --features bench --example b1_real -- --mode streaming
+//! HACIVAT_DOCKER_SET=pr cargo run --release -p hacivat-app --features bench --example b1_real -- --sorted
 //! cargo run --release -p hacivat-app --features bench --example b1_real -- --engine sqlite --any-display
 //! ```
 //!

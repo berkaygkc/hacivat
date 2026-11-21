@@ -1,0 +1,360 @@
+# SQL-SAFE-06 run A, offline, for the interim backend (Task 10): the `alg/13` bypass catalogue
+# rows M1-M19 (MySQL/MariaDB) and L1-L9 (SQLite) copied from the spec, one case per example.
+# `read_only` is the decision `decide(report, ReadOnly, Human)` must give (run A: "every case
+# must be denied before execution"); rows the catalogue marks as not a classifier denial say
+# `allow` with the reason in `note`. Task 18 replaces this with the bypass TOML and the Docker
+# legs (run A', run B).
+version = 1
+
+[[row]]
+id = "M1"
+dialect = "mysql"
+sql = "SELECT 1 /*!50000 , (SELECT GET_LOCK('x', 10)) */"
+read_only = "deny"
+
+[[row]]
+id = "M1"
+dialect = "mysql"
+sql = "/*!50000 DROP TABLE t */"
+read_only = "deny"
+
+[[row]]
+id = "M1"
+dialect = "mariadb"
+sql = "SELECT 1 /*M!100000 , (SELECT GET_LOCK('x', 10)) */"
+read_only = "deny"
+
+[[row]]
+id = "M1"
+dialect = "mysql"
+sql = "SELECT 1 /*!99999 , SLEEP(10) */"
+read_only = "deny"
+
+[[row]]
+id = "M2"
+dialect = "mysql"
+sql = "SELECT 1; DROP TABLE t"
+read_only = "deny"
+
+[[row]]
+id = "M3"
+dialect = "mysql"
+sql = "SET sql_mode = 'NO_BACKSLASH_ESCAPES'"
+read_only = "deny"
+
+[[row]]
+id = "M3"
+dialect = "mysql"
+sql = "SET NAMES gbk"
+read_only = "deny"
+
+[[row]]
+id = "M4"
+dialect = "mysql"
+sql = "SELECT * FROM t INTO OUTFILE '/tmp/x'"
+read_only = "deny"
+
+[[row]]
+id = "M4"
+dialect = "mysql"
+sql = "LOAD DATA LOCAL INFILE '/tmp/x' INTO TABLE t"
+read_only = "deny"
+
+[[row]]
+id = "M4"
+dialect = "mysql"
+sql = "SELECT LOAD_FILE('/etc/passwd')"
+read_only = "deny"
+
+[[row]]
+id = "M5"
+dialect = "mysql"
+sql = "SELECT * FROM t FOR UPDATE"
+read_only = "deny"
+
+[[row]]
+id = "M5"
+dialect = "mysql"
+sql = "LOCK TABLES t WRITE"
+read_only = "deny"
+
+[[row]]
+id = "M5"
+dialect = "mysql"
+sql = "SELECT GET_LOCK('a', 1)"
+read_only = "deny"
+
+[[row]]
+id = "M5"
+dialect = "mysql"
+sql = "SELECT SLEEP(10)"
+read_only = "deny"
+
+[[row]]
+id = "M5"
+dialect = "mysql"
+sql = "SELECT BENCHMARK(1000000, MD5('x'))"
+read_only = "deny"
+
+[[row]]
+id = "M6"
+dialect = "mysql"
+sql = "PREPARE s FROM @q"
+read_only = "deny"
+
+[[row]]
+id = "M6"
+dialect = "mysql"
+sql = "EXECUTE s"
+read_only = "deny"
+
+[[row]]
+id = "M7"
+dialect = "mysql"
+sql = "SELECT definer_fn()"
+read_only = "deny"
+
+[[row]]
+id = "M8"
+dialect = "mysql"
+sql = "CREATE TABLE t2 (a INT)"
+read_only = "deny"
+
+[[row]]
+id = "M8"
+dialect = "mysql"
+sql = "START TRANSACTION READ ONLY"
+read_only = "deny"
+
+[[row]]
+id = "M9"
+dialect = "mysql"
+sql = "SET SESSION TRANSACTION READ WRITE"
+read_only = "deny"
+
+[[row]]
+id = "M9"
+dialect = "mysql"
+sql = "SET @@transaction_read_only = 0"
+read_only = "deny"
+
+[[row]]
+id = "M10"
+dialect = "mysql"
+sql = "KILL 42"
+read_only = "deny"
+
+[[row]]
+id = "M10"
+dialect = "mysql"
+sql = "SHUTDOWN"
+read_only = "deny"
+
+[[row]]
+id = "M10"
+dialect = "mysql"
+sql = "FLUSH PRIVILEGES"
+read_only = "deny"
+
+[[row]]
+id = "M10"
+dialect = "mysql"
+sql = "RESET MASTER"
+read_only = "deny"
+
+[[row]]
+id = "M10"
+dialect = "mysql"
+sql = "PURGE BINARY LOGS TO 'mysql-bin.000010'"
+read_only = "deny"
+
+[[row]]
+id = "M10"
+dialect = "mysql"
+sql = "INSTALL PLUGIN p SONAME 'p.so'"
+read_only = "deny"
+
+[[row]]
+id = "M10"
+dialect = "mysql"
+sql = "CLONE LOCAL DATA DIRECTORY = '/tmp/c'"
+read_only = "deny"
+
+[[row]]
+id = "M10"
+dialect = "mysql"
+sql = "SET GLOBAL max_connections = 1"
+read_only = "deny"
+
+[[row]]
+id = "M10"
+dialect = "mysql"
+sql = "SET PERSIST max_connections = 1"
+read_only = "deny"
+
+[[row]]
+id = "M11"
+dialect = "mysql"
+sql = "CREATE FUNCTION f RETURNS STRING SONAME 'lib.so'"
+read_only = "deny"
+
+[[row]]
+id = "M11"
+dialect = "mysql"
+sql = "SELECT sys_exec('id')"
+read_only = "deny"
+
+[[row]]
+id = "M12"
+dialect = "mysql"
+sql = "HANDLER t OPEN"
+read_only = "deny"
+
+[[row]]
+id = "M13"
+dialect = "mysql"
+sql = "XA START 'x'"
+read_only = "deny"
+
+[[row]]
+id = "M14"
+dialect = "mysql"
+sql = "SET @x := 1"
+read_only = "deny"
+
+[[row]]
+id = "M15"
+dialect = "mysql"
+sql = "SELECT 1--1"
+read_only = "allow"
+note = "The `--` differential: our lexer and sqlparser both read `1 - -1` (MySQL needs a space after `--`); not a denial row."
+
+[[row]]
+id = "M16"
+dialect = "mysql"
+sql = "SELECT /*+ MAX_EXECUTION_TIME(0) */ 1"
+read_only = "deny"
+
+[[row]]
+id = "M16"
+dialect = "mysql"
+sql = "SELECT /*+ SET_VAR(transaction_read_only = 0) */ 1"
+read_only = "deny"
+
+[[row]]
+id = "M17"
+dialect = "mysql"
+sql = "CREATE TEMPORARY TABLE t (a INT)"
+read_only = "deny"
+
+[[row]]
+id = "M18"
+dialect = "mysql"
+sql = "SET GLOBAL super_read_only = OFF"
+read_only = "deny"
+
+[[row]]
+id = "M19"
+dialect = "mysql"
+sql = "GRANT SELECT ON hv.* TO 'hacivat_ddl'"
+read_only = "deny"
+note = "M19 is a template bug (ERROR 1410); the GRANT itself is a privilege change."
+
+[[row]]
+id = "L1"
+dialect = "sqlite"
+sql = "PRAGMA query_only = 0"
+read_only = "deny"
+
+[[row]]
+id = "L2"
+dialect = "sqlite"
+sql = "ATTACH 'new.db' AS x"
+read_only = "deny"
+
+[[row]]
+id = "L2"
+dialect = "sqlite"
+sql = "VACUUM INTO '/tmp/copy.db'"
+read_only = "deny"
+
+[[row]]
+id = "L3"
+dialect = "sqlite"
+sql = "SELECT load_extension('evil')"
+read_only = "deny"
+
+[[row]]
+id = "L3"
+dialect = "sqlite"
+sql = "SELECT readfile('/etc/passwd')"
+read_only = "deny"
+
+[[row]]
+id = "L3"
+dialect = "sqlite"
+sql = "SELECT writefile('/tmp/x', 'y')"
+read_only = "deny"
+
+[[row]]
+id = "L4"
+dialect = "sqlite"
+sql = "PRAGMA writable_schema = 1"
+read_only = "deny"
+
+[[row]]
+id = "L5"
+dialect = "sqlite"
+sql = "SELECT host_fn(1)"
+read_only = "deny"
+note = "L5 is n/a (the agent registers no function); an unknown function is FnUnknown anyway."
+
+[[row]]
+id = "L6"
+dialect = "sqlite"
+sql = "BEGIN"
+read_only = "deny"
+
+[[row]]
+id = "L6"
+dialect = "sqlite"
+sql = "DETACH DATABASE x"
+read_only = "deny"
+
+[[row]]
+id = "L7"
+dialect = "sqlite"
+sql = "SELECT randomblob(1000000000)"
+read_only = "deny"
+note = "randomblob is unreviewed in Task 3's SQLite allowlist: FnUnknown."
+
+[[row]]
+id = "L7"
+dialect = "sqlite"
+sql = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c"
+read_only = "allow"
+note = "ResourceHeavy: alg/13 allows it with limits (progress handler, sqlite3_limit)."
+
+[[row]]
+id = "L8"
+dialect = "sqlite"
+sql = "CREATE TEMP TABLE tt (a)"
+read_only = "deny"
+
+[[row]]
+id = "L8"
+dialect = "sqlite"
+sql = "INSERT INTO temp.tt VALUES (1)"
+read_only = "deny"
+
+[[row]]
+id = "L9"
+dialect = "sqlite"
+sql = "PRAGMA user_version = 7"
+read_only = "deny"
+
+[[row]]
+id = "L9"
+dialect = "sqlite"
+sql = "PRAGMA journal_mode = WAL"
+read_only = "deny"

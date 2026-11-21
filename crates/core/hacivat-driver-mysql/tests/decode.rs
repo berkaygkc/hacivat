@@ -361,17 +361,18 @@ fn mysql_columns() -> Vec<Case> {
                 unit: TempUnit::Micros,
             },
         ),
+        // m3b-t07 (R-M3-67): BIT and GEOMETRY are typed text (`tests/decode_m3b.rs`).
         case(
             "bit(5)",
             col(MYSQL_TYPE_BIT).with_column_length(5),
-            opaque("bit"),
-            BufKind::Values,
+            LogicalType::BitString { len: Some(5) },
+            BufKind::Var(VarKind::Text),
         ),
         case(
             "geometry",
             bytes_col(MYSQL_TYPE_GEOMETRY, u32::MAX),
-            opaque("geometry"),
-            BufKind::Values,
+            LogicalType::Geometry { srid: None },
+            BufKind::Var(VarKind::Text),
         ),
         case(
             "vector",
@@ -784,42 +785,8 @@ fn opaque_text(v: &Value) -> (String, String) {
 }
 
 #[test]
-fn bit_geometry_and_unknown_types_are_opaque_text() {
-    let bit5 = col(ColumnType::MYSQL_TYPE_BIT).with_column_length(5);
-    assert_eq!(
-        opaque_text(&decode_cell_bin(&bit5, &My::Bytes(vec![0b10110]), MIB)),
-        ("bit".into(), "10110".into())
-    );
-    let bit64 = col(ColumnType::MYSQL_TYPE_BIT).with_column_length(64);
-    assert_eq!(
-        opaque_text(&decode_cell_text(
-            &bit64,
-            Some(&[0x80, 0, 0, 0, 0, 0, 0, 1]),
-            MIB
-        ))
-        .1,
-        format!("1{}1", "0".repeat(62))
-    );
-    // A POINT(1 1) with SRID 0: the internal value (SRID, then WKB) as MySQL's HEX() prints it.
-    let mut point = vec![0, 0, 0, 0, 1, 1, 0, 0, 0];
-    point.extend_from_slice(&1.0_f64.to_le_bytes());
-    point.extend_from_slice(&1.0_f64.to_le_bytes());
-    let geom = bytes_col(ColumnType::MYSQL_TYPE_GEOMETRY, u32::MAX);
-    assert_eq!(
-        opaque_text(&decode_cell_bin(&geom, &My::Bytes(point), MIB)),
-        (
-            "geometry".into(),
-            "000000000101000000000000000000F03F000000000000F03F".into()
-        )
-    );
-    // Past the cap the hex text is truncated, its total length counted.
-    match decode_cell_bin(&geom, &My::Bytes(vec![0xAB; 10]), 4) {
-        Value::Truncated(tr) => {
-            assert_eq!(tr.total_len, Some(20));
-            assert_eq!(tr.prefix, Value::Text("ABAB".into()));
-        }
-        other => panic!("{other:?}"),
-    }
+fn unknown_types_are_opaque_text() {
+    // m3b-t07: BIT and GEOMETRY moved to typed text (`tests/decode_m3b.rs`).
     let vector = bytes_col(ColumnType::MYSQL_TYPE_VECTOR, 8);
     assert_eq!(
         opaque_text(&decode_cell_text(&vector, Some(b"[1,2]"), MIB)),
@@ -1068,6 +1035,8 @@ fn the_schema_keeps_names_native_types_and_origins() {
             charset: BINARY_CHARSET,
             length: 11,
             decimals: 0,
+            // m3b-t07: only TIMESTAMP columns carry the session time zone.
+            time_zone: None,
         }
     );
     assert_eq!(cols[1].origin, None);

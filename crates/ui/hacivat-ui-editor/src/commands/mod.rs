@@ -14,7 +14,8 @@
 //! that edits refuses by itself ([`change`], undo, redo, cut, paste). Moving, selecting, copy
 //! and Run still work.
 //!
-//! **Single cursor (M3a).** Commands read the main range and leave one range.
+//! **Several carets (Task 31).** Moves, edits and the clipboard act at every range, as one
+//! transaction (one undo group); Run follows the main caret (controller ruling 2).
 //!
 //! What the host reads (Tasks 32 and 34), all from this module: [`CommandState`]
 //! (`tab_moves_focus`, [`CommandState::menu_open`]), [`status_message`] (the sentence of
@@ -24,8 +25,12 @@
 //! menu's key hints, which only the app's keymap knows).
 
 mod edit;
+// ## m3b-t01b-seams: find (Task 33), lines (Task 34), multi-cursor (Task 31).
+mod find;
+mod lines;
 mod menu;
 mod movement;
+mod multi;
 mod run;
 mod selection;
 
@@ -46,6 +51,8 @@ pub use menu::{ShortcutHints, context_menu_entries};
 pub use selection::{double_click_range, escape_released};
 
 pub(crate) use selection::double_click;
+// ## m3c-t34-editor (named exception): the fan-out's line-ending hooks.
+pub(crate) use lines::{after_commit as lines_after_commit, opened as lines_opened};
 
 /// One editor command.
 #[derive(Clone, Copy)]
@@ -57,6 +64,10 @@ pub struct EditorCommand {
     pub run: fn(&mut EditorView, &mut Window, &mut Context<EditorView>),
     /// Running it closes the open undo group (Run, select all, …).
     pub seals_history: bool,
+    // ## m3b-t01b-seams (fix round 2, I3)
+    /// A stub that does nothing until its task fills it: the app registers it disabled, so the
+    /// palette does not list it and its key passes through. The filling task clears it.
+    pub stub: bool,
 }
 
 impl std::fmt::Debug for EditorCommand {
@@ -65,6 +76,7 @@ impl std::fmt::Debug for EditorCommand {
             .field("id", &self.id)
             .field("title_id", &self.title_id)
             .field("seals_history", &self.seals_history)
+            .field("stub", &self.stub)
             .finish_non_exhaustive()
     }
 }
@@ -102,6 +114,14 @@ pub struct CommandState {
     /// The string whose content the last double click selected (text version, content bytes):
     /// the next double click in it selects it with its quotes.
     pub(crate) string_content: Option<(u64, Range<usize>)>,
+    // ## m3c-t31-multi
+    /// The last sentence holds while the composition is open (the IME fallback).
+    pub(crate) said_composing: bool,
+    /// The model's commit count right after an occurrence search that began at a caret moved
+    /// the selection: while it is still the count, the search matches whole words (M10).
+    pub(crate) whole_word_at: Option<u64>,
+    // ## m3c-t34-editor (named exception): the line commands' state (line endings, recall).
+    pub(crate) lines: lines::LineState,
 }
 
 impl CommandState {
@@ -122,15 +142,29 @@ pub fn overlay(v: &EditorView, window: &mut Window, cx: &mut App) -> Option<AnyE
 /// until the text or the selection changes. The host reads it on `EditorEvent::StatusChanged`.
 pub fn status_message(v: &EditorView) -> Option<SharedString> {
     let (at, text) = v.commands.said.as_ref()?;
-    (*at == Moment::of(v)).then(|| text.clone())
+    // ## m3c-t31-multi: the IME fallback's sentence holds while its composition is open.
+    let holds = *at == Moment::of(v) || (v.commands.said_composing && v.ime.is_composing());
+    holds.then(|| text.clone())
 }
 
 /// Says `text`: a polite announcement, and the status bar's transient message.
 pub(crate) fn say(v: &mut EditorView, text: SharedString, cx: &mut Context<EditorView>) {
     v.announce(text.clone(), cx); // ## m3a-t29-a11y-tiers: `announce` takes `cx`.
     v.commands.said = Some((Moment::of(v), text));
+    v.commands.said_composing = false;
     cx.emit(EditorEvent::StatusChanged);
     cx.notify();
+}
+
+// ## m3c-t31-multi
+/// [`say`], the sentence holding while the open composition lasts (the IME fallback, R-M3-64).
+pub(crate) fn say_while_composing(
+    v: &mut EditorView,
+    text: SharedString,
+    cx: &mut Context<EditorView>,
+) {
+    say(v, text, cx);
+    v.commands.said_composing = true;
 }
 
 /// The message `id` with `args` from the installed provider (`id` itself when there is none).
@@ -176,6 +210,42 @@ pub(crate) fn select(
     );
 }
 
+// ## m3c-t31-multi
+/// Makes `set` the selection, as `event`; nothing when it already is.
+pub(crate) fn select_set(
+    v: &mut EditorView,
+    set: SelectionSet,
+    event: UserEvent,
+    cx: &mut Context<EditorView>,
+) {
+    acted(v);
+    if *v.model.selection() == set {
+        return;
+    }
+    let len = v.model.buffer().len_bytes();
+    let ann = v.annotations(event, Origin::User, cx);
+    v.commit(
+        Transaction {
+            changes: ChangeSet::identity(len),
+            selection: Some(set),
+            ann,
+        },
+        cx,
+    );
+}
+
+/// Every range of the selection through `f`, the main one kept: a per-caret move.
+pub(crate) fn map_ranges(
+    v: &EditorView,
+    mut f: impl FnMut(&SelectionRange) -> SelectionRange,
+) -> SelectionSet {
+    let sel = v.model.selection();
+    if sel.ranges().len() == 1 {
+        return SelectionSet::single(f(sel.main()));
+    }
+    SelectionSet::normalized(sel.ranges().iter().map(&mut f), sel.main_index())
+}
+
 /// Applies `edits` as one transaction of `event`, with `selection` after it (`None`: the
 /// selection mapped through the edits). Refused on a read-only editor; nothing when there is no
 /// edit. `true` when it committed.
@@ -217,12 +287,32 @@ const fn command(
         title_id,
         run,
         seals_history,
+        stub: false,
+    }
+}
+
+// ## m3b-t01b-seams (fix round 2, I3)
+/// A stub row: no-op body, no history seal, disabled in the app until its task fills it.
+// ## m3c-t34-editor (named exception): Task 34 filled the last editor stubs; the constructor
+// stays for a later seam.
+#[allow(dead_code, reason = "no editor row is a stub since Task 34")]
+const fn stub(
+    id: &'static str,
+    title_id: &'static str,
+    run: fn(&mut EditorView, &mut Window, &mut Context<EditorView>),
+) -> EditorCommand {
+    EditorCommand {
+        id,
+        title_id,
+        run,
+        seals_history: false,
+        stub: true,
     }
 }
 
 /// Every editor command, in palette order.
 #[rustfmt::skip]
-static COMMANDS: [EditorCommand; 45] = [
+static COMMANDS: [EditorCommand; 69] = [
     command("editor.move_left", "hv-cmd-editor-move-left", movement::move_left, false),
     command("editor.move_right", "hv-cmd-editor-move-right", movement::move_right, false),
     command("editor.move_up", "hv-cmd-editor-move-up", movement::move_up, false),
@@ -268,6 +358,43 @@ static COMMANDS: [EditorCommand; 45] = [
     command("editor.run_2", "hv-cmd-editor-run-2", run::run_2, true),
     command("editor.run_3", "hv-cmd-editor-run-3", run::run_3, true),
     command("editor.describe_exec_range", "hv-cmd-editor-describe-exec-range", run::describe_exec_range, false),
+    // ## m3b-t01b-seams: the M3b rows, stubs until the named task fills them (fix round 2, I3:
+    // `stub` rows are disabled in the app, out of the palette; none seals the history). The
+    // filling task turns its rows into `command(..)` rows, a named exception.
+    // Task 31: multi-cursor.
+    // ## m3c-t31-multi (named exception): the Task 31 rows are commands now.
+    command("editor.add_caret_above", "hv-cmd-editor-add-caret-above", multi::add_caret_above, false),
+    command("editor.add_caret_below", "hv-cmd-editor-add-caret-below", multi::add_caret_below, false),
+    command("editor.select_next_occurrence", "hv-cmd-editor-select-next-occurrence", multi::select_next_occurrence, false),
+    command("editor.select_all_occurrences", "hv-cmd-editor-select-all-occurrences", multi::select_all_occurrences, false),
+    command("editor.split_selection_into_lines", "hv-cmd-editor-split-selection-into-lines", multi::split_selection_into_lines, false),
+    command("editor.undo_selection", "hv-cmd-editor-undo-selection", multi::undo_selection, false),
+    command("editor.redo_selection", "hv-cmd-editor-redo-selection", multi::redo_selection, false),
+    // Task 32: folding.
+    // ## m3c-t32-fold (named exception): the Task 32 rows are commands now (palette only: no
+    // default chord, controller ruling 7).
+    command("editor.fold", "hv-cmd-editor-fold", crate::fold_gutter::fold, false),
+    command("editor.unfold", "hv-cmd-editor-unfold", crate::fold_gutter::unfold, false),
+    command("editor.fold_all", "hv-cmd-editor-fold-all", crate::fold_gutter::fold_all, false),
+    command("editor.unfold_all", "hv-cmd-editor-unfold-all", crate::fold_gutter::unfold_all, false),
+    // Task 33: find.
+    // ## m3c-t33-find (named exception): the Task 33 rows are commands now.
+    command("editor.find", "hv-cmd-editor-find", find::find, false),
+    command("editor.find_next", "hv-cmd-editor-find-next", find::find_next, false),
+    command("editor.find_prev", "hv-cmd-editor-find-prev", find::find_prev, false),
+    command("editor.find_close", "hv-cmd-editor-find-close", find::find_close, false),
+    // ## m3c-po (named exception; PO M3c-08): macOS ⌘E; palette-only elsewhere.
+    command("editor.use_selection_for_find", "hv-cmd-editor-use-selection-for-find", find::use_selection_for_find, false),
+    // Task 34: lines and history recall.
+    // ## m3c-t34-editor (named exception): the Task 34 rows are commands now.
+    command("editor.toggle_comment", "hv-cmd-editor-toggle-comment", lines::toggle_comment, false),
+    command("editor.duplicate_line", "hv-cmd-editor-duplicate-line", lines::duplicate_line, false),
+    command("editor.delete_line", "hv-cmd-editor-delete-line", lines::delete_line, false),
+    command("editor.move_line_up", "hv-cmd-editor-move-line-up", lines::move_line_up, false),
+    command("editor.move_line_down", "hv-cmd-editor-move-line-down", lines::move_line_down, false),
+    command("editor.normalize_line_endings", "hv-cmd-editor-normalize-line-endings", lines::normalize_line_endings, false),
+    command("editor.history_prev", "hv-cmd-editor-history-prev", lines::history_prev, false),
+    command("editor.history_next", "hv-cmd-editor-history-next", lines::history_next, false),
 ];
 
 /// Every editor command (the app registers them; the keymap's `editor.*` rows name them).

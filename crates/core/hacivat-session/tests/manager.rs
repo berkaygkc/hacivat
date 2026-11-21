@@ -234,9 +234,10 @@ async fn shutdown_never_waits_for_a_hanging_ping() {
     );
     connect_and_wait(&m).await;
     // Let the first ping start (and hang, holding the connection).
-    while !log.lock().unwrap().contains(&"ping") {
-        tokio::time::sleep(ms(5)).await;
-    }
+    eventually("the first liveness ping", || {
+        log.lock().unwrap().contains(&"ping")
+    })
+    .await;
     let t = Instant::now();
     m.shutdown().await;
     assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
@@ -260,16 +261,22 @@ async fn dropping_the_manager_stops_its_liveness_pings() {
     drop(m);
     let after_drop = pings();
     assert!(after_drop >= 1);
-    tokio::time::sleep(ms(100)).await;
+    // A closed connection is never pinged: wait for the close, not for a fixed time.
+    eventually("the connection to close", || {
+        log.lock().unwrap().contains(&"close")
+    })
+    .await;
     assert_eq!(pings(), after_drop);
 }
 
 #[tokio::test]
 async fn a_connect_landing_after_the_manager_dropped_is_closed_without_pings() {
-    // The exact window (pipeline done, `landed` not yet run) cannot be hit deterministically;
-    // a connect in flight at the drop must end closed, with no liveness task left behind.
-    let (m, log) = logged_manager(
-        hacivat_proto::DbmsKind::Postgres,
+    // Held at the driver until the manager is gone, then let through: the connect is in
+    // flight at the drop on every machine. (A fixed sleep before the drop let it land first,
+    // and a liveness tick could then ping the running session: the Windows CI flake.) It must
+    // end closed, with no session started, so no liveness ping.
+    let (m, log, fake) = logged_manager_over(
+        ok_pg().gated(),
         Duration::ZERO,
         false,
         ManagerConfig {
@@ -278,22 +285,19 @@ async fn a_connect_landing_after_the_manager_dropped_is_closed_without_pings() {
         },
     );
     m.connect(p(), None, Interaction::Headless);
-    tokio::time::sleep(ms(5)).await;
-    drop(m);
-    tokio::time::sleep(ms(100)).await;
-    // Whatever opened is closed in the background: wait for that, not for a fixed time.
-    let count = |what: &str| log.lock().unwrap().iter().filter(|e| **e == what).count();
-    eventually("every open connection to close", || {
-        count("open") == count("close")
+    eventually("the connect to reach the driver", || {
+        fake.connect_calls() == 1
     })
     .await;
-    let log = log.lock().unwrap().clone();
-    assert!(!log.contains(&"ping"), "{log:?}");
-    assert_eq!(
-        log.iter().filter(|e| **e == "open").count(),
-        log.iter().filter(|e| **e == "close").count(),
-        "{log:?}"
-    );
+    drop(m);
+    assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
+    fake.release();
+    // A closed connection is never pinged: once it is closed, the log is final.
+    eventually("the late connection to be closed", || {
+        log.lock().unwrap().contains(&"close")
+    })
+    .await;
+    assert_eq!(*log.lock().unwrap(), ["open", "close"]);
 }
 
 #[tokio::test]

@@ -13,6 +13,11 @@
 //! to the last cell shown, so the row always ends where its container does.
 //!
 //! A cell fills the width it is given (`w_full`): one that receives the room left over grows.
+//!
+//! ## m3c-t41-chrome (named exception; design/m3b-safe M3c-35): a row may name the cell that
+//! takes the room left over ([`GiveWayRow::grow`]), so the cells after it sit right-aligned (the
+//! status bar's right group: the editor's segment and the version); when that cell gave way,
+//! the nearest shown cell before it takes the room.
 
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId,
@@ -39,6 +44,18 @@ pub type Widths = Vec<Option<f32>>;
 /// (its container clips it); that is the caller's ordering to fix, never a reason to cut a trust
 /// signal.
 pub fn give_way(yields: &[Yield], widths: &[f32], available: f32) -> Widths {
+    give_way_growing(yields, widths, available, None)
+}
+
+// ## m3c-t41-chrome (named exception)
+/// [`give_way`], with the room left over going to cell `grow` (or the nearest shown cell before
+/// it) instead of the last cell shown.
+pub fn give_way_growing(
+    yields: &[Yield],
+    widths: &[f32],
+    available: f32,
+    grow: Option<usize>,
+) -> Widths {
     debug_assert_eq!(yields.len(), widths.len());
     let mut out: Widths = widths.iter().map(|w| Some(*w)).collect();
     let total = |out: &Widths| out.iter().flatten().sum::<f32>();
@@ -70,19 +87,34 @@ pub fn give_way(yields: &[Yield], widths: &[f32], available: f32) -> Widths {
         }
     }
     let slack = available - total(&out);
+    // ## m3c-t41-chrome: the named cell, or the nearest shown one before it.
+    let target = grow
+        .and_then(|g| {
+            (0..=g.min(out.len().saturating_sub(1)))
+                .rev()
+                .find(|&i| out[i].is_some())
+        })
+        .or_else(|| (0..out.len()).rev().find(|&i| out[i].is_some()));
     if slack > 0.0
-        && let Some(last) = out.iter_mut().rev().flatten().next()
+        && let Some(cell) = target.and_then(|i| out[i].as_mut())
     {
-        *last += slack;
+        *cell += slack;
     }
     out
 }
+
+// ## m3c-t41-chrome
+/// What a row with a growing cell adds to its natural width: more than any window is wide, so
+/// it takes all the room its container leaves.
+const GROW_BASIS_PX: f32 = 100_000.0;
 
 /// A row of cells that gives way whole (see the module docs).
 pub struct GiveWayRow {
     cells: Vec<(Yield, AnyElement)>,
     margin_left: f32,
     margin_right: f32,
+    // ## m3c-t41-chrome
+    grow: Option<usize>,
 }
 
 impl GiveWayRow {
@@ -91,7 +123,16 @@ impl GiveWayRow {
             cells,
             margin_left: 0.0,
             margin_right: 0.0,
+            grow: None,
         }
+    }
+
+    // ## m3c-t41-chrome (named exception)
+    /// Cell `index` takes the room left over (the cells after it sit right-aligned); see
+    /// [`give_way_growing`].
+    pub fn grow(mut self, index: Option<usize>) -> Self {
+        self.grow = index;
+        self
     }
 
     /// Margins on the row's sides (negative to cover its container's padding).
@@ -131,6 +172,11 @@ impl Element for GiveWayRow {
             .collect();
         let mut style = Style::default();
         style.size.width = px(widths.iter().sum::<f32>()).into();
+        // ## m3c-t41-chrome: a row with a growing cell fills the room its container leaves
+        // (its basis outweighs any spacer beside it; it shrinks to what is there).
+        if self.grow.is_some() {
+            style.size.width = px(widths.iter().sum::<f32>() + GROW_BASIS_PX).into();
+        }
         style.size.height = relative(1.0).into();
         style.min_size.width = px(0.0).into();
         style.flex_shrink = 1.0;
@@ -149,7 +195,7 @@ impl Element for GiveWayRow {
         cx: &mut App,
     ) -> Widths {
         let yields: Vec<Yield> = self.cells.iter().map(|(y, _)| *y).collect();
-        let shown = give_way(&yields, widths, f32::from(bounds.size.width));
+        let shown = give_way_growing(&yields, widths, f32::from(bounds.size.width), self.grow);
         let mut x = bounds.left();
         for ((_, cell), width) in self.cells.iter_mut().zip(&shown) {
             let Some(width) = *width else {
@@ -189,7 +235,38 @@ impl Element for GiveWayRow {
 
 #[cfg(test)]
 mod tests {
-    use super::{Yield, give_way};
+    use super::{Yield, give_way, give_way_growing};
+
+    // ## m3c-t41-chrome
+    #[test]
+    fn a_named_cell_takes_the_room_left_so_the_cells_after_it_sit_right() {
+        let y = [
+            Yield::Never,
+            Yield::Whole(1),
+            Yield::Whole(2),
+            Yield::Whole(3),
+        ];
+        let w = [10.0, 20.0, 30.0, 40.0];
+        assert_eq!(
+            give_way_growing(&y, &w, 120.0, Some(1)),
+            vec![Some(10.0), Some(40.0), Some(30.0), Some(40.0)]
+        );
+        // The named cell gave way: the nearest shown cell before it grows.
+        let y = [
+            Yield::Never,
+            Yield::Whole(9),
+            Yield::Whole(2),
+            Yield::Whole(3),
+        ];
+        assert_eq!(
+            give_way_growing(&y, &w, 95.0, Some(1)),
+            vec![Some(25.0), None, Some(30.0), Some(40.0)]
+        );
+        assert_eq!(
+            give_way_growing(&y, &w, 120.0, None),
+            give_way(&y, &w, 120.0)
+        );
+    }
 
     const W: Yield = Yield::Never;
 

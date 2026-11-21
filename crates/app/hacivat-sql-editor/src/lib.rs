@@ -11,7 +11,12 @@
 //! - [`effective_flavor`]: the client flavor a console's text is split with (never
 //!   `ClientFlavor::None` on PostgreSQL).
 
+// ## m3c-t44: the worker's relex timer for the real-app B3 bench (feature `bench` only).
+#[cfg(feature = "bench")]
+pub mod bench;
 mod chunks;
+// ## m3c-t32-fold
+mod folds;
 mod highlight;
 mod preview;
 mod service;
@@ -20,7 +25,11 @@ mod words;
 mod worker;
 
 pub use chunks::RopeChunks;
+// ## m3c-t32-fold
+pub use folds::folding_ranges;
 pub use preview::{SYNC_SELECTION_LIMIT, points as exec_points, preview_of};
+// ## m3b-t24-exec-ui (named exception: re-exports only)
+pub use preview::{InsideChoice, RunPolicy, preview_with, run_policy};
 pub use service::{SqlLanguageService, effective_flavor};
 /// The statement spans of an analysis (the property tests read them without the executor).
 #[doc(hidden)]

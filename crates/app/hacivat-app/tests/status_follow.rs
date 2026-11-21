@@ -86,8 +86,9 @@ fn shell_two(cx: &mut TestAppContext) -> &'static mut VisualTestContext {
 }
 
 /// A console session of profile `id` over `fake` (as `test_session`, with a fake the test
-/// scripts). A production profile's session is read-only, as the product opens it
-/// (`effective_read_only` under the boot's production policy; fix round 1, I2).
+/// scripts), read-only as the product opens it (`effective_read_only`; fix round 1, I2).
+/// ## m3b-t26-prod-unlock: the profile's own flag (a production session is read-write); the
+/// production rows of this file now say "production · read-write".
 fn session_over(
     vcx: &VisualTestContext,
     id: ProfileId,
@@ -109,8 +110,7 @@ fn session_with(
         let profile = m.get(id).expect("a saved profile");
         (m.core_runtime().handle(), (*profile).clone())
     });
-    profile.read_only =
-        read_only.unwrap_or(profile.read_only || profile.environment == Some(EnvTag::Production));
+    profile.read_only = read_only.unwrap_or(profile.read_only);
     futures::executor::block_on(hacivat_session::testing::fake_session(rt, fake, profile))
 }
 
@@ -310,16 +310,19 @@ fn run_one(
     let run = RunId(1);
     h.run(RunSpec {
         run,
-        units: vec![RunUnit {
-            id: UnitId { run, ordinal: 0 },
-            sql: sql.into(),
-            protocol: Protocol::Extended,
+        units: vec![RunUnit::plain(
+            UnitId { run, ordinal: 0 },
+            sql.into(),
+            Protocol::Extended,
             suspendable,
-        }]
+        )]
         .into(),
         policy: ErrorPolicy::StopOnError,
         fetch: FetchPolicy::default(),
         observer: ObserverRef(Stores::new()),
+        // ## m3b-t01c-core-seams
+        confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
+        context_generation: None,
     })
 }
 
@@ -407,7 +410,7 @@ fn focusing_a_production_or_staging_console_swaps_the_capsule(cx: &mut TestAppCo
     focus_console(vcx, prod);
     assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
     let s = status(vcx);
-    assert!(s.contains("production · read-only (guarded)"), "{s}");
+    assert!(s.contains("production · read-write"), "{s}");
     assert!(!s.contains("staging"), "{s}");
 
     focus_console(vcx, staging);
@@ -444,7 +447,7 @@ fn switching_result_tabs_swaps_the_env_segment(cx: &mut TestAppContext) {
 
     focus_console(vcx, prod);
     let s = status(vcx);
-    assert!(s.contains("production · read-only (guarded)"), "{s}");
+    assert!(s.contains("production · read-write"), "{s}");
     assert!(s.contains("3 rows · 131 ms"), "{s}");
 
     // Switching to the staging console's result swaps the environment and the rows together.
@@ -603,6 +606,59 @@ fn cursor_open_segment_closes_the_cursor(cx: &mut TestAppContext) {
     stop_core_runtime_test(cx);
 }
 
+// ## m4-t33d (R-T33-1, M3a NOTES surface 6 "Keyboard": Cursor open is a button, a Tab stop in
+// the status bar's focus group; Enter or Space closes the cursor).
+#[gpui::test]
+fn cursor_open_segment_is_a_tab_stop_and_enter_closes(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging_id = profile_id(vcx, STAGING);
+    let (h, _fake) = session_over(
+        vcx,
+        staging_id,
+        pg().tracks_transactions()
+            .queries(vec![select("SELECT", 1_000_000)]),
+    );
+    let console = register_test_console(vcx, staging_id, h.clone());
+    focus_console(vcx, console);
+    let _ticket = run_one(&h, "SELECT * FROM big", true);
+    poll_until("the cursor to open", || snapshot(&h).cursor.is_some());
+    wait_until(vcx, "the cursor segment", |vcx| {
+        status(vcx).contains("Cursor open")
+    });
+    let segment = handle_of(vcx, "button-status-cursor");
+    assert!(
+        snapshot(&h).cursor.is_some(),
+        "learning the handle clicked nothing"
+    );
+    assert!(
+        tab_order(vcx).contains(&segment),
+        "Cursor open is a Tab stop"
+    );
+    in_window(vcx, |window, cx| window.focus(&segment, cx));
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    wait_until(vcx, "the cursor to close", |_| {
+        snapshot(&h).cursor.is_none()
+    });
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the segment goes with the cursor; the focus lands on
+    // the active pane's default (the console's editor), not on the undrawn segment.
+    wait_until(vcx, "the segment to go", |vcx| {
+        !status(vcx).contains("Cursor open")
+    });
+    redraw_full(vcx);
+    let editor = vcx.cx.read(|cx| {
+        Consoles::get(cx, console)
+            .and_then(|s| s.editor.clone())
+            .expect("the console has an editor")
+            .read(cx)
+            .focus_handle(cx)
+    });
+    assert_focus_on(vcx, "the console's editor", &editor);
+    stop_core_runtime_test(cx);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The narrow window
 
@@ -642,9 +698,10 @@ fn at_960_in_turkish_the_trust_segments_keep_their_place(cx: &mut TestAppContext
     poll_until("the cursor to open", || snapshot(&h).cursor.is_some());
     focus_console(vcx, console);
     vcx.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+    // ## m3b-po-copy (named exception, PO M3b-28): "transaction" stays English in Turkish.
     wait_until(vcx, "the transaction and cursor segments", |vcx| {
         let s = status(vcx);
-        s.contains("İşlem açık") && s.contains("İmleç açık")
+        s.contains("Transaction açık") && s.contains("İmleç açık")
     });
     let bar = vcx.debug_bounds("status-bar").expect("the status bar");
     let env = vcx.debug_bounds("status-env").expect("the environment");
@@ -673,7 +730,7 @@ fn at_960_in_turkish_the_trust_segments_keep_their_place(cx: &mut TestAppContext
         );
         let s = status(vcx);
         assert!(
-            s.contains("İşlem açık") && s.contains("İmleç açık"),
+            s.contains("Transaction açık") && s.contains("İmleç açık"),
             "{width}: {s}"
         );
     }
@@ -813,7 +870,7 @@ fn a_tab_switch_without_focus_follows_the_active_console(cx: &mut TestAppContext
     activate_tab(vcx, tab_of(vcx, prod));
     assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
     let s = status(vcx);
-    assert!(s.contains("production · read-only (guarded)"), "{s}");
+    assert!(s.contains("production · read-write"), "{s}");
     assert!(!s.contains("staging"), "{s}");
 
     // And back, still without moving the focus.
@@ -833,11 +890,22 @@ fn a_tab_switch_without_focus_follows_the_active_console(cx: &mut TestAppContext
 
 #[gpui::test]
 fn the_console_session_access_wins_when_it_protects_less(cx: &mut TestAppContext) {
-    // I2: the profile's default connection reads read-only (the production policy), but this
-    // console's own session is read-write (opened before the profile changed, say). The bar
-    // and the capsule must never claim the protection the session does not enforce.
+    // I2: the profile's default connection reads read-only, but this console's own session is
+    // read-write (opened before the profile changed, say). The bar and the capsule must never
+    // claim the protection the session does not enforce.
+    // ## m3b-t26-prod-unlock: the production policy no longer makes the default connection
+    // read-only; the test sets that premise on the live state, as the next test does.
     let vcx = shell_two(cx);
     let prod_id = profile_id(vcx, PROD);
+    vcx.cx.update(|cx| {
+        let m = cx.global_mut::<ConnectionsModel>();
+        let LiveState::Connected(mut info) = m.live(prod_id) else {
+            panic!("production is connected");
+        };
+        std::sync::Arc::make_mut(&mut info).access = AccessLabel::ReadOnlyGuarded;
+        m.set_live(prod_id, LiveState::Connected(info));
+    });
+    vcx.run_until_parked();
     let (h, _) = session_with(vcx, prod_id, pg(), Some(false));
     assert!(!snapshot(&h).read_only);
     let console = register_test_console(vcx, prod_id, h);
@@ -887,7 +955,9 @@ fn a_guarded_session_is_never_explained_as_enforced(cx: &mut TestAppContext) {
         m.set_live(prod_id, LiveState::Connected(info));
     });
     vcx.run_until_parked();
-    let (h, _) = session_over(vcx, prod_id, pg());
+    // ## m3b-t26-prod-unlock: a guarded console session by its own flag (the production policy
+    // that made it so is gone).
+    let (h, _) = session_with(vcx, prod_id, pg(), Some(true));
     assert_eq!(snapshot(&h).access, AccessLabel::ReadOnlyGuarded);
     let console = register_test_console(vcx, prod_id, h);
     focus_console(vcx, console);
@@ -1050,7 +1120,7 @@ fn without_a_console_the_m2_behaviour_is_unchanged(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
     assert!(
-        status(vcx).contains("production · read-only (guarded)"),
+        status(vcx).contains("production · read-write"),
         "{}",
         status(vcx)
     );
@@ -1060,9 +1130,400 @@ fn without_a_console_the_m2_behaviour_is_unchanged(cx: &mut TestAppContext) {
     activate_tab(vcx, UNBOUND_TAB);
     assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
     assert!(
-        status(vcx).contains("production · read-only (guarded)"),
+        status(vcx).contains("production · read-write"),
         "{}",
         status(vcx)
     );
+    stop_core_runtime_test(cx);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m3c-t41-chrome: the status bar's Reduced mode and order (F2 M8 = T34 M6; design/m3b-safe
+// M3c-35, surface 24), and the chrome carries (the palette, a closed console's key context,
+// "Nothing to run here", the results' regional display, the empty console's placeholder, a
+// click on the active tab).
+
+/// The status bar's debug bounds of `selector`, when drawn.
+fn bounds_of(
+    vcx: &mut VisualTestContext,
+    selector: &'static str,
+) -> Option<gpui::Bounds<gpui::Pixels>> {
+    vcx.debug_bounds(selector)
+}
+
+/// Whether the window shows the label `#id`, visible and painted.
+/// ## m4-t33-flaky3: read from a frame that renders every view ([`full_frame`]): the last
+/// frame alone lacks the texts of a cached view it reused (the console's editor), so the
+/// placeholder could go missing for good after a late status update.
+fn drawn(vcx: &VisualTestContext, id: &str) -> bool {
+    let needle = format!("#{id}");
+    full_frame(vcx)
+        .iter()
+        .any(|r| r.path.ends_with(&needle) && r.visible && r.painted_px > 0.0)
+}
+
+/// A console over a 5 MB text: its editor opens in reduced mode (T1), with two lines selected.
+fn reduced_console(vcx: &VisualTestContext) -> ConsoleId {
+    let id = profile_id(vcx, STAGING);
+    let line = "SELECT 'İzmir', 1234567;\n";
+    let text = line.repeat((5 << 20) / line.len() + 1);
+    let tab = in_window(vcx, |window, cx| {
+        hacivat_app::console::view::fixtures::open(id, &text, window, cx)
+    })
+    .expect("a console tab");
+    wait_until(vcx, "the fixture console", |vcx| {
+        vcx.cx.read(|cx| Consoles::by_tab(cx, tab)).is_some()
+    });
+    let console = vcx
+        .cx
+        .read(|cx| Consoles::by_tab(cx, tab))
+        .expect("console");
+    let editor = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, console).and_then(|s| s.editor.clone()))
+        .expect("an editor");
+    in_window(vcx, |_, cx| {
+        editor.update(cx, |e, cx| e.select_range(0..40, cx))
+    });
+    focus_console(vcx, console);
+    console
+}
+
+#[gpui::test]
+fn reduced_mode_never_gives_way(cx: &mut TestAppContext) {
+    // NOTES surface 6 and 24: "Reduced mode" is a trust signal and never gives way; the
+    // selected count gives way before the path, Ln/Col after it.
+    let vcx = shell_two(cx);
+    // The long pseudo-locale makes the path give way at the narrowest window.
+    #[cfg(feature = "pseudo")]
+    switch_to(vcx, "tr-XT");
+    reduced_console(vcx);
+    wait_until(vcx, "the reduced cell", |vcx| {
+        drawn(vcx, "editor-segment-reduced")
+    });
+    let mut path_gone_with_lncol = false;
+    for width in (960..=1400).rev().step_by(7) {
+        vcx.simulate_resize(gpui::size(gpui::px(width as f32), gpui::px(600.0)));
+        vcx.run_until_parked();
+        assert!(
+            drawn(vcx, "editor-segment-reduced"),
+            "{width}: Reduced mode gave way"
+        );
+        let cut = chrome_cut(vcx);
+        assert!(cut.is_empty(), "{width}: chrome cut: {cut:?}");
+        let (path, lncol, selected) = (
+            drawn(vcx, "status-path"),
+            drawn(vcx, "editor-segment-lncol"),
+            drawn(vcx, "editor-segment-selected"),
+        );
+        assert!(
+            !selected || path,
+            "{width}: the selected count outlived the path"
+        );
+        assert!(!path || lncol, "{width}: Ln/Col gave way before the path");
+        path_gone_with_lncol |= !path && lncol;
+    }
+    #[cfg(feature = "pseudo")]
+    assert!(
+        path_gone_with_lncol,
+        "some width shows Ln/Col after the path gave way"
+    );
+    let _ = path_gone_with_lncol;
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn editor_segment_sits_before_the_version(cx: &mut TestAppContext) {
+    // M3c-35 (the M3a NOTES order): the editor segment and the version form the right group,
+    // right-aligned before the language segment; the segment comes first.
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    focus_console(vcx, staging);
+    vcx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(800.0)));
+    vcx.run_until_parked();
+    let lncol = bounds_of(vcx, "status-cell-lncol").expect("the Ln/Col cell");
+    let version = bounds_of(vcx, "status-version").expect("the version");
+    let env = bounds_of(vcx, "status-env").expect("the environment");
+    let bar = bounds_of(vcx, "status-bar").expect("the status bar");
+    assert!(lncol.right() <= version.left(), "{lncol:?} {version:?}");
+    // Right-aligned: the room left over sits between the left group and the editor segment.
+    let mid = bar.left() + bar.size.width / 2.0;
+    assert!(
+        lncol.left() > mid,
+        "{lncol:?} is not in the right group of {bar:?}"
+    );
+    assert!(env.right() < mid, "{env:?}");
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn palette_runs_editor_commands_in_the_editor(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    let editor = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, staging).and_then(|s| s.editor.clone()))
+        .expect("an editor");
+    in_window(vcx, |_, cx| {
+        editor.update(cx, |e, cx| {
+            e.set_text("SELECT 1", cx);
+            e.select_range(0..0, cx);
+        })
+    });
+    focus_console(vcx, staging);
+    assert!(run(vcx, "workspace.command_palette"));
+    vcx.run_until_parked();
+    let palette = vcx
+        .cx
+        .read(hacivat_app::commands::palette::open_palette_view)
+        .expect("the palette is open");
+    in_window(vcx, |_, cx| {
+        palette.update(cx, |_, cx| {
+            cx.emit(hacivat_ui::palette::PaletteEvent::Confirmed(
+                "editor.duplicate_line".into(),
+            ))
+        })
+    });
+    vcx.run_until_parked();
+    assert_eq!(editor_text(vcx, staging), "SELECT 1\nSELECT 1");
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn closing_a_console_unregisters_its_focus_context(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    focus_console(vcx, staging);
+    // The editor outlives its tab here (the test holds it), as a pending task may.
+    let editor = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, staging).and_then(|s| s.editor.clone()))
+        .expect("an editor");
+    // With its handle focused, the editor's key context is on the stack while its console is
+    // open, and no longer once it closed (its handle still alive).
+    let ws = workspace(vcx);
+    let with_editor_focused = |vcx: &VisualTestContext| {
+        in_window(vcx, |window, cx| {
+            let handle = editor.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            ws.read(cx).context_stack(window, cx)
+        })
+    };
+    assert!(
+        with_editor_focused(vcx)
+            .0
+            .contains(&hacivat_ui_editor::EDITOR_CONTEXT),
+        "registered while open"
+    );
+    focus_console(vcx, staging);
+    assert!(run(vcx, "workspace.close_tab"));
+    wait_until(vcx, "the console to be forgotten", |vcx| {
+        vcx.cx.read(|cx| Consoles::get(cx, staging).is_none())
+    });
+    let stack = with_editor_focused(vcx);
+    assert!(
+        !stack.0.contains(&hacivat_ui_editor::EDITOR_CONTEXT),
+        "the closed console's context stayed: {stack:?}"
+    );
+    drop(editor);
+    stop_core_runtime_test(cx);
+}
+
+/// A connected staging console whose editor knows its SQL context (the Run preview speaks).
+fn connected_console(vcx: &VisualTestContext) -> ConsoleId {
+    let staging = console_of(vcx, STAGING);
+    in_window(vcx, |_, cx| {
+        let state = Consoles::get(cx, staging).expect("the console").clone();
+        let editor = state.editor.expect("an editor");
+        let service = state.service.expect("its language service");
+        let doc = editor.read(cx).doc();
+        editor.update(cx, |v, cx| {
+            v.set_doc_context(
+                hacivat_ui_editor::DocContext {
+                    connected: true,
+                    tier: v.status().tier,
+                },
+                cx,
+            );
+        });
+        service.set_sql_context(
+            doc,
+            sql_dialect::DialectCtx::new(sql_dialect::DialectId::Postgres, None),
+            sql_dialect::ClientFlavor::Psql,
+            cx,
+        );
+    });
+    focus_console(vcx, staging);
+    staging
+}
+
+#[gpui::test]
+fn nothing_to_run_is_a_status_sentence(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging = connected_console(vcx);
+    vcx.simulate_keystrokes("- - space x enter enter");
+    settle_until(vcx, Duration::from_secs(10), || {
+        text_of(vcx, "status-message").as_deref() == Some("Nothing to run here")
+    });
+    let editor = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, staging).and_then(|s| s.editor.clone()))
+        .expect("an editor");
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |e, cx| assert!(e.run_command("editor.run", window, cx)));
+    });
+    // ## fix round 1 (m3): no fixed sleep. Run's resolution runs on the test executor (the
+    // GPUI background executor), so once the executor is parked it has been decided and said.
+    vcx.run_until_parked();
+    assert!(
+        !toast_ids(vcx).iter().any(|t| t.contains("nothing-to-run")),
+        "{:?}",
+        toast_ids(vcx)
+    );
+    assert!(
+        !toast_texts(vcx)
+            .iter()
+            .any(|t| t.contains("Nothing to run")),
+        "{:?}",
+        toast_texts(vcx)
+    );
+    assert_eq!(
+        text_of(vcx, "status-message").as_deref(),
+        Some("Nothing to run here")
+    );
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn display_settings_follow_a_settings_change(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    focus_console(vcx, staging);
+    let results = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, staging).and_then(|s| s.results.clone()))
+        .expect("the console's results");
+    let locale = |vcx: &VisualTestContext| {
+        vcx.cx.read(|cx| {
+            results
+                .read(cx)
+                .display()
+                .settings()
+                .format_locale
+                .to_string()
+        })
+    };
+    wait_until(vcx, "the first display", |vcx| locale(vcx) != "und");
+    assert_ne!(locale(vcx), "tr-TR");
+    vcx.cx.update(|cx| {
+        let settings = hacivat_app::shell::update_settings(cx, |s| {
+            s.ui.regional_format = hacivat_settings::LanguagePref::Tag("tr-TR".to_string());
+        });
+        hacivat_app::l10n_global::switch_locale(cx, &settings).detach();
+    });
+    wait_until(vcx, "the results to take the new region", |vcx| {
+        locale(vcx) == "tr-TR"
+    });
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn empty_console_draws_its_placeholder(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    focus_console(vcx, staging);
+    wait_until(vcx, "the placeholder", |vcx| {
+        drawn(vcx, "editor-placeholder")
+    });
+    // ## m4-t33-flaky3: a frame that renders the shell again but reuses the editor's cached
+    // view (a late session or status update draws one) still shows the placeholder.
+    with_ws(vcx, |_, _, cx| cx.notify());
+    vcx.run_until_parked();
+    assert!(drawn(vcx, "editor-placeholder"));
+    let text = full_frame(vcx)
+        .into_iter()
+        .find(|r| r.path.ends_with("#editor-placeholder"))
+        .map(|r| r.text.to_string())
+        .expect("the placeholder");
+    assert!(text.starts_with("Write SQL here."), "{text}");
+    // Narrow: it wraps inside the text area, never cut.
+    vcx.simulate_resize(gpui::size(gpui::px(700.0), gpui::px(600.0)));
+    // The placeholder sits where the last frame put the text area: one more frame after the
+    // resize places it (the editor asks for it). ## m4-t32-shots (named exception; T32 flake
+    // carry): under load that frame comes later, so wait for a frame that draws it whole.
+    wait_until(vcx, "the placeholder placed after the resize", |vcx| {
+        full_frame(vcx)
+            .into_iter()
+            .find(|r| r.path.ends_with("#editor-placeholder"))
+            .is_some_and(|r| !r.clipped && !r.truncated)
+    });
+    // Typing hides it.
+    vcx.simulate_keystrokes("s");
+    vcx.run_until_parked();
+    assert!(!drawn(vcx, "editor-placeholder"));
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn a_click_on_the_active_console_tab_follows_it_again(cx: &mut TestAppContext) {
+    // Ledger 331: after an explorer pick, a click on the console's tab that is already active
+    // brings the capsule and the status bar back to that console.
+    let vcx = shell_two(cx);
+    let prod = console_of(vcx, PROD);
+    focus_console(vcx, prod);
+    blur(vcx);
+    let staging_id = profile_id(vcx, STAGING);
+    vcx.cx
+        .update(|cx| ConnectionsModel::select(cx, Some(staging_id)));
+    vcx.run_until_parked();
+    assert_eq!(capsule_name(vcx), (STAGING.to_string(), EnvKind::Staging));
+    let tab = tab_of(vcx, prod);
+    let selector: &'static str = Box::leak(format!("tab-{}", tab.0).into_boxed_str());
+    let at = vcx
+        .debug_bounds(selector)
+        .expect("the console's tab")
+        .center();
+    vcx.simulate_click(at, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
+    stop_core_runtime_test(cx);
+}
+
+// ## m3c-t41-chrome (fix round 1, m8): a regional change made after the console's attach but
+// before its host's first frame still reaches its results.
+#[gpui::test]
+fn display_settings_changed_before_the_first_frame_are_followed(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let id = profile_id(vcx, STAGING);
+    let (session, _) = session_over(vcx, id, pg());
+    let staging = register_test_console_unseen(vcx, id, session);
+    let results = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, staging).and_then(|s| s.results.clone()))
+        .expect("the console's results");
+    let locale = |vcx: &VisualTestContext| {
+        vcx.cx.read(|cx| {
+            results
+                .read(cx)
+                .display()
+                .settings()
+                .format_locale
+                .to_string()
+        })
+    };
+    wait_until(vcx, "the attach's display", |vcx| locale(vcx) != "und");
+    assert_ne!(locale(vcx), "tr-TR");
+    vcx.cx.update(|cx| {
+        let settings = hacivat_app::shell::update_settings(cx, |s| {
+            s.ui.regional_format = hacivat_settings::LanguagePref::Tag("tr-TR".to_string());
+        });
+        hacivat_app::l10n_global::switch_locale(cx, &settings).detach();
+    });
+    vcx.run_until_parked();
+    // The console's tab was not drawn since its attach; now it is.
+    focus_console(vcx, staging);
+    wait_until(vcx, "the results to take the new region", |vcx| {
+        locale(vcx) == "tr-TR"
+    });
     stop_core_runtime_test(cx);
 }

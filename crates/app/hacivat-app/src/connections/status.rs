@@ -269,7 +269,10 @@ fn connection_parts(
 //   console's editor segment (Task 32's entity); the server version.
 // - **Collapse order at narrow widths** (first given way first): the version, the encryption
 //   (and the "unsupported" mark), the editor segment, the path and latency, rows · timing,
-//   the state words. The environment, the transaction and the cursor never give way; the
+//   the state words. ## m3c-t41-chrome (F2 M8, M3c-35; design/m3b-safe surface 24): the
+//   editor segment's parts give way one by one: the selected count, the carets and "Mixed line
+//   endings" before the path, Ln/Col after it; "Reduced mode" never. The segment and the
+//   version sit right-aligned (the room left over goes to the cell before them). The environment, the transaction and the cursor never give way; the
 //   message ellipsizes (its SQL is data) down to a floor. ## m3a-f2-visual (named exception):
 //   a cell gives way whole (NOTES cross-cutting #7: never ellipsized chrome); the message
 //   ellipsizes only once every other cell gave way (fix round 1, I1).
@@ -321,14 +324,14 @@ pub struct SessionView {
 /// The status bar's projection of a session snapshot (see [`TxSegment`], [`CursorSegment`]).
 ///
 /// The transaction, the cursor and the access are Task 23's `console_ux` table (the profile's
-/// environment, the policy, the run and the pool do not reach those fields, so they are not
+/// environment, the run and the pool do not reach those fields, so they are not
 /// passed). One rule more, the safer one where the two differ: a session that is
 /// `Disconnected` or `Broken` shows no transaction and no cursor (fix round 1, I3). Its close
 /// and its break roll the transaction back but leave the last `tx` in the snapshot, so the
 /// table alone would keep showing a transaction that is gone (session side: T18/M3b; the
 /// table's `tx_badge`: T33).
 pub fn session_view(snap: &SessionSnapshot) -> SessionView {
-    let ux = console_ux(None, false, snap, None, None);
+    let ux = console_ux(None, snap, None, None);
     let ended = matches!(
         snap.state,
         SessionState::Disconnected | SessionState::Broken(_)
@@ -593,8 +596,19 @@ fn give_of(part: Part) -> Give {
     }
 }
 
-/// The editor segment gives way after the encryption, before the path.
-const GIVE_EDITOR: Give = Yield::Whole(40);
+// ## m3c-t41-chrome (F2 M8 = T34 M6; NOTES surface 24): the editor segment's parts, each with
+// its own rank: the selected count, the carets, "Mixed line endings" after the encryption and
+// before the path; Ln/Col after the path, before rows · timing; Reduced mode never.
+fn give_editor(part: crate::console::status::SegmentPart) -> Give {
+    use crate::console::status::SegmentPart;
+    match part {
+        SegmentPart::Reduced => Yield::Never,
+        SegmentPart::Selected => Yield::Whole(46),
+        SegmentPart::Carets => Yield::Whole(45),
+        SegmentPart::LineEndings => Yield::Whole(44),
+        SegmentPart::LnCol => Yield::Whole(25),
+    }
+}
 /// Rows · timing gives way after the path.
 const GIVE_ROWS: Give = Yield::Whole(20);
 /// The message ellipsizes, down to a floor, only once every cell that can give way left
@@ -666,10 +680,30 @@ fn console_segments(
     let view = view_of(cx, console);
     match view.map_or(TxSegment::None, |v| v.tx) {
         TxSegment::None => {}
+        // ## m3b-t22-tx-ui (named exception): the segment is a button that opens the
+        // transaction menu above itself (NOTES surface 4).
         TxSegment::Open { statements } => {
-            cells.push((Give::Never, tx_open(theme, cx, statements)));
+            cells.push((
+                Give::Never,
+                tx_segment_button(
+                    theme,
+                    cx,
+                    console,
+                    tx_open(theme, cx, statements),
+                    Some(tr(cx, ids::hv::TX_OPEN_TIP, NoArgs)),
+                ),
+            ));
         }
-        TxSegment::Failed => cells.push((Give::Never, tx_failed(theme, cx))),
+        TxSegment::Failed => cells.push((
+            Give::Never,
+            tx_segment_button(
+                theme,
+                cx,
+                console,
+                tx_failed(theme, cx),
+                Some(tr(cx, ids::hv::TX_FAILED_TIP, NoArgs)),
+            ),
+        )),
     }
     if let Some(rows) = rc.as_ref().map(|rc| rows_timing(cx, rc)) {
         cells.push((
@@ -708,10 +742,22 @@ fn console_segments(
             .into_any_element(),
         ));
     }
-    if let Some(segment) = crate::console::editor_segment(console, cx) {
-        cells.push((GIVE_EDITOR, segment.into_any_element()));
+    // ## m3c-t41-chrome: the right-aligned group: the editor segment's parts, then the
+    // version; the cell before them takes the room left over.
+    let right = cells.len();
+    for (part, cell) in crate::console::editor_segment_cells(console, cx) {
+        cells.push((give_editor(part), cell.into_any_element()));
     }
     if let Some((part, segment)) = version {
+        // ## m3c-t41-chrome: its selector, for the order test.
+        let segment = div()
+            .debug_selector(|| "status-version".to_string())
+            .flex()
+            .flex_row()
+            .items_center()
+            .min_w(px(0.0))
+            .child(segment)
+            .into_any_element();
         cells.push((give_of(part), segment));
     }
     let mut cells = cells.into_iter();
@@ -722,7 +768,9 @@ fn console_segments(
     if rest.is_empty() {
         return vec![first];
     }
-    vec![first, give_way_row(theme, rest)]
+    // In `rest`, the cell before the right group (none when the group starts the row).
+    let grow = right.checked_sub(2);
+    vec![first, give_way_row(theme, rest, grow)]
 }
 
 /// The cells after the first, as one bar segment that lays them out itself, so each gives
@@ -739,7 +787,7 @@ fn console_segments(
 ///   ever narrower than its content (its SQL ellipsizes, down to its floor); it clips.
 /// - The row covers its bar segment's padding; on the right it reaches one pixel further, so
 ///   the last cell's seam lies on the bar's own seam after the segment.
-fn give_way_row(theme: &Theme, cells: Vec<(Give, AnyElement)>) -> AnyElement {
+fn give_way_row(theme: &Theme, cells: Vec<(Give, AnyElement)>, grow: Option<usize>) -> AnyElement {
     let t = theme.tokens;
     let seam = t.colors.seam.to_hsla();
     // The least an inner box keeps: its padding and its seam.
@@ -784,6 +832,8 @@ fn give_way_row(theme: &Theme, cells: Vec<(Give, AnyElement)>) -> AnyElement {
         .collect();
     GiveWayRow::new(cells)
         .margins(-t.spacing.lg, -t.spacing.lg - 1.0)
+        // ## m3c-t41-chrome (M3c-35)
+        .grow(grow)
         .into_any_element()
 }
 
@@ -815,7 +865,6 @@ fn shown_access(cx: &App, m: &ConnectionsModel, p: &Profile) -> AccessLabel {
 /// how to end it.
 fn tx_open(theme: &Theme, cx: &App, statements: u32) -> AnyElement {
     let t = theme.tokens;
-    let tip = tr(cx, ids::hv::TX_OPEN_TIP, NoArgs);
     div()
         .id("status-tx")
         .debug_selector(|| "status-tx".to_string())
@@ -839,14 +888,75 @@ fn tx_open(theme: &Theme, cx: &App, statements: u32) -> AnyElement {
             )
             .id("status-tx-open"),
         )
-        .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+        // ## m3b-t22-tx-ui (named exception, review m8): the button around it carries the
+        // tooltip, so the segment's own no longer shadows it.
         .into_any_element()
+}
+
+// ## m3b-t22-tx-ui (named exception)
+/// The transaction segment as a button (`segment`, M3a's open or failed form): a Tab stop
+/// that Enter, Space or a click opens the console's transaction menu with, anchored 4 px above
+/// the segment, left edges aligned (NOTES surface 4, M2); its tooltip says so, after `lead`
+/// (the failed form's explanation). The segment draws no tooltip of its own.
+fn tx_segment_button(
+    theme: &Theme,
+    cx: &App,
+    console: ConsoleId,
+    segment: AnyElement,
+    lead: Option<SharedString>,
+) -> AnyElement {
+    use std::rc::Rc;
+
+    let t = theme.tokens;
+    let click = tr(cx, ids::hv::TX_SEGMENT_TIP, NoArgs);
+    let tip: SharedString = match lead {
+        Some(lead) => format!("{lead} {click}").into(),
+        None => click,
+    };
+    let open = Rc::new(
+        move |window: &mut hacivat_ui_core::gpui_surface::Window, cx: &mut App| {
+            crate::console::tx_chip::open_segment_menu(console, window, cx);
+        },
+    );
+    let (on_click, on_key) = (open.clone(), open);
+    let button = div()
+        .id("status-tx-button")
+        .debug_selector(|| "status-tx-button".to_string())
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .rounded(px(t.radii.sm))
+        .cursor_pointer()
+        .child(segment)
+        .children(crate::console::tx_badge::record_bounds(
+            console,
+            crate::console::tx_badge::Focus::Segment,
+            cx,
+        ))
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .on_key_down(move |e, window, cx| {
+            if matches!(e.keystroke.key.as_str(), "enter" | "space")
+                && !e.keystroke.modifiers.modified()
+            {
+                cx.stop_propagation();
+                on_key(window, cx);
+            }
+        })
+        .tooltip(move |_, cx| Tip::view(tip.clone(), cx));
+    match crate::console::tx_badge::focus_of(console, crate::console::tx_badge::Focus::Segment, cx)
+    {
+        Some(focus) => button
+            .track_focus(&focus)
+            .focus_visible(|s| s.bg(t.colors.blue_tint.to_hsla()))
+            .into_any_element(),
+        None => button.into_any_element(),
+    }
 }
 
 /// "Transaction failed · roll back to end it" with the ink alert glyph (an error takes no hue).
 fn tx_failed(theme: &Theme, cx: &App) -> AnyElement {
     let t = theme.tokens;
-    let tip = tr(cx, ids::hv::TX_FAILED_TIP, NoArgs);
     div()
         .id("status-tx")
         .debug_selector(|| "status-tx".to_string())
@@ -868,7 +978,7 @@ fn tx_failed(theme: &Theme, cx: &App) -> AnyElement {
             )
             .id("status-tx-failed"),
         )
-        .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+        // ## m3b-t22-tx-ui (named exception, review m8): the button carries the tooltip.
         .into_any_element()
 }
 

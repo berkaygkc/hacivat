@@ -230,6 +230,13 @@ HACIVAT_DOCKER_SET=pr $E/b1_real --mode streaming        # not gating
 cargo xtask bench-report --milestone m3a target/bench/b1-fling-real-*.json target/bench/b3-*-app-*.json
 ```
 
+<!-- ## m3c-t44 -->
+> **Correction (M3c Task 44):** until M3c Task 44, `bench-report` accepted only `m<number>` and
+> refused `--milestone m3a` ("bad milestone"), so the command above failed as written. It works
+> from the M3c Task 44 fix on (`m3a`, `m3b` and `m3c` are accepted). The "Bench rows" table at
+> the end of this file is still empty for that reason; the PO-run figures are recorded with E2
+> and E3 and in the ledger (`bench-po-20261116-0643/`).
+
 Read each run's `RESULT:` line (PASS, FAIL, INVALID or n/a). The B1-real paint figure for the gate
 is the `GRID PAINT (the gate's paint figure)` line; the load figures are in `target/bench/load/`.
 Record the machine, the build hash (`git rev-parse --short HEAD`) and the raw dumps with the rows.

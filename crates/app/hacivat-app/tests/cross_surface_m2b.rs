@@ -378,7 +378,32 @@ fn ssh_connect_with_new_host_key_then_capsule_via_bastion(cx: &mut TestAppContex
     let via = format!("SSH via {}", server.host());
     assert_eq!(capsule_text(vcx, "path"), via);
     assert_eq!(status_text(vcx, "path"), via);
-    assert!(vcx.debug_bounds("explorer-row-route-0").is_some());
+    // ## m4-t14-explorer (named exception): the route flag is one of the tree root's flags.
+    {
+        let key = hacivat_app::explorer::adapter::profile_key(profile_id(vcx, "orders-staging"));
+        let flags = vcx
+            .cx
+            .read(hacivat_app::connections::explorer::shown_rows)
+            .into_iter()
+            .find(|r| r.key == key)
+            .expect("the root row")
+            .data
+            .flags;
+        let at = flags
+            .iter()
+            .position(|f| {
+                matches!(
+                    f,
+                    hacivat_ui::tree::RowFlag::Icon {
+                        icon: hacivat_ui::icon::IconName::Route,
+                        ..
+                    }
+                )
+            })
+            .expect("the SSH route flag");
+        let sel: &'static str = Box::leak(format!("hv-tree-flag-{}-{at}", key.0).into_boxed_str());
+        assert!(vcx.debug_bounds(sel).is_some());
+    }
     assert!(server.sessions_accepted() >= 1);
 
     // Trusted: the key is in Hacivat's store, never in `~/.ssh`.

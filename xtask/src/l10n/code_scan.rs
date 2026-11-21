@@ -8,10 +8,16 @@ use super::rules::finding;
 use super::{Finding, Severity};
 
 /// ID prefixes that double as `hacivat_l10n::ids` module names.
-const ID_MODULES: [&str; 12] = [
+const ID_MODULES: [&str; 16] = [
     "cm", "hui", "hv", "hc", "kg", "ps", "pw", "pe", "db", "error",
     // ## m3a-t01b-seams: the output log's messages (`hacivat-core.ftl`, Task 23; P24).
     "exec", "cursor",
+    // ## m3b-t04-safety: the classifier's messages (`hacivat-core.ftl`, Task 4; P-M3b-T4-1).
+    "safety",
+    // ## m4-t01a-model: the model's and the DDL generator's messages (`hacivat-core.ftl`).
+    "model", "ddl",
+    // ## m4-t01c-core: introspection notices (`hacivat-core.ftl`, M4 Task 1c Part B).
+    "intro",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -462,7 +468,12 @@ fn id_path(toks: &[Token], i: usize, bare_ok: bool) -> Option<(String, String, u
     };
     let (ns_at, skip) = if first == "ids" && is_colons(toks, i + 1) {
         (i + 3, 3)
-    } else if bare_ok && ID_MODULES.contains(&first.as_str()) {
+    } else if bare_ok
+        && ID_MODULES.contains(&first.as_str())
+        // ## m4-t01a-model: a module of another path (`hacivat_ui_grid::model::MAX_COPY_CELLS`)
+        // is not a bare `ids` module, now that `model` is an ID prefix too.
+        && !(i >= 2 && is_colons(toks, i - 2))
+    {
         (i, 0)
     } else {
         return None;
@@ -989,5 +1000,24 @@ mod tests {
         assert!(run(src, CORE, &[], &[]).findings.is_empty());
         let src = r#"fn f() { format!("{}:{}", text(x), id); }"#;
         assert!(run(src, CORE, &[], &[]).findings.is_empty());
+    }
+
+    // ## m4-t01a-model
+    /// `model` is an ID prefix now (M4), and also a Rust module name elsewhere
+    /// (`hacivat_ui_grid::model`): only a bare or `ids::` path is a message ID.
+    #[test]
+    fn a_model_module_of_another_path_is_not_a_message_id() {
+        let src = r#"use hacivat_l10n::ids; const M: u128 = hacivat_ui_grid::model::MAX_COPY_CELLS;
+            fn f() { l10n.t(ids::model::NAME_HAS_INVISIBLE_CHARS); l10n.t(model::CACHE_OFFLINE); }"#;
+        let s = run(
+            src,
+            UI,
+            &["model-name-has-invisible-chars", "model-cache-offline"],
+            &[],
+        );
+        assert!(s.findings.is_empty(), "{:?}", rules(&s));
+        assert!(s.used_ids.contains("model-name-has-invisible-chars"));
+        assert!(s.used_ids.contains("model-cache-offline"));
+        assert!(!s.used_ids.contains("model-max-copy-cells"));
     }
 }

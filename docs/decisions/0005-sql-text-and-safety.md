@@ -526,3 +526,1459 @@ before Task 23's oracle).
 (`run_reads_a_copy_from_the_splitters_kind`, `an_oracle_region_holding_copy_stays_uncertain`),
 `hacivat-sql-editor/tests/preview_truth.rs` (`the_preview_reads_copy_from_the_splitter` and
 the committed seed).
+
+## m3b-t01a — SQL seams
+
+**Two new Core-layer crates under `crates/sql`.** `sql-ident` (identifiers, qualified names,
+ASCII-only folding) and `sql-safety` (the classifier) obey every M3a rule: no runtime, no
+`hacivat-l10n`, no core crate, `salsa` and `sql-sema` still forbidden. `sql-safety` is pure and
+synchronous; its thread pool is `hacivat-exec::classify_pool` (R-M3-53), so the SQL layer stays
+runtime-free.
+
+**`BackendOutsideOwner` gains a `sqlparser` arm.** Each parser backend has exactly one owner
+that may depend on it directly, by any edge kind: `pg_query` in `sql-oracle-pg`, `sqlparser`
+(`=0.64.0`, Apache-2.0, no default features; `std`, `visitor`, `recursive-protection`) in
+`sql-safety` (R-M3-54). Neither crate re-exports a backend type through `sql-safety`: the
+`backend` and `visit` modules are private, and `tests/stubs.rs` checks the public lines of
+`src/` for `sqlparser::` and `pg_query::`. The one `pg_query` re-export is
+`sql_oracle_pg::tree::pb`, the protobuf tree the PG backend walks (Task 9).
+
+**Classification is tied to the bytes sent (P-M3b-2).** `SafetyReport` carries
+`classified_len` and `classified_hash` (XXH3-64 of the exact text classified,
+`sql_safety::classified_hash`). `SafetyReport::matches_text` is the comparison the exec gate
+makes before it sends a unit, so `hacivat-exec` needs no hashing crate of its own.
+
+**Fail-closed stubs (F31).** Until their tasks land: `classify` answers `Unknown` with
+`request_effects = UNKNOWN` and the pre-decision `[NotImplemented]` (Task 14); `decide` answers
+`Deny([NotImplemented])` (Task 4); `gate_class` answers `Unknown` and `opens_write` `true`
+(Task 4); `denied_function_names` is empty and `set_allowed` `false` (Task 3);
+`sql_ident::{fold, ident_eq, parse_qualified}` change nothing, compare bytes and recognise
+nothing (Task 3); `sql_split::scan_params` reports every `:`, `$` and `?` byte as an unbindable
+placeholder and rewrites nothing, so Run refuses the unit (Task 6); `hv_norm1` hashes the raw
+text at version 0 (Task 6); `StreamSplitter` yields one `Ambiguous` at offset 0 (Task 5);
+`Lexed::checkpoint_before` answers `(0, Initial)`, a full relex (Task 5);
+`sql_oracle_pg::tree::{parse_tree, scan_tokens, fingerprint}` answer `Err` (Task 9). Nothing
+here is wired into Run (R-M3-52).
+
+**`fuzz/` is its own workspace (P-M3b-15).** It is excluded from the root workspace, copies
+the root's `third_party` `[patch.crates-io]` entries with `../` paths (so `pg_query` is the
+vendored copy) and checks in a `Cargo.lock` generated from the root lock. Cargo warns that the
+`mysql_async` and `tokio-postgres` patches are unused; they stay so a later edge cannot reach the
+registry crates. `libfuzzer-sys`'s NCSA licence is recorded in Task 20's section.
+
+**xtask stubs.** `gen-pg-visitor` (Task 9), `gen-fn-catalog` (offline `--check` only, Task 3;
+the catalog read is a `hacivat-exec` Docker test, P-M3b-13), `bench-sql` and `fetch-pg-regress`
+(Task 20) exit 2 and name the task that fills them.
+
+**Data placeholders.** `sql-safety/data/` holds the TOML tables later tasks fill, each with an
+`# owner: Task NN` header: `<engine>/{allow,deny,operators,types,set_allow}.toml` and
+`functions.digest` (Task 3), `profiles.toml` (Task 4), `pg/statements.toml` (Task 9),
+`{mysql,sqlite}/statements.toml` and `mysql/known_gaps.toml` (Task 10).
+
+**Fix round 1.**
+- **Empty is not Read.** `EffectSet::default()` is the empty set, and every mapping treats an
+  empty set as `Unknown`. `GateClass` defaults to `Unknown`.
+- **Fail-closed stub.** `sql_safety::sqlite_read_pragmas` is empty until Task 10. Task 18
+  compares it with the guard's `SQLITE_READ_PRAGMAS`.
+- **Two more ownership checks** for `BackendOutsideOwner`:
+  - a declared backend dependency counts too, so an optional one that no feature turns on is
+    still seen;
+  - only `sql-oracle-pg` and `sql-safety` may name `sql_oracle_pg::tree`. This is a source scan
+    in `check-deps`.
+- **`sql-testkit`** no longer depends on `sql-safety`. It reaches `sql-oracle-pg` only through
+  its `differential` feature, so the lexer's plain test loop builds neither libpg_query nor
+  `sqlparser`.
+
+## m3b-t04 — the policy table
+
+Task 4 fills `sql-safety`'s report model: `class_of`, `merge`, `gate_class`, `opens_write`,
+`decide` and the Fluent ids of every class, reason and destructive pattern.
+
+**Every effect bit maps on purpose.** Three tables name each of the 20 effect bits once:
+`COARSE_OF_BIT` (the `CoarseClass`), `GATE_OF_BIT` (the `GateClass`) and the policy's
+`GROUP_OF_BIT` (a group in `data/profiles.toml`). A unit test checks each table against
+`EffectSet::all()`, so a new bit without a row fails the build's tests. At run time these sets
+are `Unknown`, never `Read`:
+
+- the empty set;
+- a set with a bit no table names;
+- a `RiskFlags` value with a bit that has no name.
+
+`GateClass` is declared in its total order (P-M3b-4) and derives `Ord`. Destructive reasons
+raise the gate class whatever the effects say: an unsafe-DML kind raises it to at least
+`DmlUnsafe`, a destructive-DDL kind to at least `DdlDestructive`. `DYNAMIC_SQL` is `Unknown`.
+`ROUTINE_CALL` is `Routine` for the gate but `Unknown` for the coarse class, because a routine
+body is opaque (`alg/13` test 13).
+
+**`decide`.** The rule for each (effect group, profile) pair lives in `data/profiles.toml`,
+compiled in. The loader rejects unknown and missing keys. If the table doesn't load, `decide`
+denies everything. The strictest rule wins: Deny, then Confirm, then Allow. Fail-closed
+choices:
+
+- `decide` judges request-level fields as well as statements. A statement's `class` field, the
+  request's class, request-level effect bits the statements don't show, and request-level flags
+  each count, so a producer that leaves a field behind can't lower the decision.
+- A reason is evidence of its effect group. `ExternalFile` on a bare `READ` still denies on
+  read-only.
+- Doubt codes deny in every profile, `Admin` included. These are the lexing, splitting,
+  parsing and limit codes, `LexModeChange` and `PrivilegeChange`.
+- `FnUnknown`, `OperatorUnknown`, `CastUnknown`, `DynamicSql` and `ProceduralCode` count as
+  `unknown`.
+- An executable comment (D-058) or a denylisted function denies on the read-only profiles and
+  for an AI agent.
+- A `SET_VAR` hint denies unless its variable is harmless.
+- `MAX_EXECUTION_TIME` denies when its limit is 0 or can't be read.
+
+**Harmless `SET` (P-M3b-6).** `decide` has no dialect argument, so `SafetyReport` gains
+`dialect: Option<DialectId>`. Task 14's `classify` sets it, and `pre_decided` leaves it `None`.
+A `SET` statement counts as a read in every profile only when all of these hold:
+
+- its effects are exactly `SESSION_STATE`;
+- it has no flag, no destructive pattern and a class no higher than `Session`;
+- it has at least one reason, and every reason is `SessionState` with the variable name as its
+  argument;
+- `set_allowed(dialect, name)` accepts every one of those names.
+
+Backends (Tasks 9 and 10) must emit one `SessionState` reason per `SET` target. Any other `SET`
+names `SetNotAllowlisted` for each refused target. A `SET` with no dialect or no named target
+is never harmless.
+
+**Differences from `alg/13` SQL-SAFE-04's table.**
+
+- Unbounded `UPDATE`/`DELETE` also confirms under `ddl`. That profile is a superset of
+  `read_write_dml`, so it must not ask less.
+- `CALL` has its own `routine` row with the `unknown` rules.
+- An AI agent is refused `EXPLAIN ANALYZE` on both read-only profiles. Per the plan's test
+  name, a human alone may run it there.
+- A harmless `SET` is a read in every profile, not only the read-only ones, so the allowlist
+  never makes a read-only profile more permissive than a writable one.
+- `LEX_MODE_CHANGE` denies in every profile, as `alg/13` asks of Karagöz, because `decide` is
+  shared.
+- The spec's info-disclosure and resource-heavy rows have no bits in M3b. Task 3's function
+  data denies the functions behind them.
+
+**New reason codes.** The policy names every refusal, so `ReasonCode` gains nine codes for
+groups that had none: `WriteData`, `SchemaChange`, `TableLock`, `AdvisoryLock`, `ExternalIo`,
+`PreparedStatement`, `Notify`, `EffectsUnknown` and `Destructive`.
+
+**Fluent.** The `safety-*` ids live in `hacivat-core.ftl` under the block `## m3b-t04-safety`.
+The `safety` prefix is added to three lists, a named exception (P-M3b-T4-1):
+
+- xtask's domain prefixes;
+- its id-module list;
+- `hacivat-l10n-schema::is_valid_id`.
+
+Function, operator and cast names reach the messages as `$name`, and table names as `$table`.
+Fluent isolates both with FSI/PDI. The Turkish messages carry `# Review: PO`.
+
+**Visibility.** `effects::class_of` and `report::merge` are `pub`, not `pub(crate)` as the plan
+says. The plan's integration tests call them, and P-M3b-16's report builders must merge the
+way `classify` does.
+
+**Fix round 1 (controller rulings on the review).** These rulings override the earlier text of
+this section where they differ.
+
+- **The gate reads what `decide` reads (I1).** `gate_class` used to read only the effect bits.
+  It now takes the most critical of seven sources:
+  - the effect bits;
+  - the statement's `class` field (`Unknown` means `Unknown`);
+  - its kind;
+  - its risk flags;
+  - its reasons, through the policy's own `reason_rule` (`reason_gate_floor`);
+  - its destructive patterns;
+  - an unnamed flag bit, which means `Unknown`.
+
+  The property test `gate_and_decide_agree` holds this invariant: a gate class of `Read` implies
+  `decide(ReadOnlyPlusExplain, Human)` allows. `ReadOnly` differs from it only in refusing
+  `EXPLAIN ANALYZE` of a read. The gate calls that statement `Read`, because R-M3-55 says
+  "class of x", so the invariant is stated against the human read-only profile (R-M3-56).
+  Conversely, whatever a read-only profile allows, the gate calls `Read` or `Session`.
+- **Flags (I2).** `FLAG_RULES` covers `RiskFlags::all()` and has a coverage test. Each flag's
+  meaning:
+  - `VOLATILE_FN` means `Unknown` (`alg/13` S-04). Producers set it only for a volatile
+    function that no allowlist covers.
+  - `LEX_MODE_CHANGE` and `DYNAMIC_SQL` mean `Unknown` for the gate.
+  - `EXEC_COMMENT` means `Unknown` for the gate, so production confirms it. `decide` still
+    denies it only on the read-only profiles and for an AI agent.
+  - `EXPLAIN_ANALYZE` takes the class of the inner statement.
+- **Harmless `SET` (I3).** A harmless `SET` is a read only on the two read-only profiles, and
+  only for `Human`. Everywhere else a `SET` follows `alg/13`'s Session row: Deny in
+  `read_write_dml` and `ddl`, Confirm in `admin`. This reverses the "read in every profile"
+  rule above.
+- **`EXPLAIN ANALYZE` for AI (I4).** An AI agent on `ReadOnlyPlusExplain` may run
+  `EXPLAIN ANALYZE` of a read (`alg/13` :331).
+- **Kinds are floors (I5).** `kind_rule` is an exhaustive match. It sets a minimum class for
+  each kind that has one; `SELECT`, `VALUES`, `TABLE`, `SHOW`, `COPY`, `PRAGMA`, `Other` and
+  plain `EXPLAIN` are left to their effects.
+
+  | Kinds | Minimum class |
+  |---|---|
+  | `SET` | Session, judged through the harmless list even without its bit |
+  | `INSERT`, `UPDATE`, `DELETE`, `MERGE` | Dml |
+  | `DROP`, `TRUNCATE` | DdlDestructive |
+  | `CREATE…`, `ALTER` | DdlOther |
+  | `GRANT`, `REVOKE` | Admin |
+  | `CALL`, `DO` | Routine |
+  | `EXECUTE` | Unknown |
+  | `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT` | Tx |
+  | `LOCK` | Lock |
+  | `USE`, `LISTEN`, `PREPARE`, `NOTIFY` | Session |
+  | `EXPLAIN ANALYZE` | the inner statement's class, or Unknown |
+- **`SET` targets.** `StmtReport` gains `set_targets: Vec<SetTarget { name, value }>`, filled by
+  the backends for `SET`/`RESET`. The harmless check passes each target's value to the list,
+  for P-M3b-T3-1 (`search_path` is harmless only when `pg_catalog` is absent or first). A
+  `None` value is fail-closed. `decide` calls Task 3's `set_allowed(d, name, value)` directly
+  since Task 3 merged (`search_path_value_reaches_the_list`). A `SET` that names no target is
+  refused with `SessionState`, so every `SetNotAllowlisted` names its variable.
+- **Minor fixes (M1–M5).**
+  - **M1:** `Decision.class` rises with reason evidence.
+  - **M2:** the `PRIVILEGE` bit names the new `PrivilegeGrant`, confirmed under `admin`.
+    `PrivilegeChange` is only a role or authorization switch and denies everywhere.
+  - **M3:** a bare `Destructive` reason is destructive-DDL evidence.
+  - **M5:** `merge` adds `UNKNOWN` to the request's effects for an empty or unnamed statement.
+- **Not implemented, recorded (M6–M7).**
+  - **M6:** the `MAX_EXECUTION_TIME` ceiling (`alg/13` SAFE-04 step 3). `decide` has no
+    ceilings input and the plan names none, so only 0 or an unreadable limit denies.
+  - **M7, for M8:** an AI agent's unbounded `UPDATE`/`DELETE` follows `alg/13` step 5 here
+    (Deny). The spec's L9 makes it an approvable critical class; M8's broker must reconcile
+    the two.
+- **The class field's gate floor (D1).** A statement's `class` field floors the gate class at
+  the least gate class of its coarse class (Write → Lock, Unknown → Routine). The backends
+  write `class_of(effects)`, which is `Unknown` for `ROUTINE_CALL`, so an Unknown floor would
+  turn every `CALL` into `Unknown` against P-M3b-4.
+  - **The price:** the gate is not monotone in the class *label* from Ddl or Admin up to
+    Unknown. A READ statement labelled Ddl or Admin is `DdlOther` or `Admin`, but labelled
+    Unknown it is only `Routine`. It is still monotone in *evidence*: adding bits, reasons,
+    flags or destructive kinds never lowers it.
+  - **No R-M3-55 decision changes because of it.** `DdlOther`, `Admin`, `Routine` and
+    `Unknown` are all Confirm on production, Run elsewhere and Deny on read-only. The only
+    row keyed on DDL is MySQL's implicit commit, which an Unknown statement doesn't get either.
+    In the `EXPLAIN ANALYZE` row, `Routine` is stricter: it is refused, where an `Unknown`
+    inner gets the D-062 wrap.
+  - **Producer contract (T9, T10, T14):** every Unknown outcome must also set
+    `EffectSet::UNKNOWN` or an unknown-group or doubt reason, never only the class field.
+- **`SET` reasons and targets agree (re-review R1-M3).** A `SET` is harmless only when its
+  `SessionState` reason arguments and its `set_targets` names are the same list, compared
+  byte-exact as multisets. A reason naming a variable outside the targets is refused by that
+  name.
+- **The group-skip rule (re-review R1-M1).** `decide` skips a class field's group when a group
+  of the same coarse class was already applied. A unit test pins what makes that safe: every
+  group of a coarse class is at least as strict as that class's own group in every profile.
+
+## m3b-t06 — parameters
+
+**What the scan reads.** `sql_split::scan_params` lexes the unit on its own, from the initial
+state, as the server receives it. Only code tokens are read. A marker inside a string, quoted
+identifier, comment or dollar body is never a placeholder, and after a `COPY`'s first `;` the
+rest of a unit is data. An executable comment's body is code to the server, so it is lexed and
+read too. The lexer does not recognise psql meta-commands: `\set x :y` reaches the scan as an
+unknown `\` followed by code. So a unit that holds any token the lexer could not read cleanly
+binds nothing (fix round 1, below).
+
+**One rule for refusal: if one placeholder cannot bind, none does.** When any placeholder
+cannot bind, every placeholder is `bindable: false` and `rewritten` is `None`. Run then
+refuses the unit and sends nothing. `rewritten` is `Some` exactly when there is at least one
+placeholder and every one binds. Every refusal carries a diagnostic:
+
+- `ParamInDdl`: a placeholder in `CREATE`/`ALTER`/`DROP`, unless `in_ddl` is on. The head is
+  the caller's `StmtHead` or the unit's own first word, so a stale head cannot unlock DDL. An
+  `EXPLAIN` counts as DDL when it holds any `CREATE`/`ALTER`/`DROP` keyword; all three are
+  reserved, so none of them can be a bare column name.
+- `MixedStyles`: `$n`, `?` and `:name` mixed in one unit. This includes SQLite's `?NNN` beside
+  names, because the rewrite would renumber them.
+- `TooManyBinds`: more than 65,535 driver slots. That is distinct names on PostgreSQL,
+  occurrences elsewhere, and the largest `$n`/`?NNN` number.
+- `TemplateVariable`: any template variable in the unit.
+- `Unbindable`: a variant this task added, for a marker the server may read as a parameter
+  that Hacivat cannot bind:
+  - `?` or `:name` inside a MySQL/MariaDB executable comment;
+  - `?` under `CALL`/`EXEC`/`EXECUTE` (ODBC escape semantics). Outside PostgreSQL a name
+    there is refused too, because the rewrite would send it as that same `?`, and the
+    rewritten text would then refuse itself on a rescan (nightly fuzz `params_rewrite`,
+    m3b-fuzz controller fix). PostgreSQL names become `$k` and still bind;
+  - psql `:"name"`, which substitutes an identifier: binding it would turn `WHERE :"col" = 1`
+    into `WHERE $1 = 1`;
+  - psql `:{?name}`;
+  - `$0`, `$n` with trailing junk, and any positional with a leading zero (`$01`, `?01`). The
+    server reads `$01` as `$1`, so two spellings would become two plan names for one slot;
+  - any placeholder in a unit that holds a token the lexer could not read cleanly. That is an
+    unknown character (psql's `\`, as in `\set x :y`, `:a\gset` and `\g`), an error or junk, or
+    an unterminated string, quoted identifier, dollar body or comment (`SELECT :a '`,
+    `SELECT :a /* …`). The diagnostic points at that token. This also covers a comment end
+    the server decides (`AmbiguousCommentEnd`), which is flagged as an error;
+  - with `pg_question_marks` on, a PostgreSQL `?` whose reading is ambiguous:
+    - a `?` beside another `?`-operator (`WHERE ? ? 'k'`, `(j) ? ?`, `j ? ?|…`);
+    - a `?` directly followed by a literal (`first ? 'k'`, where `first` may be a column);
+    - a known `?`-operator in operand position (`a = ?-1`);
+  - an SQLite `:name` while `:name` parameters are off, or a malformed SQLite variable
+    (SQLite binds an unbound variable as NULL, so sending it would be silent);
+  - any placeholder of a `COPY` or `PREPARE`;
+  - any placeholder in a unit of several statements (a verbatim "Run as one" unit). No
+    protocol binds values across statements, and the head describes only the first. A `;`
+    inside a MySQL/MariaDB executable comment counts, because the server runs it;
+  - a PostgreSQL operator that only contains `?` (`=?`) while `?` binds;
+  - every `:`, `$`, `?`, `@` byte in a dialect with no lexer profile;
+  - a placeholder whose replacement would merge with a neighbouring byte. `:'v'2.5` would
+    become `$12.5`, `SELECT?` would become `SELECT$1` (one identifier), and SQLite `$a(x)1`
+    would become `?1`. The replacement must have no identifier byte on either side.
+
+**Not placeholders.** These are left as written and never reported: `::` casts, `:=`, the
+jsonb and geometric `?` operators, `@`/`@@` variables, and PostgreSQL `:name` inside `[…]`
+(array slices). The DBeaver prefix guard also rules out a `:` right after an identifier
+character, `$`, `:`, `?`, `\`, `/` or `[`. The server reads all of these the same way whether
+or not Hacivat binds. With `pg_question_marks` off, a PostgreSQL `?` in operand position gets
+only a `QuestionMarkOff` hint (D-08). `ARRAY[:a]` (inside brackets) and `x/:a` (prefix guard)
+get no diagnostic; the server reports a syntax error at `:`. A hint for them needs a new
+`ParamDiag` variant and its UI, so it is noted for Task 24.
+
+**Deterministic rewrite.** Only placeholder ranges change, and `edits` lists each one. On
+PostgreSQL, `:name` and `:'name'` become `$k` by first occurrence, and a repeated name reuses
+its `$k`. With `pg_question_marks` on, `?` becomes `$k` in text order. `$n` is unchanged. On
+MySQL, MariaDB, SQLite and the generic dialect, `:name` (and SQLite's `@name`, `$name`,
+`#name`) becomes `?`, with one slot per occurrence. `?` and `?NNN` are unchanged. Plan names
+are the `:name`'s name (SQLite's other sigils kept: `:a`, `@a` and `$a` are three
+parameters), `?k` for the k-th `?`, and a positional placeholder's own text (`$2`, `?2`).
+Names compare by bytes; Turkish `İ`/`ı` never fold. The rewritten text is what is classified
+and hashed (P-M3b-2). The properties check that every byte outside an edit is unchanged, that
+every token outside a placeholder lexes the same, that each replacement lexes as one
+placeholder token, and that rescanning the output finds the same placeholders.
+
+**Templates (D-053).** `${var}`, `%var%` and `<var>` are detected in code only; nothing is ever
+substituted. `${` is a template anywhere in code. `%var%` and `<var>` also read as arithmetic
+and comparisons (`10%n%3`, `a<b>c`), so they count only in operand position. That means after
+the start, an operator, `(`, `,`, `[` or an expression keyword, and before an operator,
+closer, `,`, `;` or keyword. Text inside strings is data: Hacivat has no "substitute inside
+strings" switch (PARAM-05/06).
+
+**`HvNorm1` (version 1).** The text is lexed from the initial state. Whitespace and comments
+are dropped. Literals, `COPY` data and parameters become `?`. A MySQL charset introducer
+joins its string: always when the two touch, and across whitespace only when it names a known
+character set (`_binary X'ff'`), because `_x 'a'` is a column and its alias. A psql
+meta-command keeps its `\name`, and every argument up to the end of the line becomes one `?`,
+so no secret survives: `\connect db u password=…` → `\connect ?`. A parenthesised list of `?`
+only becomes `(?…)`, and mixed lists keep
+their shape. A hint becomes `/*+…*/`. An executable comment keeps its opener and its body is
+normalised as code. Keywords from the lexer's table are ASCII-uppercased (P-M3b-18).
+Identifiers and quoted text stay byte-exact, with no case folding and no NFC. Tokens are
+joined by single spaces, with none after `(`/`[`/`.` and none before `)`/`]`/`,`/`.`/`;`.
+`hash` is XXH3-64 of the normalised text. Every keyword is uppercased, including unreserved
+ones such as `NAME`, so `update` and `UPDATE` agree. alg/10's sample text `AND name = ?`
+therefore reads `AND NAME = ?`.
+
+**Corpus.** `sql-testkit/corpus/datagrip/param.toml` holds PARAM rows 01–06, 12–15 and 18–20
+for PostgreSQL and MySQL, with each D-053/D-08 divergence recorded. The SQL Server row 12 runs
+on both of those dialects. Because `sql-split` has no TOML dependency, the test reads the file
+with a small line reader, and the file keeps to that subset.
+
+## m3b-t03 — identifiers and function data
+
+**Names resolve as the server resolves them, ASCII only.** `sql_ident::fold` lowers unquoted
+ASCII letters on PostgreSQL (and the PG-wire dialects) and truncates every identifier to 63
+bytes at a character boundary, as `downcase_truncate_identifier` does; MySQL, MariaDB and SQLite
+keep the text and `ident_eq` compares it ASCII-case-insensitively. No locale casing anywhere:
+`PG_READ_FİLE` folds to `pg_read_fİle`, never to `pg_read_file`. `parse_qualified` splits on
+dots outside quotes (`"…"` on PostgreSQL, backticks on MySQL/MariaDB, `"…"`/backticks/`[…]` on
+SQLite; doubled quotes undone; SQL whitespace (ASCII space, tab, newline, carriage return, form
+feed) around a dot allowed). A Unicode space (U+00A0, U+2000–U+200A, U+3000, …) is an identifier
+character to the servers' lexers, so it stays part of the name it touches:
+`"\u{a0}pg_catalog.lower"` names schema `"\u{a0}pg_catalog"`, never `pg_catalog`. Vertical tab
+is whitespace only on PostgreSQL 16+, so it is refused. Anything else (an empty part,
+an unterminated quote, an operator character, PostgreSQL's `U&"…"`) is `None`, which callers
+treat as unknown. Rejected: Unicode case folding (the Turkish-i lookalike would match a denied or
+allowed builtin).
+
+**`ident_eq` is not a server-equivalence test for MySQL tables or non-ASCII columns.** It is
+ASCII-case-insensitive for every MySQL/MariaDB/SQLite identifier. It does not model MySQL's
+`lower_case_table_names` (table names may compare by bytes) or its Unicode (`general_ci`)
+column-name comparison (`É` and `é` are one column to MySQL, two here). Callers that must match
+a table exactly (the type-to-confirm name, destructive-target matching: Task 15) compare bytes
+themselves.
+
+**`lookup_fn`: deny by bare name first, allow only exact builtins.**
+- A call whose last name part, ASCII-lowercased, is on the dialect's `deny.toml` is
+  `Denied(group)` in any schema, quoting or server version (`alg/13` SAFE-03 step 2: a user
+  function named like a denied builtin is denied too). Dialects without data (Generic, SQL
+  Server, ClickHouse, Oracle) read every engine's deny list; PG-wire servers read PostgreSQL's.
+- A call is `Allowed` only when it names a builtin the way the server would resolve it:
+  unqualified, or `pg_catalog.`-qualified on PostgreSQL, folded; on MySQL, MariaDB and SQLite
+  unqualified and unquoted, ASCII-case-insensitively. The row must be `reviewed = true` and its
+  version gate (`since` inclusive, `until` exclusive) must hold. Everything else is `Unknown`,
+  including every call on a dialect without reviewed data. Arity is not read (every overload of
+  a name shares its row).
+- **Nothing is proven below the probe floor (fix round 1, I2).** Each engine's `allow.toml`
+  records `probe_floor`, the oldest server the catalog read saw: PostgreSQL `14` (builtins change
+  only in major releases), MySQL and MariaDB the exact `VERSION()` of their oldest line (they add
+  builtins in patch releases), SQLite the bundled library's version (the app always runs it). A
+  row without `since` holds only from the floor on. A known older server, or no floor at all,
+  answers `Unknown`, because a builtin missing there could be a user function of the same name:
+  MySQL resolves an unqualified non-builtin to a stored function of the default database, and
+  PostgreSQL resolves it through `search_path`. An unknown version holds a row only when it holds
+  on every server from the floor on (its `since` is at or below the floor, and it has no
+  `until`). Hand `since` gates below the floor come from the engines' change histories:
+  - MySQL: every row `8.0.11` (8.0 GA), except
+    - `FORMAT_BYTES`, `FORMAT_PICO_TIME`, `PS_CURRENT_THREAD_ID`, `PS_THREAD_ID`: `8.0.16`;
+    - `JSON_OVERLAPS`, `JSON_SCHEMA_VALID`, `JSON_SCHEMA_VALIDATION_REPORT`: `8.0.17`;
+    - `JSON_VALUE`: `8.0.21`;
+    - `ST_FRECHETDISTANCE`, `ST_HAUSDORFFDISTANCE`: `8.0.23`;
+    - `ST_COLLECT`, `ST_LINEINTERPOLATEPOINT`, `ST_LINEINTERPOLATEPOINTS`, `ST_POINTATDISTANCE`:
+      `8.0.24`;
+    - `ST_LATITUDE`, `ST_LONGITUDE`: `8.0.12`;
+    - `ST_TRANSFORM`: `8.0.13`.
+
+    Rows whose first release is uncertain keep no hand gate and hold only from the floor:
+    `STATEMENT_DIGEST`, `STATEMENT_DIGEST_TEXT`, `GEOMCOLLECTION`.
+  - MariaDB: every row `10.6.0`, except `ADD_MONTHS`, `ROWNUM`, `SYS_GUID` and `TO_CHAR`
+    (`10.6.1`). Rows the probe gated on a later line (`10.11`, `11.4`) keep that gate.
+  - PostgreSQL: none (below 14 is below the support floor; such a server, accepted with
+    `allow_unsupported_server`, gets `Unknown` for every builtin).
+- `operator_known` and `cast_known` count only reviewed rows with no version gate. Word operators
+  (`LIKE`, `DIV`, `BETWEEN`, `IS`, …) match ASCII-case-insensitively; symbols match exactly.
+  Casts drop type modifiers and (PostgreSQL) array brackets, collapse whitespace, lower ASCII
+  letters and strip a `pg_catalog.` qualifier; another qualifier is unknown. PostgreSQL's interval
+  field qualifiers (`interval day to second`) read as `interval`, the quoted `"char"` as `char`;
+  MySQL's `CHAR(n) CHARACTER SET x` reads as `char`. Not covered, so unknown: MySQL's `… ARRAY`
+  (multi-valued index casts) and every other quoted or qualified type name.
+- **`set_allowed(d, name, value)`** is P-M3b-6's list exactly (`data/<engine>/set_allow.toml`),
+  whole names ASCII case-insensitive; SQLite and every other dialect allow no `SET`. MariaDB has
+  no `max_execution_time` (it calls it `max_statement_time`); the PO list keeps the MySQL name, so
+  that `SET` is simply refused there (the safe side). **PostgreSQL `search_path` is harmless only
+  while `pg_catalog` resolves first (P-M3b-T3-1):** `set_allowed` is true only when `value` is
+  given and `pg_catalog` is absent from the list (the server then searches it first) or is its
+  first schema. `None` and a value that does not parse are refused. The value is the text after
+  `TO`/`=`, read as PostgreSQL reads a `search_path` list:
+  - an unquoted name folds to ASCII lower case (`PG_CATALOG` is `pg_catalog`);
+  - a `"quoted"` name keeps its exact text (`"PG_CATALOG"` is another schema);
+  - a `'string'` is one schema with that exact text, as `GUC_LIST_QUOTE` makes it, so
+    `'public, pg_catalog'` is one schema named `public, pg_catalog`.
+
+  The other variables ignore `value`. The classifier passes the value of every
+  `SET search_path` (Tasks 9 and 14).
+
+**Where the rows come from (P-M3b-13).** `hacivat-exec/tests/gen_fn_catalog.rs`
+(`#[ignore = "docker"]`, `HACIVAT_GEN_FN_CATALOG=1`, through the wrapper on `--set full`) reads
+`pg_proc`, `pg_operator` and `pg_type` of `pg_catalog` (OID < 16384) on PostgreSQL 14–18 with
+read-only queries, `pragma_function_list` of the bundled SQLite, and prepares `SELECT <name>()`
+for each name of the hand-curated `data/mysql/manual-index.txt` on MySQL 8.0/8.4 and MariaDB
+10.6/10.11/11.4 (prepare only, nothing runs; 1305/1630 mean "no such function"; never
+`mysql.help_*`, GPL content). It writes candidates, all `reviewed = false`, and the reasons for
+every name it leaves out, to the Docker artifacts; it never edits `data/`. A PostgreSQL function
+is a candidate when every overload is a function, aggregate or window function, `IMMUTABLE` or
+`STABLE`, in `internal` or `sql`, not `SECURITY DEFINER`, not denied and not one whose text is
+SQL or a server path; an operator when no implementation is volatile or denied; a type when it
+is a base, domain, enum, range or multirange type outside the array category with a non-volatile
+input function. A name on a non-contiguous run of lines, or a candidate on one line and not on
+another, is left out.
+
+**Row sources.** `source` names where a row came from:
+- `pg_proc@pgNN`, `pg_operator@pgNN` and `pg_type@pgNN`: the PostgreSQL catalog read, on line
+  `pg17`, or the newest line the row was read on when it is absent from 17;
+- `manual-index`: `data/mysql/manual-index.txt`, probed per line;
+- `pragma_function_list`: the bundled SQLite;
+- `manual`: a hand row.
+
+The test `every_row_names_its_source_and_review_state` holds this vocabulary per engine.
+
+**The review.** Every candidate row was read by name and flipped by hand. Counts after fix
+round 1:
+- PostgreSQL: 2,462 function candidates (2,411 reviewed, 51 left unreviewed) plus 21 hand rows;
+  74 operators; 80 types plus 20 SQL-standard spellings.
+- MySQL: 367 names (360 reviewed).
+- MariaDB: 387 names (382 reviewed).
+- SQLite: 110 names (107 reviewed).
+
+Operators and cast targets of MySQL, MariaDB and SQLite are hand rows. Left unreviewed (so
+`Unknown`, which the read-only profiles deny):
+- **Information disclosure.** `alg/13` INFO_DISCLOSURE has no deny group, so the line is drawn
+  here (fix round 1, M6). A function is withheld when it reveals one of these about the server
+  or about other sessions:
+  1. other sessions' activity or connection details;
+  2. server settings values, or the server's build or version strings;
+  3. the server's network addresses;
+  4. server file-system paths or directory contents;
+  5. replication peers, slots and subscriptions.
+
+  On that basis the following are withheld:
+  - `current_setting`, `pg_show_all_settings`, `pg_config`, `version`;
+  - `inet_server_addr`/`_port`;
+  - `pg_tablespace_location`, `pg_tablespace_databases`, `pg_relation_filepath`;
+  - `pg_stat_get_activity`, `pg_stat_get_backend_*`, `pg_stat_get_progress_info`;
+  - `pg_stat_get_wal_senders`, `pg_stat_get_wal_receiver`, `pg_stat_get_subscription`,
+    `pg_get_replication_slots`, `pg_stat_get_replication_slot`;
+  - MySQL/MariaDB `VERSION`, MySQL `ROLES_GRAPHML` and `ICU_VERSION`.
+
+  Information about the caller's own session, about catalog objects, or aggregate statistics
+  stays allowed:
+  - `inet_client_addr`, `pg_backend_pid`, `CONNECTION_ID`;
+  - `pg_relation_filenode` (a number, not a path), `pg_available_extensions`;
+  - `pg_postmaster_start_time`, `pg_conf_load_time`;
+  - the per-table and per-database `pg_stat_get_*` counters.
+
+  SQLite's library information (`sqlite_version`, `sqlite_compileoption_*`) describes the
+  bundled library on the user's machine, not a server, so it is outside the line.
+- hidden reads of a relation named by a value: `table_to_xml`, `table_to_xmlschema`,
+  `table_to_xml_and_xmlschema`;
+- a type's input run for a type named by value (a domain's CHECK can call a user function):
+  `pg_input_is_valid`, `pg_input_error_info`, `domain_in`, `record_in`, `array_in`, `range_in`,
+  `multirange_in`, and (fix round 1, I3) the JSON-to-record coercions `json_populate_record`,
+  `json_populate_recordset`, `jsonb_populate_record`, `jsonb_populate_recordset`,
+  `jsonb_populate_record_valid`, `json_to_record`, `json_to_recordset`, `jsonb_to_record`,
+  `jsonb_to_recordset` (they coerce into the record's column types; `populate_domain` runs the
+  domain's CHECK);
+- the language validators (`fmgr_c_validator` loads a shared library) and their two siblings;
+- session state or server files: MySQL/MariaDB `LAST_INSERT_ID` (with an argument it sets the
+  session value), MariaDB `BINLOG_GTID_POS`, `DES_ENCRYPT`, `DES_DECRYPT`;
+- resource and host callbacks on SQLite: `randomblob`, `zeroblob`, `sqlite_log`;
+- MySQL keywords the probe answered with a syntax error but that are no functions in 8.x:
+  `CONTAINS`, `PASSWORD`, `SRID`.
+
+**Hand rows, `source = "manual"` (P-M3b-18).** Volatile or stable in `pg_proc`, so the generator
+never proposes them, but pure for a read: `random`, `clock_timestamp`, `gen_random_uuid`, `now`,
+`timeofday`, `random_normal` (16+), `array_shuffle` and `array_sample` (16+), `uuidv4` and
+`uuidv7` (18+); `timezone` (`AT TIME ZONE` parses to it; volatile only because `timetz` reads
+today's date); the size reads `pg_relation_size`, `pg_table_size`, `pg_indexes_size`,
+`pg_total_relation_size`, `pg_database_size`, `pg_tablespace_size`; `pg_partition_tree` and
+`pg_partition_ancestors`; the `TABLESAMPLE` methods `system` and `bernoulli` (their handlers take
+`internal`, so SQL cannot call them). The deny lists and the harmless-`SET` lists are hand rows
+too: PostgreSQL's covers the `alg/13` catalogue and all 27 names of
+`hacivat_guard::PG_NON_TRANSACTIONAL_FUNCTIONS` (Task 18 tests the equality); MySQL/MariaDB
+`SLEEP`, `BENCHMARK`, `LOAD_FILE`, the lock functions, the source-position waits, `sys_exec`/
+`sys_eval`, and MariaDB's `NEXTVAL`/`SETVAL`/`LASTVAL` (one rule with Task 10's pre-scan,
+P-M3b-8); SQLite `load_extension`, `readfile`, `writefile`, `edit`, `fts3_tokenizer` (the
+guard's authorizer list).
+
+**Residual risks, covered by the server (L3–L6) and the catalog (M4).**
+- An unqualified PostgreSQL call is assumed to reach `pg_catalog` first. Ruling P-M3b-T3-1: a
+  read-only session's `SET search_path` is harmless only when `pg_catalog` is absent from the new
+  list or first in it, and `set_allowed` checks the value (above). A role's or database's default
+  `search_path`, or a connection option, can still list `pg_catalog` after a writable schema. The
+  controller has routed a connect-time check of that to Tasks 14 and 18 (review M4).
+- A builtin operator symbol is known for all its overloads: a user operator of the same symbol
+  over user types is not seen without the catalog.
+- Implicit calls (domain CHECKs, column defaults, views) are not assessed without the catalog
+  (`alg/13` SAFE-03 step 6).
+- Two cast paths bypass `cast_known` (fix round 1, M3):
+  - **A user-defined cast from a user type.** `x::text`, where `x`'s type has
+    `CREATE CAST … WITH FUNCTION`, calls that function, though the target `text` is a builtin.
+  - **A temporary type that shadows a builtin type name.** `pg_temp` is searched before
+    `pg_catalog` for types, so a session-created temporary table named `int4` shadows the cast
+    target `int4`. Creating one needs a transaction that is not read-only.
+
+  Both are seen only with the catalog (M4); the read-only transaction (L3) still blocks writes.
+- MariaDB answered "no such function" for the zero-argument probe of `POINT`, `LINESTRING`,
+  `POLYGON` and the `MULTI…` constructors, so those calls are `Unknown` there (too strict, not
+  too lax).
+
+**Fail closed.** A data file that does not parse loads as empty (every lookup `Unknown`/`false`;
+`compiled_tables_parse` keeps that from shipping); a deny row denies whatever its review state;
+a denied name is removed from the allow map whatever `allow.toml` says.
+
+**Freshness (R1-M3).** `data/functions.digest` holds `xxh3-64:<16 hex>`: XXH3-64, seed 0, over
+the 21 files of `DIGEST_FILES` in order (`pg`, `mysql` with `manual-index.txt`, `mariadb`,
+`sqlite`; each `allow`, `deny`, `operators`, `types`, `set_allow`), each as its path, `\n`, its
+byte length, `\n` and its bytes with CRLF read as LF. `sql-safety` and `xtask gen-fn-catalog`
+each implement it (xtask takes no SQL crate); xtask's test compares its list with the one
+between the `digest-files` markers of `functions/data.rs`, and both crates pin the same known
+answer. `cargo xtask gen-fn-catalog --check` exits 1 on a stale digest and `--write` refreshes
+it; `cargo test --workspace` runs both freshness tests.
+
+**Tests.** `sql-ident/tests/fold.rs`; `sql-safety/tests/functions.rs` and
+`tests/set_allow.rs`; the unit tests of `functions/{mod,data}.rs`; `xtask` `gen_fn_catalog`
+tests; the candidate rules of `hacivat-exec/tests/gen_fn_catalog.rs` run without Docker.
+
+## m3b-t05 — incremental analysis
+
+**Relex (SQL-LEX-03).** `sql_lexer::relex` restarts at an exact point before the edit: the
+start of the edit's line when the old lexing has a token there, else the last checkpoint
+(`Lexed::checkpoint_before`: token starts at a line start, lexed in `Initial`, not at a
+byte-order mark, about every 2 KiB), else offset 0 in the lexing's start state. It lexes the
+whole new text with one cursor from there and stops at the first token start at or after the
+edit's end whose old position is a token start too; the tokens after it are the old ones,
+moved. That is exact because the lexer never looks behind a token's start (the byte-order-mark
+rule reads the absolute offset, which one cursor over the whole text keeps). An edit that
+touches a client command, a `DELIMITER` line or a lexical-mode setting relexes to the end on
+purpose and says so (`RelexDelta::full`, R-M3-65). Checkpoints are a lookup aid: two lexings
+that differ only in them are equal.
+
+**Resplit (SQL-SPLIT-05).** `SqlDocument::apply` turns a batch into one change (the common
+prefix and suffix of the two texts), relexes, and splits again only a window `[A, B)` between
+two *anchors*: line starts where the structural pass carries nothing forward but the client
+delimiter (no statement open, no `COPY` data due, only white space since the last item, client
+command or data, no byte-order mark). The window's split replaces the old items between the
+anchors; the items after `B` keep their `StmtKey`s and move. A window whose split does not end
+as the old pass stood at `B` (a statement or a `\copy` still open, another delimiter, another
+psql `\if` depth, an unterminated construct) grows, and last runs to the end of the text. The
+whole pass runs again instead when something reaches across every window: the stability rule
+of an unterminated construct before it, an executable comment or hint with an ambiguous end
+before `B`, the MySQL stray-`END` backstop in or after the window, a psql `\if` branch at `A`,
+or a restart at a byte-order mark (the pass reads one there as white space when it lexes
+again, as text when the document's lexing has a token there: an M3a inconsistency the window
+cannot reproduce, so it is left to the whole pass). The property
+`incremental_resplit_equals_full_split` checks every answer of the document (lexing, both
+splits, `split_start_at`, `selection_cuts`) against one built from the new text, over scripts
+with `$$` bodies, `COPY` data, psql commands, MySQL executable comments and client delimiters.
+
+**Speed (R-M3-9).** The previous revision's text and lexing are written over by the next
+`apply` once no snapshot holds them (`Lexed::clone_from` reuses the arrays): copying a 2 MB
+script's lexing into fresh pages on every keystroke cost more than the relex itself. The
+worker keeps its document between jobs and applies the change between the two texts (one
+comparison of the old text with the rope) instead of rebuilding (R-M3-22 stays: nothing of
+this runs on the UI thread).
+
+**Lexer follow-ups.** (a) A body the server runs reads `x'…'` and `b'…'` as raw literals
+(`BodyReading::RawQuoted`), as the lexer reads them in code (ledger 200). (b) The document is
+lexed with its client flavor (`lex_with_client`): a psql or mysql-client backslash command is
+one `ClientCommand` token whose argument ends at the end of its line (psql: or at a `\\`
+outside single quotes), as the splitter's pre-pass reads it, so a quote in the argument
+(`\echo don't`) no longer makes the rest of the file a string in the document's lexing (ledger
+274). That removes the second cost of the m3a-t13 section for backslash commands; `DELIMITER`,
+`source` and sqlite3 `.cmd` lines count only at statement start, which the lexer cannot know,
+and keep it.
+
+**`StreamSplitter`.** It holds the text from the last anchor, splits it, and gives out the
+items before the latest anchor that later text can no longer change: before an executable
+comment with an ambiguous end, outside a psql `\if` branch and, on MySQL/MariaDB, before the
+last block-tracked statement (a later stray `END` refuses back to it; with none held, nothing
+is given out before the end of the stream). Fed in any chunking, it yields the execution split
+of the whole script. It splits the held text again whenever that has doubled since a split
+that gave out nothing (O(n) overall). A statement still open past `STREAM_STATEMENT_MAX` is
+`TooLong` and ends the stream: its end is never looked for. No consumer until M4b.
+
+**Fix round 1.**
+- **Checkpoints after a relex (C1).** A checkpoint is exact only where the token before it
+  cannot look past it: at a line start. `relex` keeps the old checkpoints before its restart
+  point (their line feed lies before the edit) and those *after* the old resync point (the
+  byte before each is at or after the edit's end, in the unchanged suffix). It used to keep
+  the one *at* the resync point too, and when the edit ends exactly there (a line joined to the
+  checkpointed line, a blank inserted at it) the byte before it is new text: the next relex
+  restarted there and lexed `U` `&'`, `-` `- ` or `$` `fn$` apart. In the whole-pass fallback
+  that lexing became the split Run reads. That checkpoint is now dropped; `restart_point` also
+  refuses a checkpoint that is not a line start (debug assertion; the text's start otherwise).
+  The tests check every checkpoint after every edit (`tests/support/edits.rs`,
+  `checkpoints_hold`), over seeded runs of up to eight edits on scripts up to 16 KiB, biased to
+  end at checkpoints, line starts and statement starts; T20's `relex_equivalence` fuzz target
+  takes the same generator (`Rng::from_bytes`).
+- **The tail-relex signal (M4)** reads the first word of the touched lines: `DELIMITER`, or
+  `SET` with `sql_mode` / `standard_conforming_strings` on the line. `SELECT @@sql_mode` no
+  longer relexes to the end on every keystroke. The signal never matters for exactness.
+- **Open items (routed by the controller).**
+  - *The stream holds unbounded text on MySQL/MariaDB.* With no block-tracked statement held,
+    `StreamSplitter` gives out nothing before `finish` (a later stray `END` would refuse back to
+    the script's start), so a plain dump is held whole in memory: the 64 MiB cap bounds one open
+    statement, not the held text. This must be settled before M4b wires "Run as script".
+  - *`DELIMITER`, `source` and sqlite3 `.cmd` arguments* still make an odd quote cost the rest
+    of the document's lexing (follow-up (b) covers backslash commands only).
+  - *A byte-order mark at a restart* (right after a client command): the splitter reads it as
+    white space when it lexes again from there, as text when the document's lexing has a token
+    there. The fast path declines it; the sound fix is a lexer entry that lexes a slice whose
+    offset 0 is not a document start. `StreamSplitter` splits without the document's lexing, so
+    there "Run as script" can split differently from the editor's preview: the same fix closes
+    both.
+- **Typing figures beside R-M3-9** (release, gen-sql 50k lines; recorded, not budgeted): B3's
+  phrase typed and erased at the end of line 25,000 (its `'İzmir'` opens a string mid-file)
+  p50 0.4–0.5 ms, p95 2.2–2.7 ms, max 22–121 ms over three runs (the keystrokes that
+  leave the rest of the file inside a string take the whole pass); typing in the middle of a
+  100,000-character line p50 5 ms, p95 6–8 ms (no line starts there: the relex and the window cover the line); in a
+  1 MiB one-line script p50 47 ms (the whole text, as in M3a). All of it runs on the worker.
+
+## m3b-t10 — interim backend
+
+Task 10 fills the interim classifier backend for MySQL, MariaDB and SQLite (R-M3-54):
+`sql-safety/src/backend/{interim,prescan}.rs`, the statement tables
+`data/{mysql,sqlite}/statements.toml` (MySQL's serves MariaDB), `data/mysql/known_gaps.toml`, the
+SQLite read-pragma list (`pragmas.rs`) and the read corpora `sql-testkit/corpus/read/*.sql`.
+
+**Pipeline per statement range.** Our lexer reads the range first; a lexing error is
+`LexError`. Each executable comment is then read at every **version threshold**: with `k`
+distinct gate versions there are `k + 1` readings, an unversioned `/*!` is always active, and
+an `AmbiguousCommentEnd` comment adds its running reading (the end a server that runs the body
+sees). Readings are built by blanking bytes with spaces, so every offset stays the source's.
+More than `Limits.max_exec_comment_views` (16) readings is `TooComplex`. On a MySQL connection a
+MariaDB `/*M!` comment is read as a view too: MySQL skips it, but a MariaDB server behind a MySQL
+profile runs it, and the most dangerous reading wins. Each reading must:
+
+1. lex cleanly again;
+2. **agree** with `sqlparser`'s tokenizer: every byte is code, quoted text or trivia for both,
+   and every quoted token has the same extent. Spans are mapped from `sqlparser`'s 1-based line
+   and character column through `LineIndex`. Code tokens may split differently (`@v` is one
+   token for us and for `sqlparser`, `x'0A'` keeps its `x` as code); a string, identifier or
+   comment boundary may not differ. A tokenizer error where our lexer read the text is also a
+   disagreement. Either is `ParserDisagreement`;
+3. hold the same number of statements for both (else `ParserDisagreement`; more than one is
+   `MultiStatement`);
+4. parse in strict mode: `MySqlDialect` or `SQLiteDialect`, no trailing commas, recursion
+   limit 50 (`TooComplex` at the limit). A failure is `ParseError`, except for the narrow
+   P-M3b-35 grammars below.
+
+The walk is `sqlparser`'s derived `Visit`. It maps every statement, top-level or nested,
+through the table and adds what the tree shows:
+
+- locking clauses and `SELECT … INTO` (variables are `SESSION_STATE`, a table is DDL);
+- data-modifying CTEs and `EXPLAIN ANALYZE`;
+- every function call, in expressions and in table functions, through Task 3's `lookup_fn`
+  (deny list, then the reviewed builtins with their probe floors), then the profile's
+  allowlist, then the catalog (volatile is `VOLATILE_FN`, S-04);
+- touched objects;
+- the SAFE-07 destructive patterns: no `WHERE`, an always-true `WHERE`, `LIMIT` without
+  `ORDER BY`, a join without a condition, `DROP`, `TRUNCATE`, and `DROP COLUMN`, a dropped
+  constraint or a type change in `ALTER`. The inner statement of a plain `EXPLAIN` adds its
+  effects but no destructive pattern (it does not run).
+
+The lexer pre-scan inventory, on each reading:
+
+- a denied `word(` or `"quoted"(` call, by bare name, in any schema or quoting;
+- `INTO OUTFILE|DUMPFILE|@var`, `FOR UPDATE|SHARE`, `LOCK IN SHARE MODE`, `:=`, `HANDLER`,
+  `XA`, `LOAD DATA|XML` and `RETURNING`;
+- the P-M3b-8 MariaDB forms: `NEXT|PREVIOUS VALUE FOR`, `NEXTVAL(`, `LASTVAL(`, `SETVAL(`,
+  `seq.nextval`, `FOR SYSTEM_TIME`, `BEGIN NOT ATOMIC`;
+- SQLite's `ATTACH`, `DETACH`, `VACUUM [INTO]`, `REINDEX` and `CREATE VIRTUAL TABLE`;
+- client commands (`DELIMITER`, `SOURCE`, `SYSTEM`, `\…`, sqlite3's `.commands`) and
+  unreadable tokens;
+- `SET_VAR` and `MAX_EXECUTION_TIME` hints.
+
+The readings are then **unioned**: effects, flags, reasons, destructive patterns and targets,
+with the kind of the most critical reading by `gate_class`. Any doubt code (`reason_rule`
+`DenyAlways` or the `unknown` group) adds `UNKNOWN` and makes the class `Unknown`. The class
+field never carries an Unknown outcome on its own (the T4 producer contract).
+
+**Grammars of our own.**
+- **`SET` (MySQL, MariaDB).** One `SetTarget` and one `SessionState` reason per assignment,
+  with the name as written: quotes removed, the `@@session.`/`@@global.` scope stripped, a user
+  variable kept as `@v`. The value is kept as written. Targets are de-duplicated by the name's
+  byte range, so the two lists always match. When two readings disagree on a value, the value
+  is `None`. `GLOBAL`, `PERSIST`, `PERSIST_ONLY`, `@@global.` and `@@persist.` add `ADMIN`.
+  `sql_mode`, `character_set_client`, `character_set_connection` and `collation_connection`
+  set `LEX_MODE_CHANGE`. The special forms carry no target:
+  - `NAMES` and `CHARACTER SET` set `LEX_MODE_CHANGE`;
+  - `PASSWORD` and `DEFAULT ROLE` are `PrivilegeGrant`;
+  - `ROLE` is `PrivilegeChange`, the only role switch;
+  - `TRANSACTION` is `TXN_CONTROL`;
+  - `RESOURCE GROUP` is `ADMIN`.
+
+  A `SET` the grammar cannot read is `SESSION_STATE` with an argument-less `SessionState`, never
+  harmless.
+- **`PRAGMA` (SQLite).** It is a read only without an argument for a `sqlite_read_pragmas()`
+  name (the guard's 20), or with one name argument for the six introspection pragmas. Every `=`
+  form and every other pragma is `ADMIN` (`AdminControl`). `sqlparser` is not asked: it rejects
+  `PRAGMA table_info(t)`.
+- **Narrow reads (P-M3b-35).** These apply only where `sqlparser` rejects the form:
+  - `SHOW <words> [LIKE … | WHERE …]` with no call, no subquery, no variable and no `:=`;
+  - `DESCRIBE <qualified name> [<column or pattern>]`;
+  - `EXPLAIN|DESCRIBE [FORMAT = w] <statement>`. Its inner statement is blanked out of the
+    reading and classified on its own (depth ≤ 2), and `ANALYZE` never takes this path.
+
+**Choices.**
+- **Sleep has no bit.** A denied `Sleep` call adds only `FnDenylisted`, so `SELECT 1 /*!99999 ,
+  SLEEP(100) */` is `Read` with `EXEC_COMMENT`, as `alg/13` test 22 says. The gate is `Unknown`
+  and read-only denies it. Every other deny group maps to its bits: file I/O is `EXTERNAL_IO`,
+  advisory locks `ADVISORY_LOCK`, sequences `SEQUENCE` and dynamic SQL `UNKNOWN`.
+- **`EXPLAIN` without `ANALYZE` carries its inner statement's effects** (S-08: an EXPLAIN of a
+  non-read is not a read), but no destructive pattern.
+- **`SELECT @v := 1` is `Session`.** `alg/13` S-13 allows it on read-only with a flag. M3b has
+  no `USER_VAR_ASSIGN` flag, so read-only denies it (known gap).
+- **Information disclosure is Unknown** (fix round 1, I3, which replaces the first version's
+  `permissive` gap). See the fix-round-1 notes below.
+- **`sql_mode=ORACLE` on MariaDB is `UnsupportedDialect`.** No interim parser reads that
+  grammar.
+- **A lone CR in a reading is `ParserDisagreement`.** `sqlparser` counts only LF as a line
+  break, while `LineIndex` also counts a lone CR.
+- **Harness entry.** `sql_safety::classify_interim(&str, &ClassifyCtx) -> SafetyReport`
+  (`#[doc(hidden)]`, a fenced named exception in `lib.rs`) splits in execution mode, analyses
+  each strict range and merges. It is the entry for Task 10's tests and corpus; Task 14's
+  `classify` is the production entry. No `sqlparser` type is public:
+  `no_sqlparser_type_in_the_interim_public_api` checks every `pub` line of the backend and the
+  one re-export.
+
+**Known gaps** (`data/mysql/known_gaps.toml`, each row asserted by
+`known_gaps_each_have_a_test`):
+- **False denials:** the `MOD` operator, MySQL's `TABLE t`, `CAST … CHARACTER SET`,
+  `EXPLAIN EXTENDED`, `EXPLAIN FOR CONNECTION`, `CHECKSUM TABLE`, MariaDB's
+  `LIMIT ROWS EXAMINED`, SQLite's table-valued functions (not on Task 3's allowlist),
+  `ISNULL`/`NOTNULL`, `AS MATERIALIZED`, `PRAGMA x = name`, and a lone CR.
+- **Stricter than `alg/13`:** `LOCK IN SHARE MODE`, `INTO OUTFILE`, `LOAD DATA` and
+  `VACUUM INTO` are `Unknown` because `sqlparser` rejects them; the pre-scan still names their
+  bits. `SELECT @v := 1` is the S-13 gap above.
+- **MariaDB-only forms (P-M3b-8):**
+  - Accepted by `sqlparser`: `NEXTVAL`, `SETVAL`, `LASTVAL`, `RETURNING`, and `/*M!` read as a
+    plain comment.
+  - Rejected by `sqlparser`: `NEXT VALUE FOR`, `PREVIOUS VALUE FOR`, `FOR SYSTEM_TIME`,
+    `BEGIN NOT ATOMIC` and `sql_mode=ORACLE`.
+
+  None is `Read` at the gate, and each is denied on read-only.
+
+**Read corpus.** `sql-testkit/corpus/read/{mysql,mariadb,sqlite,pg}.sql` hold 326, 330, 312 and
+304 Hacivat-authored reads over the `datagrip/13` §3.1 seed schema. They include
+`SHOW`/`DESCRIBE`/`EXPLAIN` and the read `PRAGMA`s. The interim backend calls every MySQL,
+MariaDB and SQLite entry `Read`: zero false denials, each allowed on both read-only profiles
+and `Read` at the gate. The PostgreSQL file is Task 9's and Task 14's; here each entry is only
+checked to be one statement that libpg_query parses.
+
+**Tests.** `sql-safety/tests/interim.rs` (27) and `tests/read_corpus.rs` (4, plus the
+`#[ignore = "perf"]` budget test on the perf line); the unit tests of `backend/{interim,
+prescan}.rs` and `pragmas.rs`. `tests/data/safe06_interim.toml` holds the offline run A rows
+M1–M19 and L1–L9; Task 18 replaces it with the bypass TOML.
+
+**Fix round 1 (review of Task 10).** These rulings override the text above where they differ.
+
+- **Skipped readings (C1).** Every executable comment a server may skip is also read with the
+  comment removed. A MariaDB `/*M!` without version digits on a MySQL profile used to be read
+  only as code. Its one running reading now has the version `NEVER_ON_MYSQL` (`u32::MAX`), so
+  the threshold views always include the skipped reading as well. Each comment now carries a
+  list of readings, each with its own opener, end and version:
+  - MySQL's six-digit gate is read both as five digits plus a body digit and as six digits
+    (M7);
+  - an ambiguous end adds the running end;
+  - a version gate adds the skipped reading.
+
+  The union of readings is the classification. The views cover an unknown server version, a
+  version below each gate and a version above it, whatever version is known.
+- **The reading cap (C2).** The number of readings is
+  `(distinct versions + 1) × Π readings per comment`, counted with checked arithmetic, and
+  counting stops as soon as it passes `max_exec_comment_views`. Past 16, the statement is
+  `TooComplex` before any reading is built, with no loop over readings. Readings are then
+  enumerated with a mixed-radix counter that the bound limits. 62, 63, 64 and 200 ambiguous
+  comments are `TooComplex` within the test's time bound, in debug and in release.
+- **`SET` (I1).**
+  - `@@global.`, `@@persist.` and `@@persist_only.` take dotted component names (`@@global.validate_password.length`).
+  - A `SET` the grammar cannot read keeps the targets it read and is `Unknown`, with `ParseError` and `UNKNOWN`.
+  - It is also `ADMIN` when any `GLOBAL`, `PERSIST` or `PERSIST_ONLY` word, or any `@@global`/`@@persist` scope, appears anywhere in it.
+- **Constant predicates (I2).** SAFE-07's `AlwaysTrue` uses a shared, parser-free rule in
+  `destructive.rs` (`Predicate`, `always_true`), a named exception in Task 4's file.
+  - **How it decides.** It evaluates three-valued logic over literals: `NULL IS NULL`, `NOT FALSE`, `TRUE`, `1 = 1`, `'a' = 'a'` and `… OR TRUE` are `AlwaysTrue`. An expression that reads nothing of the row but whose value the rule does not model (`1 + 1 = 2`, a user variable, a bound parameter) counts as always true too, the safe direction. FALSE or NULL for every row, or anything that reads the row, is not.
+  - **Strings** compare as equal only when their bytes are equal; any other pair is left to the server's collation, which also counts as constant.
+  - **Backends.** The interim backend maps `sqlparser` expressions to `Predicate`. Under ANSI_QUOTES, `"a"` is a column. Task 9 maps PostgreSQL's tree the same way (routed carry).
+- **Information disclosure (I3, controller ruling; PO list).** These are `Unknown` (an
+  `EffectsUnknown` doubt naming the form) and are denied on read-only. M3b has no
+  `INFO_DISCLOSURE` bit, and this matches Task 3's line for `version()` and `current_setting`.
+  - The forms: `SHOW [FULL] PROCESSLIST`, `SHOW ENGINE …`, `SHOW {REPLICA|SLAVE|MASTER} STATUS`, `SHOW ALL {REPLICAS|SLAVES} STATUS`, `SHOW BINARY LOG STATUS`, `SHOW REPLICAS`, `SHOW SLAVE HOSTS`, `SHOW {BINLOG|RELAYLOG} EVENTS`, MariaDB's `SHOW {EXPLAIN|ANALYZE} FOR <connection>`, and `SHOW GRANTS FOR` another account.
+  - Still reads: `SHOW GRANTS`, `SHOW GRANTS FOR CURRENT_USER[()]` and `SHOW ENGINES`.
+  - The corpus drops these forms, and the `permissive` gap is gone.
+- **Minors.**
+  - `CALL` is always `FnUnknown` with `UNKNOWN`: a procedure is never a builtin function. Its deny-list effects are kept.
+  - A query whose body is a data change (`WITH … DELETE`) has that change's kind.
+  - MariaDB's quoted pseudo-column ``seq.`nextval` `` is `SEQUENCE`.
+  - A golden test pins `sqlparser` at `=0.64.0` and checks the `Debug` text the walk reads: variant names, `Join(None)`, `CrossJoin(None)` and `SetDataType`.
+  - The read corpus now also runs at MySQL 8.0.12 and 8.4.0 and at MariaDB 10.6.0, with zero false denials. It gained 8 MariaDB-specific reads: `seq_1_to_n`, `OFFSET … FETCH`, `INTERSECT ALL`/`EXCEPT ALL`, `JSON_TABLE`. Its sizes are now 325, 335, 312 and 304.
+
+**Fix round 2 (re-review).**
+
+- **Grammar escapes (RR-I1).**
+  - Every MariaDB `SHOW EXPLAIN|ANALYZE …` is denied, `FORMAT=…` forms included, because each one names another connection.
+  - `SHOW {REPLICA|SLAVE|MASTER} … STATUS` is denied with a named connection (`SHOW SLAVE 'c' STATUS`) or a channel.
+- **Same-category `SHOW` forms (controller ruling).** These are `Unknown` too:
+  - `SHOW {BINARY|MASTER} LOGS`;
+  - MariaDB's `SHOW {USER|CLIENT}_STATISTICS`;
+  - `SHOW CREATE USER` of any account other than `CURRENT_USER[()]`.
+- **Table routes to the same data (RR-I2, controller ruling).** On MySQL and MariaDB these are
+  `Unknown` (an `EffectsUnknown` doubt naming the table) and read-only denies them:
+  - `information_schema.PROCESSLIST`;
+  - `performance_schema.threads`;
+  - `performance_schema.events_statements_{current,history,history_long}`;
+  - `sys.{processlist,session,x$processlist,x$session}`;
+  - MariaDB's `information_schema.{USER,CLIENT}_STATISTICS`.
+
+  The match covers any letter case, any quoting, whitespace around the dot, and anywhere in the statement (subqueries, joins and CTEs included). The names specific enough to be safe also match unqualified, which covers a default database of `information_schema`, `performance_schema` or `sys`. `threads` and `session` match only qualified, because they are common user table names. `performance_schema.session_variables` of other threads is not covered: a query cannot tell them apart from one's own. The corpus dropped `SHOW BINARY LOGS`.
+- **Defence in depth, not the control.** These denies stop Hacivat from showing other sessions'
+  activity or statement text on a read-only console. They are defence in depth: the real
+  control is still the server's PROCESS, SUPER, REPLICATION CLIENT and
+  `performance_schema`/`sys` privileges (L5), which decide what any route shows. A route not on
+  the list is not denied by this rule. The PostgreSQL equivalent (other sessions' query text
+  in `pg_stat_activity`) is routed to Tasks 9 and 3.
+
+## m3b-t09 — PG backend
+
+**The tree comes from libpg_query, behind the oracle's guard.** `sql_oracle_pg::tree::{parse_tree,
+scan_tokens, fingerprint}` run on the oracle's one 16 MiB parser thread through the same
+`guarded` path as the splitter (NUL refused, 8 MiB cap, bracket depth ≤ 256 from PostgreSQL's own
+scanner), so no input reaches libpg_query unchecked. `parse_tree` parses exactly the text it is
+given (no placeholder normalisation: the classifier sees `$n`, P-M3b-2). The protobuf decode
+stops at prost's limit of 100 nested messages (47 nested `ARRAY[`, 100 `UNION`s): that is an
+`Err`, and the backend answers `Unknown` with `ParseError`. `pg_query::parse` also fills its own
+summary with `pg_query`'s walker; the oracle drops it unread, and a test forbids `nodes()`,
+`NodeRef`, the summary fields and `deparse` in `sql-safety` and `tree.rs` (R9).
+
+**stderr ruling (ledger 151, 164): measured, no patch.** The vendored libpg_query 18.1.0
+defines `DEBUG` in `src/pg_query_internal.h` (upstream, unpatched), which every C entry point
+includes before its `#ifndef DEBUG` stderr-redirect blocks: the per-call `dup2` of fd 2 onto a
+pipe is compiled out. `sql-oracle-pg/tests/tree.rs` `concurrent_stderr_is_not_lost_during_parses`
+proves it: a child process writes 10,000 numbered lines to fd 2 from one thread while another
+keeps libpg_query busy (parse, scan, fingerprint) until the writer is done, and the parent finds
+every line. `PATCHES.md` §2 is therefore not needed. Consequences: (a) the M3a text that says
+libpg_query redirects stderr per call (`stack.rs` module docs, ledger 151) describes the
+upstream source without the header's define; the one serial parser thread stays for its other
+reasons (per-thread memory, one in-flight call); (b) a `WARNING` the grammar raises (`GLOBAL`
+in `CREATE GLOBAL TEMP TABLE`, …) goes to the process's stderr, not to
+`ParseResult::warnings`, which Hacivat never reads; (c) child processes never inherit a
+libpg_query pipe. The test fails if a future libpg_query brings the redirect back. The two
+`pg_query` functions with the null-slice hazard stay unreachable (a grep test over `crates/`).
+
+**Generated visitor (R-M3-2).** `cargo xtask gen-pg-visitor` reads
+`third_party/pg_query/libpg_query/protobuf/pg_query.proto` with a small proto3 reader (no
+`protoc`; anything it does not understand is an error) and writes
+`sql-safety/src/visit/pg_generated.rs`: `MsgKind` (every top-level message), `PgRef<'a>`,
+`push_children` (every message-typed field, singular, repeated and `oneof`, of every message),
+the `Node` variant table and an iterative `walk` with an explicit stack (no recursion). The
+first line records the schema's XXH3-64; `generated_visitor_is_fresh` compares it, xtask's
+`the_checked_in_visitor_is_fresh` regenerates in full, and CI runs `gen-pg-visitor --check`
+(`# ## m3b-t09-visitor`). Only `SummaryResult` (not part of a parse tree) is skipped.
+`pg_visitor_reaches_every_node_kind_in_the_corpus` counts the `Node` kinds of each corpus tree
+independently (serde JSON of the tree) and requires the generated walk to visit exactly as many
+of each; a mutation that skipped `SelectStmt.with_clause` failed it. The corpus (Hacivat-authored
+plus the splitter corpus) reaches 197 `Node` kinds, every kind a raw tree holds in a `Node`.
+
+**Every message kind has a role** (`backend::pg::role`, an exhaustive match, so a new libpg_query
+message does not compile until placed): `Stmt` (a row of `data/pg/statements.toml`; a test
+requires the rows and the statement messages to be the same set), `Rule` (`FuncCall`, `A_Expr`,
+`TypeCast`, `IntoClause`, `LockingClause`, `RangeVar`, `RangeTableSample`, `SubLink`, `SortBy`,
+`CommonTableExpr`, `AlterTableCmd`), `Neutral` (raw structure and builtin expressions), or
+`Unhandled`: analysed-tree nodes (`FuncExpr`, `OpExpr`, `Query`, …) whose functions are OIDs
+the classifier cannot name, and scanner/summary messages. Met in a tree, `Unhandled` is
+`Unknown` with `EffectsUnknown`; the coverage test requires that no corpus statement meets one.
+
+**Combine rule.** libpg_query is the authority: (1) one parse of the whole text, an error is
+`ParseError` on every item; (2) its raw statements must be our items (same count, each item
+inside its raw statement's span), else `ParserDisagreement` on every item, plus `MultiStatement`
+when one unit was expected and the parser found several; (3) token-boundary agreement between
+our lexer (the session's modes, the version's profile) and PostgreSQL's scanner on significant
+tokens, else `ParserDisagreement` (`SELECT 0x1F` on a PostgreSQL 14 session is `0 AS x1F` to the
+server and one number to libpg_query); the one equivalence is a `:name` token of ours that the
+scanner reads as `:` and a name (array slices); with `standard_conforming_strings` off any
+backslash in a plain string is a disagreement (libpg_query parses with it on); (4) a server
+newer than PostgreSQL 18 adds `SyntaxNewerThanAgent`. Every `Unknown` outcome carries `UNKNOWN`
+or a doubt reason (Task 4's producer contract); `class == class_of(effects)` always.
+
+**Statement rules beyond the table.** `INTO` anywhere is DDL and a write (`INTO TEMP`:
+`DDL_TEMP`, `WRITE_TEMP`; `CREATE TEMP TABLE/SEQUENCE/VIEW` likewise `DDL_TEMP`). A data change
+inside a CTE adds `DataModifyingCte`. `EXPLAIN`: any `analyze`/`analyse` option that is not
+plainly false (`false`, `off`, `0`) is `EXPLAIN_ANALYZE` (`yes`, which PostgreSQL rejects,
+counts as true); the inner statement's effects count with or without it (S-08: `EXPLAIN
+(ANALYZE off) DELETE` is a write). `COPY`: from is a write, to a read, a server file
+`EXTERNAL_IO`, a program `PROCESS_EXEC`, a query its own effects (S-12, export only through the
+export API, is the policy's, not the effects'). Two-phase commit (`PREPARE TRANSACTION`,
+`COMMIT/ROLLBACK PREPARED`) adds `WRITE_DATA | ADMIN`. `DECLARE … WITH HOLD` is session state.
+Departures toward caution: `CREATE/ALTER SUBSCRIPTION` and `IMPORT FOREIGN SCHEMA` also
+`EXTERNAL_IO`; `ALTER ROLE … SET` and `DROP OWNED` also `PRIVILEGE`.
+
+**`SET` (Task 4's producer contract).** A top-level `SET`/`RESET` gives one `SetTarget` per
+variable, named as the server resolved it (`SET TIME ZONE` is `timezone`, `SET NAMES`
+`client_encoding`, `SET SCHEMA` `search_path`), with its value as written (the text from the
+first argument to the statement's end, trimmed; `None` for `DEFAULT`, `FROM CURRENT`, `RESET`
+and the multi-word forms), and one `SessionState` reason whose argument is that name. `RESET
+ALL` has no target. `role` and `session_authorization` add `PRIVILEGE` and `PrivilegeChange`
+(denied in every profile); `standard_conforming_strings`, `client_encoding` and
+`backslash_quote` add `LEX_MODE_CHANGE`. `SET search_path` reports its value faithfully and the
+allowlist decides (P-M3b-T3-1). `set_config` is denied by name (`SetConfig`: `SESSION_STATE |
+ADMIN`, case 8), its literal name gets the same variable rules, and a non-literal name is
+`UNKNOWN`.
+
+**Functions, operators, casts (SAFE-03 through Task 3's data).** The raw tree holds names as
+the server resolved them, so each part is looked up exactly (`quoted = true` to `lookup_fn`:
+folding again would make a quoted `"Lower"` read as `lower`). Order: the deny list by bare name
+(`FnDenylisted` plus the group's effects: `Sleep` stays `READ`, file and network `EXTERNAL_IO`,
+`dblink*` also `DYNAMIC_SQL`, admin and replication `ADMIN`, large objects `WRITE_DATA`, dynamic
+SQL `UNKNOWN`, advisory locks, sequences and XIDs their bits); then Task 3's reviewed builtins,
+unqualified or `pg_catalog.`, **written unquoted** (a quoted part, found from the scanner's
+tokens at the call's location, is never taken as a builtin; a name with no place in the text
+counts as quoted unless `pg_catalog` qualifies it); then the profile's allowlist (each entry
+read as a PostgreSQL name and folded; exact part-by-part match; `Confidence::Conservative`);
+then a catalog (`FnLookup::Known { volatile: false, writes: false }` is a conservative read,
+`volatile` sets `VOLATILE_FN` and is `UNKNOWN` (S-04), `writes` adds `WRITE_DATA` and `UNKNOWN`);
+else `UNKNOWN` with `FnUnknown`. `TABLESAMPLE` methods are looked up like functions. Operators
+(`A_Expr`, `SubLink`'s and `ORDER BY … USING`'s) must be `operator_known`, unqualified or
+`OPERATOR(pg_catalog.…)`; `BETWEEN` needs `>=` and `<=`. Casts must be `cast_known`, written
+unquoted (an ASCII capital in the tree's name proves quoting), without `%TYPE`.
+
+**Destructive patterns (SAFE-07)** on statements that run now: `UPDATE`/`DELETE` without
+`WHERE` (`NoWhere`), a `WHERE` that folds to true (`AlwaysTrue`: `1=1`, `TRUE`, `'a'='a'`,
+`NULL IS NULL`, `NOT FALSE`, `x OR 1=1`, `'t'::boolean`, `IS TRUE`), a `USING`/`FROM` join whose
+`WHERE` never names the target (`JoinWithoutOn`; an unqualified column counts as the target's),
+`TRUNCATE`, every `DROP` (`CASCADE` flagged), `ALTER TABLE … DROP COLUMN/CONSTRAINT/ALTER TYPE`,
+`MERGE … THEN DELETE`. Nothing inside a routine body, rule action, prepared statement, view,
+policy, trigger or plain `EXPLAIN` (step 6), though their effects still count. No temp-table
+exemption is configured in M3b (step 4 "when configured"). Targets are the tree's names.
+
+**Not assessed (residual, covered by L4/L5 and the catalog in M4):** implicit casts and
+operators on user types, user-defined subscripting, column defaults, triggers and RLS policies
+that a statement fires, view bodies, function overloads in later `search_path` schemas,
+**attribute notation** (`t.f` and `(t).f` call `f(t)` when `t` has no column `f`; a raw tree
+cannot tell a column from a call, so the M4 catalog must treat a last field that is no known
+column as a call), and **foreign tables** (a read or write of one reaches a remote server).
+
+**Fix round 1 (review `task-m3b-09-review.md`).**
+- **Every named target type is a coercion (I1).** Besides `::`, `CAST` and `type 'literal'`,
+  the SQL/JSON `RETURNING` types (`JsonOutput`: `JSON_VALUE`, `JSON_QUERY`, `JSON_OBJECT`,
+  `JSON_ARRAY`, `JSON_SERIALIZE`, the aggregates), `JSON_TABLE` and `XMLTABLE` column types,
+  `XMLSERIALIZE … AS` and a function's column definition list (`f() AS x(a t)`) go through the
+  same check: a builtin written unquoted (`cast_known`, `pg_catalog` first), else `UNKNOWN` with
+  `CastUnknown`, because a domain's CHECK or a user cast may run code. Type names in DDL
+  (column definitions, parameters, `CREATE CAST`) are not coercions at run time and stay as
+  they were (the statement is DDL); `PREPARE`'s parameter types coerce only at `EXECUTE`, which
+  is `Unknown`. The quoted single-byte `"char"` is the one quoted builtin (M9).
+- **Statements that change how later statements read taint them (I2a).** Inside one `analyse`
+  call, after an item that may change the search path (a `SET`/`RESET search_path` the
+  harmless list refuses, any `set_config`), the lexing modes or the role (a `LEX_MODE_CHANGE`
+  or `PrivilegeChange` item), `RESET ALL`, `DISCARD ALL`, or any item with `UNKNOWN` effects
+  (code the classifier cannot see may do any of these), every later item gets `UNKNOWN` and
+  `EffectsUnknown`. Re-analysing with an updated context was rejected: the effect of an
+  `UNKNOWN` item on the context cannot be computed. **Carry (T14/T18):** when units are
+  classified one at a time, the session refreshes `ctx.search_path` and `ctx.dialect.modes`
+  after any such unit, or treats both as unknown.
+- **`ClassifyCtx.search_path` contract (I2b):** one schema per element, named as the server
+  stores it (folded: `current_schemas(true)`), `$user` literal; empty is unknown (`pg_catalog`
+  first, as the server searches it). An element that cannot be such a name (a raw `SHOW`
+  string, quotes, a comma, edge whitespace, or `pg_catalog` in another case) makes
+  unqualified builtins, operators and casts unknown; otherwise `pg_catalog` must be absent or
+  first. T18's connect-time read is the producer.
+- **Implicit `=` (M2):** `CASE x WHEN`, `JOIN … USING` and `NATURAL JOIN` look `=` up by name, so
+  they need `pg_catalog` first like any unqualified operator.
+- **Exact items (M3):** each item must be its raw statement's first-to-last significant token
+  (comments and edge `;` aside), not a part of it.
+- **Limits are `TooComplex` (M4):** the guard's size and nesting refusals and prost's decode
+  failure (`over_a_limit`). prost's limit of 100 nested messages is fixed (`DecodeContext`
+  "cannot be customized"; only the `no-recursion-limit` feature lifts it, which is a manifest
+  change and would let decoding recurse on the parser thread's stack), so it stays 100: 47
+  nested `ARRAY[`, 100 `UNION`s, a `||` chain of about 45 terms, about 24 nested `CASE`. T18's
+  run A should measure the false denials this causes.
+- **Session resets (M5):** `RESET ALL` and `DISCARD ALL` carry `LEX_MODE_CHANGE` and
+  `PrivilegeChange` (denied in every profile).
+- **M6:** `ALTER TABLE … OWNER TO` adds `PRIVILEGE`; `ALTER DOMAIN … DROP CONSTRAINT` is
+  `DropConstraint`. The statement table has 116 rows.
+- **Destructive ranges (M7):** a destructive reason's range is where its target's name is
+  written (the `RangeVar`'s location, or the first name tokens inside the statement that read
+  as the target), so T15's type-to-confirm can use the user's own bytes.
+- **Coverage (M8):** the coverage test also requires the generated walk to visit as many
+  messages as the tree's JSON has objects (`oneof` wrappers aside), so a skipped typed field
+  with no `Node` below it fails too.
+- **Leading BOM (M9):** parsed as three spaces (same offsets); our lexer reads it as whitespace,
+  and a server that does not strip it rejects the text.
+
+**Fix round 2 (round 1 re-review).**
+- **A procedure is never a builtin (R1-I1):** a `CALL`'s target is `FnUnknown` + `UNKNOWN`
+  whatever its name (`CALL lower(1)` may resolve to a user procedure), and any item with
+  `ROUTINE_CALL` (`CALL`, `DO`, an `EXECUTE` of a prepared `CALL`) makes later items unknown.
+- **`UPDATE pg_settings` is `set_config` (R1-I2):** the view's update rule runs
+  `set_config(name, setting, false)`, so an `UPDATE` of a relation named `pg_settings` (any
+  schema, any spelling that reads as that name) adds `SESSION_STATE | ADMIN`, `SessionState`
+  and `AdminControl`, and makes later items unknown.
+- **More context changers (R1-M1, R1-M2):** `pg_reload_conf()` (a reload brings `ALTER
+  SYSTEM`'s values into the session), `LOAD` (a library's `_PG_init` may set anything), and any
+  item with `DDL` or `DDL_TEMP` effects (it may create a function, operator, cast, type, or a
+  temp view that shadows a table, which a later name resolves to) make later items unknown.
+- **R1-M3:** a `search_path` element with a control character is unreadable (fail closed).
+  **R1-M4:** `"char"[]` keeps its array suffix in the cast check.
+- **Other sessions' activity (T10's RR-I2 ruling, follow-up):** reading `pg_stat_activity` or
+  `pg_stat_statements` (any schema, any spelling, ASCII case-insensitive) is `UNKNOWN` with
+  `EffectsUnknown` naming the relation, so a read-only session denies it; the functions
+  behind them (`pg_stat_get_activity`, `pg_stat_get_backend_activity`, the
+  `pg_stat_statements(…)` function) are unreviewed or absent in Task 3's data and are `Unknown`
+  already, which this aligns with. `pg_locks` alone (pids, lock modes, no statement text)
+  stays a read; joined with `pg_stat_activity` the statement is `Unknown` through the view.
+  These denies are defence in depth: a user view over these relations is not seen, and
+  `pg_read_all_stats` (or superuser) on the server is the real control.
+- **Carry wording (R1-M5, controller):** across separately classified units the session must
+  refresh the context after the unit that *executes* code which changes it (`EXECUTE`, `FETCH`
+  of a cursor whose query calls `set_config`), not only after the unit that contains it.
+
+**Tests.** `sql-oracle-pg/tests/tree.rs`; `sql-safety/tests/pg_backend.rs` (the `alg/13`
+cases 1–21, 33, 34 with their read-only decisions, CVE T12 shapes, UNSAFE-01..10, combine rule,
+hostile inputs: comment tricks, `$$` bodies, `DO`, `EXPLAIN ANALYZE <write>`, data-modifying
+CTEs, `SELECT … INTO`, `COPY … TO PROGRAM`, `CREATE TEMP`, `LOCK`, writing functions in a
+`SELECT`, `CALL`, `PREPARE`/`EXECUTE`, Turkish identifiers) and `tests/pg_coverage.rs`; xtask's
+`gen_pg_visitor` tests. The backend is reached through the hidden `pg_backend_hooks` until Task
+14's `classify` dispatches to it.
+
+## m3b-t14 — classify
+
+Task 14 fills the orchestrator `sql_safety::classify` (`classify.rs`, `backend/plan.rs`,
+`fingerprint.rs`) and the classifier pool `hacivat_exec::classify_pool`. Nothing is wired into
+Run (R-M3-52); Tasks 15, 18, 24 and 26 do that.
+
+**Steps** (`alg/13` SQL-SAFE-02; the bytes classified are exactly the bytes passed, and
+`classified_len`/`classified_hash` describe them, P-M3b-2):
+1. **L0, before any parser** (R-M3-3). Over `Limits.max_bytes` → `TooComplex` first. A dialect
+   without a backend → `UnsupportedDialect`. One lexing (with the client flavor); any lexer
+   error → `LexError`, `AmbiguousCommentEnd` → `AmbiguousBoundary`; more than
+   `max_tokens` significant tokens, or brackets (`(`, `[`, `{` together) plus `CASE … END`
+   blocks deeper than `max_nesting` (256) → `TooComplex`. Only `CASE` is counted as a block:
+   `BEGIN` is also a transaction statement with no `END`, and an over-count would refuse long
+   transaction scripts; deeper blocks meet the backends' own limits (prost's decode depth,
+   `sqlparser`'s recursion limit 50).
+2. **Pre-pass.** A client command or `COPY … FROM STDIN` data → `ClientCommand`; a template
+   variable (scanned per statement with `scan_params`, only where a `${`, `%` or `<` byte is) →
+   `TemplateVariable`; on MySQL and MariaDB a `/*!`/`/*M!` comment outside every statement's
+   strict range → `ExecutableComment` (T10 carry: the executor sends the bytes classified, and
+   a MariaDB server behind a MySQL profile runs a trailing `/*M! INTO OUTFILE … */` the backend
+   never read).
+3. **Split** (execution mode): none → `NoStatement`; two or more with
+   `Expect::SingleStatement` → `MultiStatement`; any uncertain boundary → `AmbiguousBoundary`.
+   Steps 1–3 collect all their reasons into `pre_decision`; no backend runs.
+4. Threshold views stay the interim backend's (Task 10).
+5. **Plan** (`backend::plan`): `Postgres`, `PgWire(_)` → libpg_query; `MySql`, `MariaDb`,
+   `Sqlite` → the interim backend; every other dialect (and any added later: `DialectId` is
+   `#[non_exhaustive]`) → `UnsupportedDialect`. A backend that answers another number of
+   reports, or other ranges, proves nothing (`EffectsUnknown`, pre-decided).
+6. **Combine.** Per item: the producer contract (below), exact duplicate reasons dropped, and a
+   PostgreSQL `COPY` whose class is `Read` (`TO STDOUT`) made `Unknown` (`EffectsUnknown`, arg
+   `COPY TO STDOUT`; `alg/13` S-12: exports are not a query tool's, so read-only consoles deny
+   it; Run already refuses the unit by kind, `m3a-f1`). Then the **context rule**: after an item
+   that may change how later items read, every later item is `Unknown` (`EffectsUnknown`).
+   Such an item has `UNKNOWN`, `ROUTINE_CALL`, `DDL` or `DDL_TEMP` effects, any administrative
+   effect (`ADMIN`, `PRIVILEGE`, `PROCESS_EXEC`, `EXTERNAL_IO`: `set_config`, `UPDATE
+   pg_settings`, `pg_reload_conf()` and `LOAD` leave no other trace in a report, and a unit run
+   alone has nothing else to read; a test proves that every statement the PG backend's own rule
+   taints a later statement after also changes the context as a unit), an `Unknown` class,
+   `LEX_MODE_CHANGE` or `DYNAMIC_SQL`, a `LexModeChange`, `PrivilegeChange`,
+   `SetNotAllowlisted`, `DynamicSql`, `ProceduralCode`, `RoutineCall` or `EffectsUnknown`
+   reason, a `SET` target the dialect's harmless list refuses (or a `SET` with no target
+   read), or it is `EXECUTE`, `FETCH` or `MOVE` (they run code defined earlier, perhaps in
+   another run: Task 9 review R1-M5). The PG backend applies its own rule first; this one adds
+   `FETCH`/`MOVE` and covers the interim backend, which reads statements alone (`SET sql_mode`,
+   `SET NAMES`, `CALL`, DDL on MySQL, MariaDB and SQLite). Cost: a create-then-use script is
+   `Unknown` from the DDL on (as Task 9's R1-M2 accepted for PostgreSQL).
+   The request's class, effects and flags are `merge`d.
+7. **Fingerprint** (`fingerprint::request_fingerprint`): libpg_query's (`algo = PgQuery`,
+   version 3) on PostgreSQL and the PG-wire flavours, `HvNorm1` when libpg_query refuses the
+   text (and without asking it again once the backend saw a `ParseError`), and on every other
+   dialect. `normalized` is always `HvNorm1`'s text (literals masked).
+
+**Producer contract** (T4 review carry): every backend item has `class == class_of(effects)`,
+and an `Unknown` item carries `UNKNOWN` or a reason the policy reads as doubt (`DenyAlways`) or
+as the `Unknown`/`Routine` group. A debug build asserts both (the pool turns the panic into an
+`Unknown` report); a release build makes a violating item `Unknown` (`EffectsUnknown`). No
+backend item of the existing suites violates it.
+
+**Units one at a time** (Task 9 carry). Run classifies its units before any of them runs
+(R-M3-84), so the context cannot be refreshed between them: `classify_units` (and the pool's
+`classify_units`) makes every unit after a context-changing one `Unknown` (each item gets
+`EffectsUnknown`; the report keeps its bytes' hash). Across runs, `changes_context(sql, report)`
+tells the caller to re-read `ClassifyCtx.search_path` and `dialect.modes` (Task 18's
+connect-time read, Task 24's re-probe) before classifying again; a pre-decided report, a report
+with no dialect, or one of other bytes always answers yes. `FETCH`/`EXECUTE` answer yes even
+when their cursor or statement was declared in an earlier run.
+
+**Lexing handed to the backends** (T10 C1 carry). `Backend::analyse` takes the orchestrator's
+lexing when it is exactly `sql_lexer::lex`'s (no client flavor). The PG backend's token
+agreement uses it; the interim backend uses it for a statement that is the whole text (one
+unit: the exec path). With a client flavor every backend lexes on its own; a test proves both
+ways give the same items over the four read corpora.
+
+**Kept hooks.** `pg_backend_hooks` and `classify_interim` stay `#[doc(hidden)]` backend-only
+harnesses: the PG coverage test needs hooks `classify` cannot give (visit counts, node
+variants, the statement table), and Tasks 9 and 10 pin their backends through them. A test
+proves `classify` is never more permissive than either.
+
+**The pool** (R-M3-53). `ClassifyPool::new(2)`: two std threads, 16 MiB stacks, one queue,
+answers through `oneshot`. A panic in a job is an `Unknown` report (`EffectsUnknown`) and the
+thread lives on; a shut-down pool (or one whose threads could not start) answers `Unknown` at
+once; `classify_within` turns a missed deadline or a lost job into `Unknown`; the read-only
+guard's `check_read_only`/`effects` wait at most 10 s, then deny / answer `None`. Every
+libpg_query call goes through `sql-oracle-pg`'s serial parser thread, so the two pool threads
+never parse at once (a test classifies 64 PostgreSQL texts from both threads and compares each
+with its lone classification). `check_read_only` classifies one statement (no server version,
+default lexing modes, no client flavor) with the profile's allowlist and allows only what
+`decide(.., ReadOnlyPlusExplain, Human)` allows; denials carry Fluent IDs only. `effects` maps
+`SESSION_STATE`, `WRITE_TEMP`/`DDL_TEMP`, `ADVISORY_LOCK`, MySQL-family `LOCK_TABLE`, `PREPARE`,
+`DDL` and `opens_write` to `SessionEffects`, and is `None` whenever anything is unknown.
+
+**Stack.** The token limit lets a left-deep operator chain of ~100,000 terms through (`SELECT
+1 + 1 + …`), and `sqlparser`'s derived walk and drop recurse through it: measured here, a 2 MiB
+thread aborts the process on it (from ~50,000 terms in a debug build; at 99,000 in release),
+an 8 MiB thread in a debug build too. (The claim first made here, that the pool's 16 MiB threads
+read every chain the limit allows, was wrong: see fix round 1, C1.)
+
+**Budget.** p50/p95 per 10 KB unit (release, 200 runs, a busy machine): PostgreSQL ~1.8–2.0 /
+2.0–2.4 ms, MySQL/MariaDB ~1.45 / 1.5–1.8 ms, SQLite ~1.25 / 1.3–1.45 ms, against SQL-SAFE-02's
+1 ms. On PostgreSQL libpg_query's parse with its protobuf decode (and `pg_query`'s own summary
+walk, which Hacivat drops unread) is ~0.9 ms and its fingerprint ~0.5 ms; on the interim path
+`sqlparser`'s tokenize and parse are ~0.85 ms. The assertion stays Task 10's interim 2 ms, on the
+fastest run; Task 20 measures and Task 30 decides against the budget.
+
+**`search_path`.** An empty `ClassifyCtx.search_path` keeps Task 9's contract (I2b: unknown,
+`pg_catalog` first as the server searches it); an unreadable one makes unqualified builtins
+unknown. Task 18's connect-time read is the producer; until then the read-only guard's
+`check_read_only` (whose seam carries no search path) classifies with the empty one.
+
+**Tests.** `sql-safety/tests/classify.rs` (the plan's tests; every failure path; `COPY … TO
+STDOUT`; the context rule in scripts and across units; hostile scripts mixing PostgreSQL,
+MySQL/MariaDB and SQLite tricks; the Task 9 and Task 10 regression probes; the four read corpora
+through `classify`, PostgreSQL's four ruled denials pinned; lent vs own lexing; the 10 KB
+budget), unit tests in `classify.rs` (injected failing backends, the producer contract),
+`backend/plan.rs` and `fingerprint.rs`; `hacivat-exec/tests/classify_pool.rs` and the pool's
+unit tests (panic, deadline, shutdown).
+
+**Fix round 1 (review `task-m3b-14-review.md`).**
+- **C1, operator chains.** `sqlparser` 0.64 parses MySQL/MariaDB `DIV` and SQLite `REGEXP`,
+  `GLOB`, `MATCH` by cloning the whole left operand (`parse_div_infix`,
+  `SQLiteDialect::parse_infix`): a chain of n is n² clones and a recursion n deep, which
+  aborted a 16 MiB thread at 5,000 links (debug) and 20,000 (release), after tens of seconds.
+  L0 now counts, on the interim plan, every infix operator (each `Op` token and the words
+  `AND OR XOR NOT DIV MOD LIKE ILIKE RLIKE REGEXP GLOB MATCH SOUNDS SIMILAR IS ISNULL NOTNULL
+  IN BETWEEN COLLATE ESCAPE MEMBER OVERLAPS UNION INTERSECT EXCEPT JOIN`) per expression (a
+  count per open bracket, reset at a comma, the statement's at a top-level `;`), and answers
+  `TooComplex` past **`MAX_OPERATOR_CHAIN` = 1,024** in one expression or past
+  **`MAX_CLONING_WORK` = 65,536** (cloning operators × operators) in one statement.
+  Measurements (debug, every infix operator of each dialect chained): 2,048 links took up to
+  62 ms (`IN`), over the 50 ms bound; 1,024 take 6–20 ms (one 41 ms outlier under load); the
+  cloning ones take 7 ms at 256 (the cloning cap for a plain chain), 23–31 ms at 512 and
+  87–99 ms at 1,024. A test sweeps every infix operator of MySQL, MariaDB and SQLite at the
+  cap (classified, under 2 s) and one link past it (`TooComplex`), plus the reviewer's
+  crashing inputs. PostgreSQL keeps libpg_query's own limits (prost's decode depth, its stack
+  check).
+- **C2, lexing modes (controller ruling, part a).** The session's modes do not reach every
+  caller yet (the read-only guard's seam has no slot), so `classify` reads a text under every
+  mode combination its bytes can tell apart, `ctx`'s modes first: PostgreSQL
+  `standard_conforming_strings` on and off when the text holds `\` or `&` (`U&''`);
+  MySQL/MariaDB `NO_BACKSLASH_ESCAPES` on and off when it holds `\`, crossed with
+  `ANSI_QUOTES` on and off when it holds `"`.
+  `PIPES_AS_CONCAT` and `HIGH_NOT_PRECEDENCE` change no reading here (neither the lexer nor the
+  interim backend reads them). The readings are united: a pre-decision in any is the union's
+  (with every reading's reasons); statements cut differently are `AmbiguousBoundary`; otherwise
+  each item takes every reading's effects, flags, reasons, destructive patterns, objects and
+  `SET` targets, so `decide` (monotone in evidence) allows only what every reading allows. The
+  reviewer's repros deny. Cost (release, 10 KB): PostgreSQL 1.84 → 3.74 ms (2 readings),
+  MySQL 1.6 → 6.1 ms (4 readings), only for texts holding those bytes. Part (b), the
+  session's real modes, search path and version in `ClassifyCtx` (one reading), is a plan
+  amendment for Tasks 18 and 24. New ruled denial: a PostgreSQL `U&''` string (it does not lex
+  with `standard_conforming_strings` off).
+- **I2, the stack.** `classify`, `classify_units`, `classify_interim` and the PG hooks run on a
+  scoped thread of `CLASSIFIER_STACK_BYTES` (16 MiB) unless the calling thread is marked
+  (`mark_classifier_thread`, a hidden hook the pool's threads call); a scoped thread that cannot
+  start or panics answers an `Unknown` report. A test classifies at the caps and runs the
+  harnesses on a 99,000-deep chain from a 2 MiB thread.
+- **Minors.** The pool's entries resolve to a report always (`Result<_, Infallible>`); its
+  queue holds at most `QUEUE_CAPACITY` (256) jobs and a request past it is `Unknown` at once; a
+  job whose caller stopped waiting is skipped, one past its deadline answers `Unknown`
+  unclassified (M1). An oversized text is fingerprinted by its bytes, never lexed
+  (`unknown_report`, M2). On PostgreSQL `ROLLBACK`/`ABORT` (any form), on MySQL/MariaDB `USE`,
+  change the context (M3, M4). Denial reasons are sorted and unique (M7).
+
+**Fix round 2 (round 1 re-check).**
+- **R1-C1, executable comments.** A `/*!…*/` or `/*M!…*/` body is one comment token to L0, so
+  the caps also run in the interim backend on every threshold reading (where the body is
+  code), before `sqlparser` (`classify::chains_exceed`, called from `analyse_view`). The
+  reviewer's `/*!DIV a*/`×5,000, `/*!50000 DIV a*/`, `/*M!DIV a*/` and `/*! DIV a … */`×20,000
+  shapes are `TooComplex` in milliseconds, in debug and release (sweep test).
+- **R1-M1, cloning work by size.** The cloning work is now the sum, over the cloning
+  operators, of the significant tokens before each in its statement (the left operand is at
+  most that), and the cloning words are the dialect's own (MySQL/MariaDB `DIV`; SQLite
+  `REGEXP`, `GLOB`, `MATCH`). `MAX_CLONING_WORK` = 131,072 (a plain chain of ~360; measured
+  13–15 ms debug at the cap). `f(1, … ×90,000) DIV a`×250 is `TooComplex`.
+- **R1-I1, readings (controller rulings 1–5).**
+  1. `ClassifyCtx.modes_known` (default `false`; `with_known_modes`): with known modes the
+     text is read once, exactly so. Only the unknown-modes path (today the read-only guard,
+     whose seam has no modes) varies them. Tasks 18 and 24 pass the session's modes.
+  2. An alternative reading is lexed first; one that cuts the same tokens (ranges and kinds)
+     as the base adds nothing and is dropped.
+  3. An alternative reading in which the whole text fails to lex is dropped, when the text is
+     one statement in the base reading: a string, quoted identifier or dollar body runs
+     unterminated to the end, with no `;` before it. No statement is complete in that
+     reading, so a server in that mode rejects the text as a syntax error before running any
+     of it. The `;` condition matters: a read-write MySQL connection sends a `SET` text over a
+     multi-statement `COM_QUERY`, which runs each statement before it parses the next, so in
+     `SELECT 'a\'; DELETE FROM t; --'` the `NO_BACKSLASH_ESCAPES` reading (a `DELETE` before
+     the unterminated tail) is kept and classified. Unterminated comments do not count.
+  4. PostgreSQL: libpg_query parses only with `standard_conforming_strings` on, so the text is
+     always classified in that reading; the `off` reading (modes unknown, or known `off`) is
+     only lexed: the same cut is dropped, a whole-text failure as in 3, any other difference
+     makes every item `Unknown` (`EffectsUnknown`, `standard_conforming_strings`), never
+     `ParserDisagreement`: off production it follows the `Unknown` row, `Admin` confirms.
+  5. `sql-testkit/corpus/read/escaped_literals.toml` (new file): PG `'\d+'`, `LIKE 'a\_b%'`,
+     `'C:\Users\x'`, jsonb with `\"`; MySQL/MariaDB `'O\'Brien'`, `"a\"b"`, `"O'Brien"`,
+     `'C:\\Users'`, escaped writes. On both paths every read is allowed on read-only and no
+     row is denied under `Admin`; the C2 repros still deny.
+- **R1-M2.** `mark_classifier_thread` is gone. `spawn_classifier_thread(name, f)` starts a
+  16 MiB thread already marked, the only way to get one, so a small stack cannot be marked.
+  An `unsafe fn` would need `unsafe` blocks in `hacivat-exec`, which `unsafe_code = "deny"`
+  and the global constraint (unsafe only in `hacivat-ui-core/src/platform`) forbid.
+
+**Fix round 3 (round 2 re-check).**
+- **R2-C1.** MySQL and MariaDB run an executable comment's body as code, `;` included, and the
+  body is one comment token, so a statement may end inside it where no `;` token shows
+  (`SELECT 'a\' /*!; DO SLEEP(5); */ x'` ran `DO SLEEP(5)` on a `NO_BACKSLASH_ESCAPES`
+  server over a multi-statement `COM_QUERY` while the reading was dropped). The strict rule:
+  a reading is never dropped as a whole-text lexing failure when the text holds `/*!` or
+  `/*M!` (any case) anywhere. The reviewer's five texts deny on the unknown-modes path.
+- **R2-M1.** A reading whose `;` tokens (count or position) differ from the base reading's
+  makes the request `AmbiguousBoundary`, pre-decided, on every dialect, PostgreSQL with
+  `standard_conforming_strings` known `off` included (`SELECT 'a\' || ' ; DELETE FROM t;
+  --'`), instead of an `Unknown` item a dialog would ask about.
+- **Perf tests** are load-tolerant: up to three rounds of best-of-N, asserting the 2 ms
+  interim on the best.
+
+## m3b-t20 — differential and fuzz
+
+Task 20 (SQL-T13, R-M3-80) adds the evidence around the classifier and the splitter, and the
+perf levers T14 named.
+
+**Fuzzing (R-M3-80).** `fuzz/` stays its own excluded workspace. Its five targets
+(`lex_lossless`, `relex_equivalence`, `split_items`, `params_rewrite`, `classify_no_panic`)
+run 10 minutes each in the nightly `fuzz-sql` job (`cargo +nightly fuzz`), built against
+`fuzz/Cargo.lock` (checked with `cargo metadata --locked`, P-M3b-15); the job fails when the
+build touches `third_party/` or the lockfile. **`libfuzzer-sys`'s licence** is
+`(MIT OR Apache-2.0) AND NCSA` (LLVM's libFuzzer). NCSA is accepted for this workspace only: it
+is never shipped, never a dependency of a shipped crate, and the root `deny.toml` does not see
+it. Each target exists as a seeded test in its crate, so a PR runs the same property without
+nightly: `sql-lexer/tests/props.rs` (lossless), `sql-lexer/tests/incremental.rs` and
+`sql-split/tests/incremental.rs` (relex/resplit equivalence, through the one shared generator
+`sql-lexer/tests/support/edits.rs`, T5 I1), `sql-split/tests/split_props.rs`,
+`sql-split/tests/params.rs`, and the new `sql-safety/tests/mutation_props.rs`. Seeded
+generators, not proptest strategies, in the new tests (the M3a ruling); `PROPTEST_CASES`
+scales every loop (nightly 100,000).
+
+**The fuzz never weakens a verdict.** `mutation_props` holds:
+- `classify` never panics on generated text, on every dialect, both lexing-mode paths, both
+  expectations, and its report is well formed (of these bytes, this dialect, pre-decided with
+  no item, items inside the text, and a read-only allow is no more than a read or a harmless
+  session change: `SET SCHEMA 'x'` is P-M3b-T3-1's harmless `search_path`);
+- the review seeds (`sql-testkit/corpus/fuzz/classifier_seeds.toml`, 1,529 inputs of the T9,
+  T10 and T14 probe sets with their accepted verdicts) never get weaker;
+- meaning-preserving mutants (ASCII letter case, whitespace of the same kind, a comment for a
+  space) never get a weaker verdict than their original, on the read-only and Admin profiles;
+- **the libpg_query oracle**: PG mutants the read-only profile allows parse to no write
+  statement, no `INTO`, no row lock, no two-phase commit (`PREPARE TRANSACTION`, `COMMIT` /
+  `ROLLBACK PREPARED`) and no `SET` outside the classifier's harmless list (`set_allowed`, the
+  value read strictly) (fix round 1, m2; `SELECT … INTO` is found in the tree's message fields,
+  which the node counts do not visit); functions with effects are the server's to show. A
+  self-test proves the oracle sees each of these;
+- T14's escaped literals and their meaning-preserving mutants: no false denial with the modes
+  known or unknown.
+
+**The server oracle** (`hacivat-exec/tests/docker_mutation_fuzz.rs`, P-M3b-13; `alg/13`
+:399): the PG read corpus, the escaped literals, the seeds and 10,000 mutants are classified by
+the real `ClassifyPool` with pg17's modes known; each one the read-only profile allows runs on
+a read-only console as the superuser test account in a database of its own. A read-only
+violation (`25006`) or a guard gap is a finding, and so is any change the **side channel**
+sees. Every read-only request ends with the guard's `ROLLBACK` and `DISCARD ALL` before Run
+returns, so the side channel watches what outlives both (fix round 1, I1), from connections
+outside the guarded session, before and after every statement: replication slots, server files
+(`/tmp/hv_t20*`, the paths the `COPY … TO` / `lo_export` mutants write), a sentinel backend and
+the side channel's own (`pg_terminate_backend`), statistics reset times, `pg_conf_load_time()`
+(`pg_reload_conf`) and prepared transactions. The fixture rows, sequence, relations, temporary
+tables, large objects and advisory locks are probed as a belt-and-braces check of the rollback.
+A self-check proves each probe fires before the run. After a finding, slots are dropped, the
+sentinel reopened and the next statement takes its own baseline. Every outcome is explained (a
+SQLSTATE; a guard refusal before I/O; `protocol`, a `$n` unit M3a's Run cannot bind; a Run
+refusal) or the test fails, and the console must still run `SELECT 1` at the end.
+
+**The PG regression differential** (`sql-testkit::differential`, feature `differential`,
+`tests/pg_regress_differential.rs`; the P0 exit, `alg/10` :171). `cargo xtask
+fetch-pg-regress --tag REL_17_2` fetches `src/test/regress/sql/` from the PostgreSQL mirror with
+`curl` and `tar` into the git-ignored `target-pg-regress/`, and checks it against digests
+pinned in xtask over the sorted names and bytes: XXH3-64 (integrity and reproducibility only)
+and SHA-256 (through the system's `sha256sum`/`shasum`: the cryptographic pin; fix round 1, m7).
+Any other tag is refused until pinned; with the pinned files present it does nothing
+(offline-safe). The differential re-checks the files it reads against a pinned FNV-1a 64, so a
+locally edited corpus fails. The files are data, never run. They are psql scripts, so
+the comparison runs per segment (a run of our execution statements with no client command or
+`COPY` data between them): libpg_query splits the segment, or, when it holds an intentional
+syntax error, each statement alone; a statement that does not parse alone is "not comparable",
+one our split leaves uncertain (Run refuses it) is "uncertain". The rate is reported both ways:
+agreed / (agreed + disagreed), asserted ≥ 999 per mille (REL_17_2: 1000), and agreed / all
+(988.2). Every disagreement is listed, and both buckets the first rate leaves out are pinned in
+checked-in listings (`sql-testkit/corpus/differential/REL_17_2-{uncertain,not-comparable}.tsv`:
+file, byte range, FNV-1a of the text; no corpus text) with a ±1 % count tolerance: a statement
+that moves into either bucket fails, named (fix round 1, I2). `sql-safety`'s
+`tests/oracle_corpus.rs` checks the one-parse oracle against upstream's separate calls on all
+89,342 corpus texts (there, not behind `sql-testkit`'s feature: only the oracle and
+`sql-safety` may name `sql_oracle_pg::tree`, check-deps). Not a number CI
+treats as a budget elsewhere.
+
+**Perf (T14 carry).**
+- *One parse for the tree and the fingerprint, no summary walk*: `third_party/pg_query`
+  PATCHES §3 adds `pg_query_parse_protobuf_fingerprint_opts` (one raw parse, the protobuf, then
+  the fingerprint walk on the same tree) and `parse_protobuf_with_fingerprint` (no
+  `ParseResult::new`). `sql_oracle_pg::tree::analyse` makes one trip to the parser thread (the
+  guard's scan gives the tokens), the PG backend uses it (`Backend::analyse_fingerprinted`,
+  `ParsedFingerprint`), and `classify` takes the fingerprint from it instead of a second
+  `tree::fingerprint` call. The fingerprint is the same value (tests in both crates); a text with
+  a leading byte-order mark keeps `HvNorm1`, as before.
+- *Readings × length*: the interim backend gives a request a budget of 256 KiB
+  (`MAX_READING_BYTES`) for the readings of statements with executable comments (readings ×
+  statement length, summed over the request's statements with more than one reading). Past it
+  the statement is `TooComplex` before any reading is built. 16 readings of 10 KB (about 20 ms
+  in release) fit; 16 of 20 KB, or two readings of 200 KB, do not. The budget is per backend
+  call: the lexing-mode readings of `classify` (at most 4, only those that cut other tokens)
+  multiply it, up to 1 MiB of readings. Being the request's, it also runs out on a long script
+  run as one unit with many `/*!…*/` statements (a schema dump of some 450 tables): the later
+  ones are `TooComplex` (fail-closed; PO list, with the 128 KiB statement rule).
+- *Figures*: `cargo xtask bench-sql` (the `sql-safety` `bench_sql` test as a subprocess; JSON;
+  relative signal only, L2). PostgreSQL `classify` per 10 KB fell from 1.81 to 1.55–1.65 ms
+  best; libpg_query's protobuf encode and prost decode remain most of the rest (the oracle's one
+  call is ~1.17 ms of it). The 1 ms budget is still not met; the 2 ms interim assertion stays
+  load-tolerant (min over up to 3 rounds); Task 30 decides.
+
+**The T10 gap (information disclosure).** `ClassifyCtx.search_path` on MySQL and MariaDB is the
+session's current database (`DATABASE()`), one element, empty when unknown. With
+`performance_schema` or `sys` current, the unqualified `threads` / `session` are those
+schemas' tables and `Unknown` (denied on read-only). With another current database, or none
+known, they stay user tables (the T10 choice: common names); filling the current database is
+Task 18's (connect, and after `USE`, which already changes the context) and Task 24's.
+Accepted false positive (fix round 1, m3): the match takes any standalone word, so with `sys`
+current, `SESSION` as a keyword (`SET SESSION sql_mode = …`, `SET SESSION TRANSACTION …`,
+`SHOW SESSION STATUS`) also makes the statement `Unknown`. It fails closed and needs `sys` as
+the current database.
+
+## m4-t06 — DDL effects
+
+**What.** `StmtReport.ddl` (M4 Task 1c's seam) holds the catalog effects of each statement, the
+input of refresh after DDL (HV-INTRO-12 step 2, M4 Task 21): `CREATE/ALTER/DROP/RENAME/SET
+SCHEMA/COMMENT/GRANT/REVOKE` on a named object, with the table an index, trigger, policy, rule,
+column or constraint belongs to (`on`), the tables a foreign key, partition or parent names
+(`referenced`), `temp`, `concurrently` and `Drop { cascade }`. Each backend reads them from its
+own parse (`backend/ddl_effects/{pg,interim}.rs`; parser types stay in `backend/`, R-M3-54);
+`crate::ddl_effects::finish` adds the opaque effect.
+
+**Opaque rule.** An opaque effect (refresh the session's current namespace) leads the list when
+the statement may change what it does not name: kinds `Do`, `Call`, `Execute`, `Prepare`,
+`DropOwned` (M3c P2-07: `DROP OWNED` names a role, not its objects), `Other` (MySQL `CREATE
+EVENT`, `ALTER USER`, `RENAME USER`, SQLite `ATTACH`/`DETACH`, …) and `Explain { analyze: true
+}`; flags `EXEC_COMMENT`, `DYNAMIC_SQL`, `EXPLAIN_ANALYZE`; effects `UNKNOWN` (every statement
+the backend could not read, and every later statement of a script after one that may change
+what names mean), `ROUTINE_CALL`, `PREPARE`, or none; and every statement of the T1c scope
+that yielded no named effect (`REASSIGN OWNED`, `ALTER DEFAULT PRIVILEGES`, `CREATE CAST`,
+`CREATE SCHEMA AUTHORIZATION r`, …). Named effects stay beside it (refresh more, never less).
+`CREATE/ALTER/DROP EXTENSION` and `ALTER EXTENSION … SET SCHEMA` are opaque too: member
+objects land in (or leave) a schema the statement may not name. `ALTER TABLE … DROP
+COLUMN|CONSTRAINT … CASCADE` is opaque beside its `alter` effect: dependent views and other
+tables' foreign keys go with it, in any schema (fix round 1, I1, I3). A data change whose
+target is a system catalog table (`pg_catalog.*`, an unqualified `pg_*` name, SQLite
+`sqlite_master`/`sqlite_schema` and their `temp` twins) is opaque (fix round 1, m4: the cheap
+option was taken). **Named exception (U-3):** `TRUNCATE`, plain or `CASCADE`, has no effect (no catalog
+object changes; the Statistics facet reloads on demand).
+
+**Names as written.** Every name keeps its parts' text and quoting, never folded (consumers
+fold with `sql_ident::fold`). `sqlparser` keeps both. libpg_query's tree holds the server's
+reading (folded, cut to 63 bytes), so the PG backend finds the spelling in the statement's
+tokens: at the node's own location (`RangeVar`, `TypeName`, `RoleSpec`), else the first name
+in the statement that `fold` reads as the tree's text (the last one for a `RENAME TO` or `SET
+SCHEMA` target). Any spelling so found is the same object. When none is found (`U&"…"`, a
+comment between the parts) the tree's text is the name with every part quoted: the exact
+identity, never folded twice.
+
+**Engine choices.** A MySQL/MariaDB database is the model's schema (`NsKind::Schema`): `CREATE/
+DROP DATABASE|SCHEMA`, `GRANT … ON db.*` are `DdlKind::Schema` there (`ON *.*` is opaque).
+MySQL `RENAME TABLE a TO db2.b` (or `ALTER TABLE … RENAME TO db2.b`) is a rename of `a` plus a
+create of `db2.b`, so both schemas refresh. MySQL and MariaDB resolve an unqualified target
+against the current database, so `RENAME TABLE db1.a TO b` is a rename of `db1.a` plus a create
+of the unqualified `b`, resolved by the consumer like every unqualified name; SQLite keeps a
+renamed table in its schema (fix round 1, I2). `CREATE SCHEMA s` elements other than `GRANT`
+land in `s` (PostgreSQL refuses another schema), so the schema's effect covers them; a `GRANT`
+element yields its own effect (fix round 1, m1). SQLite's `temp` schema (any ASCII case) makes an
+object `temp`; PostgreSQL's `pg_temp`/`pg_temp_N` too. A column or table-constraint comment is
+`DdlKind::Other` named by the column/constraint with `on` its table.
+
+**Never a verdict.** `ddl` is computed after the report's other fields and read by no verdict
+path (`decide`, `gate_class`, the policy, the exec gate). `classify`'s union of two lexing
+readings compares the readings with `ddl` left out, as before, and unites their effects.
+`ddl_effects_never_change_the_verdict` compares every statement of the existing corpora (read
+corpus, escaped literals, the SQL-SAFE-06 bypass catalogue, the classifier seeds, T10's run-A
+rows, this task's corpus: 3,360 statements) against a golden of their reports, `ddl` left out,
+written at the `m4` tip `f52034b` before this task changed `src/` (the T1c stub changed no other
+field since `fb98cf1`).
+
+**Not detected.** Only background validation (M4 Task 22) sees:
+- DDL run by a function that a plain `SELECT f()` calls when the classifier reads `f` as a read
+  (a reviewed builtin, the profile's allowlist, the function catalog); an unknown `f` is
+  `UNKNOWN`, so opaque;
+- a direct catalog write the classifier does not see as a statement's own target: inside a
+  data-modifying CTE, a routine or a trigger (a top-level `UPDATE pg_catalog.pg_class …` or
+  SQLite `UPDATE sqlite_master …` is opaque, above).

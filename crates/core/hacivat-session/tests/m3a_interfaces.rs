@@ -20,11 +20,12 @@ use hacivat_driver::{
     ServerInfo, TxStatus, TypedCaps,
 };
 use hacivat_net::{TlsMode, TlsSummary, TlsVerified};
-use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+use hacivat_proto::{AccessLabel, DbmsKind, EnvTag, ProfileId};
 use hacivat_results::{FetchPolicy, ResultId, ResultWriter};
 use hacivat_session::profile::Profile;
 use hacivat_session::session::{
-    ErrorPolicy, ExecErrorKind, ObserverRef, RunEvent, RunId, RunObserver, RunSpec, RunUnit, UnitId,
+    ErrorPolicy, ExecErrorKind, ObserverRef, RunEvent, RunId, RunObserver, RunSpec, RunUnit,
+    TxMode, UnitId,
 };
 use hacivat_session::{
     ConnectionManager, ManagerConfig, effective_read_only, pipeline::Interaction,
@@ -55,14 +56,16 @@ fn spec_of(sqls: &[&str], observer: Arc<Recorder>) -> RunSpec {
     let units: Vec<RunUnit> = sqls
         .iter()
         .enumerate()
-        .map(|(i, sql)| RunUnit {
-            id: UnitId {
-                run,
-                ordinal: i as u32,
-            },
-            sql: (*sql).into(),
-            protocol: Protocol::Extended,
-            suspendable: true,
+        .map(|(i, sql)| {
+            RunUnit::plain(
+                UnitId {
+                    run,
+                    ordinal: i as u32,
+                },
+                (*sql).into(),
+                Protocol::Extended,
+                true,
+            )
         })
         .collect();
     RunSpec {
@@ -71,6 +74,9 @@ fn spec_of(sqls: &[&str], observer: Arc<Recorder>) -> RunSpec {
         policy: ErrorPolicy::StopOnError,
         fetch: FetchPolicy::default(),
         observer: ObserverRef(observer),
+        // ## m3b-t01c-core-seams
+        confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
+        context_generation: None,
     }
 }
 
@@ -584,24 +590,26 @@ async fn tracked_transactions_follow_the_keywords() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Production consoles are read-only (R-M3-29, P4)
+// Production consoles were read-only (R-M3-29, P4) until M3b Task 26.
+// ## m3b-t26-prod-unlock: the production policy is gone (R-M3-6 REVISED ends). A session is
+// read-only exactly when its profile says so; a production profile connects read-write in
+// Manual mode (D-036), and the app's exec gate confirms its writes (R-M3-55).
 
 #[test]
-fn production_is_read_only_only_with_the_flag() {
+fn production_is_read_only_only_by_its_own_flag() {
     let p = profile_env(EnvTag::Production);
-    assert!(effective_read_only(&p, true));
-    assert!(!effective_read_only(&p, false));
-    assert!(effective_read_only(&ro_profile(), false));
-    assert!(!effective_read_only(&profile_env(EnvTag::Staging), true));
+    assert!(!effective_read_only(&p));
+    assert!(effective_read_only(&Profile {
+        read_only: true,
+        ..p.clone()
+    }));
+    assert!(effective_read_only(&ro_profile()));
+    assert!(!effective_read_only(&profile_env(EnvTag::Staging)));
 }
 
 #[tokio::test]
-async fn production_policy_reaches_a_connected_session() {
-    let config = ManagerConfig {
-        production_read_only: true,
-        ..ManagerConfig::m2b()
-    };
-    let (m, fake) = manager_with(FakeDriver::new(DbmsKind::Postgres), config);
+async fn production_profile_connects_read_write_in_manual_mode() {
+    let (m, fake) = manager_with(FakeDriver::new(DbmsKind::Postgres), ManagerConfig::m2b());
     let prod = Arc::new(profile_env(EnvTag::Production));
     let dev = Arc::new(Profile {
         id: ProfileId::new(),
@@ -611,24 +619,31 @@ async fn production_policy_reaches_a_connected_session() {
         m.connect(profile.clone(), None, Interaction::Headless);
         wait_connected(&m, profile.id).await;
     }
-    let read_only = |m: &ConnectionManager, id| {
+    let snap = |m: &ConnectionManager, id| {
         let s = m.sessions(id).unwrap().default_session().unwrap();
-        s.state().borrow().read_only
+        s.state().borrow().clone()
     };
-    assert!(read_only(&m, prod.id));
-    assert!(!read_only(&m, dev.id));
-    // The policy is readable where the app needs it (fix round 1).
-    assert!(m.policy().production_read_only);
-    assert!(m.sessions(prod.id).unwrap().policy().production_read_only);
-    // Both connects went through the pipeline as the session runs: production read-only.
+    let (p, d) = (snap(&m, prod.id), snap(&m, dev.id));
+    assert!(!p.read_only, "production is read-write");
+    assert_eq!(p.access, AccessLabel::ReadWrite);
+    assert_eq!(p.tx.mode, TxMode::Manual, "D-036: production starts Manual");
+    assert!(!d.read_only);
+    assert_eq!(d.tx.mode, TxMode::Auto);
+    // Both connects went through the pipeline read-write: no read-only request at all.
     let requests = fake.requests();
-    assert_eq!(requests.iter().filter(|r| r.read_only).count(), 1);
-    // Without the policy (the M2b default) the production profile is read-write.
-    let (m, _) = manager_with(FakeDriver::new(DbmsKind::Postgres), ManagerConfig::m2b());
-    m.connect(prod.clone(), None, Interaction::Headless);
-    wait_connected(&m, prod.id).await;
-    assert!(!read_only(&m, prod.id));
-    assert!(!m.policy().production_read_only);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.iter().filter(|r| r.read_only).count(), 0);
+    // A production profile that is read-only by its own flag stays read-only (and Auto).
+    let ro_prod = Arc::new(Profile {
+        id: ProfileId::new(),
+        read_only: true,
+        ..profile_env(EnvTag::Production)
+    });
+    m.connect(ro_prod.clone(), None, Interaction::Headless);
+    wait_connected(&m, ro_prod.id).await;
+    let r = snap(&m, ro_prod.id);
+    assert!(r.read_only);
+    assert_eq!(r.tx.mode, TxMode::Auto);
 }
 
 #[tokio::test]
@@ -811,23 +826,53 @@ async fn a_mysql_drain_of_a_large_rest_asks_for_a_kill_by_its_caps() {
     );
 }
 
-/// M3a's typed path is the extended protocol only (`typed.rs`): `Simple` is refused before
-/// anything is sent, on every engine.
+/// M3a's typed path was the extended protocol only. ## m3b-t11-session-runs (named exception):
+/// since M3b `Simple` is "run as one" (R-M3-60): the fake answers its result and never
+/// suspends, even when asked to, on every engine.
 #[tokio::test]
-async fn a_simple_protocol_query_is_refused() {
-    for f in [fake_pg().tracks_transactions(), fake_mysql()] {
+async fn a_simple_protocol_query_runs_as_one() {
+    let thousand = || FakeQuery {
+        prefix: "SELECT 1",
+        sets: vec![FakeResultSet {
+            columns: vec![(
+                "id",
+                LogicalType::Int {
+                    bits: 64,
+                    signed: true,
+                },
+            )],
+            rows: FakeRows::Generated {
+                count: 1_000,
+                cell: id_cell,
+            },
+        }],
+        ..FakeQuery::default()
+    };
+    for f in [
+        fake_pg().tracks_transactions().queries(vec![thousand()]),
+        fake_mysql().queries(vec![thousand()]),
+    ] {
         let mut c = connect_fake(&f).await;
-        let e = c
-            .query(QuerySpec {
-                protocol: Protocol::Simple,
-                ..spec("SELECT 1", false)
-            })
-            .await
-            .unwrap_err();
-        assert_eq!(e.kind, RawErrorKind::Unsupported);
+        if f.descriptor().kind == DbmsKind::Postgres {
+            c.batch("BEGIN").await.unwrap();
+        }
+        c.query(QuerySpec {
+            protocol: Protocol::Simple,
+            ..spec("SELECT 1", true)
+        })
+        .await
+        .unwrap();
+        loop {
+            match c.next_event().await.unwrap() {
+                QueryEvent::Suspended => panic!("a query run as one never suspends"),
+                QueryEvent::Done(_) => break,
+                _ => {}
+            }
+        }
         assert_eq!(
             c.next_event().await.unwrap_err().kind,
-            RawErrorKind::Unsupported
+            RawErrorKind::Unsupported,
+            "nothing is open after it"
         );
     }
 }

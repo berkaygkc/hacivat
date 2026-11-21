@@ -1,0 +1,129 @@
+# owner: Task 6 (M4; sql-testkit corpus, new file). The catalog effects (`StmtReport.ddl`) of
+# SQLite statements. The case format is `pg.toml`'s. The `temp` schema (any ASCII case) makes
+# an object temporary.
+
+[[case]]
+sql = "CREATE TABLE t(a)"
+ddl = ["create table t"]
+
+[[case]]
+sql = "CREATE TABLE main.t(a)"
+ddl = ["create table main.t"]
+
+[[case]]
+sql = "CREATE TEMP TABLE t(a)"
+ddl = ["create table t temp"]
+
+[[case]]
+sql = "CREATE TEMPORARY TABLE t(a)"
+ddl = ["create table t temp"]
+
+[[case]]
+sql = "create table temp.t(a)"
+ddl = ["create table temp.t temp"]
+
+[[case]]
+sql = "CREATE TABLE TEMP.t(a)"
+ddl = ["create table TEMP.t temp"]
+
+[[case]]
+sql = 'CREATE TABLE "My Table"(a)'
+ddl = ['create table "My Table"']
+
+[[case]]
+sql = "CREATE TABLE c(a REFERENCES p(id))"
+ddl = ["create table c refs=p"]
+
+[[case]]
+sql = "CREATE TABLE c(a, FOREIGN KEY (a) REFERENCES p(id))"
+ddl = ["create table c refs=p"]
+
+[[case]]
+sql = "CREATE TABLE t2 AS SELECT 1"
+ddl = ["create table t2"]
+
+[[case]]
+sql = "CREATE VIRTUAL TABLE v USING fts5(a)"
+ddl = ["create table v"]
+
+[[case]]
+sql = "DROP TABLE t"
+ddl = ["drop table t"]
+
+[[case]]
+sql = "DROP TABLE IF EXISTS main.t"
+ddl = ["drop table main.t"]
+
+[[case]]
+sql = "ALTER TABLE t RENAME TO u"
+ddl = ["rename-to:u table t"]
+
+[[case]]
+sql = "ALTER TABLE t ADD COLUMN b int"
+ddl = ["alter table t"]
+
+[[case]]
+sql = "ALTER TABLE t RENAME COLUMN a TO b"
+ddl = ["alter table t"]
+
+[[case]]
+sql = "CREATE VIEW v AS SELECT 1"
+ddl = ["create view v"]
+
+[[case]]
+sql = "CREATE TEMP VIEW v AS SELECT 1"
+ddl = ["create view v temp"]
+
+[[case]]
+sql = "DROP VIEW v"
+ddl = ["drop view v"]
+
+[[case]]
+sql = "CREATE INDEX i ON t(a)"
+ddl = ["create index i on=t"]
+
+[[case]]
+sql = "CREATE UNIQUE INDEX IF NOT EXISTS main.i ON t(a)"
+ddl = ["create index main.i on=t"]
+
+[[case]]
+sql = "DROP INDEX i"
+ddl = ["drop index i"]
+
+[[case]]
+sql = "DROP TRIGGER trg"
+ddl = ["drop trigger trg"]
+
+[[case]]
+sql = "SELECT 1"
+ddl = []
+
+[[case]]
+sql = "INSERT INTO t VALUES (1)"
+ddl = []
+
+# Opaque (T1c review H1 among them).
+[[case]]
+sql = "ATTACH DATABASE 'other.db' AS other"
+ddl = ["opaque"]
+
+[[case]]
+sql = "DETACH DATABASE other"
+ddl = ["opaque"]
+
+[[case]]
+sql = "VACUUM"
+ddl = ["opaque"]
+
+[[case]]
+sql = "CREATE TABLE t (a int,,)"
+ddl = ["opaque"]
+
+# Fix round 1 (review I2, m4): a SQLite rename stays in its schema; a catalog write is opaque.
+[[case]]
+sql = "ALTER TABLE aux.t RENAME TO u"
+ddl = ["rename-to:u table aux.t"]
+
+[[case]]
+sql = "UPDATE sqlite_master SET sql = 'x' WHERE name = 't'"
+ddl = ["opaque"]

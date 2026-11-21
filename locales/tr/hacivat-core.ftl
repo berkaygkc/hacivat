@@ -214,18 +214,14 @@ error-conn-auth-insecure-method-body = { error-conn-auth-insecure-method-body-pl
 ## m3a-t15-sqlite-typed
 
 # Review: PO
-error-exec-sqlite-busy-hint = Bu veritabanı dosyası başka bir program tarafından kilitlenmiş. O program dosyayla işini bitirince deyimi yeniden çalıştırın.
+error-exec-sqlite-busy-hint = Bu veritabanı dosyası başka bir program tarafından kilitlenmiş. O program dosyayla işini bitirince ifadeyi yeniden çalıştırın.
 
 ## m3a-t23-exec
 
 # Review: PO
-exec-dur-lt-ms = <1 ms
-# Review: PO
 exec-dur-ms = { $ms } ms
 # Review: PO
 exec-dur-s = { $s } sn
-# Review: PO
-exec-dur-s-ms = { $s } sn { $ms } ms
 # Review: PO
 exec-dur-min = { $min } dk
 # Review: PO
@@ -245,9 +241,9 @@ exec-rows-affected = { $rows } satır etkilendi ({ $duration })
 # Review: PO
 exec-completed = Tamamlandı ({ $duration })
 # Review: PO
-exec-tx-committed = İşlem commit edildi
+exec-tx-committed = Transaction commit edildi
 # Review: PO
-exec-tx-rolled-back = İşlem geri alındı
+exec-tx-rolled-back = Transaction rollback edildi
 # Review: PO
 exec-summary = { $total } ifadeden { $executed } tanesi çalıştı, { $failed } tanesi başarısız oldu ({ $duration })
 # Review: PO
@@ -259,13 +255,13 @@ exec-more-result-sets = { $skipped } sonuç kümesi daha okundu ve gösterilmedi
 # Review: PO
 exec-deny-read-only-input = Gönderilmedi: bu konsol salt okunur ve ifade veriyi ya da şemayı değiştirebilir.
 # Review: PO
-exec-deny-read-only-transaction = Gönderilmedi: salt okunur bir konsol işlem başlatamaz ya da bitiremez.
+exec-deny-read-only-transaction = Gönderilmedi: salt okunur bir konsol transaction başlatamaz ya da bitiremez.
 # Review: PO
-exec-deny-read-only-protocol = Durduruldu: sunucu, salt okunur işlemin içinde bir yazma bildirdi.
+exec-deny-read-only-protocol = Durduruldu: sunucu, salt okunur transaction'ın içinde bir yazma bildirdi.
 # Review: PO
-exec-deny-read-only-engine = Sunucu, işlem salt okunur olduğu için ifadeyi reddetti.
+exec-deny-read-only-engine = Sunucu, transaction salt okunur olduğu için ifadeyi reddetti.
 # Review: PO
-exec-deny-read-only-function = Gönderilmedi: ifade, etkileri geri alınamayan bir fonksiyon çağırıyor.
+exec-deny-read-only-function = Gönderilmedi: ifade, etkileri rollback ile geri alınamayan bir fonksiyon çağırıyor.
 # Review: PO
 exec-events-dropped = { $n } olay gösterilmedi
 # Review: PO
@@ -273,15 +269,13 @@ exec-copy-unsupported = Gönderilmedi: COPY … FROM STDIN ve TO STDOUT, istemci
 # Review: PO
 exec-not-started = Hiçbir şey çalışmadı.
 # Review: PO
-exec-run-as-one-unsupported = Gönderilmedi: Hacivat bir seçimi ifade ifade çalıştırır; tek bir ifade olarak gönderemez.
-# Review: PO
 cursor-closed-session-needed = { $rows } satırdan sonra imleç kapandı: oturum başka bir ifade için gerekiyordu.
 # Review: PO
 cursor-closed-idle-timeout = { $rows } satırdan sonra imleç kapandı: { $duration } boyunca boşta kaldı.
 # Review: PO
 cursor-closed-tab-closed = { $rows } satırdan sonra imleç kapandı: sekmesi kapatıldı.
 # Review: PO
-cursor-closed-tx-ended = { $rows } satırdan sonra imleç kapandı: ait olduğu işlem sona erdi.
+cursor-closed-tx-ended = { $rows } satırdan sonra imleç kapandı: ait olduğu transaction sona erdi.
 # Review: PO
 cursor-closed-user-closed = { $rows } satırdan sonra imleç kapatıldı.
 # Review: PO
@@ -295,7 +289,7 @@ cursor-closed-cancelled = { $rows } satırdan sonra imleç kapandı: getirme dur
 # Review: PO
 cursor-closed-enforcement-gap = { $rows } satırdan sonra imleç kapandı: salt okunur koruma oturumu kapattı.
 # Review: PO
-cursor-closed-rolled-back = Hacivat'ın işlemi geri alındı.
+cursor-closed-rolled-back = Hacivat'ın transaction'ı rollback edildi.
 # Review: PO
 cursor-closed-session-needed-rolled-back = { $rows } satırdan sonra imleç kapandı: oturum başka bir ifade için gerekiyordu. { cursor-closed-rolled-back }
 # Review: PO
@@ -303,7 +297,7 @@ cursor-closed-idle-timeout-rolled-back = { $rows } satırdan sonra imleç kapand
 # Review: PO
 cursor-closed-tab-closed-rolled-back = { $rows } satırdan sonra imleç kapandı: sekmesi kapatıldı. { cursor-closed-rolled-back }
 # Review: PO
-cursor-closed-tx-ended-rolled-back = { $rows } satırdan sonra imleç kapandı: ait olduğu işlem sona erdi. { cursor-closed-rolled-back }
+cursor-closed-tx-ended-rolled-back = { $rows } satırdan sonra imleç kapandı: ait olduğu transaction sona erdi. { cursor-closed-rolled-back }
 # Review: PO
 cursor-closed-user-closed-rolled-back = { $rows } satırdan sonra imleç kapatıldı. { cursor-closed-rolled-back }
 # Review: PO
@@ -325,11 +319,11 @@ exec-error-connection-lost-unknown = İfade çalışırken bağlantı koptu. Etk
 # Review: PO
 exec-error-cancelled = İfade iptal edildi.
 # Review: PO
-exec-error-tx-failed = Gönderilmedi: işlem başarısız oldu; sunucu artık yalnızca geri almayı kabul eder.
+exec-error-tx-failed = Gönderilmedi: transaction başarısız oldu; sunucu artık yalnızca rollback kabul eder.
 # Review: PO
-exec-error-tx-in-progress = Gönderilmedi: zaten açık bir işlem var.
+exec-error-tx-in-progress = Gönderilmedi: zaten açık bir transaction var.
 # Review: PO
-exec-error-tx-unsupported = Gönderilmedi: bu bağlantı o işlem komutunu çalıştıramaz.
+exec-error-tx-unsupported = Gönderilmedi: bu bağlantı o transaction komutunu çalıştıramaz.
 # Review: PO
 exec-error-enforcement-gap = Salt okunur koruma hiçbir şeyin yazılmadığını doğrulayamadı; bu yüzden oturumu kapattı.
 # Review: PO
@@ -352,3 +346,850 @@ exec-uncertain-comment-end = Yürütülebilir bir yorumun ya da optimizer ipucun
 exec-uncertain-client-command = İfadenin içindeki bir istemci komutu yazıldığı gibi çalıştırılamaz.
 # Review: PO
 exec-uncertain-overlapping-units = İmleçlerden ya da seçimlerden ikisi bir ifadenin bir kısmını paylaşıyor; ifade iki kez çalışırdı.
+
+## m3b-t04-safety
+
+# Review: PO
+safety-class-read = Veri okur
+# Review: PO
+safety-class-session = Oturumu değiştirir
+# Review: PO
+safety-class-write = Veriyi değiştirir
+# Review: PO
+safety-class-ddl = Şemayı değiştirir
+# Review: PO
+safety-class-admin = Yönetimsel ya da dış yan etkileri var
+# Review: PO
+safety-class-unknown = Etkileri belirlenemiyor
+
+# Review: PO
+safety-reason-not-implemented = Hacivat bu ifadeyi henüz denetleyemiyor.
+# Review: PO
+safety-reason-lex-error = İfadede Hacivat'ın okuyamadığı bir tırnak, yorum ya da karakter var.
+# Review: PO
+safety-reason-client-command = Metinde sunucunun çalıştıramayacağı bir istemci komutu var.
+# Review: PO
+safety-reason-template-variable = Metinde doldurulmamış bir şablon değişkeni var.
+# Review: PO
+safety-reason-no-statement = Çalıştırılacak bir ifade yok.
+# Review: PO
+safety-reason-multi-statement = Metinde birden fazla ifade var.
+# Review: PO
+safety-reason-ambiguous-boundary = İfadenin nerede bittiği belirsiz.
+# Review: PO
+safety-reason-parse-error = İfade ayrıştırılamadı.
+# Review: PO
+safety-reason-parser-disagreement = Hacivat'ın ifadeyi iki okuyuşu birbirini tutmuyor.
+# Review: PO
+safety-reason-too-complex = İfade denetlenemeyecek kadar büyük ya da iç içe.
+# Review: PO
+safety-reason-syntax-newer-than-agent = İfade, Hacivat'ın bu sürümünün bilmediği daha yeni bir söz dizimi kullanıyor.
+# Review: PO
+safety-reason-unsupported-dialect = Hacivat bu veritabanının ifadelerini henüz denetleyemiyor.
+# Review: PO
+safety-reason-fn-denylisted = { $name }, yan etkisi olan işlevler listesinde.
+# Review: PO
+safety-reason-fn-unknown = Hacivat { $name } işlevinin ne yaptığını bilmiyor.
+# Review: PO
+safety-reason-operator-unknown = Hacivat { $name } işlecinin ne yaptığını bilmiyor.
+# Review: PO
+safety-reason-cast-unknown = Hacivat { $name } türüne dönüştürmenin ne yaptığını bilmiyor.
+# Review: PO
+safety-reason-executable-comment = Yürütülebilir bir yorum (/*! … */), yorumun içine gizlenmiş kodu çalıştırır.
+# Review: PO
+safety-reason-lex-mode-change = İfade, sunucunun SQL metnini okuma biçimini değiştiriyor.
+# Review: PO
+safety-reason-privilege-change = İfade rolleri ya da yetkileri değiştiriyor.
+# Review: PO
+safety-reason-data-modifying-cte = Bir WITH bölümü veriyi değiştiriyor.
+# Review: PO
+safety-reason-locking-clause = İfade satırları kilitliyor.
+# Review: PO
+safety-reason-explain-analyze = EXPLAIN ANALYZE ifadeyi çalıştırır.
+# Review: PO
+safety-reason-dynamic-sql = İfade, metinden oluşturulan SQL'i çalıştırıyor.
+# Review: PO
+safety-reason-procedural-code = İfade yordamsal kod çalıştırıyor.
+# Review: PO
+safety-reason-txn-control = İfade transaction'ı denetliyor.
+# Review: PO
+safety-reason-session-state = İfade oturumun ayarlarını değiştiriyor.
+# Review: PO
+safety-reason-external-file = İfade sunucudaki dosyaları okuyor ya da yazıyor.
+# Review: PO
+safety-reason-external-network = İfade ağ üzerinden başka bir sunucuya erişiyor.
+# Review: PO
+safety-reason-process-exec = İfade sunucuda bir program çalıştırıyor.
+# Review: PO
+safety-reason-admin-control = İfade sunucuyu yönetiyor.
+# Review: PO
+safety-reason-xid-consume = İfade bir transaction kimliği (XID) tüketiyor.
+# Review: PO
+safety-reason-sequence-advance = İfade bir diziyi (sequence) ilerletiyor.
+# Review: PO
+safety-reason-write-temp = İfade geçici bir tabloya yazıyor.
+# Review: PO
+safety-reason-hint-exec-time = Bir optimizer ipucu süre sınırını kaldırıyor.
+# Review: PO
+safety-reason-hint-set-var = Bir optimizer ipucu bir ayarı değiştiriyor.
+# Review: PO
+safety-reason-routine-call = İfade, etkileri denetlenemeyen bir yordamı çağırıyor.
+# Review: PO
+safety-reason-set-not-allowlisted = Salt okunur bağlantıda yalnızca zararsız ayarlar değiştirilebilir; { $name } onlardan biri değil.
+# Review: PO
+safety-reason-write-data = İfade veriyi değiştiriyor.
+# Review: PO
+safety-reason-schema-change = İfade şemayı değiştiriyor.
+# Review: PO
+safety-reason-table-lock = İfade tabloları bütünüyle kilitliyor.
+# Review: PO
+safety-reason-advisory-lock = İfade bir danışma kilidi (advisory lock) alıyor.
+# Review: PO
+safety-reason-external-io = İfade veritabanının dışındaki dosyalara ya da ağa erişiyor.
+# Review: PO
+safety-reason-prepared-statement = İfade, daha sonra çalışacak başka bir ifade hazırlıyor.
+# Review: PO
+safety-reason-notify = İfade diğer oturumlara bir bildirim gönderiyor.
+# Review: PO
+safety-reason-effects-unknown = İfadenin ne yaptığı belirlenemiyor.
+# Review: PO
+safety-reason-destructive = İfade çok sayıda veriyi değiştirebilir ya da silebilir.
+# Review: PO
+safety-reason-privilege-grant = İfade yetki ya da rol veriyor veya geri alıyor.
+# Review: PO
+safety-reason-volatile-function = İfade, etkileri denetlenemeyen değişken (volatile) bir işlev çağırıyor.
+
+# Review: PO
+safety-destructive-no-where = { $table } için WHERE yok; bu yüzden her satır değişir.
+# Review: PO
+safety-destructive-always-true = { $table } üzerindeki WHERE koşulu her zaman doğru; bu yüzden her satır değişir.
+# Review: PO
+safety-destructive-join-without-on = Birleştirme { $table } satırlarını hiç sınırlamıyor; her satır değişebilir.
+# Review: PO
+safety-destructive-drop = { $table } kaldırılır.
+# Review: PO
+safety-destructive-drop-cascade = { $table } ve ona bağlı her şey kaldırılır.
+# Review: PO
+safety-destructive-truncate = { $table } içindeki bütün satırlar silinir.
+# Review: PO
+safety-destructive-truncate-cascade = { $table } içindeki ve ona başvuran her tablodaki bütün satırlar silinir (CASCADE).
+# Review: PO
+safety-destructive-drop-column = { $table } içindeki bir sütun, verisiyle birlikte kaldırılır.
+# Review: PO
+safety-destructive-drop-constraint = { $table } üzerindeki bir kısıt kaldırılır.
+# Review: PO
+safety-destructive-alter-type = { $table } içindeki bir sütunun türü değişir; veri yeniden yazılır.
+# Review: PO
+safety-destructive-merge-delete = MERGE, { $table } içinden satır siler.
+# Review: PO
+safety-destructive-update-limit-no-order = { $table } üzerinde ORDER BY olmadan UPDATE … LIMIT, satırları belirsiz bir sırayla değiştirir.
+
+## m3b-t16-run
+
+# Review: PO
+exec-dur-seconds = { NUMBER($seconds, minimumFractionDigits: 2) } sn
+# Review: PO
+exec-notice-debug = Sunucu hata ayıklama iletisi
+# Review: PO
+exec-notice-log = Sunucu günlük iletisi
+# Review: PO
+exec-notice-info = Sunucu bilgi iletisi
+# Review: PO
+exec-notice-notice = Sunucu bildirimi
+# Review: PO
+exec-notice-warning = Sunucu uyarısı
+# Review: PO
+exec-notices-dropped = { $n } sunucu bildirimi daha gösterilmedi.
+# Review: PO
+exec-result-set-limit = İfade { $total } sonuç kümesi döndürdü; ilk { $limit } tanesi gösteriliyor.
+# Review: PO
+exec-skipped-by-user = İsteğiniz üzerine { $n } ifade atlandı.
+# Review: PO
+exec-retried = { $n }. ifade yeniden çalıştırılıyor
+# Review: PO
+cursor-closed-evicted = Bellek açmak için kapatıldı; { $rows } satır tutuldu.
+# Review: PO
+exec-run-as-one-closed-early = Durduruldu. { $n } ifade daha çalıştı; sonuçları gösterilmiyor.
+# Review: PO
+exec-run-as-one-closed-early-rest = Durduruldu. { $n } ifade daha çalıştı (sonuçları gösterilmiyor); geri kalanı çalışmadı.
+# Review: PO
+exec-run-as-one-rolled-back = PostgreSQL metni tek bir transaction olarak çalıştırdı; metin kendisi commit etmediyse, hatalı ifadeden önceki ifadeler de rollback edildi.
+# Review: PO
+exec-run-as-one-tx-failed = Transaction başarısız oldu: rollback edene kadar içinde başka bir şey çalışmaz.
+
+## m3b-t15-gate
+
+# Review: PO
+exec-gate-stale-classification = Gönderilmedi: ifade, Hacivat denetledikten sonra değişti. Yeniden çalıştırın.
+# Review: PO
+exec-gate-not-classified = Gönderilmedi: Hacivat bu ifadeyi denetleyemedi.
+# Review: PO
+exec-gate-read-only = { $class ->
+        [session] Gönderilmedi: bu bağlantı salt okunur ve ifade oturumun ayarlarını değiştiriyor.
+        [tx] Gönderilmedi: bu bağlantı salt okunur ve ifade transaction'ı yönetiyor.
+        [lock] Gönderilmedi: bu bağlantı salt okunur ve ifade veriyi kilitliyor.
+        [routine] Gönderilmedi: bu bağlantı salt okunur ve çağrılan yordam veriyi değiştirebilir.
+        [dml] Gönderilmedi: bu bağlantı salt okunur ve ifade veriyi değiştiriyor.
+        [ddl] Gönderilmedi: bu bağlantı salt okunur ve ifade şemayı değiştiriyor.
+        [admin] Gönderilmedi: bu bağlantı salt okunur ve ifade sunucuyu yönetiyor ya da veritabanının dışına erişiyor.
+       *[other] Gönderilmedi: bu bağlantı salt okunur ve Hacivat ifadenin ne yaptığını anlayamıyor.
+    }
+# Review: PO
+exec-gate-policy-denied = Gönderilmedi: Hacivat bu ifadeyi üretim bağlantısında çalıştırmaz.
+# Review: PO
+exec-gate-implicit-commit = Sunucu bu ifadeyi çalıştırmadan önce açık transaction'ınızı commit eder; önceki değişiklikleriniz de commit edilir.
+# Review: PO
+exec-gate-not-analysed = Hacivat bu ifadeyi çözümleyemedi ve ifade veriyi değiştirebilir. Çalıştırmadan önce denetleyin.
+# Review: PO
+exec-explain-analyze-not-undone = EXPLAIN ANALYZE ifadeyi çalıştırıp rollback eder; ancak rollback, dizi (sequence) ilerlemelerini, danışma kilitlerini, dblink ya da dosya ve ağ üzerinden yapılan değişiklikleri ve transaction desteklemeyen (MyISAM) tablolara yazılanları geri almaz.
+# Review: PO
+exec-explain-analyze-refused = Gönderilmedi: EXPLAIN ANALYZE, rollback'in geri alamayacağı bir ifadeyi çalıştırır.
+# Review: PO
+exec-unsafe-no-target = Gönderilmedi: ifade her satırı değiştirebilir ve Hacivat onaylamanızı isteyeceği tabloyu belirleyemiyor.
+# Review: PO
+exec-unsafe-several-targets = Gönderilmedi: bir ad tek bir yıkıcı hedefi onaylar; burada birden fazla var. Ayrı ayrı çalıştırın.
+
+# Review: PO
+exec-param-template-variable = Gönderilmedi: ifadede parametre olarak gönderilemeyen bir şablon değişkeni var.
+# Review: PO
+exec-param-question-mark-off = PostgreSQL'de ? burada bir işleçtir, parametre değildir. Ayarlar › Çalıştırma bölümünden parametre yapılabilir.
+# Review: PO
+exec-param-in-ddl = Gönderilmedi: şema değişikliklerinde parametreler kapalı. Ayarlar › Çalıştırma bölümünden açılabilir.
+# Review: PO
+exec-param-mixed-styles = Gönderilmedi: ifade farklı parametre biçimlerini karıştırıyor. Her ifadede tek bir biçim kullanın.
+# Review: PO
+exec-param-too-many-binds = Gönderilmedi: ifadede 65.535'ten fazla parametre var.
+# Review: PO
+exec-param-unbindable = Gönderilmedi: ifadede Hacivat'ın dolduramadığı bir parametre işareti var; sunucu ona bir değer alamaz.
+
+## m3b-t19-confirm-tx
+
+# İşlem içinde onay (HV-EXEC-04; D-014, R-M3-55, P-M3b-1). Çıktı günlüğü satırları ve
+# oturumun onaylanan bir ifadeyi bitirdiği hataların başlıkları.
+
+# Review: PO
+exec-confirm-committed = Commit edildi: onaylanan ifadenin değişiklikleri kaydedildi.
+# Review: PO
+exec-confirm-undone = Geri alındı: onaylanan ifade rollback edildi; transaction'ınız hâlâ açık.
+# Review: PO
+exec-confirm-rolled-back = Rollback edildi: onaylanan ifadenin değişiklikleri atıldı.
+# Review: PO
+exec-confirm-rolled-back-deadline = Rollback edildi: zamanında yanıt gelmedi, bu yüzden onaylanan ifadenin değişiklikleri atıldı.
+# Review: PO
+exec-confirm-statement-failed = Onaylanan ifade başarısız oldu. Yalnızca o rollback edildi; transaction'ınız sağlam.
+# Review: PO
+exec-implicit-commit = Sunucu bu ifadeyi çalıştırmadan önce açık transaction'ınızı commit etti.
+# Review: PO
+exec-error-tx-implicit-commit = Gönderilmedi: bu ifade, bu çalıştırmada daha önceki bir ifadenin açtığı ve sizin onaylamadığınız transaction'ı commit ederdi. Tek başına çalıştırın.
+# Review: PO
+exec-confirm-already-committed = Zaten commit edildi: sunucu bu ifadeyi kendiliğinden commit etti, bu yüzden Hacivat önce soramadı. Çalıştırmanın geri kalanı gönderilmedi.
+# Review: PO
+exec-error-confirm-timed-out = Rollback edildi: zamanında yanıt gelmedi, ifade geri alındı ve çalıştırmanın geri kalanı gönderilmedi.
+# Review: PO
+exec-error-confirm-undone = İsteğiniz üzerine rollback edildi: ifadenin değişiklikleri atıldı.
+# Review: PO
+exec-error-tx-table-locks = Gönderilmedi: LOCK TABLES kilitleriniz tutuluyor ve bir transaction başlatmak onları bırakırdı. Önce UNLOCK TABLES çalıştırın.
+# Review: PO
+exec-tx-rolled-back-by-server = Sunucu transaction'ınızın tamamını rollback etti: transaction başladığından beri yapılan her değişiklik kayboldu.
+# Review: PO
+exec-tx-ended-by-statement = Transaction'ınız bu ifadeyle sona erdi. Önceki değişikliklerinizin commit edilip edilmediğini denetleyin.
+# Review: PO
+exec-explain-not-rolled-back = EXPLAIN ANALYZE bir transaction'ın dışında çalıştı, bu yüzden değişiklikleri rollback edilemedi. Çalıştırmanın geri kalanı gönderilmedi.
+
+## m3b-t22-tx-ui
+
+# Review: PO
+exec-dur-lt-min = <1 dk
+# Review: PO
+exec-startup-script-skipped-read-only = Bağlantının başlangıç betiği çalıştırılmadı: bu oturum salt okunur.
+
+## m3b-t18-safe06
+
+# Review: PO
+exec-deny-classifier = Gönderilmedi: bu konsol salt okunur ve Hacivat ifadenin yalnızca okuduğunu doğrulayamadı.
+
+## m3b-t23-escalation
+
+# Review: PO
+exec-terminated = Oturum sunucuda sonlandırıldı; açık transaction'ı ({ $n } ifade) rollback edildi.
+# Review: PO
+exec-terminated-no-tx = Oturum sunucuda sonlandırıldı.
+# Review: PO
+exec-terminate-failed = Oturum sunucuda sonlandırılamadı.
+# Review: PO
+exec-disconnected = { $name } bağlantısı kesildi. İfade sunucuda hâlâ çalışıyor olabilir.
+# Review: PO
+exec-disconnected-local = { $name } bağlantısı kesildi. SQLite, bağlantı kapanınca ifadeyi durdurdu.
+# Review: PO
+exec-run-stopped = { $i }. ifadede durduruldu: Durdur'u seçtiniz.
+# Review: PO
+exec-run-rolled-back-continue = Transaction rollback edildi; { $i }. ifadeden devam ediliyor.
+
+## m3b-t24-exec-ui
+
+# Review: PO
+exec-params-cancelled = Hiçbir şey gönderilmedi: parametre değerlerinden vazgeçtiniz.
+# Review: PO
+exec-param-modes-unknown = Gönderilmedi: Hacivat bu bağlantının ayarlarını okuyamadı ve ifadenin parametreleri bu ayarlara göre farklı okunuyor.
+# Review: PO
+exec-gate-run-as-one-refused = Gönderilmedi: bu ifade burada tek bir isteğin parçası olarak çalıştırılamaz. İfadelerini tek tek çalıştırın.
+# Review: PO
+exec-confirm-cancelled = Hiçbir şey gönderilmedi: { $n }. ifadede vazgeçtiniz.
+# Review: PO
+exec-confirm-skipped = { $n }. ifade atlandı: Atla'yı seçtiniz.
+# Review: PO
+exec-confirm-suppressed = Sorulmadan çalıştı: { $console } içinde bunun gibi ifadeler için bir daha sorulmamasını seçtiniz.
+# Review: PO
+exec-gate-run-refused = Gönderilmedi: bu çalıştırmanın { $n }. ifadesi reddedildi; bu yüzden çalıştırmanın hiçbir parçası gönderilmedi.
+# Review: PO
+exec-run-context-changed = Gönderilmedi: Çalıştır okuduğundan beri bu bağlantının ayarları değişti. Yeniden çalıştırın.
+# Review: PO
+exec-run-connection-changed = Gönderilmedi: çalıştırma hazırlanırken bağlantı değişti. Yeniden çalıştırın.
+# Review: PO
+exec-param-run-as-one = Gönderilmedi: tek parça çalıştırma parametre değeri alamaz. İfadeleri tek tek çalıştırın.
+# Review: PO
+exec-gate-run-as-one-read-only = Gönderilmedi: tek parça çalıştırma salt okunur bağlantıda kullanılamaz; koruma her seferinde tek bir ifadeyi denetler.
+
+## m3b-t26-prod-unlock
+
+# Review: PO
+exec-run-context-unconfirmed = Gönderilmedi: Hacivat bu bağlantının ayarlarını zamanında doğrulayamadı. Yeniden çalıştırın.
+# Review: PO
+exec-confirm-not-undone = Geri alınmadı: tablo transaction desteklemiyor; ifadenin yaptığı değişiklikler kalıyor.
+# Review: PO
+exec-error-confirm-not-undone = Geri alınmadı: tablo transaction desteklemiyor; bu ifadenin yaptığı değişiklikler kalıyor.
+
+## m3c-p2-07
+
+# Review: PO
+safety-destructive-drop-owned = { $role } rolünün bu veritabanında sahip olduğu her nesne kaldırılır. Rolün bu veritabanındaki ve veritabanları, tablespace'ler gibi paylaşılan nesnelerdeki yetkileri ile varsayılan yetkileri de geri alınır.
+# Review: PO
+safety-destructive-drop-owned-cascade = { $role } rolünün bu veritabanında sahip olduğu her nesne ve bu nesnelere bağlı her şey kaldırılır. Rolün bu veritabanındaki ve veritabanları, tablespace'ler gibi paylaşılan nesnelerdeki yetkileri ile varsayılan yetkileri de geri alınır.
+# Review: PO
+exec-drop-owned-several-targets = Gönderilmedi: rol adı tek bir DROP OWNED'ı onaylar; burada başka hedef de var. Tek başına çalıştırın.
+# Review: PO
+exec-drop-owned-no-target = Gönderilmedi: Hacivat bu DROP OWNED ifadesinin kimin nesnelerini kaldırdığını belirleyemiyor; bu yüzden rolün adını yazmanızı isteyemiyor.
+
+## m4-t01a-model
+
+# Review: PO
+model-kind-root = { $count ->
+        [one] sunucu
+       *[other] sunucular
+    }
+# Review: PO
+model-kind-database = { $count ->
+        [one] veritabanı
+       *[other] veritabanları
+    }
+# Review: PO
+model-kind-schema = { $count ->
+        [one] şema
+       *[other] şemalar
+    }
+# Review: PO
+model-kind-table = { $count ->
+        [one] tablo
+       *[other] tablolar
+    }
+# Review: PO
+model-kind-view = { $count ->
+        [one] görünüm
+       *[other] görünümler
+    }
+# Review: PO
+model-kind-materialized-view = { $count ->
+        [one] somutlaştırılmış görünüm
+       *[other] somutlaştırılmış görünümler
+    }
+# Review: PO
+model-kind-foreign-table = { $count ->
+        [one] dış tablo
+       *[other] dış tablolar
+    }
+# Review: PO
+model-kind-virtual-table = { $count ->
+        [one] sanal tablo
+       *[other] sanal tablolar
+    }
+# Review: PO
+model-kind-column = { $count ->
+        [one] sütun
+       *[other] sütunlar
+    }
+# Review: PO
+model-kind-index = { $count ->
+        [one] indeks
+       *[other] indeksler
+    }
+# Review: PO
+model-kind-primary-key = { $count ->
+        [one] birincil anahtar
+       *[other] birincil anahtarlar
+    }
+# Review: PO
+model-kind-unique-key = { $count ->
+        [one] benzersiz anahtar
+       *[other] benzersiz anahtarlar
+    }
+# Review: PO
+model-kind-foreign-key = { $count ->
+        [one] yabancı anahtar
+       *[other] yabancı anahtarlar
+    }
+# Review: PO
+model-kind-check = { $count ->
+        [one] denetim kısıtı
+       *[other] denetim kısıtları
+    }
+# Review: PO
+model-kind-exclusion = { $count ->
+        [one] dışlama kısıtı
+       *[other] dışlama kısıtları
+    }
+# Review: PO
+model-kind-default = { $count ->
+        [one] varsayılan değer
+       *[other] varsayılan değerler
+    }
+# Review: PO
+model-kind-trigger = { $count ->
+        [one] tetikleyici
+       *[other] tetikleyiciler
+    }
+# Review: PO
+model-kind-rule = { $count ->
+        [one] kural
+       *[other] kurallar
+    }
+# Review: PO
+model-kind-policy = { $count ->
+        [one] politika
+       *[other] politikalar
+    }
+# Review: PO
+model-kind-partition = { $count ->
+        [one] bölüm
+       *[other] bölümler
+    }
+# Review: PO
+model-kind-subpartition = { $count ->
+        [one] alt bölüm
+       *[other] alt bölümler
+    }
+# Review: PO
+model-kind-routine = { $count ->
+        [one] fonksiyon
+       *[other] fonksiyonlar
+    }
+# Review: PO
+model-kind-procedure = { $count ->
+        [one] prosedür
+       *[other] prosedürler
+    }
+# Review: PO
+model-kind-aggregate = { $count ->
+        [one] toplama fonksiyonu
+       *[other] toplama fonksiyonları
+    }
+# Review: PO
+model-kind-argument = { $count ->
+        [one] argüman
+       *[other] argümanlar
+    }
+# Review: PO
+model-kind-sequence = { $count ->
+        [one] sekans
+       *[other] sekanslar
+    }
+# Review: PO
+model-kind-domain = { $count ->
+        [one] alan türü
+       *[other] alan türleri
+    }
+# Review: PO
+model-kind-enum-type = { $count ->
+        [one] enum türü
+       *[other] enum türleri
+    }
+# Review: PO
+model-kind-composite-type = { $count ->
+        [one] bileşik tür
+       *[other] bileşik türler
+    }
+# Review: PO
+model-kind-range-type = { $count ->
+        [one] aralık türü
+       *[other] aralık türleri
+    }
+# Review: PO
+model-kind-alias-type = { $count ->
+        [one] takma ad türü
+       *[other] takma ad türleri
+    }
+# Review: PO
+model-kind-table-type = { $count ->
+        [one] tablo türü
+       *[other] tablo türleri
+    }
+# Review: PO
+model-kind-synonym = { $count ->
+        [one] eş ad
+       *[other] eş adlar
+    }
+# Review: PO
+model-kind-extension = { $count ->
+        [one] eklenti
+       *[other] eklentiler
+    }
+# Review: PO
+model-kind-collation = { $count ->
+        [one] sıralama kuralı
+       *[other] sıralama kuralları
+    }
+# Review: PO
+model-kind-operator = { $count ->
+        [one] operatör
+       *[other] operatörler
+    }
+# Review: PO
+model-kind-operator-class = { $count ->
+        [one] operatör sınıfı
+       *[other] operatör sınıfları
+    }
+# Review: PO
+model-kind-operator-family = { $count ->
+        [one] operatör ailesi
+       *[other] operatör aileleri
+    }
+# Review: PO
+model-kind-cast = { $count ->
+        [one] tür dönüşümü
+       *[other] tür dönüşümleri
+    }
+# Review: PO
+model-kind-language = { $count ->
+        [one] dil
+       *[other] diller
+    }
+# Review: PO
+model-kind-access-method = { $count ->
+        [one] erişim yöntemi
+       *[other] erişim yöntemleri
+    }
+# Review: PO
+model-kind-foreign-data-wrapper = { $count ->
+        [one] dış veri sarmalayıcısı
+       *[other] dış veri sarmalayıcıları
+    }
+# Review: PO
+model-kind-foreign-server = { $count ->
+        [one] dış sunucu
+       *[other] dış sunucular
+    }
+# Review: PO
+model-kind-user-mapping = { $count ->
+        [one] kullanıcı eşlemesi
+       *[other] kullanıcı eşlemeleri
+    }
+# Review: PO
+model-kind-event-trigger = { $count ->
+        [one] olay tetikleyicisi
+       *[other] olay tetikleyicileri
+    }
+# Review: PO
+model-kind-role = { $count ->
+        [one] rol
+       *[other] roller
+    }
+# Review: PO
+model-kind-user = { $count ->
+        [one] kullanıcı
+       *[other] kullanıcılar
+    }
+# Review: PO
+model-kind-login = { $count ->
+        [one] giriş hesabı
+       *[other] giriş hesapları
+    }
+# Review: PO
+model-kind-tablespace = { $count ->
+        [one] tablespace
+       *[other] tablespace'ler
+    }
+# Review: PO
+model-kind-event = { $count ->
+        [one] zamanlanmış olay
+       *[other] zamanlanmış olaylar
+    }
+# Review: PO
+model-kind-virtual-table-module = { $count ->
+        [one] sanal tablo modülü
+       *[other] sanal tablo modülleri
+    }
+# Review: PO
+model-kind-dictionary = { $count ->
+        [one] sözlük
+       *[other] sözlükler
+    }
+# Review: PO
+model-kind-row-policy = { $count ->
+        [one] satır politikası
+       *[other] satır politikaları
+    }
+# Review: PO
+model-kind-settings-profile = { $count ->
+        [one] ayar profili
+       *[other] ayar profilleri
+    }
+# Review: PO
+model-kind-quota = { $count ->
+        [one] kota
+       *[other] kotalar
+    }
+# Review: PO
+model-kind-projection = { $count ->
+        [one] projeksiyon
+       *[other] projeksiyonlar
+    }
+# Review: PO
+model-kind-package = { $count ->
+        [one] paket
+       *[other] paketler
+    }
+# Review: PO
+model-kind-package-body = { $count ->
+        [one] paket gövdesi
+       *[other] paket gövdeleri
+    }
+# Review: PO
+model-kind-object-type = { $count ->
+        [one] nesne türü
+       *[other] nesne türleri
+    }
+# Review: PO
+model-kind-db-link = { $count ->
+        [one] veritabanı bağlantısı
+       *[other] veritabanı bağlantıları
+    }
+# Review: PO
+model-kind-collection = { $count ->
+        [one] koleksiyon
+       *[other] koleksiyonlar
+    }
+# Review: PO
+model-kind-mongo-view = { $count ->
+        [one] görünüm
+       *[other] görünümler
+    }
+# Review: PO
+model-kind-time-series = { $count ->
+        [one] zaman serisi koleksiyonu
+       *[other] zaman serisi koleksiyonları
+    }
+# Review: PO
+model-kind-inferred-field = { $count ->
+        [one] çıkarsanan alan
+       *[other] çıkarsanan alanlar
+    }
+# Review: PO
+model-kind-redis-database = { $count ->
+        [one] veritabanı
+       *[other] veritabanları
+    }
+# Review: PO
+model-kind-redis-module = { $count ->
+        [one] modül
+       *[other] modüller
+    }
+# Review: PO
+model-kind-unknown = { $count ->
+        [one] türü bilinmeyen nesne
+       *[other] türü bilinmeyen nesneler
+    }
+# Review: PO
+model-kind-schema-mysql = { $count ->
+        [one] veritabanı
+       *[other] veritabanları
+    }
+# Review: PO
+model-name-has-invisible-chars = Bu ad görünmeyen karakterler içeriyor.
+# Review: PO
+model-cache-rebuilt = { $reason ->
+        [corrupt] Önbellekteki meta veriler bozulmuştu; temizlendi ve yeniden okunuyor.
+        [server-changed] Bu bağlantı artık başka bir sunucuya ulaşıyor; önbellekteki meta veriler yeniden okunuyor.
+        [wrong-key] Bu bağlantının önbellekteki meta verilerini koruyan anahtar değişti; önbellek temizlendi ve yeniden okunuyor.
+       *[incompatible] Önbellekteki meta veriler farklı bir sürüm tarafından yazılmış; yeniden okunuyor.
+    }
+# Review: PO
+model-cache-offline = { $date } tarihli önbellekteki meta veriler gösteriliyor
+# Review: PO
+model-cache-disabled-by-policy = Bu bağlantının meta verileri diskte önbelleğe alınmıyor.
+# Review: PO
+ddl-unsupported-kind = { $dbms } bu tür nesneler için DDL üretimini desteklemiyor ({ $kind }).
+# m4-t25-ddl-view (named exception in m4-t01a-model's block): the NOTES surface 10 wording.
+# Review: PO
+ddl-warn-executable-comment = Bu metin MySQL çalıştırılabilir yorumları (/*! … */) içeriyor. MySQL bunların içindekini SQL olarak çalıştırır.
+# Review: PO
+ddl-sqlite-rebuild-notice = SQLite bunu yerinde değiştiremiyor; betik tabloyu yeniden oluşturup satırlarını kopyalar.
+# Review: PO
+ddl-sqlite-placement-forced = SQLite kısıtları tablonun içinde tutar; bu yüzden oraya yerleştirildiler.
+# Review: PO
+ddl-grants-not-loaded = Bu nesnenin yetkileri okunmadı; betikte GRANT ifadesi yok.
+# Review: PO
+ddl-grants-partial = Yalnızca bu oturumun görebildiği yetkiler dahil; başkaları da olabilir.
+# Review: PO
+ddl-policies-not-loaded = Satır düzeyi güvenlik politikaları henüz okunmuyor; betik bunları içermiyor.
+
+## m4-t19-produce (named exception inside m4-t01a-model's DDL block)
+# Review: PO
+ddl-warn-unknown-type = { $type } türü yüklenen katalogda yok. Sunucunun bildirdiği biçimde yazıldı; betiği çalıştırmadan önce türün var olduğundan emin olun.
+# Review: PO
+ddl-warn-not-enforced = { $name } kısıtı sunucuda zorlanmıyor ve bu sürüm NOT ENFORCED yazamıyor; betik bu kısıtı içermiyor.
+## m4-t01a-model
+# Review: PO
+ddl-opt-placement = Kısıtlar
+# Review: PO
+ddl-opt-placement-inside-column = Sütunun içinde
+# Review: PO
+ddl-opt-placement-inside-table = Tablonun içinde
+# Review: PO
+ddl-opt-placement-after-table = Tablodan sonra
+# Review: PO
+ddl-opt-qualify = Nitelendirme
+# Review: PO
+ddl-opt-qualify-auto = Otomatik
+# Review: PO
+ddl-opt-qualify-never = Hiçbir zaman
+# Review: PO
+ddl-opt-qualify-always = Her zaman
+# Review: PO
+ddl-opt-or-replace = OR REPLACE kullan
+# Review: PO
+ddl-opt-or-replace-tooltip = Veritabanının desteklediği yerlerde CREATE OR REPLACE yazar.
+# Review: PO
+ddl-opt-if-not-exists = IF NOT EXISTS kullan
+# Review: PO
+ddl-opt-if-not-exists-tooltip = Veritabanının desteklediği yerlerde IF NOT EXISTS yazar.
+# Review: PO
+ddl-opt-skip-grants = Yetkileri atla
+# Review: PO
+ddl-opt-skip-grants-tooltip = GRANT ifadelerini dışarıda bırakır.
+# Review: PO
+ddl-opt-skip-owner = Sahibi atla
+# Review: PO
+ddl-opt-skip-owner-tooltip = Sahiplik ifadelerini dışarıda bırakır.
+# Review: PO
+ddl-opt-skip-definer = DEFINER'ı atla
+# Review: PO
+ddl-opt-skip-definer-tooltip = MySQL ve MariaDB görünümleri, rutinleri, tetikleyicileri ve olaylarındaki DEFINER ifadesini dışarıda bırakır.
+# Review: PO
+ddl-opt-surrogate-names = Adsız kısıtları adlandır
+# Review: PO
+ddl-opt-surrogate-names-tooltip = Adsız kısıtlar için veritabanının ürettiği adları yazar.
+# Review: PO
+ddl-opt-server-definitions = Sunucunun verdiği tanımlar
+# Review: PO
+ddl-opt-server-definitions-tooltip = Üretilen DDL yerine veritabanının bildirdiği tanım metnini gösterir.
+# Review: PO
+ddl-cat-create = Oluştur
+# Review: PO
+ddl-cat-drop = Kaldır
+# Review: PO
+ddl-cat-truncate = Boşalt
+# Review: PO
+ddl-cat-server-definitions = Sunucunun verdiği tanımlar
+# Review: PO
+ddl-cat-alter = Değiştir
+
+## m4-t01c-core
+
+# Review: PO
+intro-freshness-loaded-ago = { $ago } yüklendi
+# Review: PO
+intro-unknown-not-loaded = Bu nesne henüz okunmadı.
+# Review: PO
+intro-unknown-out-of-scope = Bu nesne bağlantının kapsamı dışında, bu yüzden okunmuyor.
+# Review: PO
+intro-missing-not-found = Yüklenen meta verilerde bu adda bir nesne yok.
+# Review: PO
+intro-hint-level-lowered = { $level ->
+        [names] { $name } okunurken zaman aşımı iki kez yaşandı; artık yalnızca adları okunuyor.
+       *[structure] { $name } okunurken zaman aşımı iki kez yaşandı; artık tanımları olmadan okunuyor.
+    }
+# Review: PO
+intro-scope-all-databases-cost = { $count ->
+        [one] { $count } veritabanını okumak onun için bir bağlantı daha açar. Okunsun mu?
+       *[other] { $count } veritabanının hepsini okumak her biri için bir bağlantı daha açar. Hepsi okunsun mu?
+    }
+# Review: PO
+intro-scope-syntax-error = Desende { $column }. karakterde bir hata var.
+# Review: PO
+intro-scope-err-unclosed-brace = Desende { $column }. karakterde bir hata var: bir süslü parantez kapatılmamış.
+# Review: PO
+intro-scope-err-bad-regex = Desende { $column }. karakterde bir hata var: düzenli ifade geçerli değil.
+# Review: PO
+intro-scope-current-unknown = Geçerli veritabanı ya da şema belirlenemedi, bu yüzden @ hiçbir şey seçmiyor.
+# Review: PO
+intro-filter-unknown-kind = { $item } bir nesne türü belirtmiyor.
+# Review: PO
+intro-filter-bad-regex = { $item } geçerli bir düzenli ifade değil.
+# Review: PO
+intro-filter-bad-glob = { $item } geçerli bir ad deseni değil.
+# Review: PO
+intro-full-reason = { $reason ->
+        [no-watermark] Tamamen okundu: karşılaştırılacak önceki bir okuma yoktu.
+        [restart] Tamamen okundu: sunucu son okumadan bu yana yeniden başladı.
+        [identity] Tamamen okundu: bu bağlantı artık başka bir sunucuya ya da veritabanına ulaşıyor.
+        [version] Tamamen okundu: sunucunun sürümü değişti.
+        [standby] Tamamen okundu: sunucu bir yedek sunucu; orada yalnızca tam okuma güvenilir.
+        [wraparound] Tamamen okundu: son okumadan bu yana çok fazla transaction çalıştı.
+        [mass-change] Tamamen okundu: şemanın büyük bir bölümü değişti.
+       *[schema-rename] Tamamen okundu: başka nesnelerin başvurduğu bir şemanın adı değişti.
+    }
+# Review: PO
+intro-progress-tables-incremental = { $count ->
+        [one] Değişen { $count } tablo okunuyor…
+       *[other] Değişen { $count } tablo okunuyor…
+    }
+# Review: PO
+intro-mass-drop-confirm = { $count ->
+        [one] { $schema } içindeki { $count } nesne artık bu bağlantıya görünmüyor. Önbellekteki meta verilerden kaldırılsın mı?
+       *[other] { $schema } içindeki { $count } nesne artık bu bağlantıya görünmüyor. Önbellekteki meta verilerden kaldırılsınlar mı?
+    }
+# Review: PO
+intro-visibility-changed = { $schema } içindeki nesnelerin çoğu artık bu bağlantıya görünmüyor. Bağlantının yetkileri değişmiş olabilir.
+# Review: PO
+intro-stale-namespace-badge = güncel değil
+# Review: PO
+intro-stale-object = { $name } yüklendiğinden beri sunucuda değişti.
+# Review: PO
+intro-dropped-object = { $name } artık sunucuda yok.
+# Review: PO
+intro-object-broken = { $name } çözümlenemeyen bir sütuna başvuruyor.
+# Review: PO
+intro-pre-introspected-badge = Yerleşik katalog (sürüm { $version })
+# Review: PO
+intro-refresh-after-ddl-ask = { $count ->
+        [one] Veritabanı gezgini değişen { $count } nesneyi gösterecek şekilde yenilensin mi?
+       *[other] Veritabanı gezgini değişen { $count } nesneyi gösterecek şekilde yenilensin mi?
+    }
+# Review: PO
+intro-refresh-broad-dynamic-sql = Betik, değişiklikleri önceden okunamayan SQL çalıştırdı; bu yüzden şemanın tamamı yenileniyor.
+# Review: PO
+intro-remote-filtered-notice = Bu listeyi sunucu süzdü: süzgeçle eşleşmeyen nesneler okunmadı.
+# Review: PO
+intro-name-server-dependent = Bu adın eşleşip eşleşmediği sunucunun ayarlarına bağlı.
+# Review: PO
+intro-catalog-race-retried = { $schema } içindeki bir nesne okunurken kaldırıldı; okuma yeniden denendi.
+
+## m4-t20-scope
+
+# Review: PO
+intro-scope-warn-db-term-ignored = { NUMBER($column, useGrouping: "false") }. karakterdeki veritabanı kısmı yok sayılır: bu motorda şemaların üstünde veritabanı yoktur.
+# Review: PO
+intro-filter-warn-empty-item = { NUMBER($column, useGrouping: "false") }. karakterdeki boş kısım yok sayılır.
+
+## m4-t24-live
+# Review: PO
+model-cache-write-failed = Disk dolu olduğu için önbellekteki üst veri kaydedilemedi. Gezgin çalışmaya devam eder; üst veri bir sonraki bağlantıda yeniden okunur.

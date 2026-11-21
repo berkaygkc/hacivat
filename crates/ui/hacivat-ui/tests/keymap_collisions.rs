@@ -187,7 +187,14 @@ fn datagrip_ctrl_alt_s_is_reported_on_turkish_f_too() {
         layout: "tr-f".into(),
         produces: 'µ'
     }));
-    assert_eq!(c.len(), 3, "{c:?}");
+    // ## m3b-t01b-seams (named exception, P-M3b-T1b-2): DataGrip's `ctrl-alt-shift-j` (Select
+    // all occurrences) types `<` on TR-F, accepted in the preset.
+    assert!(c.contains(&Collision {
+        chord: "ctrl-alt-shift-j".into(),
+        layout: "tr-f".into(),
+        produces: '<'
+    }));
+    assert_eq!(c.len(), 4, "{c:?}");
 }
 
 #[test]

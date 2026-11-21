@@ -9,9 +9,16 @@
 pub mod autosave;
 pub mod commands;
 pub mod decor;
+// ## m3b-t01b-seams: the editor's find bar (Task 33).
+pub mod find_bar;
+// ## m3b-t01b-seams: the idle-transaction toast (Task 22).
+pub mod idle_toast;
 pub mod registry;
 pub mod status;
 pub mod toolbar;
+// ## m3b-t01b-seams: the transaction badge and chip (Task 22).
+pub mod tx_badge;
+pub mod tx_chip;
 pub mod view;
 
 use std::rc::Rc;
@@ -20,6 +27,10 @@ use hacivat_ui_core::gpui_surface::App;
 
 pub use registry::{ConsoleId, ConsoleState, Consoles};
 pub use view::{console_binding, editor_segment, focused_console};
+// ## m3c-t41-chrome
+pub use view::editor_segment_cells;
+// ## m4-t24-live (named exception, fix round 1): the plan's `console::open_with_text`.
+pub use commands::open_with_text;
 
 use crate::shell::{set_console_binding, set_console_view, set_tab_decor};
 
@@ -31,4 +42,7 @@ pub fn install(cx: &mut App) {
     // ## m3a-t01b-seams (fix round 1): the profile a new console tab binds to (R-M3-37).
     set_console_binding(cx, Rc::new(view::console_binding));
     commands::register(cx);
+    // ## m3b-t22-tx-ui (named exception): the transaction mirror and the idle reminders.
+    tx_badge::install(cx);
+    idle_toast::install(cx);
 }

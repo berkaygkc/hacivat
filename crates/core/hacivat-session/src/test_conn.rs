@@ -82,22 +82,6 @@ pub async fn test_connection_continuing(
     cancel: CancellationToken,
     progress: watch::Sender<Progress>,
 ) -> TestReport {
-    test_connection_with_policy(deps, draft, prior_rejections, false, ix, cancel, progress).await
-}
-
-// ## m3a-t01b-seams
-/// [`test_connection_continuing`] under the session policy: with `production_read_only`, a
-/// production-tagged draft is tested read-only, as its sessions would run (R-M3-29). The
-/// `ConnectionManager` passes its `ManagerConfig::production_read_only`.
-pub(crate) async fn test_connection_with_policy(
-    deps: &ConnectDeps,
-    draft: ProfileDraft,
-    prior_rejections: u8,
-    production_read_only: bool,
-    ix: Interaction,
-    cancel: CancellationToken,
-    progress: watch::Sender<Progress>,
-) -> TestReport {
     let started = tokio::time::Instant::now();
     let ProfileDraft {
         profile,
@@ -125,8 +109,8 @@ pub(crate) async fn test_connection_with_policy(
     };
     let network = !matches!(profile.endpoint, ProfileEndpoint::File { .. });
     let req = ConnectRequest {
-        // ## m3a-t01b-seams (R-M3-29)
-        read_only: effective_read_only(&profile, production_read_only),
+        // ## m3a-t01b-seams (R-M3-29); m3b-t26-prod-unlock: the profile's own flag.
+        read_only: effective_read_only(&profile),
         profile: Arc::new(profile),
         draft_password: password,
         purpose: Purpose::Test,

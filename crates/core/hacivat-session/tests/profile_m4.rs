@@ -1,0 +1,197 @@
+//! M4 Task 1c seams of the session crate: the profile's `catalog_sensitive` flag (R-M4-15) and
+//! the fail-closed metadata connection stubs (R-M4-7, R-M4-29; bodies Task 5).
+//!
+//! Profiles live in `connections.toml` (`profile/store.rs`): the M2a fixture file and the
+//! M2b/M3 files below load and save byte for byte (P-M4-23; the precedent is
+//! `m2a_file_round_trips_verbatim`, `tests/profiles_m2b.rs`).
+
+mod common;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use common::{deps_with, ok_pg, pg_profile, session};
+use hacivat_net::TlsMode;
+use hacivat_session::budget_for;
+use hacivat_session::meta::{MetaConn, MetaConnSpec, MetaError};
+use hacivat_session::profile::{Profile, ProfileDiag, ProfileStore};
+use hacivat_session::session::{SessionManager, TxOutcome};
+use tokio_util::sync::CancellationToken;
+
+// ## fix round 1 (I4)
+#[test]
+fn an_unknown_tx_outcome_counts_as_committed() {
+    assert!(TxOutcome::Committed.counts_as_committed());
+    assert!(TxOutcome::Unknown.counts_as_committed());
+    assert!(!TxOutcome::RolledBack.counts_as_committed());
+    assert!(!TxOutcome::RolledBackTo("s1".into()).counts_as_committed());
+}
+
+/// An M2b `connections.toml`: an SSH profile with every M2b key away from its default.
+const M2B_FILE: &str = "version = 1\n\n[[connection]]\nid = \"6f9619ff-8b86-d011-b42d-00c04fc964ff\"\nname = \"orders\"\nengine = \"postgres\"\nread_only = false\nhost = \"10.0.0.5\"\nport = 5433\nuser = \"deploy\"\nretention = \"forever\"\ntls.mode = \"verify_full\"\ntls.pins = [{ endpoint = \"10.0.0.5:5433\", sha256 = \"0707070707070707070707070707070707070707070707070707070707070707\" }]\ntransport = \"ssh_tunnel\"\nconnect_timeout_s = 15\napplication_name = \"Hacivat\"\nmax_connections = 4\norigin = \"user_typed\"\nallow_unsupported_server = false\nsingle_session = true\ntx_mode = \"manual\"\nisolation = \"serializable\"\nidle_disconnect_s = 900\nssh_retention = \"until_restart\"\n\n[connection.ssh]\nhost_keys = \"strict\"\nkeepalive_s = 30\n\n[[connection.ssh.hops]]\nhost = \"bastion.internal\"\nport = 2222\nuser = \"deploy\"\nauth = \"agent\"\n";
+
+/// An M3b `connections.toml`: the three M3b keys away from their defaults.
+const M3B_FILE: &str = "version = 1\n\n[[connection]]\nid = \"7f9619ff-8b86-d011-b42d-00c04fc964ff\"\nname = \"shop\"\nengine = \"mysql\"\nread_only = false\nhost = \"127.0.0.1\"\nretention = \"forever\"\ntls.mode = \"auto\"\ntransport = \"direct\"\nconnect_timeout_s = 15\napplication_name = \"Hacivat\"\nmax_connections = 4\norigin = \"user_typed\"\nallow_unsupported_server = false\nstartup_script = \"SET time_zone = '+00:00'\"\nread_only_fn_allowlist = [\"audit.mask_email\"]\nrecord_history = false\n";
+
+fn tmp_file(text: &str) -> (PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("connections.toml");
+    std::fs::write(&path, text).expect("write the file");
+    (path, dir)
+}
+
+fn read(path: &PathBuf) -> String {
+    std::fs::read_to_string(path).expect("read the file")
+}
+
+/// Loads `text`, saves what loaded back and returns the profiles and the saved file.
+fn load_and_resave(text: &str) -> (Vec<Profile>, String) {
+    let (path, _dir) = tmp_file(text);
+    let (store, loaded) = ProfileStore::open(path.clone());
+    assert!(loaded.diags.is_empty(), "{:?}", loaded.diags);
+    store.save(&loaded.profiles).expect("save");
+    (loaded.profiles, read(&path))
+}
+
+#[test]
+fn profile_without_catalog_sensitive_round_trips_byte_for_byte() {
+    for (name, text) in [
+        ("m2a", include_str!("fixtures/m2a_connections.toml")),
+        ("m2b", M2B_FILE),
+        ("m3b", M3B_FILE),
+    ] {
+        let (profiles, saved) = load_and_resave(text);
+        assert_eq!(saved, text, "{name}");
+        assert!(!profiles.is_empty(), "{name}");
+        // ## m4-t20-scope (named exception, R-W3-1): unset, so derived.
+        assert!(
+            profiles.iter().all(|p| p.catalog_sensitive_set.is_none()),
+            "{name}"
+        );
+        assert!(!saved.contains("catalog_sensitive"), "{name}");
+    }
+    assert_eq!(Profile::default().catalog_sensitive_set, None);
+    assert!(!Profile::default().catalog_sensitive());
+}
+
+#[test]
+fn catalog_sensitive_true_is_written_and_read() {
+    let (path, _dir) = tmp_file(M3B_FILE);
+    let (store, loaded) = ProfileStore::open(path.clone());
+    let mut p = loaded.profiles[0].clone();
+    p.catalog_sensitive_set = Some(true);
+    store.save(std::slice::from_ref(&p)).expect("save");
+    let text = read(&path);
+    assert_eq!(text, format!("{M3B_FILE}catalog_sensitive = true\n"));
+    let (_, back) = ProfileStore::open(path.clone());
+    assert!(back.diags.is_empty(), "{:?}", back.diags);
+    assert_eq!(back.profiles, vec![p.clone()]);
+
+    // ## m4-t20-scope (named exception, R-W3-1): an explicit `false` is kept, so a production
+    // profile can be told "off" apart from "never chosen".
+    p.catalog_sensitive_set = Some(false);
+    store.save(std::slice::from_ref(&p)).expect("save");
+    assert_eq!(
+        read(&path),
+        format!("{M3B_FILE}catalog_sensitive = false\n")
+    );
+    let (_, back) = ProfileStore::open(path.clone());
+    assert_eq!(back.profiles[0].catalog_sensitive_set, Some(false));
+
+    // Unset: the key goes, and the file is the M3b file again.
+    p.catalog_sensitive_set = None;
+    store.save(std::slice::from_ref(&p)).expect("save");
+    assert_eq!(read(&path), M3B_FILE);
+
+    // A value that is not a boolean never loads half-read: the entry is invalid.
+    let (_, bad) =
+        ProfileStore::open(tmp_file(&format!("{M3B_FILE}catalog_sensitive = \"yes\"\n")).0);
+    assert!(bad.profiles.is_empty());
+    assert!(
+        matches!(&bad.diags[..], [ProfileDiag::InvalidEntry { reason, .. }] if reason.contains("catalog_sensitive")),
+        "{:?}",
+        bad.diags
+    );
+}
+
+// ## m4-t20-scope (named exception, ruling R-W3-1)
+/// A profile file from before M4 has no `catalog_sensitive` key: its production profiles
+/// encrypt their cached metadata, every other one does not, and the file stays as it was.
+#[test]
+fn a_pre_m4_production_profile_is_sensitive() {
+    let text = include_str!("fixtures/m2a_connections.toml");
+    let (profiles, saved) = load_and_resave(text);
+    assert_eq!(saved, text);
+    let prod: Vec<&Profile> = profiles
+        .iter()
+        .filter(|p| p.environment == Some(hacivat_proto::EnvTag::Production))
+        .collect();
+    assert!(!prod.is_empty(), "the fixture has a production profile");
+    for p in &profiles {
+        assert_eq!(p.catalog_sensitive_set, None, "{}", p.name);
+        assert_eq!(
+            p.catalog_sensitive(),
+            p.environment == Some(hacivat_proto::EnvTag::Production),
+            "{}",
+            p.name
+        );
+    }
+    // An explicit choice wins over the environment, both ways.
+    let mut p = prod[0].clone();
+    p.catalog_sensitive_set = Some(false);
+    assert!(!p.catalog_sensitive());
+    p.environment = Some(hacivat_proto::EnvTag::Dev);
+    p.catalog_sensitive_set = Some(true);
+    assert!(p.catalog_sensitive());
+}
+
+fn spec(p: &Profile) -> MetaConnSpec {
+    MetaConnSpec {
+        profile: p.id,
+        database: Some("hv_test".into()),
+        statement_timeout: Duration::from_secs(30),
+    }
+}
+
+// ## m4-t05-meta (named exception: Task 5 filled the stubs these two tests pinned; the full
+// behaviour is in `tests/meta_conn.rs`)
+#[tokio::test(start_paused = true)]
+async fn meta_conn_opens_one_read_only_connection() {
+    let (deps, fake) = deps_with(ok_pg());
+    let profile = Arc::new(pg_profile(TlsMode::Disable));
+    let sm = SessionManager::new(
+        tokio::runtime::Handle::current(),
+        profile.clone(),
+        Arc::new(deps),
+        Arc::new(budget_for(&profile)),
+    );
+    let cancel = CancellationToken::new();
+    let got = sm.meta_conn(spec(&profile), &cancel).await;
+    assert!(got.is_ok(), "{got:?}");
+    assert_eq!(fake.connect_calls(), 1);
+    let req = fake.last_request().expect("the metadata connect");
+    assert!(req.read_only);
+    assert_eq!(req.database.as_deref(), Some("hv_test"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn meta_join_refuses_a_console_session() {
+    let (handle, fake) = session(ok_pg()).await;
+    let connects = fake.connect_calls();
+    let calls = fake.call_log().len();
+    let got = MetaConn::join(&handle);
+    assert!(matches!(got, Err(MetaError::NotJoinable)), "{got:?}");
+    // Joining sends nothing to the session's connection and opens no other.
+    assert_eq!(fake.connect_calls(), connects);
+    assert_eq!(fake.call_log().len(), calls);
+}
+
+// ## m4-t01c-core (Part B): the offline test connection can never read.
+#[tokio::test]
+async fn an_offline_meta_conn_reads_nothing() {
+    let mut c = MetaConn::offline(hacivat_proto::DbmsKind::Postgres);
+    assert_eq!(c.dbms(), hacivat_proto::DbmsKind::Postgres);
+    let got = c.begin_snapshot().await;
+    assert!(matches!(got, Err(MetaError::Unavailable)), "{got:?}");
+}

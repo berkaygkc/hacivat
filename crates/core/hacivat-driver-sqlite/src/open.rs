@@ -481,18 +481,21 @@ impl RawConn for SqliteConn {
 
     // ## m3a-t15-sqlite-typed (`typed.rs`)
 
-    /// Suspends; no binds (M3b); closes by finalizing; the cached idle bound of the journal
+    /// Suspends; binds (m3b-t13); closes by finalizing; the cached idle bound of the journal
     /// modes (`typed.rs`).
     fn typed_caps(&self) -> TypedCaps {
         typed::caps(self.idle_bound)
     }
 
-    /// Returns once the statement is prepared and checked on the connection's thread, so
-    /// SQLite's refusals (syntax, the read-only authorizer, `readonly-required`, two statements,
-    /// a parameter) fail here; errors while stepping come from `next_event`.
+    /// Returns once the statement is prepared, checked and bound on the connection's thread,
+    /// so SQLite's refusals (syntax, the read-only authorizer, `readonly-required`, two
+    /// statements, a parameter count that is not the bind count) fail here; errors while
+    /// stepping come from `next_event`. Run as one (`Protocol::Simple`, m3b-t13) takes no binds.
     fn query<'a>(&'a mut self, spec: QuerySpec<'a>) -> BoxFuture<'a, Result<(), RawError>> {
         Box::pin(async move {
-            if self.typed.is_some() || spec.protocol == Protocol::Simple || !spec.binds.is_empty() {
+            // ## m3b-t13-drivers: binds and Run as one (`typed.rs`).
+            if self.typed.is_some() || (spec.protocol == Protocol::Simple && !spec.binds.is_empty())
+            {
                 return Err(unsupported());
             }
             let jobs = self.jobs.clone().ok_or_else(gone)?;

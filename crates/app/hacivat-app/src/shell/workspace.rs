@@ -13,6 +13,7 @@ use hacivat_settings::{LanguagePref, ThemePref, fsio, workspace_state};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::capsule::{Capsule, CapsuleModel, EnvKind};
 use hacivat_ui::dialog::{Dialog, DialogEvent, DialogSpec};
+use hacivat_ui::focus_home::{self, HomeSlot};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::menu::{MenuItemSpec, PopupMenu, PopupMenuEvent};
 use hacivat_ui::panes::{
@@ -47,7 +48,7 @@ use crate::shell::hooks::{CloseDecision, TabDecor, tab_close_decision};
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::layers::{DIALOG_CONTEXT, Layer, Layers, MENU_CONTEXT};
 use crate::shell::persist::LatestWriter;
-use crate::shell::tab_content::{TabContentRegistry, TabKind};
+use crate::shell::tab_content::{DdlObjectId, TabContentRegistry, TabKind};
 use crate::shell::tabs::{CONSOLE_CONTEXT, context_of, title_of};
 use crate::shell::tiles::TileBounds;
 use crate::shell::tiles::{self, Seam, TileLayout};
@@ -137,6 +138,10 @@ pub struct Workspace {
     results_view: Option<AnyView>,
     layers: Layers,
     focus: FocusHandle,
+    // ## m4-t33d-fr1 (ruling R-T33d-5, named exception): the focused pane's content is a focus
+    // home; its primary (the content's own home, else its first Tab stop) is the active pane's
+    // default, where a control outside every home hands the focus when it stops being drawn.
+    pane_home: HomeSlot,
     drag: Option<Seam>,
     state_path: Option<PathBuf>,
     /// Writes `workspace.json`; a pending state is flushed on quit and when the view goes.
@@ -214,6 +219,7 @@ impl Workspace {
             results_view,
             layers: Layers::default(),
             focus: cx.focus_handle(),
+            pane_home: HomeSlot::new(),
             drag: None,
             state_path,
             saver: LatestWriter::new(write_state),
@@ -227,7 +233,30 @@ impl Workspace {
             top: t.spacing.titlebar_height,
             bottom: t.spacing.statusbar_height,
         };
-        ws.restore(bounds, cx);
+        // ## m4-t24-live (named lines): the explorer's expanded rows (`explorer.expanded`).
+        if let Some(explorer) = ws.restore(bounds, cx) {
+            let map = crate::explorer::live::parse_saved(&explorer);
+            crate::explorer::live::set_restored(map, cx);
+        }
+        // ## m4-t33d-fr1 (ruling R-T33d-5, named exception): a focused control that stops being
+        // drawn hands the focus to its surface's primary, else to the active pane's default
+        // (none while a layer is open: the layer's own home serves it).
+        let recovery = focus_home::recover_lost_focus(ws.focus.clone(), window, cx, |ws, _, _| {
+            if ws.layers.is_empty() {
+                ws.pane_default()
+            } else {
+                None
+            }
+        });
+        ws._subscriptions.push(recovery);
+        // The cached trees of app start, now that the expanded rows are known (R-M4-15).
+        crate::explorer::live::start(cx);
+        ws._subscriptions
+            .push(
+                cx.observe_global::<crate::explorer::live::ExpandedState>(|this, cx| {
+                    this.layout_changed(cx);
+                }),
+            );
         ws
     }
 
@@ -236,13 +265,12 @@ impl Workspace {
     /// Restores `workspace.json` when it is readable and consistent; otherwise keeps one
     /// `Console 1`. A file that parses as JSON but does not describe a valid workspace is set
     /// aside (`*.corrupt-<ts>`) before anything overwrites it.
-    fn restore(&mut self, bounds: TileBounds, cx: &App) {
-        let Some(path) = &self.state_path else {
-            return;
-        };
-        let Some(value) = workspace_state::load(path, WORKSPACE_STATE_VERSION) else {
-            return;
-        };
+    // ## m4-t24-live (named lines): answers the file's `explorer` part (the expanded rows),
+    // when the file was restored.
+    fn restore(&mut self, bounds: TileBounds, cx: &App) -> Option<serde_json::Value> {
+        let path = self.state_path.as_ref()?;
+        let value = workspace_state::load(path, WORKSPACE_STATE_VERSION)?;
+        let explorer = value.get("explorer").cloned();
         let registry = cx.try_global::<TabContentRegistry>();
         let restored = serde_json::from_value::<SavedState>(value)
             .map_err(|e| e.to_string())
@@ -259,7 +287,7 @@ impl Workspace {
             Err(reason) => {
                 tracing::warn!(path = %path.display(), %reason, "workspace: state set aside");
                 let _ = fsio::quarantine(path, "corrupt", SystemTime::now());
-                return;
+                return None;
             }
         };
         for kind in restored.tabs.values() {
@@ -269,26 +297,46 @@ impl Workspace {
         self.tiles = restored.tiles;
         self.panes = restored.panes;
         self.tabs = restored.tabs;
+        explorer
     }
 
     fn saved_state(&self) -> SavedState {
+        // ## m4-t01b-seams (ruling R-W0-1, named exception): DDL view tabs are not saved; the
+        // saved panes leave them out as if they were closed.
+        let mut panes = self.panes.clone();
+        for (id, kind) in &self.tabs {
+            if matches!(kind, TabKind::DdlView { .. }) {
+                let holders: Vec<PaneId> = panes
+                    .panes
+                    .iter()
+                    .filter(|(_, p)| p.tabs.contains(id))
+                    .map(|(pane, _)| *pane)
+                    .collect();
+                for pane in holders {
+                    panes.close_tab(pane, *id);
+                }
+            }
+        }
         SavedState {
             tiles: self.tiles,
-            panes: self.panes.clone(),
+            panes,
             tabs: self
                 .tabs
                 .iter()
-                .map(|(id, kind)| SavedTab {
-                    id: *id,
-                    kind: match kind {
-                        TabKind::Console { n, profile } => SavedKind::Console {
-                            n: *n,
-                            profile: profile.map(|p| p.to_string()),
+                .filter_map(|(id, kind)| {
+                    Some(SavedTab {
+                        id: *id,
+                        kind: match kind {
+                            TabKind::Console { n, profile } => SavedKind::Console {
+                                n: *n,
+                                profile: profile.map(|p| p.to_string()),
+                            },
+                            TabKind::Registered(name) => SavedKind::Registered {
+                                name: (*name).to_string(),
+                            },
+                            TabKind::DdlView { .. } => return None,
                         },
-                        TabKind::Registered(name) => SavedKind::Registered {
-                            name: (*name).to_string(),
-                        },
-                    },
+                    })
                 })
                 .collect(),
         }
@@ -311,9 +359,11 @@ impl Workspace {
         let Some(path) = self.state_path.clone() else {
             return;
         };
-        let Ok(value) = serde_json::to_value(self.saved_state()) else {
+        let Ok(mut value) = serde_json::to_value(self.saved_state()) else {
             return;
         };
+        // ## m4-t24-live (named line): the explorer's expanded rows.
+        crate::explorer::live::add_saved(&mut value, cx);
         self.save_task = Some(self.saver.submit((path, value), Some(SAVE_DEBOUNCE), cx));
     }
 
@@ -326,6 +376,13 @@ impl Workspace {
 
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    // ## m4-t33d-fr1 (ruling R-T33d-5, named exception)
+    /// The active pane's default focus as the last frame found it: its content's home primary
+    /// (a console's editor, a DDL view's code area), else its first Tab stop.
+    pub fn pane_default(&self) -> Option<FocusHandle> {
+        self.pane_home.primary()
     }
 
     /// The focused pane's active tab.
@@ -366,7 +423,8 @@ impl Workspace {
             .values()
             .filter_map(|k| match k {
                 TabKind::Console { n, .. } => Some(*n),
-                TabKind::Registered(_) => None,
+                // ## m4-t01b-seams (ruling R-W0-1, named exception)
+                TabKind::Registered(_) | TabKind::DdlView { .. } => None,
             })
             .max()
             .map_or(1, |n| n.saturating_add(1))
@@ -513,6 +571,15 @@ impl Workspace {
         self.layout_changed(cx);
     }
 
+    // ## m3c-t38 (named exception): the record inspector's visibility (`TileLayout`, saved).
+    /// Opens or closes the record inspector of the results tile (HV-GRID-12).
+    pub fn set_inspector_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.tiles.inspector_visible != visible {
+            self.tiles.inspector_visible = visible;
+            self.layout_changed(cx);
+        }
+    }
+
     /// Activates the tab of registered `kind`, or opens one in the focused pane. A kind nobody
     /// registered opens a tab that shows an empty state.
     pub fn open_registered_tab(
@@ -545,6 +612,58 @@ impl Workspace {
         self.layout_changed(cx);
     }
 
+    // ## m4-t01b-seams (ruling R-W0-1, named exception)
+    /// Activates the DDL view tab of `object` of `profile`, or opens one in the focused pane:
+    /// one tab per object. Returns the tab (`None` only when the tab IDs are used up).
+    pub fn open_ddl_view_tab(
+        &mut self,
+        profile: ProfileId,
+        object: DdlObjectId,
+        cx: &mut Context<Self>,
+    ) -> Option<TabId> {
+        let kind = TabKind::DdlView { profile, object };
+        let existing = self
+            .tabs
+            .iter()
+            .find(|(_, k)| **k == kind)
+            .map(|(id, _)| *id);
+        let tab = match existing {
+            Some(tab) => {
+                let found = self.panes.panes.iter().find_map(|(pane, p)| {
+                    p.tabs.iter().position(|t| *t == tab).map(|i| (*pane, i))
+                });
+                if let Some((pane, idx)) = found {
+                    self.panes.activate(pane, idx);
+                }
+                tab
+            }
+            None => {
+                let tab = self.fresh_tab(kind)?;
+                self.add_to_focused(tab);
+                tab
+            }
+        };
+        self.layout_changed(cx);
+        Some(tab)
+    }
+
+    /// The view of DDL view `tab` from `crate::ddl_view`, built once.
+    fn ddl_view_view(
+        &mut self,
+        tab: TabId,
+        profile: ProfileId,
+        object: DdlObjectId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyView> {
+        if let Some(view) = self.tab_views.get(&tab) {
+            return Some(view.clone());
+        }
+        let view = crate::ddl_view::tab_view(profile, object, window, cx)?;
+        self.tab_views.insert(tab, view.clone());
+        Some(view)
+    }
+
     /// Builds the view of a registered tab once.
     fn build_view(&mut self, tab: TabId, window: &mut Window, cx: &mut App) -> Option<AnyView> {
         if let Some(view) = self.tab_views.get(&tab) {
@@ -570,8 +689,15 @@ impl Workspace {
             .get(&pane)
             .and_then(|p| p.tabs.iter().position(|t| *t == tab))
         {
+            // ## m3c-t41-chrome (named exception; ledger 331): a click on the tab that is
+            // already active says "this one" again: the status bar and the capsule follow its
+            // console again after an explorer pick (`ActiveTab` observers re-run).
+            let again = self.active_tab() == Some(tab);
             self.panes.activate(pane, idx);
             self.layout_changed(cx);
+            if again {
+                cx.set_global(ActiveTab(Some(tab)));
+            }
         }
     }
 
@@ -621,8 +747,20 @@ impl Workspace {
     /// Removes the layer showing `view` (wherever it is in the stack) and gives the focus back
     /// (`pub` since m2a-t17: a custom modal layer closes itself by its view).
     pub fn remove_layer(&mut self, view: EntityId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(layer) = self.layers.remove_view(view) {
-            self.closed(layer, window, cx);
+        // ## m3b-t21-confirm (named exception): a layer removed from under another (a prompt
+        // that closed on its own timer or session event under another modal) leaves the focus
+        // on the top layer; only the top layer gives the focus back.
+        match self.layers.remove_view_in_stack(view) {
+            Some((layer, true)) => {
+                self.closed(layer, window, cx);
+            }
+            Some((layer, false)) => {
+                if layer.modal && !self.layers.has_modal() {
+                    rebuild_menus_later(cx);
+                }
+                cx.notify();
+            }
+            None => {}
         }
     }
 
@@ -775,6 +913,8 @@ impl Workspace {
         match kind {
             TabKind::Console { .. } => Some(CONSOLE_CONTEXT),
             TabKind::Registered(name) => self.kind_contexts.get(name).copied(),
+            // ## m4-t01b-seams (ruling R-W0-1, named exception)
+            TabKind::DdlView { .. } => Some(crate::ddl_view::DDL_VIEW_CONTEXT),
         }
     }
 
@@ -1073,17 +1213,29 @@ impl Workspace {
             });
         }
         let modal = self.layers.has_modal();
+        // ## m4-m3carry (U-6 c, P2-04): the collapsed field's tooltip and name, its words and
+        // keys as the narrow Run button joins them (`hv-console-button-keys`).
+        let placeholder = tr(cx, ids::hv::TITLEBAR_PALETTE, NoArgs);
+        let palette_tip = if keys.is_empty() {
+            placeholder.clone()
+        } else {
+            tr(
+                cx,
+                ids::hv::CONSOLE_BUTTON_KEYS,
+                ids::hv::HvConsoleButtonKeys {
+                    label: Text(placeholder.to_string()),
+                    keys: Text(keys.to_string()),
+                },
+            )
+        };
         let mut bar = TitleBar::new(chrome)
             .inert(modal)
             .brand(tr(cx, ids::cm::BRAND_HACIVAT_CAPS, NoArgs))
             .capsule(capsule)
-            .palette_field(
-                tr(cx, ids::hv::TITLEBAR_PALETTE, NoArgs),
-                keys,
-                |_, window, cx| {
-                    ActionRegistry::run(PALETTE_ACTION, window, cx);
-                },
-            )
+            .palette_field(placeholder, keys, |_, window, cx| {
+                ActionRegistry::run(PALETTE_ACTION, window, cx);
+            })
+            .palette_tip(palette_tip)
             .right(vec![
                 language_switch(cx, modal),
                 theme_switch(theme, cx, modal),
@@ -1324,6 +1476,12 @@ impl Workspace {
             Some(tab) => self.tab_content(*tab, theme, window, cx),
             None => editor_empty(theme, cx),
         };
+        // ## m4-t33d-fr1 (ruling R-T33d-5, named exception): the active pane's default.
+        let content = if id == self.panes.focused {
+            focus_home::first_stop_home(&self.pane_home, content).into_any_element()
+        } else {
+            content
+        };
         div()
             .flex()
             .flex_col()
@@ -1388,6 +1546,14 @@ impl Workspace {
             Some(TabKind::Console { n, profile }) => {
                 match self.console_view(tab, n, profile, window, cx) {
                     Some(view) => view.into_any_element(),
+                    None => editor_empty(theme, cx),
+                }
+            }
+            // ## m4-t01b-seams (ruling R-W0-1, named exception): the view `crate::ddl_view`
+            // builds for the tab, once.
+            Some(TabKind::DdlView { profile, object }) => {
+                match self.ddl_view_view(tab, profile, object, window, cx) {
+                    Some(view) => div().size_full().child(view).into_any_element(),
                     None => editor_empty(theme, cx),
                 }
             }
@@ -1462,6 +1628,8 @@ impl Render for Workspace {
             .on_key_down(escape)
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
+            // ## m4-t33d-fr1 (ruling R-T33d-5, named exception)
+            .child(focus_home::frame_start())
             .child(title_bar)
             .child(tiles)
             .child(status_bar)
@@ -1876,6 +2044,8 @@ mod validate_tests {
             editor_h: -5.0,
             inspector_w: f32::INFINITY,
             explorer_visible: true,
+            // ## m3c-t38 (named exception): the new field.
+            inspector_visible: false,
         };
         let t = validate(saved, none, bounds()).unwrap().tiles;
         assert_eq!(t.explorer_w, 276.0);

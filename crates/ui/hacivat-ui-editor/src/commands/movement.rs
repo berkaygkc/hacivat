@@ -11,13 +11,14 @@
 //! - **Pages** are the viewport's height less one row; the view scrolls by the same rows, so
 //!   the caret keeps its place in it.
 //!
-//! Every move is a selection-only transaction (`UserEvent::Move`, or `Select` with Shift).
+//! Every move is a selection-only transaction (`UserEvent::Move`, or `Select` with Shift), and
+//! moves every range (## m3c-t31-multi); ranges that meet merge (the M3a rule).
 
 use hacivat_text::units::{grapheme_column, offset_at_column};
-use hacivat_text::{Dir, SelectionRange, Snapshot, Unit, UserEvent, move_offset};
+use hacivat_text::{Dir, Snapshot, Unit, UserEvent, move_offset};
 use hacivat_ui_core::gpui_surface::{Context, Window, point, px};
 
-use super::{select, words};
+use super::{map_ranges, select_set, words};
 use crate::element::FrameLayout;
 use crate::view::EditorView;
 
@@ -32,7 +33,7 @@ fn event(extend: bool) -> UserEvent {
     }
 }
 
-/// A move of `unit` in `dir` (never `Up` or `Down`).
+/// A move of `unit` in `dir` (never `Up` or `Down`), at every range (## m3c-t31-multi).
 fn horizontal(
     v: &mut EditorView,
     dir: Dir,
@@ -40,21 +41,26 @@ fn horizontal(
     extend: bool,
     cx: &mut Context<EditorView>,
 ) {
-    let now = *v.model.selection().main();
-    let head = if !extend && !now.is_empty() && unit == Unit::Grapheme {
-        // Left and Right leave a selection at its edge.
-        match dir {
-            Dir::Back => now.range().start,
-            _ => now.range().end,
-        }
-    } else {
-        move_offset(v.model.buffer(), now.head, dir, unit, words(v).as_ref())
-    };
-    select(v, now.moved_to(head, extend), event(extend), cx);
+    let tok = words(v);
+    let buf = v.model.buffer().clone();
+    let next = map_ranges(v, |now| {
+        let head = if !extend && !now.is_empty() && unit == Unit::Grapheme {
+            // Left and Right leave a selection at its edge.
+            match dir {
+                Dir::Back => now.range().start,
+                _ => now.range().end,
+            }
+        } else {
+            move_offset(&buf, now.head, dir, unit, tok.as_ref())
+        };
+        now.moved_to(head, extend)
+    });
+    select_set(v, next, event(extend), cx);
 }
 
 /// Where a line's x positions come from.
-struct Geometry<'a> {
+// ## m3c-t31-multi (named exception): shared with the add-caret commands.
+pub(super) struct Geometry<'a> {
     snap: &'a Snapshot,
     /// The last frame, when it painted this text.
     layout: Option<&'a FrameLayout>,
@@ -63,7 +69,7 @@ struct Geometry<'a> {
 }
 
 impl<'a> Geometry<'a> {
-    fn of(v: &'a EditorView, snap: &'a Snapshot) -> Self {
+    pub(super) fn of(v: &'a EditorView, snap: &'a Snapshot) -> Self {
         Geometry {
             snap,
             layout: v.layout.as_ref().filter(|l| l.version() == snap.version),
@@ -77,7 +83,7 @@ impl<'a> Geometry<'a> {
     }
 
     /// The x of `at` from its line's start.
-    fn x_of(&self, at: usize) -> f32 {
+    pub(super) fn x_of(&self, at: usize) -> f32 {
         self.layout
             .and_then(|l| {
                 let x = l.x_for_offset(at)?;
@@ -87,7 +93,7 @@ impl<'a> Geometry<'a> {
     }
 
     /// The offset on `line` nearest to `x` from its start.
-    fn offset_at(&self, line: usize, x: f32) -> usize {
+    pub(super) fn offset_at(&self, line: usize, x: f32) -> usize {
         let painted = self.layout.and_then(|l| {
             let row = l.row(u32::try_from(line).ok()?)?;
             let p = point(px((l.origin_x + f64::from(x)) as f32), row.top);
@@ -100,21 +106,53 @@ impl<'a> Geometry<'a> {
     }
 }
 
-/// A move of `lines` buffer lines (negative: up) at the goal column.
+/// A move of `lines` rows (negative: up) at the goal column, at every range; a folded range
+/// is one row (## m3c-t32-fold, named exception: the move steps over it).
 fn vertical(v: &mut EditorView, lines: isize, extend: bool, cx: &mut Context<EditorView>) {
     let snap = v.model.snapshot();
-    let now = *snap.selection.main();
-    let next: SelectionRange = {
-        let geo = Geometry::of(v, &snap);
-        now.moved_vertically(
-            &snap.buffer,
-            lines,
-            extend,
-            |at| geo.x_of(at),
-            |line, x| geo.offset_at(line, x),
-        )
+    let total = u32::try_from(snap.buffer.len_lines()).unwrap_or(u32::MAX);
+    let map = crate::fold_gutter::height_map(v, total, 1.0);
+    // The buffer lines from `line` to the row `lines` rows away (at an edge: `lines`, so the
+    // move ends at the text's start or end as before).
+    // Fix round 1 (M1): past the last row when that row is a fold reaching the text's end, the
+    // end of that row's line (the hidden end would open the fold).
+    let tail_fold = !map.hidden().is_empty() && map.is_hidden(total.saturating_sub(1));
+    let last_row_end = {
+        let rows = map.visible_rows();
+        let line = map.line_of_row(rows.saturating_sub(1));
+        snap.buffer.line_range(line as usize, false).end
     };
-    select(v, next, event(extend), cx);
+    let delta = |line: usize| -> Option<isize> {
+        if map.hidden().is_empty() {
+            return Some(lines);
+        }
+        let line = u32::try_from(line).unwrap_or(u32::MAX);
+        let row = i64::from(map.row_of(line));
+        let rows = i64::from(map.visible_rows());
+        let target = row + lines as i64;
+        if target >= rows && tail_fold {
+            return None;
+        }
+        if target < 0 || target >= rows {
+            return Some(lines);
+        }
+        let to = map.line_of_row(u32::try_from(target).unwrap_or(0));
+        Some(to as isize - line as isize)
+    };
+    let next = {
+        let geo = Geometry::of(v, &snap);
+        map_ranges(v, |now| match delta(snap.buffer.byte_to_line(now.head)) {
+            Some(d) => now.moved_vertically(
+                &snap.buffer,
+                d,
+                extend,
+                |at| geo.x_of(at),
+                |line, x| geo.offset_at(line, x),
+            ),
+            None => now.moved_to(last_row_end, extend),
+        })
+    };
+    select_set(v, next, event(extend), cx);
 }
 
 /// A page up or down: the viewport's rows less one, the view scrolled by the same.

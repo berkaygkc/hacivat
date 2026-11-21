@@ -805,7 +805,8 @@ async fn idle_bound_follows_the_journal_mode() {
     let mut c = open_rw(&f).await;
     assert_eq!(c.typed_caps().idle_bound, ROLLBACK_IDLE_BOUND);
     let caps = c.typed_caps();
-    assert!(caps.suspend && !caps.binds && !caps.close_needs_kill);
+    // ## m3b-t13-drivers (named exception): binds since M3b.
+    assert!(caps.suspend && caps.binds && !caps.close_needs_kill);
     run(&mut *c, spec("PRAGMA journal_mode = WAL"))
         .await
         .unwrap();
@@ -873,28 +874,32 @@ async fn the_idle_bound_is_cached_and_refreshed_by_what_can_change_it() {
     assert_eq!(c.typed_caps().idle_bound, ROLLBACK_IDLE_BOUND);
 }
 
+// ## m3b-t13-drivers (named exception): M3a refused every bind and the simple protocol; M3b
+// binds (one per parameter) and runs a simple-protocol text as one (`typed_m3b.rs`). What
+// stays refused: binds with the simple protocol, and a parameter without a bind.
 #[tokio::test]
 async fn simple_protocol_parameters_and_binds_are_unsupported() {
     let f = numbered(1);
     let mut c = open_rw(&f).await;
+    let binds = [BindValue::Null];
     let simple_q = QuerySpec {
         protocol: Protocol::Simple,
-        ..spec("SELECT 1")
+        binds: &binds,
+        ..spec("SELECT ?")
     };
     assert_eq!(
         c.query(simple_q).await.unwrap_err().kind,
         RawErrorKind::Unsupported
     );
-    let binds = [BindValue::Null];
     let bound = QuerySpec {
         binds: &binds,
-        ..spec("SELECT ?")
+        ..spec("SELECT 1")
     };
     assert_eq!(
         c.query(bound).await.unwrap_err().kind,
         RawErrorKind::Unsupported
     );
-    // A parameter without a bind would run as NULL: refused until binds (M3b).
+    // A parameter without a bind would run as NULL: refused.
     for sql in ["SELECT ?", "DELETE FROM t WHERE a = :id", "SELECT $x"] {
         assert_eq!(
             c.query(spec(sql)).await.unwrap_err().kind,

@@ -10,3 +10,11 @@
 *.mp4 binary
 *.icc binary
 *.dmg binary
+
+# ## m4-t01a-model
+# The shipped system-catalog snapshots are zstd frames (R-M4-17).
+assets/system-catalogs/*.hvsnap.zst binary
+# Generated-DDL goldens and the catalog query packs are compared byte for byte (R-M4-16, G5;
+# `include_str!`): git never converts their line endings, so a Windows checkout keeps LF.
+crates/core/hacivat-ddl/tests/golden/** -text
+crates/core/hacivat-introspect/packs/**/*.hvq.sql -text

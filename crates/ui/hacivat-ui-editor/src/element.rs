@@ -30,6 +30,8 @@ use hacivat_text::display::{
     Decoration, Fragment, HeightMap, RangeSet, ScrollAnchor, compose_line, control_name,
     is_visible_control,
 };
+// ## m3c-t32-fold (named exception): folded headers.
+use hacivat_text::display::{PlaceholderId, compose_folded};
 use hacivat_text::units::snap_to_grapheme;
 use hacivat_text::{Bias, Snapshot, TextBuffer};
 use hacivat_ui_core::gpui_surface::{
@@ -118,6 +120,21 @@ pub(crate) struct RowLayout {
     /// The bytes on an inlay well (an executable comment), sorted and disjoint: painted before
     /// the selection, under whatever ink the tokens inside take.
     pub wells: SmallVec<[Range<usize>; 1]>,
+    // ## m3c-t32-fold (named exception)
+    /// A folded header: the fold's last line and its inlay.
+    pub fold: Option<FoldRow>,
+}
+
+// ## m3c-t32-fold (named exception)
+/// A folded header row's fold (`fold_gutter`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FoldRow {
+    /// The last line the fold hides.
+    pub last_line: u32,
+    /// Where the header's text ends (the inlay sits 8 px on), from the line's start.
+    pub inlay_x: f32,
+    /// The inlay's width with its gap (`fold_gutter::prepaint` sets it), for the statuses.
+    pub inlay_w: f32,
 }
 
 /// The last painted frame: what IME bounds, hit testing and the chooser's anchor read.
@@ -132,6 +149,12 @@ pub struct FrameLayout {
     pub(crate) origin_x: f64,
     /// The monospace advance.
     pub(crate) advance: f32,
+    // ## m3c-t32-fold (named exception): the frame's height map (folds hide lines).
+    pub(crate) map: HeightMap,
+    // ## m3c-narrow
+    /// The whole element (the gutter and the text area), in window coordinates: the narrow
+    /// forms of the placeholder and the banner read its width.
+    pub(crate) bounds: Bounds<Pixels>,
 }
 
 impl FrameLayout {
@@ -145,11 +168,31 @@ impl FrameLayout {
         self.version
     }
 
-    /// The painted row of `line`.
+    // ## m3c-t32-fold (named exception)
+    /// The buffer lines the frame painted, in order (a folded header's hidden lines are not
+    /// among them).
+    pub fn painted_lines(&self) -> Vec<u32> {
+        self.lines.iter().map(|r| r.line).collect()
+    }
+
+    /// The painted row of `line` (`None` for a hidden line: rows skip folds).
     pub(crate) fn row(&self, line: u32) -> Option<&RowLayout> {
-        let first = self.lines.first()?.line;
-        let row = self.lines.get(line.checked_sub(first)? as usize)?;
-        (row.line == line).then_some(row)
+        let i = self.lines.binary_search_by_key(&line, |r| r.line).ok()?;
+        self.lines.get(i)
+    }
+
+    // ## m3c-t32-fold (named exception, fix round 1 M7)
+    /// The painted rows of lines `first..=last` (none of the hidden lines between them).
+    pub(crate) fn rows_in(&self, first: u32, last: u32) -> &[RowLayout] {
+        let a = self.lines.partition_point(|r| r.line < first);
+        let b = self.lines.partition_point(|r| r.line <= last).max(a);
+        &self.lines[a..b]
+    }
+
+    // ## m3c-t32-fold (named exception)
+    pub(crate) fn row_mut(&mut self, line: u32) -> Option<&mut RowLayout> {
+        let i = self.lines.binary_search_by_key(&line, |r| r.line).ok()?;
+        self.lines.get_mut(i)
     }
 
     /// The x of byte `offset` on a painted line, in window coordinates; `None` off the painted
@@ -205,7 +248,9 @@ impl FrameLayout {
             return Some(self.offset_in_row(first, p.x));
         }
         if p.y >= last.top + self.rows.line_height {
-            if last.line as usize + 1 >= self.buffer.len_lines() {
+            // ## m3c-t32-fold (named exception): below a folded last row, its header (the
+            // document's end is hidden).
+            if last.fold.is_none() && last.line as usize + 1 >= self.buffer.len_lines() {
                 return Some(self.buffer.len_bytes());
             }
             return Some(self.offset_in_row(last, p.x));
@@ -359,6 +404,10 @@ impl FrameLayout {
     }
 }
 
+// ## m3c-t32-fold (named exception, fix round 1 M7)
+/// The most hidden bytes between two painted rows that one decoration request spans.
+const DECORATION_GAP: usize = 64 << 10;
+
 /// The gutter's base width (three digits) and the scrollbar track's width.
 const GUTTER_BASE: f32 = 58.0;
 const TRACK_WIDTH: f32 = 8.0;
@@ -382,6 +431,10 @@ pub struct FramePrepaint {
     // ## m3a-t28-gutter (named exception): the frame's rows, text ends and the band's bars and
     // hints for the gutter and the marks (`gutter::prepaint`).
     pub overlay: gutter::Overlay,
+    // ## m3c-t32-fold (named exception): the fold column and the inlays.
+    pub(crate) folds: crate::fold_gutter::FoldFrame,
+    // ## m3c-t34-editor (named exception): the gutter ▶ buttons.
+    pub(crate) buttons: gutter::ButtonFrame,
     /// The whole element (wheel scrolling).
     pub(crate) hitbox: Hitbox,
     /// The text area (the I-beam, clicks and drags).
@@ -392,6 +445,8 @@ pub struct FramePrepaint {
     /// The widest painted row, for the horizontal thumb.
     pub(crate) content_width: f64,
     pub(crate) scroll_x: f64,
+    // ## m3c-t33-find (named exception): the horizontal thumb's hit target.
+    pub(crate) thumb_hit: Option<Hitbox>,
 }
 
 impl FramePrepaint {
@@ -435,6 +490,9 @@ struct RowPlan {
     bytes: Range<usize>,
     /// A long line's window: its columns and its bytes.
     window: Option<(Range<usize>, Range<usize>)>,
+    // ## m3c-t32-fold (named exception)
+    /// A folded header: the fold's last line.
+    fold: Option<u32>,
 }
 
 impl RowPlan {
@@ -472,6 +530,7 @@ fn plan_row(
         top,
         bytes,
         window,
+        fold: None,
     }
 }
 
@@ -708,11 +767,23 @@ impl RowBuild<'_> {
         let shaped_range = plan.shaped();
         self.fill_classes(&shaped_range, sets);
         let mut pieces: SmallVec<[Piece; 1]> = SmallVec::new();
+        // ## m3c-t32-fold (named exception): where a folded header's placeholder sits.
+        let mut inlay_x = None;
         let width = match &plan.window {
             None => {
                 let refs: SmallVec<[&RangeSet<Decoration>; 2]> =
                     sets.iter().map(|(_, s)| s.as_ref()).collect();
-                let vl = compose_line(self.buffer, plan.line, self.tab_size, &refs);
+                let vl = match plan.fold {
+                    Some(last) => compose_folded(
+                        self.buffer,
+                        plan.line,
+                        last,
+                        self.tab_size,
+                        &refs,
+                        PlaceholderId(0),
+                    ),
+                    None => compose_line(self.buffer, plan.line, self.tab_size, &refs),
+                };
                 let mut x = 0.0;
                 let mut piece = TextPiece::default();
                 // The byte the next fragment starts at (a tab carries no byte of its own).
@@ -734,8 +805,12 @@ impl RowBuild<'_> {
                                 cursor = *byte + c.len_utf8();
                             }
                         }
-                        // Folds arrive in M3b; nothing in M3a replaces text.
-                        Fragment::Placeholder { .. } => {}
+                        // ## m3c-t32-fold (named exception): a folded header's placeholder ends
+                        // the row; `fold_gutter` draws its inlay there.
+                        Fragment::Placeholder { .. } => {
+                            x = self.flush(std::mem::take(&mut piece), &mut pieces, x, (0, 0));
+                            inlay_x = Some(x);
+                        }
                     }
                 }
                 self.flush(piece, &mut pieces, x, (0, 0))
@@ -788,6 +863,12 @@ impl RowBuild<'_> {
             width,
             pieces,
             wells: std::mem::take(&mut self.wells),
+            // ## m3c-t32-fold (named exception)
+            fold: plan.fold.map(|last_line| FoldRow {
+                last_line,
+                inlay_x: inlay_x.unwrap_or(width),
+                inlay_w: 0.0,
+            }),
         }
     }
 }
@@ -830,7 +911,10 @@ pub(crate) fn prepaint_frame(
         ),
         size(px(TRACK_WIDTH), bounds.size.height),
     );
-    let map = HeightMap::uniform(total_lines, f64::from(lh));
+    // ## m3c-t32-fold (named exception): folded lines take no height; an anchor a new fold hid
+    // re-pins onto its header.
+    let map = crate::fold_gutter::height_map(v, total_lines, f64::from(lh));
+    v.scroll.anchor.snap_visible(&map);
     let view_h = f64::from(f32::from(text_area.size.height));
     let view_w = f64::from((f32::from(text_area.size.width) - TEXT_INSET).max(0.0));
     let visible_cols = (view_w / f64::from(advance)).ceil().max(1.0) as usize;
@@ -864,29 +948,41 @@ pub(crate) fn prepaint_frame(
             if top >= text_area.bottom() {
                 break;
             }
-            plans.push(plan_row(
-                &buf,
-                line,
-                top,
-                scroll.scroll_x,
-                advance,
-                visible_cols,
-            ));
-            line += 1;
+            let mut plan = plan_row(&buf, line, top, scroll.scroll_x, advance, visible_cols);
+            // ## m3c-t32-fold (named exception): a row over a fold is its header; the next row
+            // is the first line after it.
+            let next = map.next_visible(line + 1);
+            if next > line + 1 {
+                plan.fold = Some(next - 1);
+            }
+            plans.push(plan);
+            line = next;
         }
-        // Decorations for the visible bytes only (a long line at either end only its window).
-        let span = match (plans.first(), plans.last()) {
-            (Some(a), Some(b)) => a.shaped().start..b.shaped().end,
-            _ => 0..0,
-        };
-        let mut sets: SmallVec<[(i16, Arc<RangeSet<Decoration>>); 2]> = sources
-            .iter()
-            .map(|s: &std::rc::Rc<dyn DecorationSource>| {
-                (s.priority(), s.decorations(&snapshot, log, span.clone()))
-            })
-            .collect();
-        sets.sort_by_key(|(p, _)| *p);
-        plans.iter().map(|p| build.build(p, &sets)).collect()
+        // Decorations for the visible bytes only (a long line at either end only its window),
+        // one request per run of rows whose hidden gaps are small (fix round 1, M7: Fold all
+        // asks once), so a large folded range is never decorated.
+        let mut rows = Vec::with_capacity(plans.len());
+        let mut i = 0;
+        while i < plans.len() {
+            let mut end = i + 1;
+            while end < plans.len()
+                && plans[end].shaped().start - plans[end - 1].shaped().end <= DECORATION_GAP
+            {
+                end += 1;
+            }
+            let seg = &plans[i..end];
+            let span = seg[0].shaped().start..seg[seg.len() - 1].shaped().end;
+            let mut sets: SmallVec<[(i16, Arc<RangeSet<Decoration>>); 2]> = sources
+                .iter()
+                .map(|s: &std::rc::Rc<dyn DecorationSource>| {
+                    (s.priority(), s.decorations(&snapshot, log, span.clone()))
+                })
+                .collect();
+            sets.sort_by_key(|(p, _)| *p);
+            rows.extend(seg.iter().map(|p| build.build(p, &sets)));
+            i = end;
+        }
+        rows
     };
     let mut lines = rows_for(&mut build, &v.scroll);
 
@@ -904,6 +1000,9 @@ pub(crate) fn prepaint_frame(
         version: snapshot.version,
         origin_x,
         advance,
+        map: map.clone(),
+        // ## m3c-narrow
+        bounds,
     };
     let text_left = f64::from(f32::from(text_area.left()) + TEXT_INSET);
     if reveal {
@@ -946,19 +1045,41 @@ pub(crate) fn prepaint_frame(
         version: snapshot.version,
         origin_x: text_left - v.scroll.scroll_x,
         advance,
+        map: map.clone(),
+        // ## m3c-narrow
+        bounds,
     });
+    // ## m3c-narrow: the banner's form follows the width this frame gave the editor; a frame
+    // whose width crossed the narrow line draws once more with the other form.
+    // ## m3c-narrow (fix round 1, M5): only while a banner shows.
+    let narrow_now =
+        crate::large_file::shows_banner(&v.tier) && crate::large_file::narrow(bounds.size.width);
+    if narrow_now != v.banner_narrow {
+        cx.on_next_frame(window, |_, _, cx| cx.notify());
+    }
 
     let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
     let text_hitbox = window.insert_hitbox(text_area, HitboxBehavior::Normal);
     // ## m3a-t28-gutter (named exception): the scrollbar track's own hit target over the text
     // area's right edge, and the frame's overlay (the band's rectangles, bars and hints).
     scrollbar::prepaint(track, window);
-    let overlay = v
+    // ## m3c-t33-find (named exception): the horizontal thumb's own hit target, over the text's.
+    let thumb_hit = scrollbar::prepaint_thumb(text_area, content_width, v.scroll.scroll_x, window);
+    // ## m3c-t32-fold (named exception): the fold column and the inlays, over the text's hit
+    // target (an inlay takes its own clicks); each inlay's width goes into its row first.
+    let folds = crate::fold_gutter::prepaint(v, gutter, window, cx);
+    let mut overlay = v
         .layout
         .as_ref()
         .map_or_else(gutter::Overlay::default, |layout| {
             gutter::prepaint(&mut v.band, &v.marks, layout, &snapshot)
         });
+    // ## m3c-t34-editor (named exception): the gutter ▶ buttons; a finished mark leaves its
+    // glyph slot to a shown one.
+    let buttons = gutter::prepaint_buttons(v, gutter, window, cx);
+    overlay.play_rows = buttons.rows.clone();
+    // ## m3c-gutter-no-run (named exception): the host reads them back (`gutter_play_rows`).
+    v.gutter_ui.shown.clone_from(&buttons.rows);
     let current_statement = preview::current_statement(&v.band, &snapshot);
     let visible_lines = (view_h / f64::from(lh)).ceil().max(1.0) as u32;
     let mut frame = FramePrepaint {
@@ -974,12 +1095,18 @@ pub(crate) fn prepaint_frame(
         mark_hits: MarkHitboxes::default(),
         // ## m3a-t28-gutter (named exception)
         overlay,
+        // ## m3c-t32-fold (named exception)
+        folds,
+        // ## m3c-t34-editor (named exception)
+        buttons,
         hitbox,
         text_hitbox,
         focused,
         scroll: v.scroll.anchor,
         content_width,
         scroll_x: v.scroll.scroll_x,
+        // ## m3c-t33-find (named exception)
+        thumb_hit,
     };
     frame.mark_hits = marks::prepaint(&v.marks, &frame.gutter(), window, cx);
     frame
@@ -1000,23 +1127,49 @@ pub(crate) fn paint_frame(
     gutter::paint(&g, window, cx);
     let mut failed = 0;
     if let Some(layout) = v.layout.as_ref() {
-        let marked = v.ime.marked(&v.model);
+        // ## m3c-t31-multi (named exception): the composition is underlined at every caret.
+        // Fix round 1 (M7): only the marked ranges on the painted rows (they are sorted).
+        let all = v.ime.marked_all(&v.model);
+        let rows = layout.rows();
+        let lo = layout.buffer.line_to_byte(rows.first_line as usize);
+        let hi = layout.buffer.line_to_byte(rows.last_line as usize + 1);
+        let from = all.partition_point(|r| r.end < lo);
+        let to = all.partition_point(|r| r.start <= hi).max(from);
         failed = paint::text_area(
             layout,
             &frame.snapshot,
             &v.band,
             &theme,
             frame.focused,
-            marked,
+            &all[from..to],
             window,
             cx,
         );
+        // ## m3c-t33-find (named exception): the other find matches' outlines.
+        crate::find::paint(v, layout, window, cx);
+        // ## m3c-t34-editor (named exception): the ▶ buttons first (the tab order runs down the
+        // ▶ column, then the fold column).
+        gutter::paint_buttons(&frame.buttons, window, cx);
+        // ## m3c-t32-fold (named exception): the folded headers' lines, inlays and chevrons.
+        crate::fold_gutter::paint(&frame.folds, layout.rows().bounds, window, cx);
         marks::paint(&v.marks, &g, layout, &frame.mark_hits, window, cx);
         if frame.focused && v.blink.visible() {
             paint::carets(layout, &frame.snapshot, &theme, window);
         }
     }
     v.cache.paint_failed(failed);
+    // ## m3c-t33-find (named exception): markers by visible row, and the find ticks.
+    let map = match v.layout.as_ref() {
+        Some(layout) => layout.map.clone(),
+        None => HeightMap::uniform(
+            frame.total_lines,
+            f64::from(f32::from(frame.rows.line_height)),
+        ),
+    };
+    // Fix round 1 (M9): bucketed by pixel row, cached per count generation.
+    let ticks = crate::find::tick_rows(v, frame.track, &map);
+    let current = crate::find::current_tick(v, frame.track, &map);
+    let map = &map;
     scrollbar::paint(
         &ScrollbarCtx {
             track: frame.track,
@@ -1025,6 +1178,9 @@ pub(crate) fn paint_frame(
             visible_lines: frame.visible_lines,
             current_statement: frame.current_statement.clone(),
             snapshot: &frame.snapshot,
+            map,
+            find_ticks: &ticks,
+            find_current: current,
         },
         &v.marks,
         window,
@@ -1038,10 +1194,22 @@ pub(crate) fn paint_frame(
         window,
     );
     crate::mouse::listen(view, frame, window);
+    // ## m3c-t33-find (named exception): the horizontal thumb's drag (its press runs first).
+    scrollbar::listen_thumb(view, frame, window);
+    // ## m3c-t32-fold (named exception)
+    crate::fold_gutter::listen(view, frame, window);
     if let Some(probe) = v.probe.clone() {
         probe.painted(cx);
     }
 }
+
+// ## m3c-narrow (F11; fix round 1, review M1: moved above the element's own doc)
+/// The lines the text area keeps beside the banner's narrow form where the editor's column has
+/// room for them below the banner's title (fix round 1, I1: they give way before the title).
+const NARROW_TEXT_MIN_LINES: f32 = 2.0;
+/// The text's flex shrink beside the narrow banner (the banner's is 1): it gives its two lines
+/// up only after the banner reached its minimum.
+const NARROW_TEXT_SHRINK: f32 = 0.001;
 
 // ## m3a-t29-a11y-tiers: the element's accessibility hooks moved to the view's focusable
 // column (`a11y::declare`), the element GPUI gives the platform focus.
@@ -1085,6 +1253,16 @@ impl Element for EditorElement {
             ..Style::default()
         };
         style.size.width = relative(1.0).into();
+        // ## m3c-narrow (F11): beside the banner's narrow form the text starts from
+        // `NARROW_TEXT_MIN_LINES` lines: the banner's body scrolls first. Fix round 1 (I1): a
+        // basis, not a minimum, and a shrink far below the banner's, so the text gives those
+        // lines up only once the banner is down to its title (its own minimum).
+        if self.view.read(cx).banner_narrow {
+            let lh = f32::from(EditorTheme::get(cx).line_height);
+            style.flex_basis = px(lh * NARROW_TEXT_MIN_LINES).into();
+            style.flex_shrink = NARROW_TEXT_SHRINK;
+            style.min_size.height = px(0.0).into();
+        }
         (window.request_layout(style, [], cx), ())
     }
 

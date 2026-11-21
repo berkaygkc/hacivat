@@ -53,6 +53,9 @@ struct SessionToasts {
     idle: HashSet<ProfileId>,
     /// Profiles whose read-only session let a write through (M8).
     downgraded: HashSet<ProfileId>,
+    // ## m3b-t22-tx-ui (named exception, T12 carry r1-m1)
+    /// What the visible session-lost toast of each profile says was lost.
+    lost: HashMap<ProfileId, LostState>,
     /// What each toast says, for the tests (feature `test-support`).
     #[cfg(feature = "test-support")]
     record: Vec<(u64, &'static str, Toast)>,
@@ -113,10 +116,19 @@ fn lost_items(cx: &App, lost: &LostState) -> Vec<String> {
 }
 
 /// A session of `profile` was lost and a reconnect would lose `lost` (see the module docs).
+///
+/// ## m3b-t22-tx-ui (named exception, T12 carry r1-m1): one toast per close. A close (the
+/// default's Disconnect, a profile's loss) can report a session twice: the console's own loss
+/// and the profile's list of the others'. While the profile's earlier "lost" toast (a session
+/// that did not reconnect) is still on screen, a newer "lost" one joins it: one toast that says
+/// everything both lost. A reconnect still replaces it (the M2b rule). The transaction line
+/// says "may have": a session counts as maybe in a transaction while any request of the user's
+/// ran, a plain SELECT included (T12), so it never claims one was open.
 pub(crate) fn lost(profile: ProfileId, lost: LostState, cx: &mut App) {
     let Some(name) = name_of(cx, profile) else {
         return;
     };
+    let lost = merged_loss(cx, profile, lost);
     // Task 17 (C1): only a session without an open (or unknown) transaction reconnects.
     let reconnected = !lost.open_tx;
     let (title_state, body_state) = if reconnected {
@@ -149,7 +161,8 @@ pub(crate) fn lost(profile: ProfileId, lost: LostState, cx: &mut App) {
     });
     let mut bullets: Vec<TextFn> = Vec::new();
     if lost.open_tx {
-        bullets.push(text_fn(ids::hv::CONN_LOST_TX));
+        // ## m3b-t22-tx-ui (named exception): "may have" (see above).
+        bullets.push(text_fn(ids::hv::TX_LOST_MAYBE));
     }
     if !lost_items(cx, &lost).is_empty() {
         let lost = lost.clone();
@@ -186,6 +199,33 @@ pub(crate) fn lost(profile: ProfileId, lost: LostState, cx: &mut App) {
         },
     ];
     show(cx, profile, Kind::Lost, toast);
+}
+
+// ## m3b-t22-tx-ui (named exception, T12 carry r1-m1)
+/// `lost`, joined with what the profile's visible "lost" toast already says when that one
+/// may have rolled a transaction back (one close reported twice, or a later loss of another
+/// session: fix round 1, m6); recorded as what the toast now says.
+fn merged_loss(cx: &mut App, profile: ProfileId, lost: LostState) -> LostState {
+    let visible = ToastQueue::visible_ids(cx);
+    let toasts = cx.default_global::<SessionToasts>();
+    let on_screen = toasts
+        .shown
+        .get(&(profile, Kind::Lost))
+        .is_some_and(|id| visible.contains(id));
+    let merged = match toasts.lost.get(&profile) {
+        // Fix round 1 (m6): an earlier loss that may have rolled a transaction back stays
+        // said until the toast goes, whatever a later loss of another session says.
+        Some(before) if on_screen && before.open_tx => LostState {
+            open_tx: true,
+            temp_objects: before.temp_objects || lost.temp_objects,
+            session_vars: before.session_vars || lost.session_vars,
+            prepared: before.prepared.max(lost.prepared),
+            locks: before.locks || lost.locks,
+        },
+        _ => lost,
+    };
+    toasts.lost.insert(profile, merged.clone());
+    merged
 }
 
 /// The idle threshold of `profile` (`LivenessPolicy::for_profile`, B18) as the toast's text:
@@ -256,6 +296,12 @@ pub(crate) fn clear_idle(cx: &mut App, profile: ProfileId) {
 /// A transaction of `profile` has been open and idle for `minutes`: a notice (M3 adds the
 /// prompt that ends it).
 pub(crate) fn idle_tx(profile: ProfileId, minutes: u32, cx: &mut App) {
+    // ## m3b-t22-tx-ui (named exception): a console showing the profile's default session
+    // gets the idle-transaction toast with Commit / Roll back / Keep open from the session's
+    // own reminder (`console::idle_toast`); this notice stays for a session no console shows.
+    if crate::console::idle_toast::shows_session_of(profile, cx) {
+        return;
+    }
     let Some(name) = name_of(cx, profile) else {
         return;
     };

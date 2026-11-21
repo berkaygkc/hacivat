@@ -21,6 +21,7 @@ use hacivat_app::results::adapter::{GridAdapter, ResultDisplay};
 use hacivat_app::results::cache::{DISPLAY_CACHE_CAPACITY, DisplayCache, DisplayKey};
 use hacivat_app::results::context::result_context_of;
 use hacivat_app::results::copy::{self, CopyOutcome, MAX_COPY_BYTES, TooLarge};
+// ## m3c-t36 fix round 1 (named exception, m5): every copy entry point takes the view map.
 use hacivat_app::results::tabs::MemoryBanner;
 use hacivat_app::results::{ActiveResult, CompletenessView, ConsoleResults};
 use hacivat_driver::{SemVerLoose, ServerInfo, Support};
@@ -37,6 +38,7 @@ use hacivat_session::session::{RunId, UnitId};
 use hacivat_session::{LiveInfo, LiveState, PathKind};
 use hacivat_ui::toast::ToastQueue;
 use hacivat_ui_core::theme::{Theme, ThemeMode};
+use hacivat_ui_grid::model::ViewMap;
 use hacivat_ui_grid::model::{CopyRefusal, CopyRegion, Dir};
 use hacivat_ui_grid::testing::grid_config;
 use hacivat_ui_grid::{
@@ -161,9 +163,15 @@ fn whole(adapter: &GridAdapter) -> CopyRegion {
 }
 
 fn tsv(adapter: &GridAdapter) -> String {
-    copy::tsv(adapter, &whole(adapter), false, MAX_COPY_BYTES)
-        .expect("within the limits")
-        .text
+    copy::tsv(
+        adapter,
+        &whole(adapter),
+        &ViewMap::identity(0),
+        false,
+        MAX_COPY_BYTES,
+    )
+    .expect("within the limits")
+    .text
 }
 
 fn names(adapter: &GridAdapter) -> Vec<String> {
@@ -281,9 +289,15 @@ fn copy_with_headers_puts_the_column_names_first() {
         schema(vec![pg("id", int8(), "int8"), pg("a\tb", text(), "text")]),
         vec![vec![Value::Int(7), t("x")]],
     );
-    let text = copy::tsv(&adapter, &whole(&adapter), true, MAX_COPY_BYTES)
-        .unwrap()
-        .text;
+    let text = copy::tsv(
+        &adapter,
+        &whole(&adapter),
+        &ViewMap::identity(0),
+        true,
+        MAX_COPY_BYTES,
+    )
+    .unwrap()
+    .text;
     assert_eq!(text, "id\t\"a\tb\"\n7\tx\n");
 }
 
@@ -297,9 +311,15 @@ fn copy_takes_the_region_only_and_skips_what_the_result_lacks() {
         cols: vec![ColId(2), ColId(0), ColId(9)],
     };
     assert_eq!(
-        copy::tsv(&adapter, &region, false, MAX_COPY_BYTES)
-            .unwrap()
-            .text,
+        copy::tsv(
+            &adapter,
+            &region,
+            &ViewMap::identity(0),
+            false,
+            MAX_COPY_BYTES
+        )
+        .unwrap()
+        .text,
         "x\t2\n\" \"\t3\n"
     );
 }
@@ -308,13 +328,28 @@ fn copy_takes_the_region_only_and_skips_what_the_result_lacks() {
 fn a_text_past_the_byte_limit_is_refused() {
     let adapter = fixture_3x3();
     assert_eq!(
-        copy::tsv(&adapter, &whole(&adapter), false, 8),
+        copy::tsv(&adapter, &whole(&adapter), &ViewMap::identity(0), false, 8),
         Err(TooLarge)
     );
     let exact = tsv(&adapter).len();
-    assert!(copy::tsv(&adapter, &whole(&adapter), false, exact).is_ok());
+    assert!(
+        copy::tsv(
+            &adapter,
+            &whole(&adapter),
+            &ViewMap::identity(0),
+            false,
+            exact
+        )
+        .is_ok()
+    );
     assert_eq!(
-        copy::tsv(&adapter, &whole(&adapter), false, exact - 1),
+        copy::tsv(
+            &adapter,
+            &whole(&adapter),
+            &ViewMap::identity(0),
+            false,
+            exact - 1
+        ),
         Err(TooLarge)
     );
 }
@@ -445,20 +480,42 @@ fn truncated_and_undecodable_cells(cx: &mut TestAppContext) {
     assert_eq!(bad.align, Align::Start);
     // Copy: the kept prefix, and an empty cell for the value that could not be decoded. The
     // decoder's message is not a value the server sent: it never reaches the clipboard.
-    let copied = copy::tsv(&adapter, &whole(&adapter), false, MAX_COPY_BYTES).unwrap();
+    let copied = copy::tsv(
+        &adapter,
+        &whole(&adapter),
+        &ViewMap::identity(0),
+        false,
+        MAX_COPY_BYTES,
+    )
+    .unwrap();
     assert_eq!(copied.text, "the kept prefix\t\n");
     assert!(!copied.text.contains("invalid byte sequence"));
     assert_eq!(copied.incomplete, 2, "both cells are incomplete");
     // A complete result has none.
     let whole_3x3 = fixture_3x3();
     assert_eq!(
-        copy::tsv(&whole_3x3, &whole(&whole_3x3), false, MAX_COPY_BYTES)
-            .unwrap()
-            .incomplete,
+        copy::tsv(
+            &whole_3x3,
+            &whole(&whole_3x3),
+            &ViewMap::identity(0),
+            false,
+            MAX_COPY_BYTES
+        )
+        .unwrap()
+        .incomplete,
         0
     );
     let region = whole(&adapter);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    let task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            adapter.generation(),
+            cx,
+        )
+    });
     assert_eq!(
         task.now_or_never(),
         Some(CopyOutcome::Copied {
@@ -496,7 +553,16 @@ fn a_copy_with_incomplete_cells_warns_instead_of_plainly_succeeding(cx: &mut Tes
     let adapter = incomplete_fixture();
     let region = whole(&adapter);
     vcx.cx
-        .update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx))
+        .update(|cx| {
+            copy::copy_region(
+                &adapter,
+                region,
+                ViewMap::identity(0),
+                false,
+                adapter.generation(),
+                cx,
+            )
+        })
         .detach();
     vcx.run_until_parked();
     assert_eq!(toast_ids(vcx), ["hv-copy-done", "hv-copy-done-incomplete"]);
@@ -593,20 +659,26 @@ fn columns_carry_the_native_type_kind_alignment_and_default_width() {
     assert_eq!(widths, [96.0, 120.0, 200.0, 200.0, 64.0, 96.0]);
 }
 
+// ## m3b-t07-types (ledger 246): MySQL labels come from the column definition (named exception;
+// was `a_column_without_a_native_name_is_labelled_by_its_logical_type`, same labels).
 #[test]
-fn a_column_without_a_native_name_is_labelled_by_its_logical_type() {
-    let mysql = |name: &str, logical: LogicalType| ColumnMeta {
-        name: name.into(),
-        logical,
-        native: NativeType::MySql {
-            column_type: 0,
-            flags: 0,
-            charset: 0,
-            length: 0,
-            decimals: 0,
-        },
-        origin: None,
-    };
+fn a_mysql_column_is_labelled_from_its_native_definition() {
+    let mysql =
+        |name: &str, logical: LogicalType, column_type, flags, charset, length| ColumnMeta {
+            name: name.into(),
+            logical,
+            native: NativeType::MySql {
+                column_type,
+                flags,
+                charset,
+                length,
+                decimals: 0,
+                time_zone: None,
+            },
+            origin: None,
+        };
+    // `INT UNSIGNED` (type 3, flag 32) and `VARCHAR(40)` in utf8mb4 (type 253, collation 255,
+    // 160 bytes): the logical text type carries no length on MySQL.
     let adapter = adapter_over(
         schema(vec![
             mysql(
@@ -615,8 +687,53 @@ fn a_column_without_a_native_name_is_labelled_by_its_logical_type() {
                     bits: 32,
                     signed: false,
                 },
+                3,
+                32,
+                63,
+                10,
             ),
             mysql(
+                "s",
+                LogicalType::Text {
+                    max_chars: None,
+                    fixed: false,
+                },
+                253,
+                0,
+                255,
+                160,
+            ),
+        ]),
+        vec![],
+    );
+    let labels: Vec<String> = adapter
+        .columns()
+        .iter()
+        .map(|c| c.type_label.to_string())
+        .collect();
+    assert_eq!(labels, ["int unsigned", "varchar(40)"]);
+}
+
+// ## m3b-t07-types fix round 1 (review m-5): the logical-type label path, which still serves
+// columns whose engine sent no type (FakeDriver's `NativeType::Unknown`).
+#[test]
+fn a_column_without_a_native_name_is_labelled_by_its_logical_type() {
+    let unknown = |name: &str, logical: LogicalType| ColumnMeta {
+        name: name.into(),
+        logical,
+        native: NativeType::Unknown,
+        origin: None,
+    };
+    let adapter = adapter_over(
+        schema(vec![
+            unknown(
+                "n",
+                LogicalType::Int {
+                    bits: 32,
+                    signed: false,
+                },
+            ),
+            unknown(
                 "s",
                 LogicalType::Text {
                     max_chars: Some(40),
@@ -632,6 +749,32 @@ fn a_column_without_a_native_name_is_labelled_by_its_logical_type() {
         .map(|c| c.type_label.to_string())
         .collect();
     assert_eq!(labels, ["int unsigned", "varchar(40)"]);
+}
+
+// ## m3b-t07-types fix round 1 (review m-9): a MySQL type code without an SQL name is labelled
+// through Fluent (never English from the core), and follows the installed language.
+#[gpui::test]
+fn a_mysql_type_code_without_a_name_is_labelled_through_fluent(cx: &mut TestAppContext) {
+    install_l10n(cx);
+    let col = ColumnMeta {
+        name: "x".into(),
+        logical: LogicalType::Opaque {
+            type_name: "time2".into(),
+        },
+        native: NativeType::MySql {
+            column_type: 19,
+            flags: 0,
+            charset: 63,
+            length: 0,
+            decimals: 0,
+            time_zone: None,
+        },
+        origin: None,
+    };
+    let adapter = adapter_over(schema(vec![col]), vec![]);
+    // The first frame renders the label in the installed language.
+    paint_rows(cx, &adapter, 0..0);
+    assert_eq!(plain(&adapter.columns()[0].type_label), "MySQL type 19");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1449,7 +1592,16 @@ fn toasts(cx: &mut TestAppContext) -> usize {
 fn copy_puts_one_string_on_the_clipboard_and_says_so(cx: &mut TestAppContext) {
     let adapter = fixture_3x3();
     let region = whole(&adapter);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    let task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            adapter.generation(),
+            cx,
+        )
+    });
     let outcome = task.now_or_never().expect("a small copy ends at once");
     assert_eq!(
         outcome,
@@ -1471,8 +1623,16 @@ fn a_large_copy_is_built_in_the_background(cx: &mut TestAppContext) {
     let adapter = adapter_over(three_columns(), numbered_rows(0..5_001));
     let region = whole(&adapter);
     assert!(region.cell_count() > copy::BACKGROUND_COPY_CELLS);
-    let mut task =
-        cx.update(|cx| copy::copy_region(&adapter, region, true, adapter.generation(), cx));
+    let mut task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            true,
+            adapter.generation(),
+            cx,
+        )
+    });
     assert!(
         (&mut task).now_or_never().is_none(),
         "the text is not built on the UI thread"
@@ -1511,7 +1671,16 @@ fn copy_over_a_million_cells_is_refused(cx: &mut TestAppContext) {
     };
     let cells = region.cell_count();
     assert_eq!(cells, 1_000_002);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    let task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            adapter.generation(),
+            cx,
+        )
+    });
     assert_eq!(
         task.now_or_never(),
         Some(CopyOutcome::TooManyCells { cells })
@@ -1528,7 +1697,16 @@ fn copy_over_a_million_cells_is_refused(cx: &mut TestAppContext) {
         cols: vec![ColId(0), ColId(1)],
     };
     assert_eq!(region.cell_count(), copy::MAX_COPY_CELLS);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    let task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            adapter.generation(),
+            cx,
+        )
+    });
     cx.run_until_parked();
     assert!(matches!(
         task.now_or_never(),
@@ -1591,7 +1769,16 @@ fn a_copy_requested_before_a_rerun_was_painted_copies_nothing(cx: &mut TestAppCo
     assert_eq!(region.cell_count(), 2, "the first result's selection");
     assert_eq!(generation, 1, "cut from the first result");
     assert_eq!(adapter.generation(), 2);
-    let task = vcx.update(|_, cx| copy::copy_region(&adapter, region, false, generation, cx));
+    let task = vcx.update(|_, cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            generation,
+            cx,
+        )
+    });
     assert_eq!(task.now_or_never(), Some(CopyOutcome::Stale));
     assert_eq!(
         vcx.read_from_clipboard().and_then(|i| i.text()).as_deref(),
@@ -1609,7 +1796,16 @@ fn a_copy_requested_before_a_rerun_was_painted_copies_nothing(cx: &mut TestAppCo
     vcx.run_until_parked();
     let (region, generation) = requests.borrow_mut().pop().expect("a copy was requested");
     assert_eq!(generation, 2);
-    let task = vcx.update(|_, cx| copy::copy_region(&adapter, region, false, generation, cx));
+    let task = vcx.update(|_, cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            generation,
+            cx,
+        )
+    });
     assert_eq!(
         task.now_or_never(),
         Some(CopyOutcome::Copied {
@@ -1635,16 +1831,22 @@ fn a_cell_past_the_byte_limit_is_refused_from_its_known_length() {
     );
     let region = whole(&adapter);
     let exact = 2 + 2 * (2 << 20) + 1;
-    assert_eq!(copy::tsv(&adapter, &region, false, 1 << 20), Err(TooLarge));
     assert_eq!(
-        copy::tsv(&adapter, &region, false, exact - 1),
+        copy::tsv(&adapter, &region, &ViewMap::identity(0), false, 1 << 20),
+        Err(TooLarge)
+    );
+    assert_eq!(
+        copy::tsv(&adapter, &region, &ViewMap::identity(0), false, exact - 1),
         Err(TooLarge)
     );
     // The bound is the text's real size: exactly at the limit it fits.
-    let copied = copy::tsv(&adapter, &region, false, exact).unwrap();
+    let copied = copy::tsv(&adapter, &region, &ViewMap::identity(0), false, exact).unwrap();
     assert_eq!(copied.text.len(), exact);
     // The estimate the background decision uses is that same size, without building the text.
-    assert_eq!(copy::estimated_bytes(&adapter, &region), exact);
+    assert_eq!(
+        copy::estimated_bytes(&adapter, &region, &ViewMap::identity(0)),
+        exact
+    );
 }
 
 #[gpui::test]
@@ -1654,8 +1856,16 @@ fn a_few_large_cells_are_built_in_the_background(cx: &mut TestAppContext) {
     let adapter = one_cell(&big);
     let region = whole(&adapter);
     assert_eq!(region.cell_count(), 1);
-    let mut task =
-        cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    let mut task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            adapter.generation(),
+            cx,
+        )
+    });
     assert!(
         (&mut task).now_or_never().is_none(),
         "a megabyte of text is not built on the UI thread"
@@ -1680,7 +1890,16 @@ fn copy_toasts_are_the_mocks_messages(cx: &mut TestAppContext) {
     let adapter = fixture_3x3();
     let region = whole(&adapter);
     vcx.cx
-        .update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx))
+        .update(|cx| {
+            copy::copy_region(
+                &adapter,
+                region,
+                ViewMap::identity(0),
+                false,
+                adapter.generation(),
+                cx,
+            )
+        })
         .detach();
     vcx.run_until_parked();
     assert_eq!(
@@ -1755,4 +1974,85 @@ fn cell_through_the_adapter_hit_under_200_ns(cx: &mut TestAppContext) {
     let p99 = per_cell[per_cell.len() * 99 / 100];
     println!("adapter cell hit: p50 {p50:.1} ns, p99 {p99:.1} ns");
     assert!(p50 < 200.0, "p50 {p50:.1} ns per cell");
+}
+
+// ## m3c-t40 (named exception): what a screen reader reads for a cell (`GridFrame::a11y_cell`,
+// `Purpose::A11y`): controls spoken as spaces, a truncated value's whole size alone as its chip
+// (the grid words it, "…, truncated, 5.2 MB"); every other cell as painted.
+#[gpui::test]
+fn a_cell_reads_to_a_screen_reader_with_controls_as_spaces_and_its_whole_size(
+    cx: &mut TestAppContext,
+) {
+    install_l10n(cx);
+    let truncated = Value::Truncated(Box::new(TruncatedVal {
+        prefix: t("the kept prefix"),
+        total_len: Some(5_452_595),
+        unit: LenUnit::Bytes,
+    }));
+    let adapter = adapter_over(
+        schema(vec![
+            pg("a", text(), "text"),
+            pg("b", text(), "text"),
+            pg("c", text(), "text"),
+        ]),
+        vec![
+            vec![t("one\ntwo\tthree"), truncated, t("plain")],
+            vec![Value::Null, t("x"), t("y")],
+        ],
+    );
+    let read = adapter.clone();
+    let (spoken, painted) = cx.update(|cx| {
+        let frame = read.begin_frame(cx);
+        let at = [(0, 0), (0, 1), (0, 2), (1, 0)];
+        (
+            at.map(|(r, c)| frame.a11y_cell(ModelRow(r), ColId(c))),
+            at.map(|(r, c)| frame.cell(ModelRow(r), ColId(c))),
+        )
+    });
+    assert_eq!(spoken[0].text.as_ref(), "one two three");
+    assert_eq!(
+        painted[0].text.as_ref(),
+        "one\ntwo\tthree",
+        "the cell keeps its controls"
+    );
+    assert_eq!(spoken[1].text.as_ref(), "the kept prefix");
+    assert!(spoken[1].flags.contains(GridCellFlags::TRUNCATED));
+    assert_eq!(plain(spoken[1].chip.as_ref().expect("a size")), "5.2 MB");
+    assert_eq!(spoken[2], painted[2]);
+    assert_eq!(spoken[3], painted[3]);
+    assert_eq!(spoken[3].kind, CellKind::Null);
+}
+
+// ## m3c-t40 fix round 1 (m4): a cell's screen-reader text is formatted once per data and
+// display settings, not once per frame.
+#[gpui::test]
+fn a_cells_screen_reader_text_is_formatted_once(cx: &mut TestAppContext) {
+    install_l10n(cx);
+    let adapter = adapter_over(
+        schema(vec![pg("a", text(), "text"), pg("b", text(), "text")]),
+        vec![vec![t("one\ntwo"), t("plain")], vec![t("x\ty"), t("z")]],
+    );
+    let read = |cx: &mut TestAppContext, adapter: &Rc<GridAdapter>| {
+        let adapter = adapter.clone();
+        cx.update(|cx| {
+            let frame = adapter.begin_frame(cx);
+            [(0, 0), (0, 1), (1, 0), (1, 1)].map(|(r, c)| frame.a11y_cell(ModelRow(r), ColId(c)))
+        })
+    };
+    let first = read(cx, &adapter);
+    assert_eq!(first[0].text.as_ref(), "one two");
+    // Two cells carry controls: two formats; plain cells read the display cache.
+    assert_eq!(adapter.a11y_format_calls(), 2);
+    for _ in 0..3 {
+        assert_eq!(read(cx, &adapter), first);
+    }
+    assert_eq!(
+        adapter.a11y_format_calls(),
+        2,
+        "later frames read the cache"
+    );
+    // New display settings format again.
+    cx.update(|cx| adapter.set_display(tr_istanbul(), cx));
+    read(cx, &adapter);
+    assert_eq!(adapter.a11y_format_calls(), 4);
 }

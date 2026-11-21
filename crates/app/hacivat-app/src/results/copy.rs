@@ -39,11 +39,12 @@
 //!   [`copy_region`] copies only while the adapter is still at it. Otherwise it answers
 //!   [`CopyOutcome::Stale`], with no clipboard write and no toast: the rows under the old
 //!   selection's positions are rows the user neither saw nor selected.
-//! - **View rows are read as model rows.** `CopyRegion::rows` are the grid's *view* rows. The
-//!   copy reads them from the snapshot as they are, which is right only while the grid's
-//!   `ViewMap` is the identity, as it is in M3a (no local sort, no row filter). When either
-//!   lands (HV-GRID-06, M3b), the request must carry model rows or the map, and this module
-//!   must translate; until then a sorted grid would copy other rows' values.
+//! - **View rows go through the map** (## m3c-t36, ledger 253 I5). `CopyRegion::rows` are the
+//!   grid's *view* rows. [`copy_region`] takes the grid's `ViewMap` and reads each view row's
+//!   model row (`view_to_model`), in view order, so a copy after a sort or under a filter holds
+//!   exactly the rows the user sees, in the order shown; a view row the map does not show is
+//!   left out. Fix round 1 (m5): every entry point takes the map, so no caller can read view
+//!   rows as model rows (a grid without a sort or filter passes `ViewMap::identity`).
 //!
 //! # The TSV
 //!
@@ -71,7 +72,8 @@ use hacivat_l10n::{Count, Text, ids};
 use hacivat_ui::icon::IconName;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, AppContext as _, ClipboardItem, Task};
-use hacivat_ui_grid::model::{CopyRefusal, CopyRegion};
+use hacivat_ui_grid::ViewRow;
+use hacivat_ui_grid::model::{CopyRefusal, CopyRegion, ViewMap};
 use hacivat_values::ValueRef;
 use hacivat_values::valfmt::{RawText, raw_text_in};
 
@@ -122,26 +124,51 @@ pub struct Tsv {
     pub incomplete: u64,
 }
 
-/// The TSV of `region` of the result `adapter` shows now (module docs), or [`TooLarge`] past
-/// `max_bytes`. Rows and columns the result does not have are left out.
+/// The TSV of `region` (view rows of `map`, module docs) of the result `adapter` shows now,
+/// or [`TooLarge`] past `max_bytes`. Rows and columns the result does not have are left out.
 pub fn tsv(
     adapter: &GridAdapter,
     region: &CopyRegion,
+    map: &ViewMap,
     headers: bool,
     max_bytes: usize,
 ) -> Result<Tsv, TooLarge> {
-    build_tsv(&adapter.raw_view(), region, headers, max_bytes)
+    build_tsv(&adapter.raw_view(), region, map, headers, max_bytes)
 }
 
 /// The least text `region`'s TSV needs, without building it: every cell's known length (the
 /// hex of a binary value, the bytes of a text) plus the separators. Numbers, dates and the
-/// quoting are not counted, so the real text is at least this long.
-pub fn estimated_bytes(adapter: &GridAdapter, region: &CopyRegion) -> usize {
-    estimate(&adapter.raw_view(), region, usize::MAX)
+/// quoting are not counted, so the real text is at least this long. `region`'s rows are view
+/// rows of `map`.
+pub fn estimated_bytes(adapter: &GridAdapter, region: &CopyRegion, map: &ViewMap) -> usize {
+    estimate(&adapter.raw_view(), region, map, usize::MAX)
+}
+
+// ## m3c-t36
+/// The model rows `region`'s view rows show through `map`, in view order: rows the map does not
+/// show, or that are not loaded (`loaded` model rows), are left out.
+fn model_rows<'a>(
+    region: &'a CopyRegion,
+    map: &'a ViewMap,
+    loaded: u64,
+) -> impl Iterator<Item = u64> + 'a {
+    region.rows.iter().flat_map(move |rows| {
+        // The identity reads the range as it is (no lookup per row).
+        let range = if map.is_identity() {
+            rows.start.min(loaded)..rows.end.min(loaded)
+        } else {
+            rows.clone()
+        };
+        range.filter_map(move |r| {
+            map.view_to_model(ViewRow(r))
+                .map(|m| m.0)
+                .filter(|m| *m < loaded)
+        })
+    })
 }
 
 /// [`estimated_bytes`] over `view`, stopping once it passes `stop_above`.
-fn estimate(view: &RawView, region: &CopyRegion, stop_above: usize) -> usize {
+fn estimate(view: &RawView, region: &CopyRegion, map: &ViewMap, stop_above: usize) -> usize {
     let snapshot = &view.snapshot;
     let cols: Vec<u32> = region
         .cols
@@ -151,14 +178,12 @@ fn estimate(view: &RawView, region: &CopyRegion, stop_above: usize) -> usize {
         .collect();
     let loaded = snapshot.row_count();
     let mut total = 0usize;
-    for rows in &region.rows {
-        for row in rows.start.min(loaded)..rows.end.min(loaded) {
-            for col in &cols {
-                total = total.saturating_add(known_len(snapshot.cell(row, *col)) + 1);
-            }
-            if total > stop_above {
-                return total;
-            }
+    for row in model_rows(region, map, loaded) {
+        for col in &cols {
+            total = total.saturating_add(known_len(snapshot.cell(row, *col)) + 1);
+        }
+        if total > stop_above {
+            return total;
         }
     }
     total
@@ -167,7 +192,8 @@ fn estimate(view: &RawView, region: &CopyRegion, stop_above: usize) -> usize {
 /// The bytes a cell's raw text is known to need before it is built: exact for binary values
 /// (`\x` and two digits per byte), a lower bound for text (quoting and escapes only add), 0
 /// for values whose text is short (numbers, dates) or is not copied (a decode error).
-fn known_len(value: ValueRef<'_>) -> usize {
+// ## m3c-t38 (named exception): crate-visible for the Transposed view's copy.
+pub(crate) fn known_len(value: ValueRef<'_>) -> usize {
     match value {
         ValueRef::Bytes(b) => 2 + 2 * b.len(),
         ValueRef::Text(t) | ValueRef::Json(t) | ValueRef::Xml(t) => t.len(),
@@ -180,11 +206,11 @@ fn known_len(value: ValueRef<'_>) -> usize {
 
 /// The TSV of `region` over `view`'s snapshot. Pure: it runs on any thread.
 ///
-/// `region.rows` are read as model rows (module docs: valid while the grid's view map is the
-/// identity).
+/// ## m3c-t36: `region.rows` are view rows of `map`; each is read as the model row it shows.
 pub(crate) fn build_tsv(
     view: &RawView,
     region: &CopyRegion,
+    map: &ViewMap,
     headers: bool,
     max_bytes: usize,
 ) -> Result<Tsv, TooLarge> {
@@ -209,37 +235,35 @@ pub(crate) fn build_tsv(
         out.push('\n');
     }
     let loaded = snapshot.row_count();
-    for rows in &region.rows {
-        for row in rows.start.min(loaded)..rows.end.min(loaded) {
-            for (i, col) in cols.iter().enumerate() {
-                if i > 0 {
-                    out.push('\t');
-                }
-                let value = snapshot.cell(row, *col);
-                match value {
-                    // Not a value the server sent: an empty cell, never the decoder's message.
-                    ValueRef::Error(_) => {
-                        incomplete += 1;
-                        continue;
-                    }
-                    // The kept prefix is all the result has of it.
-                    ValueRef::Truncated(_) => incomplete += 1,
-                    _ => {}
-                }
-                // Refused before the cell's text exists: a huge value is never expanded.
-                if out.len().saturating_add(known_len(value)) > max_bytes {
-                    return Err(TooLarge);
-                }
-                let facts = view.facts[*col as usize].view(engine);
-                match raw_text_in(value, &facts, zone) {
-                    RawText::Null => {}
-                    RawText::Text(text) => push_cell(&mut out, &text),
-                }
+    for row in model_rows(region, map, loaded) {
+        for (i, col) in cols.iter().enumerate() {
+            if i > 0 {
+                out.push('\t');
             }
-            out.push('\n');
-            if out.len() > max_bytes {
+            let value = snapshot.cell(row, *col);
+            match value {
+                // Not a value the server sent: an empty cell, never the decoder's message.
+                ValueRef::Error(_) => {
+                    incomplete += 1;
+                    continue;
+                }
+                // The kept prefix is all the result has of it.
+                ValueRef::Truncated(_) => incomplete += 1,
+                _ => {}
+            }
+            // Refused before the cell's text exists: a huge value is never expanded.
+            if out.len().saturating_add(known_len(value)) > max_bytes {
                 return Err(TooLarge);
             }
+            let facts = view.facts[*col as usize].view(engine);
+            match raw_text_in(value, &facts, zone) {
+                RawText::Null => {}
+                RawText::Text(text) => push_cell(&mut out, &text),
+            }
+        }
+        out.push('\n');
+        if out.len() > max_bytes {
+            return Err(TooLarge);
         }
     }
     if out.len() > max_bytes {
@@ -253,7 +277,8 @@ pub(crate) fn build_tsv(
 
 /// One TSV cell: quoted when it holds a tab, a line break or a quote, or has outer white
 /// space; verbatim otherwise.
-fn push_cell(out: &mut String, text: &str) {
+// ## m3c-t38 (named exception): crate-visible for the Transposed and text views.
+pub(crate) fn push_cell(out: &mut String, text: &str) {
     let outer_space = text.chars().next().is_some_and(char::is_whitespace)
         || text.chars().next_back().is_some_and(char::is_whitespace);
     if !outer_space && !text.contains(['\t', '\n', '\r', '"']) {
@@ -276,9 +301,13 @@ fn push_cell(out: &mut String, text: &str) {
 ///
 /// `expected_generation` is the event's `generation`: the result the region was cut from.
 /// When the adapter has moved on (a re-run), nothing is copied ([`CopyOutcome::Stale`]).
+///
+/// ## m3c-t36: `region`'s rows are view rows of `map` (the grid's map when it asked): the copy
+/// holds the rows the user sees, in the order shown (module docs).
 pub fn copy_region(
     adapter: &GridAdapter,
     region: CopyRegion,
+    map: ViewMap,
     headers: bool,
     expected_generation: u64,
     cx: &mut App,
@@ -295,14 +324,14 @@ pub fn copy_region(
     let rows = region.row_count();
     let cols = region.cols.len() as u64;
     let small = cells <= BACKGROUND_COPY_CELLS
-        && estimate(&view, &region, BACKGROUND_COPY_BYTES) <= BACKGROUND_COPY_BYTES;
+        && estimate(&view, &region, &map, BACKGROUND_COPY_BYTES) <= BACKGROUND_COPY_BYTES;
     if small {
-        let text = build_tsv(&view, &region, headers, MAX_COPY_BYTES);
+        let text = build_tsv(&view, &region, &map, headers, MAX_COPY_BYTES);
         return Task::ready(finish(text, rows, cols, cells, cx));
     }
     let working = ToastQueue::push_id(cx, working_toast(saturating_u64(cells)));
-    let job =
-        cx.background_spawn(async move { build_tsv(&view, &region, headers, MAX_COPY_BYTES) });
+    let job = cx
+        .background_spawn(async move { build_tsv(&view, &region, &map, headers, MAX_COPY_BYTES) });
     cx.spawn(async move |cx| {
         let text = job.await;
         cx.update(|cx| {
@@ -326,7 +355,8 @@ pub fn copy_refused(refusal: CopyRefusal, cx: &mut App) {
 }
 
 /// Puts the text on the clipboard and says so, or refuses a text past the byte limit.
-fn finish(
+// ## m3c-t38 (named exception): crate-visible for the Transposed view's copy.
+pub(crate) fn finish(
     text: Result<Tsv, TooLarge>,
     rows: u64,
     cols: u64,
@@ -403,7 +433,8 @@ fn copied_toast(rows: u64, cols: u64, incomplete: u64) -> Toast {
 }
 
 /// The "Too much to copy" toast (NOTES surface 14): the selection's cells and both limits.
-fn refuse_too_much(cells: u128, cx: &mut App) {
+// ## m3c-t38 (named exception): crate-visible for the Transposed view's copy.
+pub(crate) fn refuse_too_much(cells: u128, cx: &mut App) {
     let count = saturating_u64(cells);
     let mut toast = Toast::new(
         ToastKind::Info,

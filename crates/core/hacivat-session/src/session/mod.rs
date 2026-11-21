@@ -21,6 +21,16 @@ pub mod router;
 pub mod run;
 pub mod schema;
 pub mod tx;
+// ## m3b-t01c-core-seams: verdicts and the classifier hook (R-M3-83), confirm-in-transaction
+// and Smart (Task 19), out-of-band answers (P-M3b-3).
+pub(crate) mod confirm;
+pub(crate) mod run_gate;
+// ## m3b-t24-exec-ui (named exception: the T24 I1 ruling)
+pub(crate) mod run_context;
+// ## m3b-t26-prod-unlock: a production profile's startup script runs only harmless statements.
+pub(crate) mod smart;
+pub(crate) mod startup_check;
+pub mod verdict;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,11 +46,13 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use hacivat_driver::{Protocol, TxStatus};
-use hacivat_proto::EnvTag;
 use hacivat_results::{
     CloseReason, Completeness, FetchControl, FetchPolicy, ResultId, ResultWriter,
 };
 use hacivat_values::ResultSchema;
+// ## m3b-t01c-core-seams
+use hacivat_values::BindValue;
+use std::time::Duration;
 
 use crate::profile::Profile;
 
@@ -58,10 +70,13 @@ pub use schema::{
 };
 pub use tx::{IsolationLevel, TxCommand, TxError, TxMode, TxState, begin_sql, default_mode};
 // ## m3a-t01b-seams
-pub use pool::SessionPolicy;
 pub use tx::TxOwner;
 // ## m3a-f1-followups
 pub use schema::context_probe_sql;
+// ## m3b-t01c-core-seams
+pub use verdict::{RoCheck, SafetyDenial, SessionEffects, StatementClassifier, UnitVerdict};
+// ## m3b-t18-safe06
+pub use verdict::{ClassifierContext, RoAnswer};
 
 /// A session's ID, unique in the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -177,6 +192,40 @@ pub enum Request {
         result: ResultId,
         reason: CloseReason,
     },
+    // ## m3b-t24-exec-ui (named exception: the T24 I1 ruling)
+    /// The session's classification context now (Run's gate, Count rows): answered in the
+    /// queue's order, so after every earlier request; read again first when a request may have
+    /// changed it. [`SessionHandle::classifier_context`] sends it and reads the answer.
+    ReadContext,
+    // ## m4-t05-meta (named exception, ruling R-W1-9)
+    /// A metadata read (`crate::meta`), checked and run in one actor step when it is taken.
+    /// Only `crate::meta` builds one ([`MetaRead`]'s fields are private).
+    MetaRead(MetaRead),
+}
+
+// ## m4-t05-meta (named exception, ruling R-W1-9)
+/// One metadata read on a session (`crate::meta`): trusted pack text with its binds. The actor
+/// checks its condition when it takes the request, in the same step that runs it, and answers
+/// a refusal without sending anything:
+/// - **On the user's session**: the transaction must be idle, with no cursor, no MySQL
+///   `LOCK TABLES` and MySQL `autocommit` on (`TxError::InProgress` otherwise). The read runs
+///   inside Hacivat's own read-only transaction, rolled back after it.
+/// - **Joined** (R-M4-29): a `Job(DdlApply | DriftCheck)` session inside its transaction
+///   (`TxError::Unsupported` otherwise); nothing but the read is sent.
+///
+/// It never goes through the user-run path, the transaction modes, the verdicts, the history
+/// or the activity, and never marks the run context stale.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MetaRead {
+    pub(crate) sql: Arc<str>,
+    pub(crate) binds: Arc<[BindValue]>,
+    pub(crate) joined: bool,
+    /// The server-side limit of the read (PostgreSQL `SET LOCAL statement_timeout`).
+    pub(crate) timeout: Duration,
+    // ## m4-t15b-facets (named exception in Task 5's seam; T15b review m-1)
+    /// The engine the reader expects the session to be (`Unknown`: any). A joined read of
+    /// another engine's text is refused before anything is sent.
+    pub(crate) engine: hacivat_proto::DbmsKind,
 }
 
 /// Which read-only layer refused a statement (SQL-SAFE-05).
@@ -190,6 +239,9 @@ pub enum DenyLayer {
     /// PostgreSQL: the statement calls a function whose effect a rollback does not undo
     /// (`hacivat_guard::check_functions`; Task 23 finding F1).
     Function,
+    // ## m3b-t01c-core-seams
+    /// The injected classifier refused it (`Core::step0b`, R-M3-83; Task 18).
+    Classifier,
 }
 
 /// Why a request failed.
@@ -207,6 +259,15 @@ pub enum ExecErrorKind {
     EnforcementGap(GapReason),
     NotConnected,
     Internal,
+    // ## m3b-t01c-core-seams
+    /// The classifier refused the statement on a read-only session (Task 18): nothing sent.
+    SafetyDenied(SafetyDenial),
+    /// The session's queue is full (Task 11): nothing queued.
+    QueueFull,
+    // ## m3b-t24-exec-ui (fix round 2, named exception)
+    /// The run was classified under a context the session no longer has (another request
+    /// changed it in between): nothing sent.
+    ContextChanged,
 }
 
 /// A failed request.
@@ -271,6 +332,56 @@ pub enum SessionEvent {
     /// The liveness supervisor closed the session after its idle threshold (B18); sent just
     /// before it publishes `Disconnected`, so a close by anyone else is never taken for one.
     IdleDisconnected,
+    // ## m3b-t23-escalation (named exception)
+    /// The cancel or the terminate of request `req` failed (its escalation's reply is
+    /// `CancelOutcome::Failed`); `server` is the server's own error when the statement that
+    /// carried it (`pg_terminate_backend`, `KILL`) answered one, shown verbatim by the UI.
+    /// Sent before the failure's reply, so a caller that got the reply finds it already queued.
+    CancelFailed {
+        req: u64,
+        server: Option<ServerMessage>,
+    },
+    // ## m4-t01c-core (named): how a transaction ended, for refresh after DDL (HV-INTRO-12,
+    // R-M4-42: pending targets apply on COMMIT, are dropped on ROLLBACK, and a ROLLBACK TO drops
+    // those after the savepoint). `TxChanged(TxState)` cannot say it: its `status` reads
+    // `InTx` → `Idle` after both COMMIT and ROLLBACK, and stays `InTx` across `ROLLBACK TO
+    // SAVEPOINT`, and `TxState` names no savepoint. No session emits it until Task 21.
+    TxEnded {
+        outcome: TxOutcome,
+    },
+}
+
+// ## m4-t01c-core
+/// How a transaction (or part of one) ended ([`SessionEvent::TxEnded`]).
+///
+/// **Where the outcome comes from** (for the emitter, Task 21): the server's answer, never the
+/// statement text. The command tag or the transaction status after the statement decides:
+/// PostgreSQL answers `COMMIT` in a failed transaction with the tag `ROLLBACK`; `END`,
+/// `ABORT`, `COMMIT AND CHAIN`, MySQL's implicit commits (DDL, `START TRANSACTION` inside a
+/// transaction, `LOCK TABLES`) and SQLite's `RELEASE` of the outermost savepoint end a
+/// transaction without saying so in the text. Savepoint names are compared through
+/// `sql_ident::key::match_key` (PostgreSQL folds an unquoted name; MySQL compares them
+/// case-insensitively), never byte for byte.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TxOutcome {
+    Committed,
+    RolledBack,
+    /// `ROLLBACK TO SAVEPOINT <name>`: the transaction stays open; what ran after the
+    /// savepoint is undone. The name exactly as the server knows it.
+    RolledBackTo(Arc<str>),
+    // ## m4-t01c-core (fix round 1, I4)
+    /// The transaction ended, but how is not known: the connection was lost after `COMMIT` or
+    /// `ROLLBACK` was sent and before the server answered. Treated as committed for refresh
+    /// after DDL (refresh more, never less: [`TxOutcome::counts_as_committed`]).
+    Unknown,
+}
+
+impl TxOutcome {
+    /// Whether refresh after DDL applies the transaction's pending targets: on a commit, and
+    /// when the outcome is unknown (the changes may have been committed).
+    pub fn counts_as_committed(&self) -> bool {
+        matches!(self, TxOutcome::Committed | TxOutcome::Unknown)
+    }
 }
 
 /// What a handle sends its actor.
@@ -293,6 +404,22 @@ pub(crate) enum Command {
     Close {
         policy: ClosePolicy,
         reply: oneshot::Sender<Result<(), CloseRefused>>,
+    },
+    // ## m3b-t01c-core-seams (P-M3b-3): answers to a waiting run, through the `RunGate`
+    // slot; never queued behind the request that waits. `question`: the id the run's event
+    // carried (review I1). `reply`: the run waited on exactly that question.
+    Choose {
+        run_seq: u64,
+        question: u64,
+        choice: RunChoice,
+        reply: oneshot::Sender<bool>,
+    },
+    CommitDecision {
+        run_seq: u64,
+        unit: UnitId,
+        question: u64,
+        answer: CommitAnswer,
+        reply: oneshot::Sender<bool>,
     },
 }
 
@@ -361,6 +488,91 @@ impl SessionHandle {
         rx
     }
 
+    // ## m3b-t01c-core-seams (P-M3b-3, P-M3b-25)
+    /// Answers question `question` (`RunEvent::NeedsChoice::question`, Task 11) of the run sent
+    /// as request `run_seq`: `true` when that run waits on exactly that question. A second
+    /// answer, an answer to an older question (also one a Retry asked again for the same unit)
+    /// or any other id is refused (`false`) and changes nothing (review I1). It never queues
+    /// behind the running request. Without a running actor, `false`.
+    pub fn choose(&self, run_seq: u64, question: u64, c: RunChoice) -> oneshot::Receiver<bool> {
+        let (reply, rx) = oneshot::channel();
+        let command = Command::Choose {
+            run_seq,
+            question,
+            choice: c,
+            reply,
+        };
+        if let Err(mpsc::error::SendError(Command::Choose { reply, .. })) =
+            self.commands.send(command)
+        {
+            let _ = reply.send(false);
+        }
+        rx
+    }
+
+    /// Answers the confirm-in-transaction question `question` about `unit`
+    /// (`RunEvent::NeedsCommit::question`, Task 19) of the run sent as request `run_seq`:
+    /// `true` when that run waits on exactly that question; anything else is refused, as for
+    /// [`choose`](Self::choose). Without a running actor, `false`.
+    pub fn commit_decision(
+        &self,
+        run_seq: u64,
+        unit: UnitId,
+        question: u64,
+        a: CommitAnswer,
+    ) -> oneshot::Receiver<bool> {
+        let (reply, rx) = oneshot::channel();
+        let command = Command::CommitDecision {
+            run_seq,
+            unit,
+            question,
+            answer: a,
+            reply,
+        };
+        if let Err(mpsc::error::SendError(Command::CommitDecision { reply, .. })) =
+            self.commands.send(command)
+        {
+            let _ = reply.send(false);
+        }
+        rx
+    }
+
+    // ## m3b-t24-exec-ui (named exception: the T24 I1 ruling)
+    /// The context Run classifies this session's statements in (plan amendment C2(b)/I1): its
+    /// lexing-mode setting, its search path (MySQL/MariaDB: the current database) and the
+    /// server version, the way the read-only guard's classifier reads them (`ClassifierContext`).
+    /// Queued like any request, so it answers after every request sent before it, and a request
+    /// that may have changed the context makes the session read it again first: every console
+    /// sharing the session sees the same one. A read the session cannot make (a failed
+    /// transaction, a suspended cursor on the connection, a lost connection) answers an
+    /// unknown context, never a stale one.
+    pub fn classifier_context(
+        &self,
+    ) -> impl std::future::Future<Output = ClassifierContext> + Send + 'static + use<> {
+        let answer = self.run_context();
+        async move { answer.await.0 }
+    }
+
+    // ## m3b-t24-exec-ui (fix round 2, named exception)
+    /// [`SessionHandle::classifier_context`] with the context's generation, which a run
+    /// classified in it carries (`RunSpec::context_generation`): the session refuses the run
+    /// when the generation has moved since. `None` when the session could not answer.
+    pub fn run_context(
+        &self,
+    ) -> impl std::future::Future<Output = (ClassifierContext, Option<u64>)> + Send + 'static + use<>
+    {
+        let ticket = self.submit(Request::ReadContext);
+        async move {
+            match ticket.reply.await {
+                Ok(Ok(summary)) => (
+                    run_context::decode(&summary),
+                    run_context::decode_generation(&summary),
+                ),
+                _ => (ClassifierContext::default(), None),
+            }
+        }
+    }
+
     pub fn state(&self) -> watch::Receiver<SessionSnapshot> {
         self.state.clone()
     }
@@ -406,6 +618,29 @@ pub enum ErrorPolicy {
     /// The first failure stops the run; later units end `Skipped`.
     #[default]
     StopOnError,
+    // ## m3b-t01c-core-seams
+    /// A failure asks (`RunEvent::NeedsChoice`, answered by `SessionHandle::choose`;
+    /// R-M3-61, Task 11) when later units wait; a failed last unit ends the run.
+    Ask,
+}
+
+// ## m3b-t01c-core-seams
+/// The answer to `RunEvent::NeedsChoice` (R-M3-61, P-M3b-19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RunChoice {
+    Retry,
+    Ignore,
+    IgnoreAll,
+    Stop,
+    /// Inside a failed PostgreSQL transaction: `ROLLBACK`, keep the session's mode, go on.
+    RollbackAndContinue,
+}
+
+/// The answer to `RunEvent::NeedsCommit` (Keep/Undo in the savepoint form).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommitAnswer {
+    Commit,
+    RollBack,
 }
 
 /// One statement of a run: the exact text sent (no terminator, no leading comments).
@@ -417,6 +652,40 @@ pub struct RunUnit {
     /// The unit may stay suspended as a console cursor (R-M3-23: a read head, and only the
     /// last unit of its run stays suspended).
     pub suspendable: bool,
+    // ## m3b-t01c-core-seams
+    /// The bind values, in placeholder order (Task 11 sends them with the query when the
+    /// driver's typed path binds, never with `Protocol::Simple`; otherwise the unit is refused
+    /// before anything is sent).
+    pub binds: Arc<[BindValue]>,
+    /// The exec gate's verdict (`Unknown` when no gate ran); scheduling only, never trusted
+    /// for safety (R-M3-83).
+    pub verdict: UnitVerdict,
+    pub effects: SessionEffects,
+    /// The text with the bind values masked, for the log and the history.
+    pub masked: Arc<str>,
+    /// Result sets kept (R-M3-66: 100), each its own result; clamped to 1..=100.
+    pub max_result_sets: u32,
+    /// The cell cap of this unit (R-M3-82: a re-run with a 64 MiB limit); `None` takes
+    /// `RunSpec::fetch`'s.
+    pub cell_cap: Option<u32>,
+}
+
+impl RunUnit {
+    /// A unit as M3a sends it: no binds, no verdict, one result set, the run's cell cap.
+    pub fn plain(id: UnitId, sql: Arc<str>, protocol: Protocol, suspendable: bool) -> RunUnit {
+        RunUnit {
+            id,
+            masked: sql.clone(),
+            sql,
+            protocol,
+            suspendable,
+            binds: Arc::from(Vec::new()),
+            verdict: UnitVerdict::Unknown,
+            effects: SessionEffects::empty(),
+            max_result_sets: 1,
+            cell_cap: None,
+        }
+    }
 }
 
 /// One `Request::Run`.
@@ -427,6 +696,22 @@ pub struct RunSpec {
     pub policy: ErrorPolicy,
     pub fetch: FetchPolicy,
     pub observer: ObserverRef,
+    // ## m3b-t01c-core-seams
+    /// How long a confirm-in-transaction question waits before the statement is rolled back
+    /// (D-014: [`RunSpec::CONFIRM_DEADLINE`]; tests inject a shorter one; Task 19).
+    pub confirm_deadline: Duration,
+    // ## m3b-t24-exec-ui (fix round 2, named exception)
+    /// The session's context generation the units were classified under
+    /// ([`SessionHandle::run_context`]): when it has moved by the time the run is taken, the
+    /// session refuses it (`ExecErrorKind::ContextChanged`), sending nothing. `None`: not
+    /// checked (a count, M3a's runs, tests).
+    pub context_generation: Option<u64>,
+}
+
+impl RunSpec {
+    // ## m3b-t01c-core-seams
+    /// D-014's deadline: 5 minutes.
+    pub const CONFIRM_DEADLINE: Duration = Duration::from_secs(300);
 }
 
 /// Sees a run on the actor task. Every call is O(1) and never blocks.
@@ -551,6 +836,56 @@ pub enum RunEvent {
         fetch_ms: u64,
     },
     RunEnded(RunSummary),
+    // ## m3b-t01c-core-seams
+    /// A unit failed under the `Ask` policy; the run waits for `SessionHandle::choose`
+    /// (Task 11). `rollback_and_continue`: inside a failed PostgreSQL transaction (no Retry).
+    NeedsChoice {
+        unit: UnitId,
+        /// The question's id: `SessionHandle::choose` names it (review I1).
+        question: u64,
+        error: ExecError,
+        rollback_and_continue: bool,
+    },
+    /// A confirmed statement ran inside a transaction; the run waits for
+    /// `SessionHandle::commit_decision` until `deadline` (Task 19). `savepoint`: the form the
+    /// session chose (P-M3b-1): Keep/Undo inside an open transaction, else Commit/Roll back.
+    NeedsCommit {
+        unit: UnitId,
+        /// The question's id: `SessionHandle::commit_decision` names it (review I1).
+        question: u64,
+        affected: Option<u64>,
+        deadline: Instant,
+        savepoint: bool,
+    },
+    CommitDecided {
+        unit: UnitId,
+        answer: CommitAnswer,
+        by_deadline: bool,
+    },
+    // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+    /// Sent right before `CommitDecided` when the rollback of `unit` did not undo it: the server
+    /// warned that a table does not support transactions. The log never says "undone" then.
+    ConfirmNotUndone {
+        unit: UnitId,
+    },
+    /// A server notice of the unit (R-M3-77; Tasks 11 and 13).
+    Notice {
+        unit: UnitId,
+        notice: hacivat_driver::Notice,
+    },
+    // ## m3b-t16-run-service (named exception: the run service logs these)
+    /// `n` notices of `unit` past the per-unit cap (and the driver's own) were counted, never
+    /// reported; their text is never kept (R-M3-77).
+    NoticesDropped {
+        unit: UnitId,
+        n: u32,
+    },
+    /// A unit run as one (`Protocol::Simple`) was closed before its end (a stop), and the
+    /// driver reported what ran after the closed result (`RawConn::take_close_report`, Task 13).
+    ClosedEarly {
+        unit: UnitId,
+        report: hacivat_driver::CloseReport,
+    },
 }
 
 /// The open cursor a session holds (its snapshot's `cursor`).
@@ -563,11 +898,14 @@ pub struct CursorBadge {
     pub holds_tx: bool,
 }
 
-/// Whether a session of `profile` is read-only (R-M3-29, P4): the profile says so, or the
-/// production policy is on and the profile is tagged production. Every site that decides a
-/// session's (or a Test connection's) read-only flag reads this.
-pub fn effective_read_only(profile: &Profile, production_read_only: bool) -> bool {
-    profile.read_only || (production_read_only && profile.environment == Some(EnvTag::Production))
+/// Whether a session of `profile` is read-only (R-M3-29, P4): the profile says so. Every site
+/// that decides a session's (or a Test connection's) read-only flag reads this.
+///
+/// ## m3b-t26-prod-unlock (R-M3-6 REVISED ends): a production tag no longer makes a session
+/// read-only; production consoles are read-write in Manual mode (D-036) and every unit that is
+/// not a read passes the exec gate and its confirmations (R-M3-55) before it is sent.
+pub fn effective_read_only(profile: &Profile) -> bool {
+    profile.read_only
 }
 
 impl SessionHandle {

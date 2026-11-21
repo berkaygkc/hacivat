@@ -22,6 +22,10 @@ pub struct TileLayout {
     pub editor_h: f32,
     pub inspector_w: f32,
     pub explorer_visible: bool,
+    // ## m3c-t38 (named exception, additive): the record inspector (HV-GRID-12; NOTES surface
+    // 21) is open. Closed by default; a `workspace.json` written before it reads `false`.
+    #[serde(default)]
+    pub inspector_visible: bool,
 }
 
 impl Default for TileLayout {
@@ -32,6 +36,8 @@ impl Default for TileLayout {
             editor_h: 322.0,
             inspector_w: 252.0,
             explorer_visible: true,
+            // ## m3c-t38
+            inspector_visible: false,
         }
     }
 }
@@ -127,6 +133,8 @@ impl TileLayout {
             inspector_w: finite(self.inspector_w, d.inspector_w)
                 .clamp(MIN_TILE_PX, MAX_INSPECTOR_PX),
             explorer_visible: self.explorer_visible,
+            // ## m3c-t38
+            inspector_visible: self.inspector_visible,
         }
     }
 }
@@ -239,6 +247,10 @@ pub fn explorer(theme: &Theme, cx: &App) -> Div {
                     t.type_ramp.body_sm,
                     c.text_3.to_hsla(),
                 )
+                // ## m3b-ci (controller fix): the placeholder ellipsizes, as the live filter
+                // field's does (`hacivat-ui/src/input`): with wider fonts (Linux, CI run
+                // 44051024805) the pseudo-locale text overran the field and was clipped.
+                .truncate(true)
                 .id("explorer-filter"),
             ),
         );

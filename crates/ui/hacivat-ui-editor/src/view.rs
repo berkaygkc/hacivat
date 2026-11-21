@@ -35,10 +35,9 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use hacivat_text::display::HeightMap;
 use hacivat_text::{
-    Annotations, Bias, ChangeSet, Committed, EditorModel, ImeCore, MapMode, ModelConfig, Origin,
-    SelectionRange, SelectionSet, Snapshot, TextBuffer, Transaction, UserEvent,
+    Annotations, Bias, ChangeSet, Committed, EditorModel, FoldSet, ImeCore, MapMode, ModelConfig,
+    Origin, SelectionRange, SelectionSet, Snapshot, TextBuffer, Transaction, UserEvent,
 };
 use hacivat_ui::text::TextFn;
 use hacivat_ui_core::gpui_surface::{
@@ -52,7 +51,10 @@ use crate::a11y::{self, A11yFrame, A11yState};
 use crate::clipboard::PasteState;
 use crate::commands::{self, CommandState, command_by_id};
 use crate::config::{DocContext, DocId, EditorConfig, Tier};
+// ## m3b-t01b-seams
 use crate::element::{EditorElement, FrameLayout};
+use crate::find::{self, FindMatcher, FindState, FindStatus};
+use crate::fold_gutter::{self, FoldState};
 use crate::ime::{self, InputState};
 use crate::large_file::{self, TierState};
 use crate::layout_cache::{LayoutCache, LayoutStats};
@@ -64,6 +66,11 @@ use crate::probe::FrameProbe;
 use crate::scroll::ScrollState;
 use crate::service::{DecorationSource, LanguageService};
 
+// ## m3c-narrow (F10)
+/// The least room beside the gutter the placeholder takes on the first line; with less (a pane
+/// at the split floor) it wraps under that line across the editor's width.
+pub const PLACEHOLDER_MIN_PX: f32 = 120.0;
+
 /// What the status bar's editor segment shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EditorStatus {
@@ -71,9 +78,16 @@ pub struct EditorStatus {
     pub line: u32,
     /// 1-based, in graphemes.
     pub column: u32,
+    /// Characters selected over every range (## m3c-t31-multi).
     pub selected_chars: u64,
     pub tier: Tier,
     pub composing: bool,
+    // ## m3c-t31-multi (named exception): "3 carets" (NOTES surface 14).
+    /// How many ranges the selection has (1: one caret or one selection).
+    pub carets: u32,
+    // ## m3c-t34-editor (named exception): the status bar's "Mixed line endings" (NOTES 17).
+    /// The text's lines end in more than one way.
+    pub mixed_line_endings: bool,
 }
 
 /// What an editor tells its host.
@@ -100,6 +114,33 @@ pub enum EditorEvent {
     ContextMenuOpened {
         at: Point<Pixels>,
     },
+    // ## m3b-t01b-seams
+    /// `editor.find` (Task 33 emits it): the host opens its find bar, seeded with the
+    /// selection's text when it is on one line.
+    FindRequested {
+        seed: Option<String>,
+    },
+    /// The document's line endings changed between uniform and mixed (Task 34 emits it; the
+    /// host's status bar offers `editor.normalize_line_endings`).
+    LineEndingsChanged {
+        mixed: bool,
+    },
+    // ## m3c-t33-find (named exception): the find status may have changed (a count batch, a
+    // step, a new query, a commit while a query is set); the host's bar re-reads it.
+    FindChanged,
+    // ## m3c-t34-editor (named exception)
+    /// `editor.history_prev` (`older`) or `_next` at the last line of an empty or recalled
+    /// editor: the host recalls a statement from its history and answers with
+    /// `EditorView::show_recalled`.
+    HistoryRecall {
+        older: bool,
+    },
+    // ## m3c-po (named exception; PO M3c-08)
+    /// `editor.use_selection_for_find` (macOS ⌘E "Use Selection for Find"): the host takes the
+    /// one-line selection as its find query (and its find pasteboard) without opening its bar.
+    FindSeeded {
+        seed: String,
+    },
 }
 
 /// The focused editor, for the app's commands (`enabled` = an editor is focused).
@@ -125,10 +166,22 @@ pub struct EditorView {
     pub(crate) paste: PasteState,
     pub(crate) probe: Option<Rc<dyn FrameProbe>>,
     pub(crate) layout: Option<FrameLayout>,
+    // ## m3c-t41 (named exception; design/m3b-safe surface 24): the placeholder an empty
+    // document shows on its first line, and the text area it was last placed in.
+    pub(crate) placeholder: Option<TextFn>,
+    pub(crate) placeholder_at: Option<Bounds<Pixels>>,
+    // ## m3c-narrow
+    /// Whether the last render drew the banner's narrow form (`large_file::narrow`).
+    pub(crate) banner_narrow: bool,
     // ## m3a-t01b-seams (fix round 1): module-owned state of the input handler (Task 27) and
     // the commands (Task 25), and the focus subscriptions.
     pub(crate) input: InputState,
     pub(crate) commands: CommandState,
+    // ## m3b-t01b-seams: module-owned state of find (Task 33) and folding (Task 32).
+    pub(crate) find: FindState,
+    pub(crate) fold: FoldState,
+    // ## m3c-t33-find (named exception): the horizontal thumb's drag (`scrollbar.rs`).
+    pub(crate) hthumb: crate::scrollbar::ThumbDrag,
     _subscriptions: Vec<Subscription>,
     // ## m3a-t01b-seams (round 2): the label as last evaluated, with the UI-text generation it
     // was evaluated at (re-read only when the language changes).
@@ -147,6 +200,10 @@ pub struct EditorView {
     pub(crate) scroll: ScrollState,
     pub(crate) blink: Blink,
     pub(crate) drag: Option<DragState>,
+    // ## m3c-t34-editor (named exception): the drag's edge autoscroll (`mouse.rs`) and the
+    // gutter's buttons (`gutter.rs`).
+    pub(crate) autoscroll: Option<crate::mouse::Autoscroll>,
+    pub(crate) gutter_ui: crate::gutter::GutterUi,
     /// The editor has the focus (the blink runs only then).
     has_focus: bool,
     /// The longest line seen, in bytes (the tier's long-line rule). Edits only grow it (a
@@ -160,6 +217,8 @@ pub struct EditorView {
     /// The pointer of the right click whose `editor.context_menu` is running (`None` for the
     /// keyboard's Shift+F10 or the menu key): Task 25 opens the menu there, else at the caret.
     context_point: Option<Point<Pixels>>,
+    // ## m3c-t31-multi: the selected count, keyed by the model's commit count.
+    selected_cache: std::cell::Cell<Option<(u64, u64)>>,
 }
 
 impl std::fmt::Debug for EditorView {
@@ -232,6 +291,9 @@ impl EditorView {
             doc,
             Rc::new(move |cx: &mut App| {
                 let _ = weak.update(cx, |v, cx| {
+                    // ## m3c-t32-fold (named exception, fix round 1 I1): the foldable ranges
+                    // are asked again.
+                    fold_gutter::on_analysis(v);
                     preview::on_update(v, Refresh::AnalysisLanded, cx);
                     cx.notify();
                 });
@@ -242,7 +304,8 @@ impl EditorView {
             cx.on_focus(&focus, window, |v, window, cx| v.focused(window, cx)),
             cx.on_blur(&focus, window, |v, window, cx| v.blurred(window, cx)),
         ];
-        EditorView {
+        // ## m3c-t34-editor (named exception): the line endings' state starts from the text.
+        let mut view = EditorView {
             doc,
             model,
             ime: ImeCore::default(),
@@ -258,8 +321,17 @@ impl EditorView {
             paste: PasteState::default(),
             probe: None,
             layout: None,
+            // ## m3c-t41
+            placeholder: None,
+            placeholder_at: None,
+            // ## m3c-narrow
+            banner_narrow: false,
             input: InputState::default(),
             commands: CommandState::default(),
+            find: FindState::default(),
+            fold: FoldState::default(),
+            // ## m3c-t33-find (named exception)
+            hthumb: crate::scrollbar::ThumbDrag::default(),
             _subscriptions: subscriptions,
             a11y_label_cache: None,
             remeasure: None,
@@ -269,12 +341,17 @@ impl EditorView {
             scroll: ScrollState::default(),
             blink: Blink::default(),
             drag: None,
+            autoscroll: None,
+            gutter_ui: crate::gutter::GutterUi::default(),
             has_focus: false,
             longest_line: longest_line(text),
             fanned,
             input_marked: false,
             context_point: None,
-        }
+            selected_cache: std::cell::Cell::new(None),
+        };
+        commands::lines_opened(&mut view);
+        view
     }
 
     /// The editor took the focus: it becomes the `FocusedEditor` the app's commands run on,
@@ -300,7 +377,8 @@ impl EditorView {
         }
         self.has_focus = false;
         self.blink.stop();
-        self.drag = None;
+        // ## m3c-t31-multi (fix round 1, M2): the press's gesture ends with the focus.
+        crate::mouse::end_drag(self);
         ime::on_blur(self, window, cx);
     }
 
@@ -394,6 +472,10 @@ impl EditorView {
             config: self.config,
             tier: self.tier.tier,
             focused,
+            // ## m3c-t32-fold (named exception): folded lines leave the runs; a folded
+            // header says how many (fix round 1, M9).
+            hidden: fold_gutter::hidden(self),
+            fold_notes: fold_gutter::a11y_notes(self, cx),
         }
     }
 
@@ -411,6 +493,55 @@ impl EditorView {
         cx.emit(EditorEvent::CompositionChanged(composing));
         cx.emit(EditorEvent::StatusChanged);
         cx.notify();
+    }
+
+    // ## m3b-t01b-seams: find (Task 33) and folding (Task 32), each one line into its module.
+
+    /// Sets (or clears, `None`) the find query the next steps use.
+    // ## m3c-t33-find (named exception): an `Arc`, so the count runs off the UI thread.
+    pub fn set_find(&mut self, m: Option<Arc<dyn FindMatcher>>, cx: &mut Context<Self>) {
+        find::set_find(self, m, cx);
+    }
+
+    /// Selects the next (`back`: previous) match and answers it; `None` when there is none.
+    pub fn find_step(&mut self, back: bool, cx: &mut Context<Self>) -> Option<Range<usize>> {
+        find::find_step(self, back, cx)
+    }
+
+    /// Selects every match, at most `cap`; answers how many.
+    pub fn select_all_matches(&mut self, cap: u32, cx: &mut Context<Self>) -> u32 {
+        find::select_all_matches(self, cap, cx)
+    }
+
+    /// The find panel's status ("k of N").
+    pub fn find_status(&self) -> FindStatus {
+        find::status(self)
+    }
+
+    // ## m3c-t33-find (named exception, fix round 1 I1/I3): find as you type, off the UI thread.
+    /// Selects the first match at or after `origin` (wrapping), else `origin`, as one
+    /// selection change; `None` while it waits for the background.
+    pub fn find_from(
+        &mut self,
+        origin: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        find::find_from(self, origin, cx)
+    }
+
+    /// The selection find made last (a step, find as you type), while the text is the same.
+    pub fn find_made(&self) -> Option<Range<usize>> {
+        find::made(self)
+    }
+
+    /// The folded ranges.
+    pub fn folds(&self) -> &FoldSet {
+        fold_gutter::folds(self)
+    }
+
+    /// Folds or unfolds at `line` (0-based); `true` when anything changed.
+    pub fn toggle_fold_at(&mut self, line: u32, cx: &mut Context<Self>) -> bool {
+        fold_gutter::toggle_fold_at(self, line, cx)
     }
 
     /// Runs the editor command `id`; `false` when there is no such command.
@@ -496,19 +627,37 @@ impl EditorView {
     }
 
     /// The status bar's editor segment.
+    // ## m3c-t31-multi (named exception, ledger 207): the selected count covers every range
+    // and is cached by the model's commit count, so a frame reads it in O(1).
     pub fn status(&self) -> EditorStatus {
-        let snap = self.model.snapshot();
-        let main = snap.selection.main();
-        let line = snap.buffer.byte_to_line(main.head);
+        let buf = self.model.buffer();
+        let sel = self.model.selection();
+        let main = sel.main();
+        let line = buf.byte_to_line(main.head);
         // Bounded on a long line (exact within its first 64 KB, Task 10).
-        let column = hacivat_text::units::grapheme_column(&snap.buffer, main.head);
-        let selected = snap.buffer.slice(main.range()).chars().count();
+        let column = hacivat_text::units::grapheme_column(buf, main.head);
+        let key = self.model.commit_count();
+        let selected = match self.selected_cache.get() {
+            Some((at, n)) if at == key => n,
+            _ => {
+                let n = sel
+                    .ranges()
+                    .iter()
+                    .map(|r| buf.char_count(r.range()) as u64)
+                    .sum();
+                self.selected_cache.set(Some((key, n)));
+                n
+            }
+        };
         EditorStatus {
             line: u32::try_from(line + 1).unwrap_or(u32::MAX),
             column: u32::try_from(column + 1).unwrap_or(u32::MAX),
-            selected_chars: selected as u64,
+            selected_chars: selected,
             tier: self.tier.tier,
             composing: self.ime.is_composing(),
+            carets: u32::try_from(sel.ranges().len()).unwrap_or(u32::MAX),
+            // ## m3c-t34-editor (named exception): O(1), kept by the fan-out.
+            mixed_line_endings: self.commands.lines.mixed,
         }
     }
 
@@ -569,6 +718,78 @@ impl EditorView {
     /// The last painted frame (Task 27's `bounds_for_range`, `character_index_for_point`).
     pub fn last_layout(&self) -> Option<&FrameLayout> {
         self.layout.as_ref()
+    }
+
+    // ## m3c-t41 (named exception)
+    /// The sentence an empty document shows on its first line, in `text-3`, wrapping in the
+    /// text area ("Write SQL here. ⌘↵ runs the statement at the caret."); `None`: none.
+    pub fn set_placeholder(&mut self, text: Option<TextFn>, cx: &mut Context<Self>) {
+        self.placeholder = text;
+        cx.notify();
+    }
+
+    /// The placeholder over the first line of an empty document, placed by the last painted
+    /// frame (a frame is asked for while it has none, or when the text area moved).
+    /// ## m3c-narrow: in a narrow editor, under the first line (`PLACEHOLDER_MIN_PX`).
+    fn placeholder_element(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<hacivat_ui_core::gpui_surface::AnyElement> {
+        use hacivat_ui_core::gpui_surface::{IntoElement as _, anchored, point, px};
+        let text = self.placeholder.as_ref()?;
+        if self.model.snapshot().buffer.len_bytes() > 0 {
+            self.placeholder_at = None;
+            return None;
+        }
+        let Some(layout) = self.layout.as_ref() else {
+            window.request_animation_frame();
+            return None;
+        };
+        let rows = layout.rows();
+        if self.placeholder_at != Some(rows.bounds) {
+            self.placeholder_at = Some(rows.bounds);
+            window.request_animation_frame();
+        }
+        let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
+        let x = layout.origin_x as f32;
+        let width = (f32::from(rows.bounds.right()) - x - t.spacing.md).max(0.0);
+        // ## m3c-narrow (F10; design/m3b-safe surface 24): where the text area leaves the
+        // sentence less than `PLACEHOLDER_MIN_PX` (a pane at the split floor), it wraps under
+        // the first line across the editor's whole width instead, so it never runs past the
+        // pane's bottom.
+        let (x, y, width) = if width < PLACEHOLDER_MIN_PX {
+            let left = f32::from(layout.bounds.left()) + t.spacing.md;
+            let right = f32::from(rows.bounds.right()) - t.spacing.md;
+            (
+                left,
+                rows.first_y + rows.line_height,
+                (right - left).max(0.0),
+            )
+        } else {
+            (x, rows.first_y, width)
+        };
+        let style = hacivat_ui_core::theme::TypeStyle {
+            line_height: f32::from(rows.line_height),
+            ..t.type_ramp.body
+        };
+        Some(
+            anchored()
+                .position(point(px(x), y))
+                .snap_to_window()
+                .child(
+                    div().w(px(width)).child(
+                        hacivat_ui::text::paragraph(
+                            text(cx),
+                            hacivat_ui::text::TextSource::Fluent,
+                            style,
+                            t.colors.text_3.to_hsla(),
+                        )
+                        .id("editor-placeholder"),
+                    ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The editor's accessible label.
@@ -666,8 +887,10 @@ impl EditorView {
         };
         let rows = layout.rows();
         let lines = u32::try_from(self.model.buffer().len_lines()).unwrap_or(u32::MAX);
-        let map = HeightMap::uniform(lines, f64::from(f32::from(rows.line_height)));
+        // ## m3c-t32-fold (named exception): folded lines take no height.
+        let lh = f64::from(f32::from(rows.line_height));
         let view_h = f64::from(f32::from(rows.bounds.size.height));
+        let map = fold_gutter::height_map(self, lines, lh);
         self.scroll.scroll_by(&map, dy, view_h);
     }
 
@@ -735,6 +958,13 @@ impl EditorView {
             self.scroll.reveal = true;
         }
         marks::on_commit(&mut self.marks, &committed, self.model.changelog(), &snap);
+        // ## m3b-t01b-seams: folds follow the text; find matches go stale (Tasks 32, 33).
+        // ## m3c-t32-fold (named exception, fix round 1 M2): only a text change maps them.
+        fold_gutter::on_commit(self, &committed, text_changed);
+        // ## m3c-t33-find (named exception): a text change recounts (it spawns the count).
+        find::on_commit(self, &committed, text_changed, cx);
+        // ## m3c-t34-editor (named exception): the host hears of mixed line endings.
+        commands::lines_after_commit(self, text_changed, cx);
         if text_changed {
             self.service.change(self.doc, &snap, &committed.desc, cx);
             let text_len = snap.buffer.len_bytes() as u64;
@@ -771,6 +1001,9 @@ impl EditorView {
         };
         preview::on_update(self, why, cx);
         ime::after_commit(self, &committed, event, cx);
+        // ## m3c-t31-multi (named exception): the Linux primary selection follows the main
+        // selection (`clipboard::selection_changed`; nothing elsewhere).
+        crate::clipboard::selection_changed(self, cx);
         if self.has_focus {
             self.restart_blink(cx);
         }
@@ -827,8 +1060,19 @@ impl Render for EditorView {
     /// ## m3a-t29-a11y-tiers: the column itself is the editor's accessibility node
     /// (`a11y::declare`).
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let banner = large_file::banner(&self.tier, window, cx);
+        // ## m3c-narrow: the banner's form follows the width the last frame gave the editor
+        // (`prepaint_frame` asks for one more frame when it crossed the narrow line).
+        // ## m3c-narrow (fix round 1, M5): only while a banner shows.
+        let narrow = self
+            .layout
+            .as_ref()
+            .map(|l| l.bounds.size.width)
+            .filter(|w| large_file::shows_banner(&self.tier) && large_file::narrow(*w));
+        self.banner_narrow = narrow.is_some();
+        let banner = large_file::banner(&self.tier, narrow, window, cx);
         let overlay = commands::overlay(self, window, cx);
+        // ## m3c-t41
+        let placeholder = self.placeholder_element(window, cx);
         let text = EditorElement::new(
             cx.entity(),
             self.focus.clone(),
@@ -836,6 +1080,8 @@ impl Render for EditorView {
         );
         let column = div()
             .id(("editor", self.doc.0))
+            // ## m3c-narrow (fix round 1, I1): the column's box, for the scene checks.
+            .debug_selector(|| "editor-column".to_string())
             .track_focus(&self.focus)
             .size_full()
             .flex()
@@ -846,6 +1092,8 @@ impl Render for EditorView {
             .children(banner)
             .child(text)
             .children(overlay)
+            // ## m3c-t41
+            .children(placeholder)
     }
 }
 

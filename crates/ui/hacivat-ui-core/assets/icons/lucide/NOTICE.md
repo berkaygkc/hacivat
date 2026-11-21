@@ -13,3 +13,15 @@ The M2b icons, from the same package with the same modifications: `file-up`, `ar
 ## m3a-t01b-seams
 
 The M3a query icons (`design/m3a-query/NOTES.md`, "Icons"), from the same package with the same modifications: `scroll-text` (the Output tab), `skip-forward` (Skipped), `arrow-down-to-line` (Scroll to end), `eraser` (Clear), `clipboard-x` (clipboard unavailable), `ban` (Cancelled) and `copy-check` (Copied).
+
+## m3b-t01b-seams
+
+The M3b icons (P-M3b-37), from the same package with the same modifications: `pin` (pinned result tabs and history rows), `arrow-up-down` (sort) and `snowflake` (frozen columns). M3b also draws the already bundled `play`, `filter` and `sigma`. Controller ruling RC-4 adds, from the same package with the same modifications: `history`, `timer`, `hourglass`, `users`, `eye-off`, `octagon-x` and `clock`.
+
+## m3c-t31-multi
+
+The M3c icons (controller ruling 8, NOTES "Icons (RC-4 pattern)"), from the same package with the same modifications: `arrow-up` (ascending sort, previous match, previous record), `case-sensitive`, `whole-word` and `regex` (the find toggles). Tasks 33 and 36 draw them.
+
+## m4-t01b-seams
+
+The M4 icons (`design/m4-explorer/NOTES.md`, "New primitives" and "For the controller"), from the same package with the same modifications: `columns-3` (column), `link` (foreign key), `zap` (trigger), `type` (type), `folder-tree` (schema), `library` (the Built-in group), `server` (the DDL view's "Definitions provided by server" caption), `terminal` (Open in console) and `refresh-cw` (Refresh). M4 also draws the already bundled `cylinder`, `eye`, `list-tree`, `shield-check`, `square-function` and `list-ordered`.

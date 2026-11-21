@@ -33,6 +33,12 @@
 //! isolation = "serializable"           # "default", "read_uncommitted", "read_committed", ...
 //! idle_disconnect_s = 900
 //! ssh_retention = "until_restart"      # SSH passwords and passphrases; default "forever"
+//! # M3b (P-M3b-10); each key left out at its default:
+//! startup_script = "SET search_path = app"   # read-write sessions only (Task 12)
+//! read_only_fn_allowlist = ["audit.mask_email"]   # D-009 (R-M3-56)
+//! record_history = false               # default true (D-061)
+//! # M4 (R-M4-15; R-W3-1); left out when unset (then: on for production only):
+//! catalog_sensitive = true             # encrypt cached metadata, as the user chose
 //!
 //! [connection.ssh]                     # with transport = "ssh_tunnel"
 //! host_keys = "strict"                 # "ask" (default), "accept_new", "strict"
@@ -108,6 +114,9 @@ use toml_edit::{
 
 use super::options::fold_typed_options;
 use super::{Profile, ProfileEndpoint, TransportSpec};
+// ## m3b-t01c-core-seams
+use super::FN_ALLOWLIST_MAX;
+use super::rules::{valid_fn_allowlist_entry, valid_startup_script};
 use crate::session::{IsolationLevel, TxMode};
 
 /// The file format version this build writes.
@@ -701,10 +710,47 @@ fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
         idle_disconnect_s: opt_int(t, "idle_disconnect_s", 1)?,
         ssh_retention: opt_id(t, "ssh_retention", Retention::from_id)?
             .unwrap_or(defaults.ssh_retention),
+        // ## m3b-t01c-core-seams (P-M3b-10): an invalid value makes the entry invalid, so it
+        // stays on disk untouched and is shown (P29), never loaded half-read.
+        startup_script: read_startup_script(t)?,
+        read_only_fn_allowlist: read_fn_allowlist(t)?,
+        record_history: opt_bool(t, "record_history")?.unwrap_or(defaults.record_history),
+        // ## m4-t01c-core (R-M4-15): not a boolean makes the entry invalid, as above.
+        // ## m4-t20-scope (named exception, R-W3-1): missing = unset (derived).
+        catalog_sensitive_set: opt_bool(t, "catalog_sensitive")?,
     };
     // An older file's `sslmode`, `sslrootcert`, ... extras become the typed settings (I2).
     fold_typed_options(&mut profile);
     Ok((profile, ignored))
+}
+
+// ## m3b-t01c-core-seams (P-M3b-10)
+/// `startup_script`: a string that passes [`valid_startup_script`].
+fn read_startup_script(t: &Table) -> Read<Option<String>> {
+    match opt_str(t, "startup_script")? {
+        Some(sql) if !valid_startup_script(&sql) => invalid("startup_script"),
+        sql => Ok(sql),
+    }
+}
+
+/// `read_only_fn_allowlist = ["audit.mask_email", …]`: at most [`FN_ALLOWLIST_MAX`] strings,
+/// each passing [`valid_fn_allowlist_entry`].
+fn read_fn_allowlist(t: &Table) -> Read<Vec<String>> {
+    const KEY: &str = "read_only_fn_allowlist";
+    let Some(item) = t.get(KEY) else {
+        return Ok(Vec::new());
+    };
+    let array = item.as_array().ok_or(Skip::Invalid(KEY))?;
+    if array.len() > FN_ALLOWLIST_MAX {
+        return invalid(KEY);
+    }
+    array
+        .iter()
+        .map(|v| match v.as_str() {
+            Some(name) if valid_fn_allowlist_entry(name) => Ok(name.to_string()),
+            _ => invalid(KEY),
+        })
+        .collect()
 }
 
 // ## m2b-t12-profiles
@@ -1112,6 +1158,30 @@ fn write_entry(t: &mut Table, p: &Profile) {
         "ssh_retention",
         (p.ssh_retention != defaults.ssh_retention).then(|| value(p.ssh_retention.id())),
     );
+    // ## m3b-t01c-core-seams (P-M3b-10): each left out at its default (an M2b file
+    // round-trips byte for byte).
+    set_opt(t, "startup_script", p.startup_script.clone().map(value));
+    set_opt(
+        t,
+        "read_only_fn_allowlist",
+        (!p.read_only_fn_allowlist.is_empty()).then(|| {
+            value(
+                p.read_only_fn_allowlist
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Array>(),
+            )
+        }),
+    );
+    set_opt(
+        t,
+        "record_history",
+        (p.record_history != defaults.record_history).then(|| value(p.record_history)),
+    );
+    // ## m4-t01c-core (R-M4-15): left out at its default (an M2b/M3 file round-trips byte for
+    // byte). ## m4-t20-scope (named exception, R-W3-1): written only when set, `true` or
+    // `false`.
+    set_opt(t, "catalog_sensitive", p.catalog_sensitive_set.map(value));
     write_ssh(t, &p.transport);
 }
 

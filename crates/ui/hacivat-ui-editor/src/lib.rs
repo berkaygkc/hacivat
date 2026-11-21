@@ -18,6 +18,9 @@ pub mod commands;
 mod config;
 mod decor;
 pub mod element;
+// ## m3b-t01b-seams: find (Task 33) and folding (Task 32).
+pub mod find;
+pub mod fold_gutter;
 pub mod gutter;
 mod ime;
 pub mod large_file;
@@ -48,7 +51,12 @@ pub use preview::BandState;
 pub use probe::FrameProbe;
 pub use scrollbar::ScrollbarCtx;
 pub use service::{
-    Confidence, DecorationSource, ExecAction, ExecAt, ExecPreview, ExecRequest, FailClosedService,
-    InvalidateFn, LanguageService, NoTokens, PreviewState, SourceId, StatementSpan,
+    CommentTokens, Confidence, DecorationSource, ExecAction, ExecAt, ExecPreview, ExecRequest,
+    FailClosedService, InvalidateFn, LanguageService, NoTokens, PreviewState, SourceId,
+    StatementSpan,
 };
 pub use view::{EditorEvent, EditorStatus, EditorView, FocusedEditor};
+// ## m3b-t01b-seams
+pub use find::{FindMatcher, FindStatus};
+// ## m3c-t34-editor
+pub use mouse::DRAG_AUTOSCROLL_TICK;

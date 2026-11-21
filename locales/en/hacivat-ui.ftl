@@ -1643,18 +1643,6 @@ hv-console-waiting = Waiting for a free connection to { $name } ({ $inUse } of {
 hv-console-waiting-short = Waiting for a connection ({ $inUse } of { $max } in use)
 # Stops waiting for a free connection.
 hv-console-waiting-cancel = Cancel
-# The console toolbar's notice on a production connection (a button that opens the explanation).
-hv-console-prod-notice = Production is read-only in this version
-# The notice's short form when the toolbar is narrow.
-hv-console-prod-short = read-only
-# The overflow menu row that opens the explanation when the notice is short.
-hv-console-prod-why = Why this console is read-only…
-# The explanation popover's title.
-hv-console-prod-pop-title = Why this console is read-only
-# The explanation popover's first paragraph.
-hv-console-prod-pop-body = Writing to production needs statement confirmations, and this version of { -brand-hacivat } doesn't have them yet. Until it does, every production console runs read-only, whatever the connection allows.
-# The explanation popover's second paragraph.
-hv-console-prod-pop-reads = Reads run as usual. A statement that would change data or schema isn't sent, and the Output tab says why.
 # The status bar's caret position in the console's editor (raw numbers, like the line numbers).
 # Variables:
 #   $line (Number) - the caret's line, from 1, e.g. 14.
@@ -1911,7 +1899,7 @@ hv-editor-mark-denied = not sent: read-only
 hv-editor-mark-cancelling = cancelling…
 # At the end of a statement's first line when it was cancelled.
 # Variables:
-#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "12 s 408 ms".
+#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "12.40 s".
 hv-editor-mark-cancelled = cancelled after { $duration }
 # At the end of a statement's first line when an earlier statement of its run failed.
 hv-editor-mark-skipped = skipped: an earlier statement failed
@@ -2015,6 +2003,2138 @@ hv-exec-pending-read-only = Nothing was sent: this console becomes read-only onc
 # Toast when Re-run is refused because the statement was edited since it ran.
 hv-exec-rerun-edited = The statement was edited since it ran. Run it from the editor.
 
+## m3b-t01b-seams
+
+# Command titles of the M3b and M3c commands (palette rows, key hints). Task 1b registers them;
+# each command's task fills its body and its surface strings.
+hv-cmd-editor-add-caret-above = Add a caret above
+hv-cmd-editor-add-caret-below = Add a caret below
+hv-cmd-editor-select-next-occurrence = Select the next occurrence
+hv-cmd-editor-select-all-occurrences = Select all occurrences
+hv-cmd-editor-split-selection-into-lines = Split the selection into lines
+hv-cmd-editor-undo-selection = Undo the selection change
+hv-cmd-editor-redo-selection = Redo the selection change
+hv-cmd-editor-fold = Fold
+hv-cmd-editor-unfold = Unfold
+hv-cmd-editor-fold-all = Fold all
+hv-cmd-editor-unfold-all = Unfold all
+hv-cmd-editor-find = Find
+hv-cmd-editor-find-next = Find next
+hv-cmd-editor-find-prev = Find previous
+hv-cmd-editor-find-close = Close find
+hv-cmd-editor-toggle-comment = Comment or uncomment
+hv-cmd-editor-duplicate-line = Duplicate line
+hv-cmd-editor-delete-line = Delete line
+hv-cmd-editor-move-line-up = Move line up
+hv-cmd-editor-move-line-down = Move line down
+hv-cmd-editor-normalize-line-endings = Normalize line endings
+hv-cmd-editor-history-prev = Previous statement from history
+hv-cmd-editor-history-next = Next statement from history
+hv-cmd-grid-grow-selection = Grid: expand the selection
+hv-cmd-grid-shrink-selection = Grid: shrink the selection
+hv-cmd-grid-find = Grid: find
+hv-cmd-grid-goto-row = Grid: go to row
+hv-cmd-grid-open-value = Grid: open the value viewer
+hv-cmd-grid-context-menu = Grid: show the menu
+hv-cmd-grid-auto-fit = Grid: fit the column widths
+hv-cmd-grid-freeze = Grid: freeze the columns up to here
+hv-cmd-grid-unfreeze = Grid: unfreeze the columns
+hv-cmd-grid-sort-asc = Grid: sort ascending
+hv-cmd-grid-sort-desc = Grid: sort descending
+hv-cmd-grid-clear-sort = Grid: clear the sort
+hv-cmd-grid-view-table = Grid: table view
+hv-cmd-grid-view-transposed = Grid: transposed view
+hv-cmd-grid-view-text = Grid: text view
+hv-cmd-grid-toggle-record = Grid: show or hide the record view
+hv-cmd-results-next-tab = Next result tab
+hv-cmd-results-prev-tab = Previous result tab
+hv-cmd-history-open = Open query history
+
 ## m3a-f4-ime
 # The Edit menu item (macOS) that opens the system's Emoji & Symbols palette; AppKit's own name for it.
 hv-cmd-app-character-palette = Emoji & Symbols
+
+## m3b-t07-types
+
+# A result column's type line for a MySQL/MariaDB column type code the app has no name for
+# (rare: replication-only codes). The code is the protocol's number, e.g. 19.
+# Variables:
+#   $code (Number) - the column type code, from 0 to 255.
+hv-results-type-mysql-code = MySQL type { $code }
+
+## m3b-t22-tx-ui
+
+# The transaction mode chip in the console toolbar (D-014, D-036; design/m3b-safe surface 3).
+hv-tx-chip-auto = Auto-commit
+hv-tx-chip-manual = Manual
+hv-tx-chip-smart = Smart
+# The chip's tooltip.
+# Variables:
+#   $mode (String) - the mode's name (an hv-tx-chip-* message), e.g. "Manual".
+hv-tx-chip-tip = Transaction mode: { $mode }
+# The chip's menu: its title row, the mode hints, the Isolation row.
+hv-tx-menu-title = Transaction mode
+hv-tx-mode-auto-hint = each statement commits as it runs
+hv-tx-mode-manual-hint = changes wait for Commit
+hv-tx-mode-smart-hint = Manual from the first change
+hv-tx-menu-isolation = Isolation
+# The isolation level the server picks itself; its SQL name follows in mono.
+hv-tx-iso-default = Server default
+# The Isolation row's hint while the server picks the level: its SQL name follows.
+# Variables:
+#   $level (String) - the engine's default level (SQL, untranslated), e.g. "READ COMMITTED".
+hv-tx-iso-default-hint = Server default · { $level }
+# Why a mode or the isolation can't change now (a transaction is open).
+hv-tx-menu-reason-open = Commit or roll back first
+# The note under the menu on a production console.
+hv-tx-menu-prod-note = Production consoles start in Manual.
+# The disabled chip's tooltip on a read-only session.
+hv-tx-chip-ro-reason = A read-only session runs each statement on its own, so its mode is always Auto-commit.
+# The transaction badge in the console toolbar (surface 4).
+# Variables:
+#   $n (Number) - statements in the open transaction, e.g. 3.
+#   $age (String) - how long it has been open (an exec-dur-* message), e.g. "2 min".
+hv-tx-badge = { $n ->
+        [one] Transaction · { $n } statement · { $age }
+       *[other] Transaction · { $n } statements · { $age }
+    }
+# The badge without its age (narrow toolbars).
+# Variables:
+#   $n (Number) - statements in the open transaction, e.g. 3.
+hv-tx-badge-short = { $n ->
+        [one] Transaction · { $n } statement
+       *[other] Transaction · { $n } statements
+    }
+hv-tx-badge-failed = Transaction failed
+hv-tx-badge-tip = Not committed yet: other sessions don't see these changes, and the rows they touch stay locked.
+hv-tx-badge-failed-tip = An error or a cancel stopped the transaction. The server now accepts only a rollback.
+hv-tx-badge-commit = Commit
+hv-tx-badge-rollback = Roll back
+# The status bar's transaction segment is a button that opens the chip's menu.
+hv-tx-segment-tip = Click for Commit, Roll back and the transaction mode.
+# The idle-transaction toast (surface 5).
+# Variables:
+#   $age (String) - how long the transaction has been open (an exec-dur-* message), e.g. "10 min".
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-tx-idle-title = Transaction open for { $age } on { $name }
+hv-tx-idle-body = It may hold locks that block other sessions.
+hv-tx-idle-commit = Commit
+hv-tx-idle-rollback = Roll back
+hv-tx-idle-keep = Keep open
+# The session-lost toast's transaction line: a session counts as maybe in a transaction while
+# any request of the user's ran (T12), so the line never claims one was open.
+hv-tx-lost-maybe = It may have had an open transaction; if so, the server rolled back its uncommitted changes.
+# The connection dialog's single-session setting (Advanced; surface 12).
+hv-conn-sessions = Sessions
+hv-conn-single-session = Use one session for every console
+hv-conn-single-session-sub = Consoles of this connection share one session: its transaction, variables and temporary tables.
+# The Connections row when every console shares one session.
+hv-conn-budget-single = One session, shared by every console
+# The console toolbar's chip when the console shares its connection's one session.
+hv-console-shared = Shared session
+# Its tooltip.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+hv-console-shared-tip = Every console of { $name } uses this session: a transaction opened here is open in all of them.
+
+## m3b-t22-tx-ui-r1
+
+# The idle-transaction toast's Commit or Roll back while the console's run waits for an answer
+# (or still runs): nothing was sent.
+hv-tx-idle-waits = The console is waiting for an answer to its run. Commit or roll back once it's answered.
+# A connected profile's single-session setting changed: it applies to the sessions opened after
+# the next reconnect.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+hv-conn-single-session-reconnect = The session setting of { $name } applies after it reconnects.
+# The capsule of a connection whose server refused the time zone in Settings. Retry connects
+# without it.
+# Variables:
+#   $zone (String) - the time zone name (an IANA name, untranslated), e.g. "Europe/Istanbul".
+hv-conn-zone-refused = The server refused time zone { $zone }
+
+## m3b-t21-confirm
+
+# The gate's confirmation dialog (R-M3-55, R-M3-84; design/m3b-safe surface 1): asked before a
+# statement is sent. Nothing is sent until the user chooses.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-confirm-title = Run this statement on { $name }?
+# The title for a statement that only locks rows (SELECT … FOR UPDATE).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-confirm-title-warn = This statement locks rows on { $name }
+# The subtitle's position of the statement in a run of several.
+# Variables:
+#   $i (Number) - the statement's position, from 1.
+#   $n (Number) - the statements in the run.
+hv-confirm-sub-unit = statement { $i } of { $n }
+# The caption above the statement's text.
+hv-confirm-sql = Statement
+# The label of the row that says what the statement does.
+hv-confirm-effect = Effect
+# The dialog's last line on production.
+hv-confirm-prod-line = Nothing is sent until you choose.
+# The dialog's last line off production (the no-WHERE guard, which a setting turns off).
+hv-confirm-calm-line = Off production, Hacivat asks only before statements like this one. Settings › Execution can turn it off.
+# What the statement does (the Effect row), one per kind.
+hv-confirm-class-lock = Reads rows and locks them
+hv-confirm-class-dml = Changes data
+hv-confirm-class-dml-unsafe = Changes data with no usable filter
+hv-confirm-class-ddl-destructive = Removes schema objects or their data
+hv-confirm-class-ddl-other = Changes the schema
+hv-confirm-class-routine = Runs a procedure
+hv-confirm-class-admin = Administers the server or reaches outside the database
+hv-confirm-class-tx = Controls the transaction
+hv-confirm-class-unknown = Unknown: Hacivat can't tell what it does
+# MySQL and MariaDB commit a schema change at once.
+hv-confirm-mysql-ddl = MySQL commits DDL at once, so this can't be rolled back.
+# Above the field the name is typed into.
+# Variables:
+#   $name (String) - the table or schema name exactly as written in the statement, e.g. "müşteriler".
+hv-confirm-type-label = Type { $name } to run it
+# Under the field after a typed name that doesn't match.
+hv-confirm-type-hint = Type it exactly as shown, letter case included.
+# The small button that copies the name to type (for a name the keyboard can't reproduce).
+hv-confirm-copy-name = Copy the name
+hv-confirm-execute = Execute
+hv-confirm-execute-all = Execute all
+hv-confirm-execute-suppress = Execute and don't ask again
+# On production the label names where "don't ask again" applies.
+hv-confirm-execute-suppress-prod = Execute; don't ask again in this console
+# Variables:
+#   $console (String) - the console's title (the connection's name), e.g. "orders-prod".
+hv-confirm-suppress-scope = Not asked again for statements of the same shape in { $console } until it closes.
+hv-confirm-skip = Skip
+hv-confirm-skip-all = Skip all
+hv-confirm-cancel = Cancel
+# What Execute all also answers (RC-1). Never shown on production. (m3b-po, PO M3b-26: edited
+# in place to name the connection's real environment instead of "production".)
+# Variables:
+#   $n (Number) - the later statements Execute all runs without asking.
+#   $env (String) - the connection's environment word (an hv-conn-env-* message), e.g. "staging".
+hv-confirm-execute-all-scope = { $n ->
+        [one] Execute all also runs, without asking, the remaining { $n } statement that would ask on this connection ({ $env }). A statement that needs its name typed still asks.
+       *[other] Execute all also runs, without asking, the remaining { $n } statements that would ask on this connection ({ $env }). A statement that needs its name typed still asks.
+    }
+
+# The confirm-in-transaction prompt (R-M3-55, D-014; design/m3b-safe surface 2): a production
+# change ran inside a transaction and waits for an answer.
+# Hacivat's own transaction (Auto-commit, nothing open before).
+# Variables:
+#   $rows (Number) - the rows the statement changed.
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-commit-title = { $rows ->
+        [one] { $rows } row changed on { $name }
+       *[other] { $rows } rows changed on { $name }
+    }
+# As hv-commit-title when the server reported no row count.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-commit-title-unknown = The statement changed data on { $name }
+hv-commit-body-own = Hacivat ran this statement in a transaction of its own. Other sessions don't see the change until you commit.
+hv-commit-locks = Its rows stay locked while this waits. With no answer, Hacivat rolls back after 5 minutes.
+hv-commit-commit = Commit
+hv-commit-rollback = Roll back
+# The countdown; the time is minutes and seconds, e.g. 4:32.
+# Variables:
+#   $time (String) - the time left, e.g. "4:32".
+hv-commit-countdown = Rolls back in { $time }
+# Inside the user's open transaction (a savepoint).
+# Variables:
+#   $rows (Number) - the rows the statement changed.
+hv-commit-sp-title = { $rows ->
+        [one] { $rows } row changed inside your transaction
+       *[other] { $rows } rows changed inside your transaction
+    }
+# As hv-commit-sp-title when the server reported no row count.
+hv-commit-sp-title-unknown = The statement changed data inside your transaction
+hv-commit-sp-keep-line = Keep: the change joins your open transaction. Nothing is committed yet.
+hv-commit-sp-undo-line = Undo: removes this statement's change; your transaction stays open.
+hv-commit-sp-locks = With no answer, Hacivat undoes the statement after 5 minutes and leaves your transaction open.
+hv-commit-keep = Keep
+hv-commit-undo = Undo
+# Variables:
+#   $time (String) - the time left, e.g. "4:51".
+hv-commit-sp-countdown = Undoes this statement in { $time }
+# The connection was lost while the prompt waited.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-commit-dropped-title = The connection to { $name } was lost
+hv-commit-dropped-body = The server rolled back these changes. Nothing was committed.
+# Variables:
+#   $n (Number) - the statements of the user's transaction before this one.
+hv-commit-dropped-sp-body = The server rolled back your open transaction: this statement and the { $n } before it. Nothing was committed.
+# As hv-commit-dropped-sp-body when the count is not known.
+hv-commit-dropped-sp-body-unknown = The server rolled back your open transaction, this statement included. Nothing was committed.
+hv-commit-close = Close
+# Fix round 1 (m8): the name to type holds a control character (a tab or a line break in a
+# quoted name), which the field can't take: the statement can't be confirmed here.
+hv-confirm-type-untypeable = This name contains a character that can't be typed or pasted, so it can't be confirmed here. Run this statement from another client.
+
+## m3b-t25-results
+
+# A result tab whose title repeats an earlier tab's (a statement's further result set, or two
+# statements under the same comment). The title is the statement's comment, as written, or
+# hv-results-result-n.
+# Variables:
+#   $title (String) - the tab's title, e.g. "orders by city".
+#   $n (Number) - which repeat this is, from 2.
+hv-results-tab-dup = { $title } ({ $n })
+# The tooltip of a pinned result tab's pin glyph.
+hv-results-tab-pinned = Pinned: the next run opens a new tab
+# The result tab menu (right-click on a result tab).
+hv-results-tab-pin = Pin tab
+hv-results-tab-unpin = Unpin tab
+hv-results-tab-close-others = Close other tabs
+# After a result tab's title: the statements ran as one, so the server sent every column as
+# text (R-M3-60).
+hv-results-untyped = untyped (run as one)
+# The short form of hv-results-untyped when the tab strip is short.
+hv-results-untyped-short = untyped
+# The tooltip of hv-results-untyped.
+hv-results-untyped-tip = Run as one sends the statements together, so the server returns every column as text. Numbers sort as text.
+# The info row under the result toolbar when a statement returned more result sets than a run
+# keeps (R-M3-66).
+# Variables:
+#   $kept (Number) - the result sets shown, e.g. 100.
+#   $skipped (Number) - the result sets read and not kept, e.g. 37.
+hv-results-set-limit = The first { $kept } result sets are shown; { $skipped } more were read and not kept.
+# The result toolbar's Count rows button (R-M3-76).
+hv-results-count = Count rows
+# The tooltip of hv-results-count.
+hv-results-count-tip = Runs SELECT COUNT(*) over this query on a separate session.
+# Beside Count rows: the count the server answered.
+# Variables:
+#   $rows (Number) - the rows the query returns, e.g. 1048213.
+hv-results-count-exact = { $rows ->
+        [one] { $rows } row (exact)
+       *[other] { $rows } rows (exact)
+    }
+# Beside Count rows while the count runs.
+hv-results-counting = Counting…
+# Stops a count that is running.
+hv-results-count-cancel = Cancel
+# Beside Count rows: why this result's query can't be counted (only one SELECT, WITH, VALUES or
+# TABLE statement without parameters or locking clauses is counted).
+hv-results-count-unavailable = This query can't be counted.
+# Beside Count rows: the read-only check refused the count statement; nothing was sent.
+hv-results-count-refused = Not counted: Hacivat could not confirm the count only reads.
+# Beside Count rows: the count ran for 30 seconds and was stopped.
+hv-results-count-timeout = Stopped after 30 seconds.
+# Beside Count rows: the server or the session failed the count.
+hv-results-count-failed = The count failed.
+# Beside Count rows: the console has no connection to count on.
+hv-results-count-offline = Not counted: the console isn't connected.
+# The cursor strip of a background result closed to free memory (R-M3-68); Re-run brings the
+# rest back.
+# Variables:
+#   $rows (Number) - the rows the result kept, e.g. 4096.
+hv-strip-evicted = { $rows ->
+        [one] Closed to free memory; the first row is kept.
+       *[other] Closed to free memory; the first { $rows } rows are kept.
+    }
+# A copy whose selection reaches past the rows a result kept after it was closed to free
+# memory: nothing was copied.
+hv-results-copy-evicted = Nothing was copied: this result was closed to free memory and keeps fewer rows than you selected. Select again, or re-run it.
+# The fetch-all question (R-M3-68): asked when fetching every row would pass the result's
+# memory limit.
+hv-fetchall-title = Fetching every row would pass this result's memory limit
+# Variables:
+#   $size (String) - the result's memory limit, e.g. "256.0 MB".
+hv-fetchall-body = The query has more rows than fit in { $size }. Hacivat can fetch up to the limit and keep the cursor open for the rest.
+hv-fetchall-ok = Fetch up to the memory limit
+hv-fetchall-cancel = Cancel
+
+## m3b-t25-results-r1
+
+# A repeated result tab title's number, drawn after the title so a cut title keeps it.
+# Variables:
+#   $n (Number) - which repeat this is, from 2.
+hv-results-tab-repeat = ({ $n })
+# The button after the result tabs that fit: how many more there are (a menu lists them).
+# Variables:
+#   $n (Number) - the result tabs not drawn, e.g. 12.
+hv-results-tabs-more = +{ $n }
+# The tooltip and accessible name of hv-results-tabs-more.
+# Variables:
+#   $n (Number) - the result tabs not drawn, e.g. 12.
+hv-results-tabs-more-tip = { $n ->
+        [one] { $n } more result tab
+       *[other] { $n } more result tabs
+    }
+# Beside Count rows: the tab's statement is no longer known to the console (an older run).
+hv-results-count-rerun = Re-run the statement to count its rows.
+# Beside Count rows: the console has not read its SQL settings, so the statement can't be
+# read safely yet.
+hv-results-count-context = Not counted: the console's SQL settings aren't known yet.
+
+## m3b-t23-escalation
+
+# The slow-cancel toast (design/m3b-safe surface 6): a cancel not answered after 10 s.
+hv-cancel-slow-title = Cancelling is taking long
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $duration (String) - how long it has been cancelling (an exec-dur-* message), e.g. "11 s".
+hv-cancel-slow-body = The server hasn't stopped the statement on { $name } after { $duration }.
+# The toast's one button: it opens the escalation dialog (it never ends anything itself).
+hv-cancel-options = Show options…
+# The escalation dialog (a second Stop while cancelling, or Show options…).
+hv-cancel-dlg-title = The statement isn't answering the cancel
+# Variables:
+#   $duration (String) - how long it has been cancelling (an exec-dur-* message), e.g. "14 s".
+hv-cancel-dlg-body = It has been cancelling for { $duration }. Hacivat keeps waiting unless you choose otherwise.
+hv-cancel-keep-waiting = Keep waiting
+hv-cancel-terminate = Terminate on server
+# Variables:
+#   $fn (String) - the server function or statement that ends the session (SQL, untranslated), e.g. "pg_terminate_backend".
+hv-cancel-terminate-line = Terminate on server ends this session on the server with { $fn }.
+# Variables:
+#   $n (Number) - statements in this console's open transaction, e.g. 3.
+hv-cancel-own-tx = { $n ->
+        [one] This console's open transaction ({ $n } statement) rolls back.
+       *[other] This console's open transaction ({ $n } statements) rolls back.
+    }
+# This console's running statement may have opened a transaction (Manual or Smart mode).
+hv-cancel-own-tx-maybe = This console may have an open transaction; if so, it rolls back.
+# A transaction Hacivat opened for this console (a confirmed change waiting for its answer, a
+# cursor) rolls back (fix round 1).
+hv-cancel-own-tx-hacivat = The transaction Hacivat opened on this console (a change waiting for your answer, or an open cursor) rolls back.
+# Another console holds a transaction Hacivat opened for it (fix round 1).
+# Variables:
+#   $console (String) - the other console's title, e.g. "orders-dev (2)".
+hv-cancel-other-tx-hacivat = { $console } also has a transaction Hacivat opened; the server rolls it back.
+# The app's existing verb (hv-conn-menu-disconnect); the engine call stays "deactivate".
+hv-cancel-disconnect = Disconnect
+# From the profile's default console: the whole profile disconnects (R-M3-73).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+hv-cancel-disconnect-line-all = Disconnect closes every connection of { $name } here; the statement may continue on the server.
+# From any other console: only its session.
+# Variables:
+#   $console (String) - the console's title, e.g. "orders-dev (2)".
+hv-cancel-disconnect-line-one = Disconnect closes only this console's session ({ $console }); the statement may continue on the server.
+# SQLite: a local file, nothing runs "on the server"; the profile's consoles share its one
+# connection (single-session; fix round 1, m4).
+# Variables:
+#   $name (String) - the database file's name, e.g. "app.db".
+hv-cancel-disconnect-line-local = Disconnect closes the connection to the file { $name } that this connection's consoles share; SQLite stops the statement when its connection closes.
+# Another console of the profile holds a user transaction that the default console's
+# Disconnect rolls back.
+# Variables:
+#   $console (String) - the other console's title, e.g. "orders-dev (2)".
+#   $n (Number) - statements in its open transaction, e.g. 3.
+hv-cancel-other-tx = { $n ->
+        [one] { $console } also has an open transaction ({ $n } statement); the server rolls it back.
+       *[other] { $console } also has an open transaction ({ $n } statements); the server rolls it back.
+    }
+# Another console runs a statement that may have opened a transaction (T12: a running request).
+# Variables:
+#   $console (String) - the other console's title, e.g. "orders-dev (2)".
+hv-cancel-other-tx-maybe = { $console } may also have an open transaction; if so, the server rolls it back.
+# A terminate the server refused; the server's own text follows in its own box, verbatim.
+hv-cancel-terminate-failed = Couldn't terminate the session. Hacivat is still waiting for the cancel.
+# The gutter's end-of-line status of a statement whose cancel was not answered (amber hourglass).
+# Variables:
+#   $duration (String) - how long it has been cancelling (an exec-dur-* message), e.g. "14 s".
+hv-editor-mark-escalated = cancel not answered · { $duration }
+# The error-policy bar (surface 7): a statement of a multi-statement run failed (R-M3-61).
+# Variables:
+#   $i (String) - the failed statement's number in the run, e.g. "2".
+#   $n (String) - the statements in the run, e.g. "5".
+hv-errbar-failed = Statement { $i } of { $n } failed
+# Inside a failed PostgreSQL transaction (P-M3b-19).
+# Variables:
+#   $i (String) - the failed statement's number in the run, e.g. "3".
+#   $n (String) - the statements in the run, e.g. "6".
+hv-errbar-aborted = Statement { $i } of { $n } failed, and the transaction failed with it
+# Variables:
+#   $n (Number) - the statements after the failed one, e.g. 3.
+hv-errbar-waiting = { $n ->
+        [one] { $n } more waits
+       *[other] { $n } more wait
+    }
+hv-errbar-retry = Retry
+hv-errbar-ignore = Ignore
+hv-errbar-ignore-all = Ignore all
+hv-errbar-stop = Stop
+hv-errbar-rollback-continue = Roll back and continue
+# Roll back and continue's tooltip in Manual or Smart mode: the rest runs in a new transaction.
+# Variables:
+#   $n (Number) - statements in the user's open transaction, e.g. 2.
+#   $next (String) - the number of the statement that runs next, e.g. "4".
+hv-errbar-rollback-continue-tip = { $n ->
+        [one] Rolls back your open transaction ({ $n } statement), then continues with statement { $next } in a new transaction.
+       *[other] Rolls back your open transaction ({ $n } statements), then continues with statement { $next } in a new transaction.
+    }
+# As hv-errbar-rollback-continue-tip in Auto-commit mode (the user's own BEGIN).
+# Variables:
+#   $n (Number) - statements in the user's open transaction, e.g. 2.
+#   $next (String) - the number of the statement that runs next, e.g. "4".
+hv-errbar-rollback-continue-tip-auto = { $n ->
+        [one] Rolls back your open transaction ({ $n } statement), then continues with statement { $next }, committing each statement as it runs.
+       *[other] Rolls back your open transaction ({ $n } statements), then continues with statement { $next }, committing each statement as it runs.
+    }
+
+## m3b-t24-exec-ui
+
+# The parameter prompt (design/m3b-safe surface 8): the values of a statement's parameters,
+# asked before the statement is checked and sent. Values are data: never translated.
+hv-params-title = Values for this statement
+# The subtitle's count of parameters asked for.
+# Variables:
+#   $n (Number) - how many parameters the prompt asks for.
+hv-params-sub = { $n ->
+        [one] { $n } parameter
+       *[other] { $n } parameters
+    }
+# Column headings of the prompt's rows.
+hv-params-col-name = Name
+hv-params-col-value = Value
+hv-params-col-type = Type
+# The tooltip of a row's NULL toggle.
+hv-params-null-tip = Send NULL
+# Under a value filled in from an earlier run of this app session.
+hv-params-remembered = remembered
+# The tooltip of "remembered".
+hv-params-remembered-tip = From an earlier run in this app session; never saved to disk.
+# A number grouped with dots where the region groups that way: it is read as a decimal unless
+# the user writes it without the dots. Run stays off until the user decides.
+# Variables:
+#   $value (String) - the value as typed, e.g. "1.234".
+#   $plain (String) - the same digits without dots, e.g. "1234".
+hv-params-ambiguous = Read as the decimal { $value }: a dot is the decimal point here. If you meant { $plain }, write it without the dot.
+# The button that accepts the decimal reading.
+# Variables:
+#   $value (String) - the value as typed, e.g. "1.234".
+hv-params-ambiguous-use = Use { $value }
+# A value written as bytes (\x…) that isn't pairs of hex digits.
+hv-params-bad-hex = Bytes written as \x must be pairs of hex digits (0–9, a–f).
+# A template variable can't be filled in as a parameter: the statement can't run as written.
+# Variables:
+#   $var (String) - the template variable as written, e.g. "${tablo}".
+hv-params-template = { $var } is a template variable, not a parameter. Hacivat doesn't fill it in, so this statement can't run as written.
+# PostgreSQL: a ? in the statement is the jsonb operator, not a parameter.
+hv-params-pg-q = On PostgreSQL ? isn't a parameter here, because jsonb operators use it. Settings › Parameters can turn it on.
+# The note at the end of the prompt.
+hv-params-note = Values are kept for this app session only and are masked in history.
+# The prompt's buttons.
+hv-params-run = Run
+hv-params-cancel = Cancel
+# The tooltip of a disabled Run.
+hv-params-resolve-first = Resolve the flagged value first
+# The type column when the statement says nothing of the parameter's type.
+hv-params-type-unknown = unknown
+# The chooser's uncertain state (R-M3-60): sends the uncertain region in one request.
+hv-chooser-run-as-one = Run as one
+# The line under "Run as one".
+hv-chooser-run-as-one-hint = Run as one sends the whole region in one request; its results come back untyped.
+# The line under a disabled "Run as one" on a read-only session.
+hv-chooser-run-as-one-ro = Not on a read-only session: its guard checks one statement at a time.
+# The chooser's last row: opens how Run picks statements in this console.
+hv-chooser-customize = Customize…
+# The policy popover (CHOOSE-06): how Run picks statements in this console.
+hv-policy-title = How Run picks statements in this console
+hv-policy-inside = Caret inside a statement
+hv-policy-inside-ask = Ask
+hv-policy-inside-smallest = Smallest statement
+hv-policy-inside-largest = Largest statement
+hv-policy-inside-whole = Whole script
+hv-policy-selection = With a selection
+hv-policy-sel-separate = As separate statements
+hv-policy-sel-as-one = As one
+hv-policy-note = Kept for this console until it closes.
+# A statement's gutter mark while its change waits for the user's answer (confirm in
+# transaction; NOTES ruling 31).
+hv-editor-mark-awaiting = waiting for Commit or Roll back
+# The same in the savepoint form (the user's own transaction stays open).
+hv-editor-mark-awaiting-sp = waiting for Keep or Undo
+# A statement Run refused before sending it (its tooltip says why), on a read-write console.
+hv-editor-mark-not-sent = not sent
+# Once, when the query history file was damaged and set aside at startup.
+hv-exec-history-recovered = The query history file was damaged, so Hacivat set it aside and started a new one.
+
+## m3b-t27-history
+
+# The query history dialog (design/m3b-safe surface 11).
+hv-history-title = Query history
+# The search field's placeholder.
+hv-history-search = Search history
+hv-history-search-tip = Search ignores letter case and accents: musteri finds müşteri.
+# The scope: this console's connection, or every connection.
+hv-history-filter-this = This connection
+hv-history-filter-all = All connections
+# The outcome filter.
+hv-history-outcome-any = Any outcome
+hv-history-outcome-ok = Succeeded
+hv-history-outcome-failed = Failed
+hv-history-outcome-cancelled = Cancelled
+# An entry the safety gate refused (nothing was sent).
+hv-history-outcome-denied = Not run
+# Day groups of the list.
+hv-history-today = Today
+hv-history-yesterday = Yesterday
+# The header's subtitle.
+# Variables:
+#   $n (Number) - the entries the list shows, e.g. 5.
+hv-history-count = { $n ->
+        [one] { $n } entry
+       *[other] { $n } entries
+    }
+# A row's and the preview's row count.
+# Variables:
+#   $rows (Number) - rows fetched or affected, e.g. 12.
+hv-history-rows = { $rows ->
+        [one] { $rows } row
+       *[other] { $rows } rows
+    }
+# The chip on an entry from which a secret was removed before it was saved.
+hv-history-redacted = redacted
+hv-history-redacted-line = A password or secret was removed before this was saved.
+hv-history-pin = Pin
+hv-history-unpin = Unpin
+# The pin glyph's tooltip on a pinned row.
+hv-history-pinned = Pinned: never removed by retention
+hv-history-insert = Insert
+hv-history-insert-run = Insert and run
+hv-history-copy = Copy SQL
+hv-history-open-new = Open in new console
+hv-history-empty = No history yet. Statements you run are kept here for 90 days.
+# Variables:
+#   $q (String) - what the user searched for, e.g. "faturalar".
+hv-history-nomatch = Nothing matches “{ $q }”.
+# Variables:
+#   $n (Number) - how many times the same statement ran, e.g. 4.
+hv-history-ran = { $n ->
+        [one] Ran once
+       *[other] Ran { $n } times
+    }
+# Which console Insert and Insert and run go into (always shown; fix round 1).
+# Variables:
+#   $name (String) - that console's title, e.g. "orders-dev" or "orders-dev (2)".
+hv-history-target = Goes into the console { $name }; Run checks it there.
+# A row's time, in the regional format.
+# Variables:
+#   $t (DateTime) - when the statement last started, e.g. 2026-11-16T14:32:08.
+hv-history-time = { DATETIME($t, timeStyle: "medium") }
+# A day group's date, in the regional format (days before yesterday).
+# Variables:
+#   $t (DateTime) - a moment of that day, e.g. 2026-11-14.
+hv-history-day = { DATETIME($t, dateStyle: "medium") }
+# The entry's connection was deleted since.
+hv-history-conn-gone = Deleted connection
+# The history store could not answer (closed or damaged).
+hv-history-failed = The history can't be read right now.
+# Fix round 1: an entry with masked values (or one cut at the size limit) never runs as stored.
+hv-history-masked-line = Masked values: fill them in before running.
+hv-history-truncated-line = This statement was cut at 64 KiB when it was saved; it can't run as it is.
+# The header's subtitle when the search shows its most entries (there may be more).
+# Variables:
+#   $n (Number) - the entries the list shows, e.g. 200.
+hv-history-count-capped = { $n }+ entries
+# Toasts when an action did nothing.
+hv-history-console-gone = The console to insert into is closed.
+hv-history-insert-refused = The statement couldn't be inserted: the editor is read-only, composing text, or would get too large.
+hv-history-pin-failed = The pin couldn't be changed.
+hv-history-open-failed = The new console didn't open in time; nothing was inserted.
+
+## m3b-t31-multi
+
+# The status bar's count of carets in the console's editor, before the selected count (shown from two carets on; NOTES surface 14).
+# Variables:
+#   $n (Number) - the carets, e.g. 3.
+hv-editor-carets = { $n } carets
+# Said once, politely, when an input method composition goes to the main caret only (R-M3-64).
+hv-editor-ime-primary-only = Input method: typing at the main caret only, because another caret was inside a string or comment
+
+## m3b-t29-shots
+# The history list's selected entry, announced to assistive technology when ↑/↓ moves it:
+# its first SQL line (data) and its place in the list.
+# Variables:
+#   $sql (String) - the entry's first SQL line, e.g. SELECT 1.
+#   $pos (Number) - its place in the list, e.g. 3.
+#   $n (Number) - the entries the list shows, e.g. 5.
+hv-history-selection-a11y = { $sql }, { $pos } of { $n }
+
+## m3b-t32-fold
+
+# A folded range's inlay after its header line, behind an ellipsis glyph (NOTES surface 15).
+# Variables:
+#   $n (Number) - the lines the fold hides, e.g. 5.
+hv-editor-fold-lines = { $n ->
+        [one] { $n } line
+       *[other] { $n } lines
+    }
+# The folded inlay's tooltip.
+# Variables:
+#   $from (Number) - the fold's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-fold-tip = Lines { $from }–{ $to } are folded. Click to unfold.
+# The gutter's chevron on an open range (its name and tooltip).
+# Variables:
+#   $from (Number) - the range's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-fold-name = Fold lines { $from }–{ $to }
+# The gutter's chevron on a folded range (its name and tooltip).
+# Variables:
+#   $from (Number) - the fold's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-unfold-name = Unfold lines { $from }–{ $to }
+# A folded header's end-of-line status when a statement inside the fold failed (the SQLSTATE chip follows).
+# Variables:
+#   $line (Number) - the failed statement's first line, e.g. 9.
+hv-editor-fold-failed = failed inside the fold · line { $line }
+# A folded header's accessible description (screen readers), after its text.
+# Variables:
+#   $n (Number) - the lines the fold hides, e.g. 5.
+hv-editor-fold-hidden = { $n ->
+        [one] { $n } line folded
+       *[other] { $n } lines folded
+    }
+# Said politely after a fold (the gutter, the inlay or the palette).
+# Variables:
+#   $from (Number) - the fold's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-fold-done = Folded lines { $from }–{ $to }
+# Said politely after an unfold.
+# Variables:
+#   $from (Number) - the fold's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-unfold-done = Unfolded lines { $from }–{ $to }
+
+## m3b-t35-grid
+
+# The header tooltip of a frozen column (frozen columns keep their place when the grid scrolls
+# sideways).
+hv-grid-frozen-tip = Frozen: stays in place when you scroll sideways
+# The column-resize tag's hint, after the width (hv-grid-width), while the pointer is on or
+# drags a column header's edge.
+hv-grid-resize-tip = Drag to resize · double-click to fit
+# A column's width in the column-resize tag.
+# Variables:
+#   $px (Number) - the width in logical pixels, e.g. 136.
+hv-grid-width = { $px } px
+# The selection's size on the right of the cursor strip when it holds several ranges
+# (Ctrl/Cmd-click adds one).
+# Variables:
+#   $n (Number) - the ranges, e.g. 2.
+#   $cells (Number) - the cells they cover together, e.g. 10.
+hv-strip-ranges = { $n } ranges · { $cells ->
+        [one] { $cells } cell
+       *[other] { $cells } cells
+    }
+# Fix round 1: the notice when Freeze columns is refused because the frozen columns would
+# leave too little of the grid to scroll.
+hv-grid-freeze-refused = These columns can't be frozen: there would be no room left to scroll. Widen the pane or freeze fewer columns.
+
+## m3b-t36-sort
+
+# The sort note under the result toolbar when the rows were sorted on this computer and the
+# database may hold more rows (a partial result): its order might differ from ORDER BY.
+hv-grid-sorted-locally = Sorted locally: the database might order differently.
+# After hv-grid-sorted-locally on a partial result.
+# Variables:
+#   $rows (Number) - the fetched rows the sort ordered, e.g. 10,000.
+hv-grid-sorted-locally-more = Only the { $rows } fetched rows are sorted.
+# A button in the sort note: back to the order the database sent.
+hv-grid-clear-sort = Clear sort
+# The sort note when rows arrived after the sort of a complete result: they wait, unsorted,
+# after a dashed line at the end of the grid.
+# Variables:
+#   $rows (Number) - the rows that arrived after the sort, e.g. 1,500.
+hv-grid-unsorted-tail = { $rows ->
+        [one] { $rows } new row at the end (not sorted)
+       *[other] { $rows } new rows at the end (not sorted)
+    }
+# A button in the sort note: sort again, the new rows included.
+hv-grid-resort = Re-sort
+# The sort note while a long sort runs (shown after 200 ms; the grid keeps its old order
+# meanwhile).
+# Variables:
+#   $rows (Number) - the rows being sorted, e.g. 1,048,576.
+hv-grid-sorting = { $rows ->
+        [one] Sorting { $rows } row…
+       *[other] Sorting { $rows } rows…
+    }
+# After hv-grid-sorted-locally on a partial result whose new rows arrived after the sort: both
+# facts in one note.
+# Variables:
+#   $sorted (Number) - the fetched rows the sort ordered, e.g. 10,000.
+#   $rows (Number) - the rows that arrived after the sort, e.g. 1,500.
+hv-grid-sorted-tail = { $rows ->
+        [one] Only the { $sorted } fetched rows are sorted; { $rows } new row at the end is not.
+       *[other] Only the { $sorted } fetched rows are sorted; { $rows } new rows at the end are not.
+    }
+# A button in the sort note while a sort runs: stop it and keep the order shown.
+hv-grid-sort-cancel = Cancel
+# The tooltip of a sorted column's header.
+# Variables:
+#   $lvl (Number) - the sort level, 1 for the first key, e.g. 1.
+#   $dir (String) - hv-grid-dir-asc or hv-grid-dir-desc, e.g. "ascending".
+#   $collation (String) - the column's collation as the database names it, e.g. "tr-x-icu".
+hv-grid-sort-tip = Sort level { $lvl }, { $dir }. Text compares by the column's collation, { $collation }.
+# The tooltip of a sorted text column whose collation this app cannot follow.
+# Variables:
+#   $lvl (Number) - the sort level, 1 for the first key, e.g. 1.
+#   $dir (String) - hv-grid-dir-asc or hv-grid-dir-desc, e.g. "ascending".
+#   $collation (String) - the column's collation as the database names it, e.g. "utf8mb4_general_ci".
+hv-grid-sort-tip-cp = Sort level { $lvl }, { $dir }. The column's collation { $collation } has no equivalent here, so text compares by code point.
+# The sort direction inside the sort tooltips.
+hv-grid-dir-asc = ascending
+hv-grid-dir-desc = descending
+# The tooltip of a sorted text column when the result does not say which collation the column
+# uses (the database sends no collation with a result's columns).
+# Variables:
+#   $lvl (Number) - the sort level, 1 for the first key, e.g. 1.
+#   $dir (String) - hv-grid-dir-asc or hv-grid-dir-desc, e.g. "ascending".
+hv-grid-sort-tip-unknown = Sort level { $lvl }, { $dir }. The column's collation is not known here, so text compares by code point.
+# The tooltip of a sorted column that holds no text (numbers, dates…).
+# Variables:
+#   $lvl (Number) - the sort level, 1 for the first key, e.g. 1.
+#   $dir (String) - hv-grid-dir-asc or hv-grid-dir-desc, e.g. "ascending".
+hv-grid-sort-level = Sort level { $lvl }, { $dir }.
+# Fix round 1: the notice when a local sort stops on an internal error; the grid keeps the
+# order it showed.
+hv-grid-sort-failed = The sort stopped on an internal error. The grid keeps the order it showed.
+
+## m3b-t33-find
+
+# The editor find bar's query field: placeholder and accessible name, also the bar's (role=search) name (NOTES surface 16).
+hv-find-placeholder = Find
+# The find field's toggle: match upper and lower case exactly (tooltip and accessible name).
+hv-find-match-case = Match case
+# The find field's toggle: match whole words only (SQL word boundaries).
+hv-find-words = Whole words
+# The find field's toggle: the query is a regular expression.
+hv-find-regex = Regular expression
+# The find field's toggle: Turkish-tolerant matching (D-074).
+hv-find-tolerant = Turkish-tolerant
+# The Turkish-tolerant toggle's tooltip and accessible description.
+hv-find-tolerant-tip = Turkish-tolerant: İ, I, ı and i find each other, and accents are ignored.
+# The find count: the current match and the total.
+# Variables:
+#   $i (Number) - the current match, 1-based, e.g. 3.
+#   $n (Number) - the matches, e.g. 41.
+hv-find-count = { $i } of { $n }
+# The find count while counting goes on (the static amber marker beside it).
+# Variables:
+#   $i (Number) - the current match, 1-based, e.g. 3.
+#   $n (Number) - the matches counted so far, e.g. 1,240.
+hv-find-count-more = { $i } of { $n }+
+# The tooltip of a count still running.
+hv-find-counting-tip = Still counting; the number grows as the rest of the document is searched.
+# The find count when nothing matches.
+hv-find-none = No matches
+# The find count when the regular expression cannot be read (ink glyph, never red; NOTES M3c-11).
+hv-find-invalid = Invalid pattern
+# The tooltip of an invalid pattern, with the regular expression engine's message.
+# Variables:
+#   $error (String) - the engine's message (English, data), e.g. unclosed group.
+hv-find-invalid-tip = The regular expression can't be read, so nothing is searched: { $error }
+# The find bar's previous-match button (tooltip and accessible name).
+hv-find-prev = Previous match
+# The find bar's next-match button (tooltip and accessible name).
+hv-find-next = Next match
+# Said in the status bar and politely to assistive technology when Select all occurrences stops at its cap.
+# Variables:
+#   $max (Number) - the occurrences selected, e.g. 10,000.
+#   $n (Number) - every occurrence, e.g. 41,208.
+hv-find-capped = Selected the first { $max } of { $n } matches
+# The find count when the caret is not on a match (the total only).
+# Variables:
+#   $n (Number) - the matches, e.g. 41.
+hv-find-total = { $n ->
+        [one] { $n } match
+       *[other] { $n } matches
+    }
+# The find count when the caret is not on a match, while counting goes on.
+# Variables:
+#   $n (Number) - the matches counted so far, e.g. 1,240.
+hv-find-total-more = { $n }+ matches
+# Said politely when Select next occurrence finds nothing more (every occurrence is selected).
+hv-find-no-more = No further occurrence
+
+## m3b-t37-find-goto
+
+# The grid find bar's query field: placeholder and accessible name, also the bar's (role=search) name (NOTES surface 19).
+hv-gfind-placeholder = Find in the shown values
+# The grid find field's toggle: show only the rows with a match (tooltip and accessible name).
+hv-gfind-filter = Filter rows
+# The Filter rows toggle's longer tooltip and accessible description.
+hv-gfind-filter-tip = Filter rows: show only the rows with a match
+# After the grid find count when some searched values were cut at the value-size limit.
+hv-gfind-incomplete = may be incomplete
+# The tooltip of "may be incomplete".
+# Variables:
+#   $n (Number) - the values that were cut, e.g. 1.
+#   $size (String) - the value-size limit, already formatted with its unit, e.g. 1 MB.
+hv-gfind-incomplete-tip = { $n ->
+        [one] { $n } value was cut at { $size }; text past the cut isn't searched.
+       *[other] { $n } values were cut at { $size }; text past the cut isn't searched.
+    }
+# The note row under the result toolbar while Filter rows is on (NOTES M3c-26).
+# Variables:
+#   $shown (Number) - the rows with a match, e.g. 41.
+#   $rows (Number) - the rows fetched, e.g. 10,000.
+hv-gfind-filter-note = Showing the { $shown } rows that match, of the { $rows } fetched. Rows not fetched yet aren't filtered.
+# The filter note's button: turns Filter rows off.
+hv-gfind-show-all = Show all rows
+# The grid find field's tooltip: what it searches.
+hv-gfind-null-tip = Searches what the grid shows, row by row from the focused cell. NULL never matches.
+# The grid find bar's close button (tooltip and accessible name).
+hv-gfind-close = Close find
+# The grid find bar's Select all occurrences button (the command's words without "Grid:").
+hv-gfind-select-all = Select all occurrences
+# The command palette's title of the grid's Select all occurrences (⌃⌘G in a grid).
+hv-cmd-grid-select-all-occurrences = Grid: select all occurrences
+# The go-to popover's title (NOTES surface 20).
+hv-goto-title = Go to row
+# The go-to field's placeholder.
+hv-goto-placeholder = row or row:column
+# The line under the go-to field before anything is typed.
+hv-goto-hint = A row number, then an optional column by name or position: 1500:city or 1500:3
+# The line under the go-to field: where Enter goes, with a column.
+# Variables:
+#   $row (Number) - the row, e.g. 1,000.
+#   $col (String) - the column's name (catalog text), e.g. city.
+hv-goto-target = Row { $row }, column { $col }
+# The line under the go-to field: where Enter goes, a row only.
+# Variables:
+#   $row (Number) - the row, e.g. 1,000.
+hv-goto-target-row = Row { $row }
+# The go-to error past the last row.
+# Variables:
+#   $row (Number) - the row asked for, e.g. 40.
+#   $total (Number) - the result's rows, e.g. 12.
+hv-goto-past-end = { $total ->
+        [one] There's no row { $row }: the result has { $total } row.
+       *[other] There's no row { $row }: the result has { $total } rows.
+    }
+# The go-to error for a column name no column has.
+# Variables:
+#   $name (String) - what was typed (data), e.g. ilce.
+hv-goto-unknown-col = No column is named { $name }.
+# The go-to error for a hidden column.
+# Variables:
+#   $name (String) - the column's name (catalog text), e.g. meta.
+hv-goto-hidden-col = Column { $name } is hidden.
+# The button after the hidden-column error: shows the column and goes.
+hv-goto-show-col = Show it and go
+# The go-to question above a million rows to fetch.
+# Variables:
+#   $row (Number) - the row asked for, e.g. 1,500,000.
+#   $more (Number) - the rows still to fetch, e.g. 1,490,000.
+hv-goto-fetch = Row { $row } isn't fetched yet. Fetching { $more } more rows takes a while, and the result's memory limit still applies.
+# While go to row fetches toward its row.
+# Variables:
+#   $row (Number) - the row asked for, e.g. 1,500,000.
+#   $done (Number) - the rows fetched so far, e.g. 214,000.
+#   $more (Number) - the rows to fetch, e.g. 1,490,000.
+hv-goto-fetching = Fetching to row { $row }: { $done } of { $more } rows
+# Under the fetching line: Escape hides the popover, the fetch goes on.
+hv-goto-fetching-note = Escape hides this; fetching goes on in the strip.
+# The go-to fetching's button: ends the fetching, the cursor stays open.
+hv-goto-stop = Stop fetching
+# The go-to question's primary button.
+hv-goto-fetch-ok = Fetch and go
+# The go-to question's cancel button.
+hv-goto-cancel = Cancel
+# The go-to key hint's word after the return glyph ("↵ Go").
+hv-goto-key-go = Go
+# The go-to error when the row part is not a row number (or too large for one).
+hv-goto-not-a-row = That isn't a row number.
+# The go-to error past the last row while Filter rows shows only the matching rows.
+# Variables:
+#   $row (Number) - the row asked for, e.g. 40.
+#   $total (Number) - the rows the filter shows, e.g. 12.
+hv-goto-past-end-filter = { $total ->
+        [one] There's no row { $row }: the filter shows { $total } row.
+       *[other] There's no row { $row }: the filter shows { $total } rows.
+    }
+# The go-to line when fetching toward a row ended because the cursor closed (an error, a
+# cancel, a lost connection).
+# Variables:
+#   $row (Number) - the rows fetched, e.g. 214,000.
+hv-goto-fetch-closed = Fetching stopped at row { $row }: the cursor is closed.
+# The go-to line when fetching toward a row ended at the result's memory limit.
+# Variables:
+#   $row (Number) - the rows fetched, e.g. 214,000.
+hv-goto-fetch-paused = Fetching stopped at row { $row }: the result reached its memory limit.
+
+## m3b-t34-editor
+
+# The gutter's ▶ button on a statement's first row (accessible name) and its tooltip's title (NOTES surface 17).
+hv-gutter-run = Run this statement
+# The ▶ tooltip's caption above the statement's last three runs.
+hv-gutter-last-runs = Last runs
+# The ▶ tooltip of a statement that has not run in this editor.
+hv-gutter-never-run = Not run yet.
+# The ▶ tooltip's last line: the gutter runs through the same resolve, preview and gate as Run.
+hv-gutter-same-path = Runs through the same checks as Run.
+# The status bar's button when the editor's lines end in more than one way.
+hv-eol-mixed = Mixed line endings
+# The tooltip of the mixed line endings button: the endings the text has.
+# Variables:
+#   $mix (String) - the endings' names, data, e.g. LF, CRLF.
+hv-eol-mixed-tip = Lines end in more than one way ({ $mix }). Click to normalize them.
+# The header of the line endings menu: how many lines end each way.
+# Variables:
+#   $lf (Number) - the lines that end in LF, e.g. 214.
+#   $crlf (Number) - the lines that end in CRLF, e.g. 12.
+hv-eol-counts = Line endings: LF { $lf }, CRLF { $crlf }
+# A row of the line endings menu: rewrite every line ending as this one (one undo group).
+# Variables:
+#   $ending (String) - the ending's name, LF or CRLF (data), e.g. LF.
+hv-eol-to = Normalize to { $ending }
+# The hint beside the dominant ending's row.
+hv-eol-most = most lines
+# The status bar's sentence after a history recall (⌃⌥↑ / ⌃⌥↓ at the last line of an empty or recalled console).
+# Variables:
+#   $i (Number) - the recalled statement's place, newest first, e.g. 2.
+#   $n (Number) - the statements recalled, e.g. 48.
+#   $older (String) - the key for an older statement, e.g. ⌃⌥↑.
+#   $newer (String) - the key for a newer statement, e.g. ⌃⌥↓.
+hv-history-recall = From history: statement { $i } of { $n } · { $older } older · { $newer } newer
+# A statement's end-of-line status after its change was rolled back (Roll back, Undo, the deadline or a close; the gutter's undo glyph).
+hv-editor-mark-rolled-back = rolled back
+# The end of a selection's first line when Run sends it as one unit (the layers glyph; NOTES surface 9).
+# Variables:
+#   $n (Number) - the statements the selection holds, e.g. 2.
+hv-editor-preview-as-one = { $n ->
+        [one] as one · { $n } statement
+       *[other] as one · { $n } statements
+    }
+# The line endings menu's header when some lines end in CR (old Mac files).
+# Variables:
+#   $lf (Number) - the lines that end in LF, e.g. 214.
+#   $crlf (Number) - the lines that end in CRLF, e.g. 12.
+#   $cr (Number) - the lines that end in CR, e.g. 3.
+hv-eol-counts-cr = Line endings: LF { $lf }, CRLF { $crlf }, CR { $cr }
+# The gutter's ▶ button's accessible name: which statement it runs.
+# Variables:
+#   $line (Number) - the statement's first line, 1-based, e.g. 12.
+hv-gutter-run-line = Run the statement at line { $line }
+
+## m3b-t38-views
+
+# The result view switch's segment: the grid as a table (NOTES surface 21).
+hv-view-table = Table
+# The result view switch's segment: rows as columns.
+hv-view-transposed = Transposed
+# The result view switch's segment: the result as a text table.
+hv-view-text = Text
+# The result view switch's accessible name.
+hv-view-label = View
+# The tooltip of the disabled Transposed segment.
+# Variables:
+#   $max (Number) - the most rows the Transposed view shows, e.g. 100,000.
+#   $rows (Number) - the rows the result has, e.g. 1,048,576.
+hv-view-transposed-off = Transposed shows up to { $max } rows; this result has { $rows }.
+# The Transposed view's first column: each column's name.
+hv-transposed-col = Column
+# The record toggle's word (a one-row result shows it) and the inspector's small-caps title.
+hv-record = Record
+# The record toggle's tooltip and accessible name.
+hv-record-tip = Show the focused row as a record
+# The record inspector's position.
+# Variables:
+#   $i (Number) - the row shown (as the grid numbers it), e.g. 4.
+#   $n (Number) - the rows the grid shows, e.g. 184.
+hv-record-pos = Row { $i } of { $n }
+# The record inspector's previous-row button (tooltip and accessible name).
+hv-record-prev = Previous row
+# The record inspector's next-row button (tooltip and accessible name).
+hv-record-next = Next row
+# Under a value the record inspector shows in part: opens the value viewer.
+hv-record-show-more = Show more
+# After a column name the result has more than once.
+# Variables:
+#   $i (Number) - which of the columns with that name this is, e.g. 2.
+hv-record-dup = ({ $i })
+# The tooltip of a duplicate column name's suffix.
+# Variables:
+#   $n (Number) - the columns with that name, e.g. 2.
+#   $name (String) - the column name, e.g. "id".
+#   $i (Number) - which of them this is, e.g. 2.
+hv-record-dup-tip = The result has { $n } columns named { $name }; this is number { $i }.
+# The record inspector's accessible name.
+hv-record-label = Record of the focused row
+# The text view's question above 100,000 rows.
+# Variables:
+#   $rows (Number) - the rows the result has, e.g. 1,048,576.
+hv-text-big-title = { $rows ->
+        [one] Show { $rows } row as text?
+       *[other] Show { $rows } rows as text?
+    }
+# Under the text view's question.
+# Variables:
+#   $size (String) - the memory the text takes (an hv-grid-size-* message), e.g. "180 MB".
+hv-text-big-body = Building the text view for this many rows takes a while and uses about { $size } of memory.
+# The text view's build in progress.
+# Variables:
+#   $done (Number) - the rows built so far, e.g. 412,000.
+#   $rows (Number) - the rows to build, e.g. 1,048,576.
+hv-text-building = Building the text view: { $done } of { $rows } rows
+# The text view build's cancel button (back to the table).
+hv-text-cancel = Cancel
+# The text view question's primary button.
+hv-text-big-ok = Show as text
+# The text view question's default button.
+hv-text-big-back = Back to the table
+# The text view's accessible name.
+hv-text-label = The result as a text table
+# The toast after copying lines of the text view.
+# Variables:
+#   $n (Number) - the lines copied, e.g. 3.
+hv-text-copied = { $n ->
+        [one] Copied { $n } line
+       *[other] Copied { $n } lines
+    }
+# The value viewer's subtitle: the column's type and the row.
+# Variables:
+#   $type (String) - the column's type, e.g. "jsonb".
+#   $row (Number) - the row (as the grid numbers it), e.g. 4.
+hv-vv-sub = { $type } · row { $row }
+# The value viewer's switch: the value as the server sent it.
+hv-vv-raw = Raw
+# The value viewer's switch: JSON or XML indented.
+hv-vv-pretty = Pretty
+# The value viewer's single segment for a binary value.
+hv-vv-hex = Hex
+# The Pretty segment's tooltip.
+hv-vv-pretty-tip = Display only: Copy raw value copies the server's text unchanged.
+# The value viewer's footer for a text value.
+# Variables:
+#   $size (String) - its size (an hv-grid-size-* message), e.g. "48 KB".
+#   $n (Number) - its characters, e.g. 48,213.
+hv-vv-chars = { $n ->
+        [one] { $size } · { $n } character
+       *[other] { $size } · { $n } characters
+    }
+# The value viewer's footer for a binary value.
+# Variables:
+#   $n (Number) - its bytes, e.g. 48,213.
+hv-vv-bytes = { $n ->
+        [one] { $n } byte
+       *[other] { $n } bytes
+    }
+# The value viewer's notice for a value cut at the value-size limit.
+# Variables:
+#   $shown (String) - what the result kept (an hv-grid-size-* message), e.g. "1 MB".
+#   $size (String) - the value's whole size, e.g. "5.2 MB".
+hv-vv-truncated = Showing the first { $shown } of { $size }.
+# The value viewer's notice for a value cut at the value-size limit whose whole size is unknown.
+# Variables:
+#   $shown (String) - what the result kept (an hv-grid-size-* message), e.g. "1 MB".
+hv-vv-truncated-unknown = Showing the first { $shown } of the value.
+# The value viewer's re-run button.
+# Variables:
+#   $limit (String) - the raised limit (an hv-grid-size-* message), e.g. "64 MB".
+hv-vv-rerun = Re-run with a { $limit } value limit
+# The re-run button's tooltip.
+hv-vv-rerun-tip = Runs this statement again with a larger limit for every value. It goes through the same checks as Run.
+# The value viewer's copy button.
+hv-vv-copy = Copy raw value
+# Beside the switch when a JSON value does not parse.
+hv-vv-not-json = Not valid JSON, so Pretty is off and the value shows as the server sent it.
+# The value viewer's accessible name.
+hv-vv-label = Value viewer
+# The toast after Copy raw value.
+hv-vv-copied = Copied the value
+# The toast after Copy raw value of a value cut at the value-size limit.
+# Variables:
+#   $shown (String) - what was copied (an hv-grid-size-* message), e.g. "1 MB".
+hv-vv-copied-cut = Copied the first { $shown } of the value: the rest wasn't fetched.
+# The value viewer's line (and the console's log line and gutter) when its re-run was refused:
+# only a read runs again with a raised value limit (fix round 1, controller ruling).
+hv-vv-rerun-not-read = Only a query that reads data is run again with a larger value limit. Run this statement again from the editor.
+# The re-run button's tooltip while the console runs a statement.
+hv-vv-rerun-busy = A statement is running in this console. Re-run once it ends.
+
+## m3b-t42-settings
+
+# The settings navigation's four M3b sections (NOTES surface 25, ruling M3c-37).
+hv-settings-nav-editor = Editor
+hv-settings-nav-execution = Execution
+hv-settings-nav-results = Results
+hv-settings-nav-history = History
+# The headings of those sections, pre-cased for small caps.
+hv-settings-section-editor = EDITOR
+hv-settings-section-execution = EXECUTION
+hv-settings-section-results = RESULTS
+hv-settings-section-history = HISTORY
+# The two choices of an on/off setting.
+hv-settings-on = On
+hv-settings-off = Off
+# The choice that decides by itself (the Turkish-tolerant find: on for Turkish users).
+hv-settings-auto = Auto
+# Setting titles (the Editor section).
+hv-settings-tab-size = Tab size
+hv-settings-insert-spaces = Indent with spaces
+hv-settings-copy-line = Copy the line when nothing is selected
+hv-settings-caret-blink = Blinking caret
+hv-settings-find-tolerant = Turkish-tolerant find
+# The note under the Turkish-tolerant find row.
+hv-settings-find-tolerant-note = Auto: on when the language or the regional format is Turkish. The find bar's toggle changes this setting too.
+# Setting titles and notes (the Execution section).
+hv-settings-confirm-unsafe-where = Confirm UPDATE or DELETE without WHERE off production
+hv-settings-confirm-unsafe-where-note = Production always asks, with the table's name typed.
+hv-settings-error-policy = Ask what to do when a statement fails
+hv-settings-error-policy-note = Off: a run of several statements stops at the first failure.
+# Setting title and note (the Results section): the most bytes a cell keeps of one value.
+hv-settings-max-value = Largest value kept per cell
+hv-settings-max-value-note = From 64 KB to 64 MB. Larger values are cut; the value viewer can re-run with the largest limit.
+# The number in the largest-value field, in the regional format (the unit is the select beside it).
+# Variables:
+#   $n (Decimal) - the size in the chosen unit, e.g. 0.5.
+hv-settings-max-value-amount = { $n }
+# Under the largest-value field after a size above the largest allowed was typed (the info glyph).
+# Variables:
+#   $typed (String) - the size typed (an exec-size-* message), e.g. "128 MB".
+#   $max (String) - the largest size allowed (an exec-size-* message), e.g. "64 MB".
+hv-settings-max-value-clamped = { $typed } is above the largest allowed, so it was set to { $max }.
+# Under the largest-value field after a size below the smallest allowed was typed (the info glyph).
+# Variables:
+#   $typed (String) - the size typed (an exec-size-* message), e.g. "10 KB".
+#   $min (String) - the smallest size allowed (an exec-size-* message), e.g. "64 KB".
+hv-settings-max-value-clamped-low = { $typed } is below the smallest allowed, so it was set to { $min }.
+# The two units of the largest-value select.
+hv-settings-unit-kb = KB
+hv-settings-unit-mb = MB
+hv-settings-raw-display = Show grid values raw
+hv-settings-raw-display-note = Numbers and dates as the server sent them, without regional formatting. Copy is always raw.
+# Setting title and note (the History section).
+hv-settings-history = Record query history
+hv-settings-history-note = Up to 10,000 statements per connection are kept for 90 days; recognised passwords and secrets are masked.
+
+## m3c-int-fixes
+
+# The go-to line when fetching toward a row (or its question before a large fetch) ended
+# because the result was run again: no row of the new result is fetched or gone to.
+hv-goto-fetch-rerun = Fetching stopped: the result was run again.
+
+## m3b-t41-chrome
+
+# The transaction mode chip's word for Auto-commit in a narrow pane (design/m3b-safe surface 24, N4): the chip keeps its mode word.
+hv-tx-chip-auto-short = Auto
+# The waiting item's first line in a narrow pane (NOTES surface 24): the sentence keeps all its words on two lines.
+hv-console-waiting-l1 = Waiting for a connection
+# The waiting item's second line in a narrow pane.
+# Variables:
+#   $inUse (Number) - connections in use, e.g. 4.
+#   $max (Number) - connections the profile allows, e.g. 4.
+hv-console-waiting-l2 = { $inUse } of { $max } in use
+# The tooltip and accessible name of an icon-only toolbar button in a narrow pane (N1): its word and its keys, e.g. "Run · ⌘↵".
+# Variables:
+#   $label (String) - the button's word, e.g. Run.
+#   $keys (String) - its shortcut, e.g. ⌘↵.
+hv-console-button-keys = { $label } · { $keys }
+# The first line of an empty console, in text-3 (design/m3a-query surface 1; m3b-safe surface 24: it wraps in a narrow pane).
+# Variables:
+#   $key (String) - the Run shortcut, e.g. ⌘↵.
+hv-editor-placeholder = Write SQL here. { $key } runs the statement at the caret.
+
+## m3b-t39-grid-menu
+
+# The grid's context menu (right press on a cell, a column header or a row number; Shift+F10).
+# Copies the selected cells.
+hv-gmenu-copy = Copy
+# Copies the selected cells with the column names as the first line.
+hv-gmenu-copy-headers = Copy with headers
+# The row-number menu's Copy: copies the selected rows.
+hv-gmenu-copy-rows = Copy rows
+# The header menu: copies the column's name.
+hv-gmenu-copy-name = Copy column name
+# Opens the value viewer on the cell.
+hv-gmenu-open-value = Open value viewer
+# Sorts the rows by the column, smallest first.
+hv-gmenu-sort-asc = Sort ascending
+# Sorts the rows by the column, largest first.
+hv-gmenu-sort-desc = Sort descending
+# The header menu, while another column is sorted: sorts by this column too, after the others.
+# Variables:
+#   $lvl (Number) - the level this column would take, e.g. 2.
+hv-gmenu-add-sort = Add as sort level { $lvl }
+# The header menu: keeps the columns up to this one in place when the grid scrolls sideways.
+hv-gmenu-freeze = Freeze up to here
+# The header menu while columns are frozen.
+hv-gmenu-unfreeze = Unfreeze columns
+# The header menu: hides the column from the grid (Show all columns brings it back).
+hv-gmenu-hide = Hide column
+# The header menu: shows every hidden column again.
+hv-gmenu-show-all = Show all columns
+# The header menu: sizes the column to its values.
+hv-gmenu-autofit = Fit width
+# A check item: shows the column's values as the server sent them (no digit grouping).
+hv-gmenu-raw = Raw display
+# The hint after hv-gmenu-raw: the item applies to this column only (the setting applies to
+# every grid).
+hv-gmenu-raw-hint = this column
+# Opens the go-to-row field.
+hv-gmenu-goto = Go to row…
+# The row-number menu: opens the record inspector on the row.
+hv-gmenu-record = Show as record
+# Why Open value viewer is unavailable: several cells are selected.
+hv-gmenu-why-one-cell = Select one cell
+# Why Clear sort is unavailable.
+hv-gmenu-why-not-sorted = Not sorted
+# Why Show all columns is unavailable: no column is hidden.
+hv-gmenu-why-no-hidden = None hidden
+# Why Copy is unavailable: the selected ranges share neither their rows nor their columns.
+hv-gmenu-why-ranges = Ranges don't line up
+# Why Hide column is unavailable: it is the only column still shown.
+hv-gmenu-why-last = Last shown column
+# The menu's name for screen readers.
+hv-gmenu-label = Grid menu
+
+## m3c-po
+
+# The command (palette; macOS ⌘E) that makes the selection the find query without opening the
+# find bar (PO M3c-08; macOS "Use Selection for Find").
+hv-cmd-editor-use-selection-for-find = Use selection for find
+
+## m4-t01b-ui
+
+# Surface 1 (Explorer tree).
+hv-explorer-tree-label = Database explorer
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-tables = TABLES
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-views = VIEWS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-matviews = MATERIALIZED VIEWS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-functions = FUNCTIONS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-procedures = PROCEDURES
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-sequences = SEQUENCES
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-types = TYPES
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-events = EVENTS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-columns = COLUMNS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-keys = KEYS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-foreign-keys = FOREIGN KEYS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-indexes = INDEXES
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-checks = CHECKS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-triggers = TRIGGERS
+# Surface 1 (Explorer tree). The Built-in group of a database.
+hv-explorer-builtin = Built-in
+# Surface 1 (Explorer tree). The Built-in group of a database.
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+hv-explorer-builtin-badge = version { $version }
+# Surface 1 (Explorer tree). The Built-in group of a database.
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+hv-explorer-builtin-tip = Built-in catalog (version { $version }): the server's own objects, shipped with Hacivat and read without a connection.
+# Surface 1 (Explorer tree). The database row's schema scope count (N of M).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-scope-count = { $n } of { $total }
+# Surface 1 (Explorer tree). The database row's schema scope count (N of M).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-scope-count-tip = { $total ->
+        [one] { $n } of { $total } schema is in scope. Edit scope… changes which ones are read.
+       *[other] { $n } of { $total } schemas are in scope. Edit scope… changes which ones are read.
+    }
+# Surface 1 (Explorer tree).
+hv-explorer-add-scope = Add to scope
+# Surface 1 (Explorer tree).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-explorer-out-of-scope-tip = { $name } isn't in this connection's scope, so it isn't read.
+# Surface 1 (Explorer tree).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-explorer-out-of-scope-db-tip = { $name } isn't in this connection's scope, so it isn't read. Reading it opens one more connection.
+# Surface 1 (Explorer tree).
+# Variables:
+#   $rows (Number) - the server's row estimate, e.g. 48213.
+hv-explorer-row-estimate-tip = { $rows ->
+        [one] About { $rows } row (the server's estimate)
+       *[other] About { $rows } rows (the server's estimate)
+    }
+# Surface 1 (Explorer tree).
+hv-explorer-loads-on-open = Loads when you open it
+# Surface 2 (Loading states).
+hv-explorer-loading = Loading…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+hv-explorer-phase-names = Reading names…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+hv-explorer-phase-columns = Reading columns…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+hv-explorer-phase-constraints = Reading keys and indexes…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+hv-explorer-phase-sources = Reading definitions…
+# Surface 2 (Loading states). Progress of a pass in the explorer (surface 14: explorer only).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-progress-count = { $n }/{ $total }
+# Surface 2 (Loading states).
+hv-explorer-waiting-pass = Waiting for columns
+# Surface 2 (Loading states). The partial-load badge and its tooltip.
+hv-explorer-partial = partial
+# Surface 2 (Loading states). The partial-load badge and its tooltip.
+hv-explorer-partial-title = Some objects could not be read
+# Surface 2 (Loading states). The partial-load badge and its tooltip.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-explorer-partial-body = { $n ->
+        [one] This login can't read the definition of { $n } function in { $schema }. It is listed by name; its definition is missing.
+       *[other] This login can't read the definitions of { $n } functions in { $schema }. They are listed by name; their definitions are missing.
+    }
+# Surface 2 (Loading states). A namespace whose catalog query was refused.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-explorer-failed = Couldn't read { $name }
+# Surface 2 (Loading states). A namespace whose catalog query was refused.
+hv-explorer-failed-body = The server refused the catalog query. Retry reads it again.
+# Surface 2 (Loading states).
+hv-explorer-retry = Retry
+# Surface 3 (Cached and offline). A profile shown from its cache while offline.
+# Variables:
+#   $date (DateTime) - when the cache was saved, e.g. 2026-11-17 14:05.
+hv-explorer-cached = Showing cached metadata from { DATETIME($date, dateStyle: "medium", timeStyle: "short") }
+# Surface 3 (Cached and offline). A profile shown from its cache while offline.
+hv-explorer-cached-meta = cached
+# Surface 3 (Cached and offline). A profile shown from its cache while offline.
+# Variables:
+#   $date (DateTime) - when the cache was saved, e.g. 2026-11-17 14:05.
+hv-explorer-cached-tip = Not connected. The tree is the copy saved on { DATETIME($date, dateStyle: "medium", timeStyle: "short") }; connect to check it against the server.
+# Surface 3 (Cached and offline).
+hv-explorer-stale = out of date
+# Surface 3 (Cached and offline).
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-explorer-stale-tip = The server changed { $schema } after it was read. Refresh to load the changes.
+# Surface 3 (Cached and offline).
+hv-explorer-encrypted-tip = The cached metadata is encrypted. Opening this connection reads its key from the Keychain.
+# Surface 3 (Cached and offline).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-explorer-memory-only = The Keychain isn't available, so { $name }'s metadata is kept in memory until you quit.
+# Surface 4 (Filter field). The explorer filter field.
+hv-explorer-filter-objects = Filter objects
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-explorer-filter-count = { $n ->
+        [one] { $n } match
+       *[other] { $n } matches
+    }
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-filter-group-count = { $n } of { $total }
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-explorer-filter-unloaded = { $n ->
+        [one] Searches loaded names only. The columns of { $n } table aren't loaded yet.
+       *[other] Searches loaded names only. The columns of { $n } tables aren't loaded yet.
+    }
+# Surface 4 (Filter field). The explorer filter field.
+hv-explorer-filter-none = No objects match
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $query (String) - the filter text as typed, e.g. "müş".
+hv-explorer-filter-none-body = Nothing loaded matches “{ $query }”.
+# Surface 4 (Filter field). The explorer filter field.
+hv-explorer-filter-clear = Clear filter
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-refresh = Refresh
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-edit-scope = Edit scope…
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-level = Introspection level
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-clear-cache = Clear cached metadata…
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-open-data = Open data
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-view-ddl = View DDL
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-view-table-ddl = View table DDL
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-copy-name = Copy qualified name
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-copy-plain = Copy name
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-hide-like = Hide objects like this
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-show-hidden = Show hidden objects
+# Surface 5 (Context menus).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $pattern (String) - the view filter's pattern, e.g. "yedek_fatura_*".
+hv-explorer-hidden-tip = { $n ->
+        [one] { $n } object is hidden by a view filter ({ $pattern }). Show hidden objects, in this group's menu, removes it.
+       *[other] { $n } objects are hidden by a view filter ({ $pattern }). Show hidden objects, in this group's menu, removes it.
+    }
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-copy-ddl = Copy DDL
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-modify-table = Modify table…
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-modify-view = Modify view…
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-modify-column = Modify column…
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-modify-tip = Arrives in a later version
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-remove-scope = Remove from scope
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-expand-all = Expand all children
+# Surface 5 (Context menus). The tree-wide command (palette, ⌘←); node menus use hv-explorer-menu-collapse-children.
+hv-explorer-menu-collapse-all = Collapse all
+# Surface 5 (Context menus).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-explorer-copied = Copied { $name }
+# Surface 5 (Context menus).
+# Variables:
+#   $conn (String) - the connection name, e.g. "orders-dev".
+hv-explorer-open-data-note = Opens a console on { $conn } and runs:
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-collapse-children = Collapse all children
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-auto = Automatic
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-names = Names only
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-structure = Structure
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-sources = Structure and sources
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+# Variables:
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-level-auto-hint = { $level ->
+        [names] now Names only
+        [sources] now Structure and sources
+       *[structure] now Structure
+    }
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-names-hint = fastest, no columns
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-structure-hint = columns, keys, indexes
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-sources-hint = and view and function text
+# Surface 6 (Introspection level). The level pill's word.
+hv-explorer-pill-names = Names
+# Surface 6 (Introspection level). The level pill's word.
+hv-explorer-pill-structure = Structure
+# Surface 6 (Introspection level). The level pill's word.
+hv-explorer-pill-sources = Sources
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
+# Variables:
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-pill-tip-explicit = { $level ->
+        [names] Introspection level: Names only, set here. Schemas below inherit it.
+        [sources] Introspection level: Structure and sources, set here. Schemas below inherit it.
+       *[structure] Introspection level: Structure, set here. Schemas below inherit it.
+    }
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
+# Variables:
+#   $parent (String) - the database or schema the level comes from, e.g. "orders".
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-pill-tip-inherited = { $level ->
+        [names] Introspection level: Names only, inherited from { $parent }.
+        [sources] Introspection level: Structure and sources, inherited from { $parent }.
+       *[structure] Introspection level: Structure, inherited from { $parent }.
+    }
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-pill-tip-auto = { $level ->
+        [names] Introspection level: Names only, chosen automatically for { $n ->
+                [one] { $n } object
+               *[other] { $n } objects
+            }.
+        [sources] Introspection level: Structure and sources, chosen automatically for { $n ->
+                [one] { $n } object
+               *[other] { $n } objects
+            }.
+       *[structure] Introspection level: Structure, chosen automatically for { $n ->
+                [one] { $n } object
+               *[other] { $n } objects
+            }.
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-section = Schemas
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-scope-summary = { $total ->
+        [one] { $n } of { $total } schema
+       *[other] { $n } of { $total } schemas
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $total (Number) - the total, e.g. 15000.
+hv-scope-summary-mysql = { $total ->
+        [one] { $total } database
+       *[other] All { $total } databases
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-current-db = current database
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-other-db-hint = needs its own connection
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-pattern = Pattern
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-pattern-hint = @ is the current database or schema, * is all, {"{"}…{"}"} holds a regular expression, | separates clauses.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $pos (Number) - the 1-based character position of the error, e.g. 20.
+hv-scope-pattern-error = Expected a schema name after “:” (character { NUMBER($pos, useGrouping: "false") }).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-builtin-note = Built-in schemas come from the bundled catalog and are not listed here.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-mysql-note = Every database you can see is listed. Each one loads the first time you open it.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-all-dbs = All databases
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-all-dbs-title = Read every database on this server?
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-scope-all-dbs-body = { $n ->
+        [one] This server has { $n } database. Reading it opens one more connection.
+       *[other] This server has { $n } databases. Reading them opens one connection per database and can take a while on a large server.
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-scope-all-dbs-yes = { $n ->
+        [one] Read { $n } database
+       *[other] Read all { $n } databases
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-all-dbs-no = Keep the current database
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-encrypt = Encrypt cached metadata
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-encrypt-sub = The saved catalog is encrypted with a key kept in the Keychain. On by default for production.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-scope-encrypt-confirm-on = Turning this on deletes the cached metadata of { $name }. It is read again, encrypted, on the next connect.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-scope-encrypt-confirm-off = Turning this off deletes the encrypted cache of { $name }. From the next connect it is saved as a plain file only your account can read.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-encrypt-apply = Delete the cache and encrypt
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-encrypt-apply-off = Delete the cache and stop encrypting
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-encrypt-keep = Keep it as it is
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-connect-to-list = Connect to list the schemas. The pattern below still decides what is read.
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-metadata-mass-title = { $count ->
+        [one] { $count } object in { $schema } is no longer visible
+       *[other] { $count } objects in { $schema } are no longer visible
+    }
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+hv-metadata-mass-body = They may have been dropped, or this login may have lost access to them. Removing them from the cache changes nothing on the server.
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-metadata-mass-more = and { $n } more
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+hv-metadata-mass-keep = Keep cached
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+hv-metadata-mass-remove = Remove from cache
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-metadata-mass-pending-tip = { $count ->
+        [one] { $count } object disappeared in the last background check. Refresh { $schema } to review it; nothing was removed.
+       *[other] { $count } objects disappeared in the last background check. Refresh { $schema } to review them; nothing was removed.
+    }
+# Surface 8 (Mass-deletion confirmation).
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-metadata-ns-dropped = { $schema } is no longer on the server, so it was removed from the explorer.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+hv-metadata-refresh-ask = { $count ->
+        [one] Refresh the database explorer to reflect { $count } changed object?
+       *[other] Refresh the database explorer to reflect { $count } changed objects?
+    }
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Variables:
+#   $console (String) - the console's title, e.g. "orders-dev".
+hv-metadata-refresh-ask-body = Your script in { $console } changed them.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+hv-metadata-refresh = Refresh
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+hv-metadata-refresh-always = Always refresh
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+hv-metadata-refresh-not-now = Not now
+# Surface 9 (Refresh after DDL). Refresh after DDL inside a transaction (the pending stamp).
+hv-metadata-after-commit = Refreshes after COMMIT
+# Surface 9 (Refresh after DDL). Refresh after DDL inside a transaction (the pending stamp).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+hv-metadata-after-commit-tip = { $count ->
+        [one] { $count } change from this transaction waits for COMMIT. ROLLBACK discards it and the explorer stays as it is.
+       *[other] { $count } changes from this transaction wait for COMMIT. ROLLBACK discards them and the explorer stays as it is.
+    }
+# Surface 9 (Refresh after DDL). Refresh after DDL: dynamic SQL.
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-metadata-broad = Refreshing all of { $schema }
+# Surface 9 (Refresh after DDL). Refresh after DDL: dynamic SQL.
+# Variables:
+#   $what (String) - the SQL keyword that made the change opaque, e.g. "EXECUTE".
+hv-metadata-broad-body = The script ran dynamic SQL ({ $what }), so Hacivat can't tell which objects changed.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-metadata-refreshed = { $count ->
+        [one] Explorer refreshed { $count } object in { $schema }
+       *[other] Explorer refreshed { $count } objects in { $schema }
+    }
+# Surface 9 (Refresh after DDL).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+hv-metadata-log-pending = { $count ->
+        [one] Explorer refresh waits for COMMIT ({ $count } object)
+       *[other] Explorer refresh waits for COMMIT ({ $count } objects)
+    }
+# Surface 10 (DDL view). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-tab-title = { $name } · DDL
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-qualification = Qualification
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-qual-auto = Auto
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-qual-never = Never
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-qual-always = Always
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-constraints = Constraints
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-constraints-inside-column = Inside column
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-constraints-inside-table = Inside table
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-constraints-after-table = After table
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-server = Definitions provided by server
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-grants = Grants
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-owner = Owner
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-options = Options
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-copy = Copy
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-open-console = Open in console
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-refresh = Refresh
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-source-generated = Generated from the catalog
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-source-server = Text from the server
+# Surface 10 (DDL view). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-copied = Copied the DDL of { $name }
+# Surface 10 (DDL view). One whole sentence per kind ($kind selector); never a kind word inserted.
+# Variables:
+#   $kind (String) - the object kind code, a selector, e.g. "index".
+hv-ddl-view-unsupported = { $kind ->
+        [domain] Hacivat can't show DDL for a domain yet.
+        [extension] Hacivat can't show DDL for an extension yet.
+        [operator] Hacivat can't show DDL for an operator yet.
+        [policy] Hacivat can't show DDL for a row security policy yet.
+        [rule] Hacivat can't show DDL for a rule yet.
+        [type] Hacivat can't show DDL for a type yet.
+       *[other] Hacivat can't show DDL for this kind of object yet.
+    }
+# Surface 10 (DDL view). One whole sentence per kind ($kind selector); never a kind word inserted.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-unsupported-body = { $name } stays in the explorer, and Copy qualified name works.
+# Surface 10 (DDL view). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-loading = Reading the definition of { $name }…
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-grants-partial = Some grants could not be read, so the list may be incomplete.
+# Surface 11 (Stale object). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-stale = { $name } changed on the server since it was loaded
+# Surface 11 (Stale object). The DDL view tab.
+hv-ddl-view-reload = Reload
+# Surface 11 (Stale object). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-gone = { $name } no longer exists on the server
+# Surface 11 (Stale object). The DDL view tab.
+hv-ddl-view-gone-body = The text below is the last one loaded.
+# Surface 11 (Stale object). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-unknown = Hacivat couldn't check whether { $name } changed on the server since it was loaded
+# Surface 12 (Invisible characters and broken objects). The invisible-characters badge and its tooltip.
+hv-explorer-invisible = invisible characters
+# Surface 12 (Invisible characters and broken objects). The invisible-characters badge and its tooltip.
+# Variables:
+#   $what (String) - the SQL keyword that made the change opaque, e.g. "EXECUTE".
+hv-explorer-invisible-tip = This name contains an invisible character: { $what }. Copy and DDL keep it exactly.
+# Surface 12 (Invisible characters and broken objects). One whole sentence per kind ($kind selector); the name stays an isolated argument.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $kind (String) - the object kind code, a selector, e.g. "index".
+hv-explorer-broken = { $kind ->
+        [check] Check constraint { $name } references a column that could not be resolved
+        [foreign-key] Foreign key { $name } references a column that could not be resolved
+        [index] Index { $name } references a column that could not be resolved
+        [trigger] Trigger { $name } references a column that could not be resolved
+       *[other] { $name } references a column that could not be resolved
+    }
+# Surface 12 (Invisible characters and broken objects). One whole sentence per kind ($kind selector); the name stays an isolated argument.
+hv-explorer-broken-body = The column may have been dropped or renamed after the last read. Refresh the table to check.
+# Surface 13 (Settings › Metadata).
+hv-settings-nav-metadata = Metadata
+# Surface 13 (Settings › Metadata).
+hv-settings-section-metadata = METADATA
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-refresh = Refresh the explorer after DDL
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-always = Always
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-ask = Ask
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-never = Never
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-refresh-note = After a console runs a statement that changes the schema. Inside a transaction it waits for COMMIT.
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-check = Check for changes in the background
+# Surface 13 (Settings › Metadata).
+hv-metadata-check-auto = Automatic
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-check-note = Automatic checks local and dev connections every 10 minutes, and the others when you connect or press Refresh.
+# Surface 13 (Settings › Metadata).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-metadata-every-min = Every { $n } min
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-cache-conn = Cache per connection
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-cache-total = Cache for all connections
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-cache-note = Past the limit, the schemas loaded longest ago leave first. The current database always stays.
+# Surface 13 (Settings › Metadata).
+hv-metadata-unit-mb = MB
+# Surface 13 (Settings › Metadata).
+hv-metadata-unit-gb = GB
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-clear = Cached metadata
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+hv-metadata-clear = Clear cached metadata…
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $size (String) - a size (an hv-metadata-size-mb message), e.g. "38.4 MB".
+hv-metadata-clear-note = { $name } is the active console's connection. Its cached metadata uses { $size } on this computer.
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-metadata-clear-title = Clear cached metadata for { $name }?
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+hv-metadata-clear-body = The explorer reads it again from the server on the next connect. Nothing on the server changes.
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+hv-metadata-clear-btn = Clear
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-metadata-cleared = Cleared the cached metadata of { $name }
+# Surface 13 (Settings › Metadata).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-metadata-size-mb = { $n } MB
+# Surface 14 (Long introspection). Progress of a pass in the explorer (surface 14: explorer only).
+# Variables:
+#   $fraction (Number) - the share read so far, from 0 to 1, e.g. 0.23.
+hv-explorer-progress-meta = { NUMBER($fraction, style: "percent") }
+# Surface 14 (Long introspection). Progress of a pass in the explorer (surface 14: explorer only).
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-progress-tip = { $total ->
+        [one] Reading { $schema }: the columns of { $n } of { $total } table so far. The explorer stays usable meanwhile.
+       *[other] Reading { $schema }: the columns of { $n } of { $total } tables so far. The explorer stays usable meanwhile.
+    }
+
+# M4 command titles (palette, menus, keymap; `hv-cmd-<action id with . and _ as ->`).
+hv-cmd-explorer-view-ddl = View DDL
+hv-cmd-explorer-copy-qualified-name = Copy qualified name
+hv-cmd-explorer-collapse-all = Collapse all in the explorer
+hv-cmd-explorer-open-data = Open data
+hv-cmd-explorer-refresh = Refresh metadata
+hv-cmd-explorer-expand-all-children = Expand all children
+hv-cmd-explorer-edit-scope = Edit scope
+hv-cmd-explorer-set-level-auto = Introspection level: Automatic
+hv-cmd-explorer-set-level-names = Introspection level: Names only
+hv-cmd-explorer-set-level-structure = Introspection level: Structure
+hv-cmd-explorer-set-level-sources = Introspection level: Structure and sources
+hv-cmd-metadata-clear-cache = Clear cached metadata
+hv-cmd-ddl-view-copy = Copy DDL
+
+## m4-t14-explorer
+
+# Surface 1 (Explorer tree). The child row of a node whose catalog has not been read yet (no
+# cached or live catalog): never an empty database.
+hv-explorer-not-loaded = Not loaded
+# Surface 1 (Explorer tree). A count shown alone: a kind group's or an environment group's.
+# Variables:
+#   $n (Number) - a count, e.g. 1204.
+hv-explorer-count = { $n }
+# Surface 1 (Explorer tree). A foreign key's type text after its name (mono): the table and
+# columns it references.
+# Variables:
+#   $target (String) - the referenced table, verbatim, e.g. "İSTANBUL_ŞUBE".
+#   $columns (String) - the referenced columns, verbatim, e.g. "id".
+hv-explorer-fk-target = → { $target } ({ $columns })
+# Surface 1 (Explorer tree). The accessible word of a database or schema row outside the
+# connection's scope (the row is drawn dim).
+hv-explorer-out-of-scope = out of scope
+# Surface 4 (Filter field). Under the field while connections, databases or schemas have no
+# loaded catalog: their names could not be searched.
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-explorer-filter-not-loaded = { $n ->
+        [one] Searches loaded names only. { $n } connection or schema isn't loaded yet.
+       *[other] Searches loaded names only. { $n } connections or schemas aren't loaded yet.
+    }
+
+## m4-t20-scope
+
+# Surface 7 (Scope editor). The folded Schemas section's summary while no schema list was read
+# (not connected, nothing cached): the pattern that decides what is read.
+# Variables:
+#   $pattern (String) - the scope pattern as typed, e.g. "@:*".
+hv-scope-summary-pattern = Pattern { $pattern }
+# Surface 7 (Scope editor). Said by assistive technology for a database whose schemas are
+# partly checked (the box's mixed state).
+hv-scope-tree-mixed = partly selected
+# Surface 7 (Scope editor). Asked in place when a click in the list cannot be made without
+# writing the pattern again from the checked names (fix round 1, I-3).
+hv-scope-rewrite-title = Write the pattern again from the checked names?
+# Surface 7 (Scope editor).
+hv-scope-rewrite-body = Parts of it that the list can't show (a regular expression, an exclusion, a name that isn't listed) would be removed.
+# Surface 7 (Scope editor). The safe answer (focused).
+hv-scope-rewrite-keep = Keep the pattern
+# Surface 7 (Scope editor).
+hv-scope-rewrite-apply = Write it again
+# Surface 7 (Scope editor). The saved scope could not be read (the connection's data file).
+hv-scope-stored-unreadable = The saved schema scope couldn't be read. The pattern shown is the default, and it can't be saved until the file can be read.
+# Surface 7 (Scope editor). Save failed at the top of the form: nothing was saved.
+hv-scope-save-cache-failed = The cached metadata of this connection couldn't be deleted, so nothing was saved.
+# Surface 7 (Scope editor). Save failed at the top of the form: nothing was saved.
+hv-scope-save-data-unreadable = This connection's explorer settings file can't be read, so nothing was saved.
+# Surface 7 (Scope editor). Save failed at the top of the form: nothing was saved.
+hv-scope-save-data-failed = The schema scope couldn't be saved, so nothing was saved.
+# Surface 6 (Introspection level). A toast when a level could not be saved.
+hv-explorer-level-not-saved = The introspection level couldn't be saved.
+
+## m4-t24-live
+# Surface 5 (Context menus). The palette title of the node menu's "Copy name".
+hv-cmd-explorer-copy-name = Copy name
+# Surface 5 (Context menus). The palette title of "Hide objects like this".
+hv-cmd-explorer-hide-like-this = Hide objects like this
+# Surface 5 (Context menus). The palette title of "Show hidden objects".
+hv-cmd-explorer-show-hidden = Show hidden objects
+# Surface 5 (Context menus). The palette title of "Collapse all children".
+hv-cmd-explorer-collapse-children = Collapse all children
+# Surface 5 (Context menus). The palette title of "Introspection level" (opens the level list).
+hv-cmd-explorer-level-menu = Introspection level
+# Surface 5 (Context menus). The title of the disabled Modify… placeholder (never in the palette).
+hv-cmd-explorer-modify = Modify
+# Surface 5 (Context menus). Open data refused: the object is in another database than the one
+# this connection's consoles use.
+# Variables:
+#   $database (String) - the object's database, verbatim, e.g. "reports".
+#   $current (String) - the database the consoles use, verbatim, e.g. "app".
+hv-explorer-open-data-other-db = This connection's consoles use { $current }, so Open data can't show the data of { $database }. Connect to { $database } to see it.
+# Surface 5 (Context menus). Open data refused: which database the consoles use is not known.
+# Variables:
+#   $database (String) - the object's database, verbatim, e.g. "reports".
+hv-explorer-open-data-db-unknown = Hacivat can't tell which database this connection's consoles use, so Open data didn't open { $database }. Set the connection's database, or open a console on it first.
+# Surface 5 (Context menus). Hide objects like this refused: the name can't be written as a view filter.
+# Variables:
+#   $name (String) - the object's name, verbatim, e.g. "yedek_2019".
+hv-explorer-hide-refused = Objects like { $name } can't be hidden: the name can't be written as a view filter.
+
+## m4-t25-ddl-view
+# Surface 10 (DDL view). The toolbar's read-only chip (never hides).
+hv-ddl-view-read-only = read-only
+# Surface 10 (DDL view). The definition could not be read (not loaded, or the login can't read it).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-not-loaded = Hacivat couldn't read the definition of { $name }.
+# Surface 10 (DDL view). Under hv-ddl-view-not-loaded.
+hv-ddl-view-not-loaded-body = Refresh reads it from the server again.
+# Surface 11 (Stale object). The "no longer exists" notice's button.
+hv-ddl-view-close-tab = Close tab
+# Surface 10 (DDL view). The tooltip of "Definitions provided by server" on SQLite, where it is
+# checked and can't be changed (ruling R-W4-12).
+hv-ddl-view-server-fixed-tip = SQLite always shows the server's text: CHECK constraints and generated columns exist only there.
+# The palette title of the DDL view's Reload (F5 in its text).
+hv-cmd-ddl-view-reload = Reload DDL
+# Surface 11 (Stale object). While the state check runs (review m-2): a quiet caption.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-checking = Checking whether { $name } changed on the server…
+
+## m4-t27-refresh-ui
+# Surface 13 (Settings › Metadata). Clearing a connection's cached metadata failed (its files could not be deleted).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-metadata-clear-failed = The cached metadata of { $name } couldn't be deleted. Nothing changed.
+# Surface 9 (Refresh after DDL). Ruling R-W5-10: the Ask when a whole schema changed (dynamic SQL, a database-wide change): no count.
+# Variables:
+#   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
+hv-metadata-refresh-ask-schema = Refresh the database explorer to reflect the changes in { $schema }?
+# Surface 9 (Refresh after DDL). Ruling R-W5-10: the namespace stamp's tooltip when the whole schema waits for COMMIT.
+# Variables:
+#   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
+hv-metadata-after-commit-tip-schema = Changes to { $schema } from this transaction wait for COMMIT. ROLLBACK discards them and the explorer stays as it is.
+# Surface 9 (Refresh after DDL). Ruling R-W5-10: the output line when the whole schema waits for COMMIT.
+# Variables:
+#   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
+hv-metadata-log-pending-schema = Explorer refresh waits for COMMIT (changes in { $schema })
+
+## m4-t32-shots
+# Settings › General (PO ruling R-W5-14 a). The time zone row's title.
+hv-settings-time-zone = Time zone
+# Settings › General (PO ruling R-W5-14 a). The choice that follows the operating system, with the zone it reports.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+hv-settings-time-zone-system = System ({ $zone })
+# Settings › General (PO ruling R-W5-14 a). Coordinated Universal Time.
+hv-settings-time-zone-utc = UTC
+# Settings › General (PO ruling R-W5-14 a). The note under the time zone row.
+hv-settings-time-zone-note = Dates and times in results show in this zone. Connections opened from now on use it; open ones keep theirs.
+# Command palette (PO ruling R-W5-14 b): clears the selected connection's query history.
+hv-cmd-connection-clear-history = Clear query history of connection
+# The connection context menu (PO ruling R-W5-14 b).
+hv-conn-menu-clear-history = Clear query history…
+# The query history dialog (PO ruling R-W5-14 b). The ⋯ button's name and tooltip.
+hv-history-more = More actions
+# The query history dialog's ⋯ menu (PO ruling R-W5-14 b).
+hv-history-clear-item = Clear history of this connection…
+# Command palette (PO ruling R-W5-14 b): clears the history of the console's connection, from the history dialog.
+hv-cmd-history-clear = Clear query history of this connection
+# The clear-history confirmation (PO ruling R-W5-14 b). Cancel is the default button.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-clear-title = Clear the query history of { $name }?
+# The clear-history confirmation (PO ruling R-W5-14 b).
+hv-history-clear-body = Every statement saved for this connection is deleted from this computer, pinned ones too. This can't be undone. Nothing on the server changes.
+# The clear-history confirmation (PO ruling R-W5-14 b). The button that clears.
+hv-history-clear-btn = Clear history
+# A toast after the history of a connection was cleared (PO ruling R-W5-14 b).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-cleared = The query history of { $name } was cleared.
+# A toast when clearing the history of a connection failed (PO ruling R-W5-14 b).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-clear-failed = The query history of { $name } couldn't be cleared. Nothing changed.
+# Settings › General (fix round 1, review M-3). A saved zone the time zone database does not know, as a choice.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+hv-settings-time-zone-unknown-choice = { $zone } (unknown)
+# Settings › General (fix round 1, review M-3). The notice under the row while the saved zone is unknown.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+#   $system (String) - the system choice as the select shows it, e.g. "System (Europe/Istanbul)".
+hv-settings-time-zone-unknown = { $zone } isn't a time zone Hacivat knows, so { $system } is used.
+
+## m4-t33b-carries
+
+# The clear-history confirmation when damaged backups exist (T32 carry, ruling 2026-11-20).
+# Variables:
+#   $count (Number) - how many damaged backups of the history exist, e.g. 2.
+hv-history-clear-body-backups = { $count ->
+        [one] Every statement saved for this connection is deleted from this computer, pinned ones too. This can't be undone. Nothing on the server changes. Hacivat also keeps { $count } damaged backup of the history, set aside when the file was repaired. It may still hold this connection's statements, and every other connection's.
+       *[other] Every statement saved for this connection is deleted from this computer, pinned ones too. This can't be undone. Nothing on the server changes. Hacivat also keeps { $count } damaged backups of the history, set aside when the file was repaired. They may still hold this connection's statements, and every other connection's.
+    }
+# The clear-history confirmation: the checkbox (off by default) that also deletes the damaged backups.
+hv-history-clear-backups = Also delete damaged history backups
+# The clear-history confirmation: the checkbox's dimmer note.
+# Variables:
+#   $count (Number) - how many damaged backups of the history exist, e.g. 2.
+hv-history-clear-backups-note = { $count ->
+        [one] { $count } file, with every connection's old statements
+       *[other] { $count } files, with every connection's old statements
+    }
+# A toast after the history of a connection was cleared and the damaged backups deleted.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $count (Number) - how many damaged backups were deleted, e.g. 2.
+hv-history-cleared-backups = { $count ->
+        [one] The query history of { $name } was cleared, and { $count } damaged backup was deleted.
+       *[other] The query history of { $name } was cleared, and { $count } damaged backups were deleted.
+    }
+# A toast when the history file turned out damaged while clearing with the history off (T32 re-review RR-2).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-clear-damaged = The history file was damaged, so Hacivat set it aside as a backup. The query history of { $name } wasn't cleared from it; clear again to delete the damaged backup.
+# Surface 1 (Explorer tree). The Built-in group's tooltip when only some of its schemas come from the shipped catalog (T32 re-review RR-3).
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+#   $schemas (String) - the schema names the bundled catalog answers for, a list, e.g. "information_schema".
+hv-explorer-builtin-tip-mixed = Built-in catalog (version { $version }) for { $schemas }: shipped with Hacivat and read without a connection. The other built-in schemas were read from the server.
+# Surface 4 (Filter field). Under the field when more objects match than the filter opens (T14 carry, R-W2-13).
+# Variables:
+#   $n (Number) - how many matches the filter did not open, e.g. 50.
+hv-explorer-filter-more = { $n ->
+        [one] { $n } more match isn't opened. Open its group, or type more to narrow the filter.
+       *[other] { $n } more matches aren't opened. Open their groups, or type more to narrow the filter.
+    }
+# Surface 14 (Long introspection). The meta of a loaded schema row while it is read again: the share read, in whole percents (T24 carry).
+# Variables:
+#   $fraction (Number) - the share read so far, from 0 to 1, e.g. 0.23.
+hv-explorer-progress-percent = { NUMBER($fraction, style: "percent", minimumFractionDigits: 0, maximumFractionDigits: 0) }
+# Surface 13 (Settings › Metadata). The clear-cache question's subtitle: the size of the cached metadata (T27 carry).
+# Variables:
+#   $size (String) - a preformatted size, e.g. "38.4 MB".
+hv-metadata-clear-subtitle = { $size } on this computer
+# A toast when the history of a connection was cleared but its damaged backups could not be deleted (T33b review 6).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-cleared-backups-failed = The query history of { $name } was cleared, but its damaged backups couldn't be deleted.

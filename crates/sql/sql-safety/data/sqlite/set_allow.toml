@@ -1,0 +1,3 @@
+# Harmless `SET` variables a read-only session may run (sqlite; P-M3b-6, the PO list).
+# Exact names, ASCII-case-insensitive. Owner: M3b Task 3.
+rows = []

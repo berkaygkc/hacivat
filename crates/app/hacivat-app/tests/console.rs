@@ -104,12 +104,12 @@ fn wait_session(vcx: &VisualTestContext, id: ConsoleId) -> SessionHandle {
 }
 
 /// Every text the last frame drew, joined.
+// ## m4-t33d (T33 flaky3 follow-up): a frame that renders every view (`full_frame` strips the
+// isolation marks).
 fn frame_text(vcx: &VisualTestContext) -> String {
-    in_window(vcx, |window, _| window.refresh());
-    vcx.run_until_parked();
-    registry_frame(vcx)
+    full_frame(vcx)
         .into_iter()
-        .map(|r| r.text.to_string().replace(['\u{2068}', '\u{2069}'], ""))
+        .map(|r| r.text.to_string())
         .collect::<Vec<_>>()
         .join(" | ")
 }
@@ -299,25 +299,49 @@ fn second_console_opens_its_own_session_and_waits_when_the_budget_is_full(cx: &m
         frame_text(vcx).contains("Waiting for a free connection to orders-dev (2 of 2 in use)")
     });
     assert!(session_of(vcx, third).is_none());
-    click(vcx, "button-console-waiting-cancel");
+    // ## m4-t33d-fr1 (ruling R-T33d-5): Cancel from the keyboard; the sentence and its Cancel
+    // go, and the focus lands on the pane's default (the console's editor), not on the
+    // undrawn Cancel.
+    let cancel = handle_of(vcx, "button-console-waiting-cancel");
+    press_key(vcx, "enter");
     wait_until(vcx, "the wait to be cancelled", |vcx| {
         !frame_text(vcx).contains("Waiting for a free connection")
     });
     assert!(session_of(vcx, third).is_none());
+    redraw_full(vcx);
+    let landed = focused(vcx).expect("the focus moved on");
+    assert_ne!(landed, cancel, "not the undrawn Cancel");
+    let pane_first = with_ws(vcx, |ws, _, _| ws.pane_default());
+    assert_eq!(Some(landed.clone()), pane_first, "the pane's default");
+    let editor = vcx.cx.read(|cx| {
+        Consoles::get(cx, third)
+            .and_then(|s| s.editor.clone())
+            .map(|e| gpui::Focusable::focus_handle(e.read(cx), cx))
+    });
+    assert_eq!(Some(landed), editor, "the waiting console's editor");
+    assert!(context_stack(vcx).0.contains(&"Editor"));
     stop_core_runtime_test(cx);
 }
 
 // ---- production ------------------------------------------------------------------------------
 
+// ## m3b-t26-prod-unlock: was `production_console_shows_the_notice_and_the_hairline`. The
+// production read-only notice and its explanation are gone (R-M3-6 REVISED ends, R-M3-81); the
+// hairline and the environment stay, and a write is confirmed before anything is sent.
 #[gpui::test]
-fn production_console_shows_the_notice_and_the_hairline(cx: &mut TestAppContext) {
+fn production_console_shows_the_hairline_and_confirms_a_write(cx: &mut TestAppContext) {
     let vcx = shell_with_profile(cx, "orders-prod", Some(EnvTag::Production), 4);
     connect_and_wait(vcx, "orders-prod");
     let id = wait_active_console(vcx);
     let session = wait_session(vcx, id);
     assert!(
-        session.state().borrow().read_only,
-        "a production console's session is read-only (R-M3-6)"
+        !session.state().borrow().read_only,
+        "a production console's session is read-write since Task 26"
+    );
+    assert_eq!(
+        session.state().borrow().tx.mode,
+        hacivat_session::session::TxMode::Manual,
+        "D-036"
     );
     let tab = with_ws(vcx, |ws, _, _| ws.active_tab()).expect("a tab");
     let decor = vcx.cx.read(|cx| {
@@ -328,19 +352,43 @@ fn production_console_shows_the_notice_and_the_hairline(cx: &mut TestAppContext)
     assert_eq!(decor.env, Some(hacivat_ui::capsule::EnvKind::Production));
     let frame = frame_text(vcx);
     assert!(
-        frame.contains("Production is read-only in this version"),
-        "{frame}"
+        !frame.contains("Production is read-only in this version"),
+        "no production read-only notice: {frame}"
     );
-    // The notice opens its explanation.
-    click(vcx, "button-console-prod-notice");
-    let frame = frame_text(vcx);
-    assert!(frame.contains("Why this console is read-only"), "{frame}");
-    assert!(layer_ids(vcx).contains(&"console-prod-popover"));
+    assert!(vcx.debug_bounds("button-console-prod-notice").is_none());
+    assert!(vcx.debug_bounds("console-lock").is_none(), "no lock chip");
+    // A write asks first (DmlUnsafe on production: the typed name), and nothing is sent
+    // before the answer; Escape cancels it.
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    vcx.simulate_input("DELETE FROM t;");
+    vcx.simulate_keystrokes(&primary("enter"));
+    wait_until(vcx, "the confirmation", |vcx| {
+        vcx.cx.read(hacivat_app::exec_ui::confirm::confirm_open)
+    });
+    let sent = format!("{:?}", fake(vcx).call_log());
+    assert!(
+        !sent.contains("DELETE"),
+        "nothing sent before the answer: {sent}"
+    );
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    wait_until(vcx, "the confirmation to close", |vcx| {
+        !vcx.cx.read(hacivat_app::exec_ui::confirm::confirm_open)
+    });
+    let sent = format!("{:?}", fake(vcx).call_log());
+    assert!(!sent.contains("DELETE"), "Cancel sent nothing: {sent}");
     stop_core_runtime_test(cx);
 }
 
+// ## m3b-t26-prod-unlock (R-M3-78): was `a_profile_tagged_production_while_its_console_is_open_
+// reconnects_read_only`. A retag to production reconnects nothing; the gate reads the live tag,
+// so the next Run asks before anything is sent. Marking the profile read-only still drops the
+// read-write session and reconnects read-only (the strength the old test had, on the path that
+// keeps it).
 #[gpui::test]
-fn a_profile_tagged_production_while_its_console_is_open_reconnects_read_only(
+fn a_profile_tagged_production_while_its_console_is_open_confirms_from_the_next_run(
     cx: &mut TestAppContext,
 ) {
     let vcx = shell_with_profile(cx, "orders", Some(EnvTag::Dev), 4);
@@ -354,11 +402,40 @@ fn a_profile_tagged_production_while_its_console_is_open_reconnects_read_only(
         .cx
         .read(|cx| (*cx.global::<ConnectionsModel>().get(pid).expect("saved")).clone());
     p.environment = Some(EnvTag::Production);
+    save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p.clone()));
+    // No forced reconnect: the console keeps its read-write session (and its mode).
+    assert_eq!(
+        session_of(vcx, id).map(|s| s.id()),
+        Some(rw.id()),
+        "the session survives the tag"
+    );
+    assert!(!rw.state().borrow().read_only);
+    // The next Run asks first: an unbounded DELETE on production needs the typed name.
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    vcx.simulate_input("DELETE FROM t;");
+    vcx.simulate_keystrokes(&primary("enter"));
+    wait_until(vcx, "the confirmation", |vcx| {
+        vcx.cx.read(hacivat_app::exec_ui::confirm::confirm_open)
+    });
+    let sent = format!("{:?}", fake(vcx).call_log());
+    assert!(
+        !sent.contains("DELETE"),
+        "nothing sent before the answer: {sent}"
+    );
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    wait_until(vcx, "the confirmation to close", |vcx| {
+        !vcx.cx.read(hacivat_app::exec_ui::confirm::confirm_open)
+    });
+    // Marking it read-only still moves it at once: the read-write session is gone from the
+    // console, and a read-only one replaces it.
+    p.read_only = true;
     save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p));
-    // At once: the read-write session is gone from the console.
     assert!(
         session_of(vcx, id).is_none_or(|s| s.id() != rw.id()),
-        "the read-write session does not survive the tag"
+        "the read-write session does not survive the read-only mark"
     );
     wait_until(vcx, "a read-only session", |vcx| {
         session_of(vcx, id).is_some_and(|s| s.state().borrow().read_only)
@@ -413,9 +490,12 @@ fn answer_prompt(vcx: &VisualTestContext, button: Option<usize>) {
 const ROLL_BACK: usize = 1;
 
 /// A console never lets go of a session holding the user's open transaction (no silent
-/// rollback). Tagging its profile production asks first (Task 33's prompt); on Cancel the
+/// rollback). Marking its profile read-only asks first (Task 33's prompt); on Cancel the
 /// console stays pending read-only (C1): nothing claims read-only, Run sends nothing; once the
-/// transaction ends the profile reconnects read-only and the notice is true again.
+/// transaction ends the profile reconnects read-only and the lock chip is true again.
+/// ## m3b-t26-prod-unlock: the release used to come from a production tag; a tag no longer
+/// releases anything (R-M3-78), so the read-only mark (the path that keeps the reconnect)
+/// drives it, with the same assertions.
 #[gpui::test]
 fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext) {
     let vcx = shell_with_fake(cx, "en", pg_fake());
@@ -431,7 +511,7 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
     let mut p = vcx
         .cx
         .read(|cx| (*cx.global::<ConnectionsModel>().get(pid).expect("saved")).clone());
-    p.environment = Some(EnvTag::Production);
+    p.read_only = true;
     save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p));
     // The prompt asks; nothing is released before an answer.
     wait_until(vcx, "the prompt", |vcx| prompt(vcx).is_some());
@@ -449,13 +529,15 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
     );
     let frame = frame_text(vcx);
     assert!(
-        !frame.contains("Production is read-only in this version"),
-        "no false read-only notice: {frame}"
+        vcx.debug_bounds("console-lock").is_none(),
+        "no false read-only lock chip: {frame}"
     );
+    // ## m3b-ci (controller): the chip falls back to its short form when the sentence does not
+    // fit; non-macOS fonts are wider, so either form is the pending chip.
     assert!(
         frame.contains(
             "orders turns read-only once its open transaction is committed or rolled back."
-        ),
+        ) || frame.contains("Read-only after this transaction"),
         "the pending chip: {frame}"
     );
     activate(vcx);
@@ -470,7 +552,7 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
         !sent.contains("DELETE"),
         "Run sent nothing while pending: {sent}"
     );
-    // The user ends it: the profile reconnects read-only, and the notice is true again.
+    // The user ends it: the profile reconnects read-only, and the lock chip is true again.
     user_exec(&rw, "ROLLBACK");
     wait_until(vcx, "a read-only session", |vcx| {
         session_of(vcx, id).is_some_and(|s| s.state().borrow().read_only)
@@ -479,9 +561,10 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
         !vcx.cx
             .read(|cx| hacivat_app::exec_ui::pending_read_only(id, cx))
     });
-    wait_until(vcx, "the production notice", |vcx| {
-        frame_text(vcx).contains("Production is read-only in this version")
+    wait_until(vcx, "the lock chip", |vcx| {
+        frame_text(vcx).contains("read-only (guarded)")
     });
+    assert!(vcx.debug_bounds("console-lock").is_some(), "the lock chip");
     stop_core_runtime_test(cx);
 }
 
@@ -944,6 +1027,32 @@ fn toolbar_run_ends_a_composition_and_keeps_the_editor_focused(cx: &mut TestAppC
     stop_core_runtime_test(cx);
 }
 
+// ## m4-t33d (R-T33-1, M3a NOTES surface 2): the toolbar's Run is a Tab stop like its notice
+// and ⋯ (a Button is one by default); Enter on it runs.
+#[gpui::test]
+fn the_toolbar_run_button_is_a_tab_stop(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    let id = wait_active_console(vcx);
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    let runs = record_runs(vcx, &editor);
+    vcx.simulate_input("SELECT 1;");
+    vcx.run_until_parked();
+    let run = handle_of(vcx, "button-console-run");
+    assert!(runs.borrow().is_empty(), "learning the handle ran nothing");
+    assert!(tab_order(vcx).contains(&run), "Run is a Tab stop");
+    in_window(vcx, |window, cx| window.focus(&run, cx));
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    vcx.run_until_parked();
+    assert_eq!(runs.borrow().len(), 1, "Enter on Run ran once");
+    stop_core_runtime_test(cx);
+}
+
 // ## m3a-f4-ime (E7 row B5, F15): the Run chord typed into marked text sends nothing; the
 // composition stays whole, and once committed the same chord runs the committed text.
 #[gpui::test]
@@ -1218,8 +1327,13 @@ fn editor_commands_are_disabled_without_a_focused_editor(cx: &mut TestAppContext
     activate(vcx);
     let editor = editor_of(vcx, id);
     focus_editor(vcx, &editor);
+    // ## m3b-t01b-seams (fix round 2, I3; named exception): a stub row stays disabled until its
+    // task fills it; every other row is enabled while an editor has the focus.
     assert!(
-        registered(vcx).iter().all(|e| *e),
+        registered(vcx)
+            .iter()
+            .zip(hacivat_ui_editor::commands())
+            .all(|(enabled, c)| *enabled != c.stub),
         "an editor has the focus"
     );
     assert!(context_stack(vcx).0.contains(&"Editor"));
@@ -1483,6 +1597,34 @@ fn typing_notifies_the_status_segment_but_not_the_grid(cx: &mut TestAppContext) 
         segment.read(cx).status()
     });
     assert_eq!((status.line, status.column), (1, 4));
+    stop_core_runtime_test(cx);
+}
+
+// ## m3c-t31-multi (named exception, NOTES surface 14): "3 carets" in the editor segment,
+// before the selected count; one caret shows nothing new.
+#[gpui::test]
+fn the_status_segment_counts_carets(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    let id = wait_active_console(vcx);
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    in_window(vcx, |_, cx| {
+        editor.update(cx, |e, cx| e.set_text("ab\ncd\nef", cx));
+    });
+    vcx.run_until_parked();
+    assert!(!frame_text(vcx).contains("carets"));
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |e, cx| {
+            assert!(e.run_command("editor.add_caret_below", window, cx));
+            assert!(e.run_command("editor.add_caret_below", window, cx));
+            assert!(e.run_command("editor.select_right", window, cx));
+        });
+    });
+    vcx.run_until_parked();
+    let frame = frame_text(vcx);
+    assert!(frame.contains("3 carets | 3 selected"), "{frame}");
     stop_core_runtime_test(cx);
 }
 

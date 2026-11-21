@@ -157,9 +157,10 @@ impl SecretBackend for SlowBackend {
 // ---------------------------------------------------------------------------------------------
 // Credential files: one `.pgpass` for every test (0600, a line for the test user).
 
-fn pgpass_file() -> PathBuf {
-    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let dir = DIR.get_or_init(|| {
+thread_local! {
+    /// The `.pgpass` folder of this test thread, removed when the thread ends (a process-wide
+    /// static is never dropped, so its folder outlived every run).
+    static PGPASS_DIR: tempfile::TempDir = {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pgpass");
         std::fs::write(&path, "127.0.0.1:5432:*:deploy:from-pgpass\n").unwrap();
@@ -169,8 +170,11 @@ fn pgpass_file() -> PathBuf {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         dir
-    });
-    dir.path().join("pgpass")
+    };
+}
+
+fn pgpass_file() -> PathBuf {
+    PGPASS_DIR.with(|dir| dir.path().join("pgpass"))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2353,14 +2357,16 @@ pub mod runs {
         let units: Vec<RunUnit> = units
             .iter()
             .enumerate()
-            .map(|(i, (sql, suspendable))| RunUnit {
-                id: UnitId {
-                    run,
-                    ordinal: i as u32,
-                },
-                sql: (*sql).into(),
-                protocol: Protocol::Extended,
-                suspendable: *suspendable,
+            .map(|(i, (sql, suspendable))| {
+                RunUnit::plain(
+                    UnitId {
+                        run,
+                        ordinal: i as u32,
+                    },
+                    (*sql).into(),
+                    Protocol::Extended,
+                    *suspendable,
+                )
             })
             .collect();
         RunSpec {
@@ -2369,6 +2375,9 @@ pub mod runs {
             policy: ErrorPolicy::StopOnError,
             fetch,
             observer: ObserverRef(o.clone()),
+            // ## m3b-t01c-core-seams
+            confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
+            context_generation: None,
         }
     }
 
@@ -2417,4 +2426,406 @@ pub mod runs {
     pub async fn ask(h: &SessionHandle, request: Request) -> Reply {
         h.submit(request).reply.await.expect("the actor replies")
     }
+}
+
+// ## m3b-t11-session-runs
+// Run fixtures for M3b Task 11: units with binds, result sets and protocols, `Ask` runs, the
+// questions a run asks, scripted failures and notices.
+pub mod runs_m3b {
+    use std::sync::Arc;
+
+    use hacivat_driver::fake::{FakeQuery, FakeResultSet, FakeRows};
+    use hacivat_driver::{Notice, NoticeSeverity, Protocol};
+    use hacivat_results::FetchPolicy;
+    use hacivat_session::session::{
+        ErrorPolicy, ExecError, ObserverRef, RunEvent, RunId, RunSpec, RunUnit, UnitId,
+    };
+    use hacivat_values::{BindValue, LogicalType, Value};
+
+    use super::runs::Recorder;
+    use super::{db, settle_until};
+
+    /// Unit `i` of run 1: `sql`, the extended protocol, never suspended.
+    pub fn unit(i: u32, sql: &str) -> RunUnit {
+        RunUnit::plain(
+            UnitId {
+                run: RunId(1),
+                ordinal: i,
+            },
+            sql.into(),
+            Protocol::Extended,
+            false,
+        )
+    }
+
+    /// A run of `units` (default fetch policy, `StopOnError`).
+    pub fn spec_units(o: &Arc<Recorder>, units: Vec<RunUnit>) -> RunSpec {
+        RunSpec {
+            run: RunId(1),
+            units: units.into(),
+            policy: ErrorPolicy::StopOnError,
+            fetch: FetchPolicy::default(),
+            observer: ObserverRef(o.clone()),
+            confirm_deadline: RunSpec::CONFIRM_DEADLINE,
+            context_generation: None,
+        }
+    }
+
+    /// An `Ask` run of `sqls`, one unit each, never suspended.
+    pub fn ask_spec(o: &Arc<Recorder>, sqls: &[&str]) -> RunSpec {
+        let units = sqls
+            .iter()
+            .enumerate()
+            .map(|(i, sql)| unit(i as u32, sql))
+            .collect();
+        RunSpec {
+            policy: ErrorPolicy::Ask,
+            ..spec_units(o, units)
+        }
+    }
+
+    /// One unit of `sql` with `binds`.
+    pub fn spec_binds(o: &Arc<Recorder>, sql: &str, binds: &[BindValue]) -> RunSpec {
+        let mut u = unit(0, sql);
+        u.binds = binds.to_vec().into();
+        spec_units(o, vec![u])
+    }
+
+    /// A text bind value.
+    pub fn text(s: &str) -> BindValue {
+        BindValue::Typed {
+            hint: LogicalType::Text {
+                max_chars: None,
+                fixed: false,
+            },
+            text: s.into(),
+        }
+    }
+
+    /// A one-row result set of one `v int4` column holding `v`.
+    pub fn one_row(v: i64) -> FakeResultSet {
+        FakeResultSet {
+            columns: vec![(
+                "v",
+                LogicalType::Int {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
+            rows: FakeRows::Literal(vec![vec![Value::Int(v)]]),
+        }
+    }
+
+    /// A typed query of `prefix` the server refuses (42P01) before its first row.
+    pub fn failing(prefix: &'static str) -> FakeQuery {
+        FakeQuery {
+            prefix,
+            sets: vec![one_row(1)],
+            fail_after: Some((0, db("42P01"))),
+            ..FakeQuery::default()
+        }
+    }
+
+    /// A typed query of `prefix` answering one row.
+    pub fn answering(prefix: &'static str) -> FakeQuery {
+        FakeQuery {
+            prefix,
+            sets: vec![one_row(1)],
+            ..FakeQuery::default()
+        }
+    }
+
+    /// `n` server notices `n0`, `n1`, …
+    pub fn notices(n: usize) -> Vec<Notice> {
+        (0..n)
+            .map(|i| Notice::new(NoticeSeverity::Notice, Some("00000"), &format!("n{i}")))
+            .collect()
+    }
+
+    /// One `NeedsChoice` as the run asked it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Asked {
+        pub unit: UnitId,
+        pub question: u64,
+        pub error: ExecError,
+        pub rollback_and_continue: bool,
+    }
+
+    /// Every `NeedsChoice` the run emitted, in order.
+    pub fn asked(o: &Recorder) -> Vec<Asked> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::NeedsChoice {
+                    unit,
+                    question,
+                    error,
+                    rollback_and_continue,
+                } => Some(Asked {
+                    unit,
+                    question,
+                    error,
+                    rollback_and_continue,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Waits (yielding, never sleeping) for the run's `n`-th question; returns it.
+    pub async fn nth_question(o: &Recorder, n: usize) -> Asked {
+        settle_until("the run asks", || asked(o).len() >= n).await;
+        asked(o)[n - 1].clone()
+    }
+
+    /// The notices the run reported, by text.
+    pub fn notice_texts(o: &Recorder) -> Vec<String> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::Notice { notice, .. } => Some(notice.text.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The units started, by ordinal, in order (a retried unit twice).
+    pub fn started(o: &Recorder) -> Vec<u32> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::UnitStarted { unit, .. } => Some(unit.ordinal),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every result the run opened: (unit ordinal, set ordinal).
+    pub fn opened(o: &Recorder) -> Vec<(u32, u32)> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::ResultOpened { unit, ordinal, .. } => Some((unit.ordinal, ordinal)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+// ## m3b-t19-confirm-tx
+// Confirm-in-transaction fixtures (M3b Task 19): units carrying the exec gate's verdict, the
+// `NeedsCommit` questions a run asks and their answers, and what a session sent since a mark.
+pub mod confirm {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use hacivat_driver::fake::{FakeCall, FakeDriver, FakeQuery, FakeTypedCall};
+    use hacivat_driver::{Driver, TxStatus};
+    use hacivat_session::session::{
+        CommitAnswer, RequestTicket, RunEvent, RunSpec, RunUnit, SessionEffects, SessionHandle,
+        UnitId, UnitVerdict, schema_probe_sql,
+    };
+
+    use super::runs::Recorder;
+    use super::runs_m3b::{spec_units, unit};
+    use super::settle_until;
+
+    /// Unit `i` of run 1 (`sql`, extended protocol, never suspended) carrying `verdict`, with
+    /// the effects the gate gives it (a non-read opens a write).
+    pub fn verdict_unit(i: u32, sql: &str, verdict: UnitVerdict) -> RunUnit {
+        let mut u = unit(i, sql);
+        u.verdict = verdict;
+        u.effects = match verdict {
+            UnitVerdict::Read | UnitVerdict::Unknown => SessionEffects::empty(),
+            _ => SessionEffects::OPENS_WRITE,
+        };
+        u
+    }
+
+    /// A run submitted to a session: its observer and its ticket.
+    pub struct Ran {
+        pub o: Arc<Recorder>,
+        pub ticket: RequestTicket,
+    }
+
+    /// Submits `units` with the confirm deadline `deadline`.
+    pub fn run_units(h: &SessionHandle, units: Vec<RunUnit>, deadline: Duration) -> Ran {
+        let o = Recorder::new();
+        let spec = RunSpec {
+            confirm_deadline: deadline,
+            context_generation: None,
+            ..spec_units(&o, units)
+        };
+        let ticket = h.run(spec);
+        Ran { o, ticket }
+    }
+
+    /// Submits one unit of `sql` carrying `verdict` (D-014's deadline).
+    pub fn run_verdict(h: &SessionHandle, sql: &str, verdict: UnitVerdict) -> Ran {
+        run_units(
+            h,
+            vec![verdict_unit(0, sql, verdict)],
+            RunSpec::CONFIRM_DEADLINE,
+        )
+    }
+
+    /// One `NeedsCommit` as the run asked it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Asked {
+        pub unit: UnitId,
+        pub question: u64,
+        pub affected: Option<u64>,
+        pub savepoint: bool,
+    }
+
+    /// Every `NeedsCommit` the run emitted, in order.
+    pub fn commit_questions(o: &Recorder) -> Vec<Asked> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::NeedsCommit {
+                    unit,
+                    question,
+                    affected,
+                    savepoint,
+                    ..
+                } => Some(Asked {
+                    unit,
+                    question,
+                    affected,
+                    savepoint,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Waits (yielding, never sleeping: a paused clock stays) for the run's `n`-th question.
+    pub async fn nth_commit(o: &Recorder, n: usize) -> Asked {
+        settle_until("the run asks Commit/Roll back", || {
+            commit_questions(o).len() >= n
+        })
+        .await;
+        commit_questions(o)[n - 1]
+    }
+
+    /// Every `CommitDecided`: the answer and whether the deadline gave it.
+    pub fn decided(o: &Recorder) -> Vec<(CommitAnswer, bool)> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::CommitDecided {
+                    answer,
+                    by_deadline,
+                    ..
+                } => Some((answer, by_deadline)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether the run reported `RunEnded`.
+    pub fn run_ended(o: &Recorder) -> bool {
+        o.events()
+            .iter()
+            .any(|e| matches!(e, RunEvent::RunEnded(_)))
+    }
+
+    /// Waits for the run's `RunEnded` (yielding).
+    pub async fn until_ended(o: &Recorder) {
+        settle_until("the run ends", || run_ended(o)).await;
+    }
+
+    /// Answers the run's `n`-th question with `a`; whether the session took it.
+    pub async fn answer_nth(h: &SessionHandle, ran: &Ran, n: usize, a: CommitAnswer) -> bool {
+        let q = nth_commit(&ran.o, n).await;
+        h.commit_decision(ran.ticket.seq, q.unit, q.question, a)
+            .await
+            .unwrap_or(false)
+    }
+
+    /// Answers the run's first question `Commit` (Keep) and waits for the run's end.
+    pub async fn answer_commit(h: &SessionHandle, ran: &Ran) {
+        assert!(answer_nth(h, ran, 1, CommitAnswer::Commit).await);
+        until_ended(&ran.o).await;
+    }
+
+    /// Answers the run's first question `RollBack` (Undo) and waits for the run's end.
+    pub async fn answer_rollback(h: &SessionHandle, ran: &Ran) {
+        assert!(answer_nth(h, ran, 1, CommitAnswer::RollBack).await);
+        until_ended(&ran.o).await;
+    }
+
+    /// The fake's calls from `mark` on, without the session's schema probe.
+    pub fn sent(f: &FakeDriver, mark: usize) -> Vec<FakeCall> {
+        let probe = schema_probe_sql(f.descriptor().kind);
+        f.call_log()[mark..]
+            .iter()
+            .filter(|c| !matches!(c, FakeCall::Statement(s) if !probe.is_empty() && s == probe))
+            .cloned()
+            .collect()
+    }
+
+    /// An `execute`/`batch` call of `sql`.
+    pub fn st(sql: &str) -> FakeCall {
+        FakeCall::Statement(sql.into())
+    }
+
+    /// A typed query of `sql`.
+    pub fn q(sql: &str) -> FakeCall {
+        FakeCall::Typed(FakeTypedCall::Query(sql.into()))
+    }
+
+    /// The close of a typed query that failed (the stream ends it at once).
+    pub fn closed_now() -> FakeCall {
+        FakeCall::Typed(FakeTypedCall::Close(hacivat_driver::CloseHow::Now))
+    }
+
+    /// A typed query of `prefix` after which the connection's status is `status` (the user's
+    /// `BEGIN`, `COMMIT`, … run as units).
+    pub fn leaves(prefix: &'static str, status: TxStatus) -> FakeQuery {
+        FakeQuery {
+            prefix,
+            tx_after: Some(status),
+            ..FakeQuery::default()
+        }
+    }
+
+    /// A typed DML of `prefix` that reports `n` rows affected.
+    pub fn affects(prefix: &'static str, n: u64) -> FakeQuery {
+        FakeQuery {
+            prefix,
+            rows_affected: Some(n),
+            ..FakeQuery::default()
+        }
+    }
+}
+
+// ## m4-sessflake
+// `logged_manager` over a driver the test builds (e.g. `FakeDriver::gated()`), so a test can
+// hold a connect at the driver and still read the connection log.
+
+/// A manager over a logging driver around `fake`, with `fake` kept for its gate and counters.
+pub fn logged_manager_over(
+    fake: FakeDriver,
+    close_delay: Duration,
+    hang_pings: bool,
+    config: ManagerConfig,
+) -> (Arc<ConnectionManager>, Log, Arc<FakeDriver>) {
+    let fake = Arc::new(fake);
+    let log: Log = Arc::default();
+    let mut drivers = DriverRegistry::new();
+    drivers.register(Arc::new(LoggedDriver {
+        fake: fake.clone(),
+        log: log.clone(),
+        close_delay,
+        hang_pings,
+    }));
+    let mut deps = deps_over(fake.clone(), thread_store());
+    deps.drivers = Arc::new(drivers);
+    (
+        ConnectionManager::new(tokio::runtime::Handle::current(), Arc::new(deps), config),
+        log,
+        fake,
+    )
 }

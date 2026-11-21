@@ -645,3 +645,20 @@ fn an_unreadable_file_is_reported_left_alone_and_read_only(cx: &mut TestAppConte
         Err(SaveError::StoreReadOnly)
     ));
 }
+
+// ## m3b-t18-safe06 (named exception: R-M3-83, T1c review M7)
+#[gpui::test]
+fn boot_installs_the_classifier(cx: &mut TestAppContext) {
+    // The app's boot (`connections::boot::install`, which the shell runs) gives the manager the
+    // read-only guard's classifier: no product build reaches `classifier: None` (run B's
+    // configuration), so every read-only session's step 0b asks it.
+    let vcx = shell_with_connections(cx, "en");
+    let installed = vcx.cx.read(|cx| {
+        cx.global::<ConnectionsModel>()
+            .manager()
+            .config()
+            .classifier
+            .is_some()
+    });
+    assert!(installed, "the boot's ManagerConfig has no classifier");
+}

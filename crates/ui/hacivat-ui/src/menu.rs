@@ -16,10 +16,10 @@
 
 use hacivat_ui_core::gpui_surface::Entity;
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, AppContext, Bounds, Context, EventEmitter, FocusHandle, Focusable, Global,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Point,
-    Render, Role, ScrollEvent, SharedString, StatefulInteractiveElement, Styled, Window, accesskit,
-    div, px,
+    AnyElement, App, AppContext, Bounds, Context, ElementId, EventEmitter, FocusHandle, Focusable,
+    Global, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
+    Point, Render, Role, ScrollEvent, SharedString, StatefulInteractiveElement, Styled, Window,
+    accesskit, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
@@ -62,6 +62,18 @@ pub struct MenuItemSpec {
     pub mono: bool,
     /// Where the hint's text comes from: Fluent (default) or data (a resolved address).
     pub hint_source: TextSource,
+    // ## m3b-t26-prod-unlock (named exception: the T22 review m12 carry)
+    /// An informational note (the mock's `.mnote`: 12 px `text-2`), never selectable: not a
+    /// disabled command, so the Raised Ink Rule's `text-2` applies, never disabled `text-3`.
+    pub note: bool,
+    // ## m3b-t29-shots (named exception; T29 review I1)
+    /// An inert sentence that wraps inside the menu's width (the chooser's explanations,
+    /// NOTES M3b ruling 19: "on its own wrapping line"): the row grows to its lines.
+    pub wraps: bool,
+    // ## m4-t33b-carries (named exception; T25 carry: the toolbar overflow's check marks)
+    /// An on/off row (a toolbar checkbox moved into ⋯): its check shows its state, it is a
+    /// menu checkbox to assistive technology, and the highlight never starts on it.
+    pub toggle: bool,
 }
 
 impl MenuItemSpec {
@@ -78,6 +90,11 @@ impl MenuItemSpec {
             danger: false,
             mono: false,
             hint_source: TextSource::Fluent,
+            // ## m3b-t26-prod-unlock
+            note: false,
+            // ## m3b-t29-shots
+            wraps: false,
+            toggle: false,
         }
     }
 
@@ -94,6 +111,11 @@ impl MenuItemSpec {
             danger: false,
             mono: false,
             hint_source: TextSource::Fluent,
+            // ## m3b-t26-prod-unlock
+            note: false,
+            // ## m3b-t29-shots
+            wraps: false,
+            toggle: false,
         }
     }
 
@@ -117,6 +139,14 @@ impl MenuItemSpec {
         self
     }
 
+    // ## m4-t33b-carries (named exception)
+    /// An on/off row, `on` or off ([`MenuItemSpec::toggle`]).
+    pub fn toggle(mut self, on: bool) -> Self {
+        self.checked = on;
+        self.toggle = true;
+        self
+    }
+
     pub fn hint(mut self, hint: TextFn) -> Self {
         self.hint = Some(hint);
         self
@@ -135,6 +165,24 @@ impl MenuItemSpec {
         self
     }
 
+    // ## m3b-t26-prod-unlock (named exception: the T22 review m12 carry)
+    /// Makes the row an informational note: 12 px `text-2` (the Raised Ink Rule), never
+    /// selectable, never chosen.
+    // ## m3b-t29-shots (named exception; T29 review I1)
+    /// A sentence that wraps inside the menu (never actionable, as a note).
+    pub fn wraps(mut self, wraps: bool) -> Self {
+        self.wraps = wraps;
+        self.disabled |= wraps;
+        self
+    }
+
+    pub fn note(mut self, note: bool) -> Self {
+        self.note = note;
+        // Never actionable: every path that skips a disabled row skips a note.
+        self.disabled |= note;
+        self
+    }
+
     // ## m2a-t21-shots
     /// Marks a destructive item (its label is `red` while enabled).
     pub fn danger(mut self, danger: bool) -> Self {
@@ -142,14 +190,18 @@ impl MenuItemSpec {
         self
     }
 
-    /// The label's ink: `text-3` when disabled, `red` for an enabled destructive item, else
+    /// The label's ink: `text-disabled` when disabled, `red` for an enabled destructive item, else
     /// `text`.
     pub fn label_ink(
         &self,
         c: &hacivat_ui_core::theme::Colors,
     ) -> hacivat_ui_core::gpui_surface::Hsla {
-        if self.disabled {
-            c.text_3
+        // ## m3b-t26-prod-unlock (named exception): a note is text, not a disabled command.
+        if self.note {
+            c.text_2
+        } else if self.disabled {
+            // ## m3c-t41 (M3c-38): the disabled ink, never remapped on the raised menu.
+            c.text_disabled
         } else if self.danger {
             c.red
         } else {
@@ -159,7 +211,8 @@ impl MenuItemSpec {
     }
 
     fn selectable(&self) -> bool {
-        !self.separator && !self.disabled
+        // ## m3b-t26-prod-unlock (named exception): a note is never selectable.
+        !self.separator && !self.disabled && !self.note
     }
 }
 
@@ -239,7 +292,7 @@ impl PopupMenu {
             // The highlight starts on the checked row (a Select's current option).
             let selected = items
                 .iter()
-                .position(|i| i.checked && i.selectable())
+                .position(|i| i.checked && !i.toggle && i.selectable())
                 .or_else(|| items.iter().position(MenuItemSpec::selectable));
             PopupMenu {
                 anchor,
@@ -251,7 +304,8 @@ impl PopupMenu {
                 label: None,
                 title: None,
                 access_keys: !cfg!(target_os = "macos"),
-                active_tint: false,
+                // ## m3c-t41 (M3c-36): every menu's active row takes the selection tint.
+                active_tint: true,
                 key_hints: Vec::new(),
                 first: 0,
                 wheel: 0.0,
@@ -315,6 +369,14 @@ impl PopupMenu {
         if self.items.get(index).is_some_and(MenuItemSpec::selectable) {
             self.selected = Some(index);
         }
+    }
+
+    // ## m3b-t24-exec-ui (named exception): the chooser's "Run as one" row is never
+    // preselected (R-M3-60, NOTES surface 9): Enter does nothing until ↓ highlights it.
+    /// Highlights no row: Enter chooses nothing until an arrow key or the pointer highlights
+    /// one.
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
     }
 
     fn step(&mut self, forward: bool) {
@@ -420,6 +482,10 @@ impl PopupMenu {
     fn entry_height(item: &MenuItemSpec, xs: f32) -> f32 {
         if item.separator {
             1.0 + 2.0 * xs
+        } else if item.wraps {
+            // ## m3b-t29-shots: a wrapping sentence is budgeted two lines (its height is known
+            // only once laid out; check (m) sees a menu that runs past its room).
+            2.0 * MENU_ROW_PX
         } else {
             MENU_ROW_PX
         }
@@ -494,13 +560,17 @@ pub struct MenuLayout {
     pub rows: Vec<(usize, Bounds<Pixels>)>,
     pub window_height: f32,
     pub statusbar_height: f32,
+    // ## m3b-ci (controller fix)
+    /// The window's width: a row must end inside it.
+    pub window_width: f32,
 }
 
 impl Global for MenuLayout {}
 
 impl MenuLayout {
     /// What is wrong with the last anchored menu: a row shown only in part (cut at its
-    /// column's edge), or one drawn over the status bar or past the window's bottom.
+    /// column's edge), or one drawn over the status bar or past the window's bottom, or
+    /// (## m3b-ci) past the window's left or right side.
     pub fn violations(cx: &App) -> Vec<String> {
         let Some(layout) = cx.try_global::<MenuLayout>() else {
             return Vec::new();
@@ -524,6 +594,15 @@ impl MenuLayout {
                      ({bottom} > {floor})"
                 ));
             }
+            // ## m3b-ci (controller fix): nothing clips a row at the window's sides but the
+            // window itself, so its hint would be cut there (CI run 44051024805, Linux).
+            let (left, right) = (f32::from(row.left()), f32::from(row.right()));
+            if layout.window_width > 0.0 && (left < -slack || right > layout.window_width + slack) {
+                out.push(format!(
+                    "menu row {i} runs past the window's side ({left}..{right} in {})",
+                    layout.window_width
+                ));
+            }
         }
         out
     }
@@ -545,7 +624,15 @@ fn note_menu_rows(
         rows,
         window_height: f32::from(window.viewport_size().height),
         statusbar_height: statusbar,
+        window_width: f32::from(window.viewport_size().width),
     });
+}
+
+// ## m3c-shotfix F1 (fix round 1)
+/// The widest an anchored menu may be in a window `width` wide: the window less `margin` on
+/// each side.
+pub fn window_room(width: Pixels, margin: f32) -> Pixels {
+    (width - px(2.0 * margin)).max(px(0.0))
 }
 
 impl Render for PopupMenu {
@@ -612,7 +699,16 @@ impl Render for PopupMenu {
             Some(room) => self.rows_window(&entries, room),
             None => 0..self.items.len(),
         };
-        let check_column = self.items.iter().any(|i| i.checked && !i.separator);
+        // ## m4-t33b-carries: an on/off row keeps the column even while it is off.
+        let check_column = self
+            .items
+            .iter()
+            .any(|i| (i.checked || i.toggle) && !i.separator);
+        // A Select's options (a checked row that is not an on/off one) are radio items.
+        let radio = self
+            .items
+            .iter()
+            .any(|i| i.checked && !i.toggle && !i.separator);
 
         let rows: Vec<AnyElement> = self
             .items
@@ -629,8 +725,38 @@ impl Render for PopupMenu {
                         .into_any_element();
                 }
                 let selected = self.selected == Some(i);
-                let ink = item.label_ink(c);
+                // ## m3c-t41 (M3c-36): the active row's label, hint and keys take `text` (a
+                // destructive row keeps its red: Hue Is Meaning).
+                let active = selected && self.active_tint && !item.disabled && !item.note;
+                let ink = if active && !item.danger {
+                    c.text.to_hsla()
+                } else {
+                    item.label_ink(c)
+                };
                 let text = (item.label)(cx);
+                // ## m3b-t29-shots (named exception; T29 review I1): a wrapping sentence takes the
+                // menu's width and as many lines as it needs, inside the card.
+                if item.wraps {
+                    let row = div()
+                        .id(("menu-item", i))
+                        .debug_selector(move || format!("menu-item-{i}"))
+                        .w_full()
+                        .min_h(px(MENU_ROW_PX))
+                        .py(px(t.spacing.xs))
+                        .px(px(t.spacing.lg))
+                        .child(
+                            crate::text::paragraph(
+                                text.clone(),
+                                TextSource::Fluent,
+                                t.type_ramp.body,
+                                ink,
+                            )
+                            .id("menu-item-text"),
+                        );
+                    return A11yNode::new(("menu-item-node", i), Role::MenuItem, text, false, row)
+                        .disabled(true)
+                        .into_any_element();
+                }
                 // The check column (12 px, `blue` check) sits before the label on every row of a
                 // menu that has one.
                 // ## m3a-t35-shots (named exception): the label never gives way to the hint.
@@ -658,16 +784,21 @@ impl Render for PopupMenu {
                 // ## m2b-t24-shots: a mono label is data (a host alias, a path).
                 let (style, source) = if item.mono {
                     (t.type_ramp.mono_data, TextSource::Data)
+                } else if item.note {
+                    // ## m3b-t26-prod-unlock (named exception): the note's 12 px caption.
+                    (t.type_ramp.caption, TextSource::Fluent)
                 } else {
                     (t.type_ramp.body, TextSource::Fluent)
                 };
+                // ## m3b-t29-shots (named exception; T29 review I4): the row's label says it is a
+                // menu row (`#menu-item-label`), which no button outside a menu draws.
                 lead = lead.child(key_label_from(
                     &text,
                     source,
                     Some(keys[i]),
                     style,
                     ink,
-                    None,
+                    Some(&ElementId::from("menu-item-label")),
                 ));
                 let mut row = div()
                     .id(("menu-item", i))
@@ -694,7 +825,7 @@ impl Render for PopupMenu {
                         .min_w(px(0.0));
                     if let Some(hint) = &item.hint {
                         // ## m3a-f2-visual: the active row's hint goes to `text` (chooser).
-                        let hint_ink = if self.active_tint && selected && !item.disabled {
+                        let hint_ink = if active {
                             c.text.to_hsla()
                         } else {
                             c.text_2.to_hsla()
@@ -705,16 +836,27 @@ impl Render for PopupMenu {
                         // whole text in its tooltip; one that fits draws as before.
                         trail = trail.child(
                             Label::new(hint(cx), item.hint_source, t.type_ramp.caption, hint_ink)
-                                .truncate(true),
+                                .truncate(true)
+                                // ## m3b-t29-shots (named exception)
+                                .id("menu-item-hint"),
                         );
                     }
                     if let Some(shortcut) = &item.keys {
+                        // ## m3c-t41 (M3c-36, M3c-38): `text` on the active row, the disabled
+                        // ink on a disabled one.
+                        let key_ink = if active {
+                            c.text
+                        } else if item.disabled {
+                            c.text_disabled
+                        } else {
+                            c.text_2
+                        };
                         trail = trail.child(Label::new(
                             shortcut(cx),
                             TextSource::Shortcut,
                             t.type_ramp.mono_kbd,
                             // Raised Ink Rule: key hints on the raised menu use text-2.
-                            c.text_2.to_hsla(),
+                            key_ink.to_hsla(),
                         ));
                     }
                     row = row.child(trail);
@@ -738,6 +880,19 @@ impl Render for PopupMenu {
                         } else {
                             c.hover.to_hsla()
                         });
+                        // ## m3c-t41 (M3c-36): and a 1 px blue left edge, the non-text cue.
+                        if active {
+                            row = row.relative().child(
+                                div()
+                                    .debug_selector(move || format!("menu-item-edge-{i}"))
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .h_full()
+                                    .w(px(1.0))
+                                    .bg(c.blue.to_hsla()),
+                            );
+                        }
                     }
                 }
                 if item.disabled {
@@ -745,7 +900,10 @@ impl Render for PopupMenu {
                         .disabled(true)
                         .into_any_element();
                 }
-                let role = if check_column {
+                // ## m4-t33b-carries: an on/off row is a menu checkbox.
+                let role = if item.toggle {
+                    Role::MenuItemCheckBox
+                } else if radio {
                     Role::MenuItemRadio
                 } else {
                     Role::MenuItem
@@ -754,8 +912,11 @@ impl Render for PopupMenu {
                 if selected {
                     decl = decl.active_descendant();
                 }
+                if item.toggle {
+                    decl = decl.toggled(item.checked);
+                }
                 let row = row.declare_full(decl);
-                if check_column {
+                if radio && !item.toggle {
                     row.aria_toggled(accesskit::Toggled::from(item.checked))
                         .into_any_element()
                 } else {
@@ -775,12 +936,15 @@ impl Render for PopupMenu {
         let drawn_rows: std::rc::Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>> = Default::default();
         let has_title = self.title.is_some();
         let statusbar = t.spacing.statusbar_height;
+        // ## m3b-t29-shots (named exception; T29 review I1): the menu is a card: text that runs
+        // past its sides is recorded so (`RenderedText::outside_card`), as a dialog's is. Its
+        // scope's canvas is the surface's first child, so the rows' column comes one later.
         let surface = popover_surface(&theme);
         let surface = if self.anchor.is_some() {
             let drawn_rows = drawn_rows.clone();
             let first = shown.start;
-            surface.on_children_prepainted(move |bounds, window, cx| {
-                let column = bounds.get(usize::from(has_title)).copied();
+            crate::text::card_scope_then(surface, move |bounds, window, cx| {
+                let column = bounds.get(1 + usize::from(has_title)).copied();
                 let rows = drawn_rows
                     .borrow()
                     .iter()
@@ -790,20 +954,28 @@ impl Render for PopupMenu {
                 note_menu_rows(cx, window, statusbar, column, rows);
             })
         } else {
-            surface
+            crate::text::card_scope(surface)
         };
-        let mut menu = surface
+        let menu = surface
             .id("popup-menu")
             .debug_selector(|| "popup-menu".to_string())
             .track_focus(&self.focus)
             .declare(Role::Menu, menu_name.clone(), None);
-        if let Some((left, top)) = position {
-            menu = menu.absolute().left(left).top(top);
-        }
+        // ## m3c-t41-chrome (fix round 1, m5): an anchored menu is placed by GPUI's `anchored`,
+        // which measures it before it paints: one wider than its minimum near the window's right
+        // edge moves inside the window on its first frame (below).
         let mut menu = menu.min_w(self.min_width);
         // ## m3a-t35-shots (named exception)
-        if let Some(max) = self.max_width {
-            menu = menu.max_w(max.max(self.min_width));
+        let mut max = self.max_width.map(|max| max.max(self.min_width));
+        // ## m3c-shotfix F1 (fix round 1, controller ruling): an anchored menu is never wider
+        // than the window less its 4 px margins; past that its hints ellipsize (they give way,
+        // `menu-item-hint`), the label never.
+        if self.anchor.is_some() {
+            let cap = window_room(window.viewport_size().width, t.spacing.xs);
+            max = Some(max.map_or(cap, |max| max.min(cap)));
+        }
+        if let Some(max) = max {
+            menu = menu.max_w(max);
         }
         let menu = menu
             .py(px(t.spacing.xs))
@@ -839,7 +1011,8 @@ impl Render for PopupMenu {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(5.0))
+                    // ## m3c-t41-chrome (F2 review M9)
+                    .gap(px(crate::metrics::MENU_FOOTER_GAP_PX))
                     .child(Label::new(
                         crate::palette::key_label(chord),
                         TextSource::Shortcut,
@@ -889,7 +1062,18 @@ impl Render for PopupMenu {
             column
         };
         let column = column.children(rows);
-        menu.children(title).child(column).children(footer)
+        let menu = menu.children(title).child(column).children(footer);
+        // ## m3c-t41-chrome (fix round 1, m5)
+        // ## m3c-shotfix F1 (fix round 1, controller ruling): snapped inside the window with a
+        // 4 px margin on every side.
+        match position {
+            Some((left, top)) => hacivat_ui_core::gpui_surface::anchored()
+                .position(hacivat_ui_core::gpui_surface::point(left, top))
+                .snap_to_window_with_margin(px(t.spacing.xs))
+                .child(menu)
+                .into_any_element(),
+            None => menu.into_any_element(),
+        }
     }
 }
 
@@ -915,8 +1099,25 @@ mod tests {
             assert_eq!(item().danger(true).label_ink(c), c.red.to_hsla());
             assert_eq!(
                 item().danger(true).disabled(true).label_ink(c),
-                c.text_3.to_hsla()
+                c.text_disabled.to_hsla()
             );
+        }
+    }
+
+    // ## m3b-t26-prod-unlock (named exception: the T22 review m12 carry)
+    /// A note is `text-2` on the raised menu (the Raised Ink Rule), never disabled `text-3`,
+    /// and never selectable or chosen.
+    #[test]
+    fn a_note_is_text_2_and_never_selectable() {
+        for c in [&DARK.colors, &LIGHT.colors] {
+            let note = item().note(true);
+            assert_eq!(note.label_ink(c), c.text_2.to_hsla());
+            assert!(!note.selectable());
+            assert!(
+                note.disabled,
+                "every path that skips a disabled row skips it"
+            );
+            assert!(item().selectable() && !item().note);
         }
     }
 }

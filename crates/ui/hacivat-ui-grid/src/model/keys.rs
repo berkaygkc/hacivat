@@ -6,9 +6,9 @@
 //!   loaded.
 //! - The last row is the last *loaded* row while rows stream in; Last row then follows the
 //!   tail.
-//! - Tab and Shift+Tab move to the next and previous cell, wrapping rows inside the grid, and
-//!   leave the grid from its last (first) cell, so keyboard users always have an exit (digest 04
-//!   R10). Tab collapses the selection.
+//! - Tab and Shift+Tab leave the grid from any cell (## m3c-t40, R-M3-69: a grid of a million
+//!   rows must never trap the keyboard; M3a moved to the next cell and left only from the last
+//!   one). The arrows move between cells; the selection and the focus stay as they were.
 //! - A focus on a column hidden since sits between its visible neighbours: Right and Left step
 //!   to them, every other key snaps it to the next visible column.
 
@@ -46,7 +46,7 @@ pub enum KeyOutcome {
     /// The focus moved: scroll it into view. `follow_tail`: the view goes to the end and follows
     /// rows streaming in (Last row), even when the focus was already there.
     Moved { focus: ModelCell, follow_tail: bool },
-    /// Tab from the last cell (Shift+Tab from the first): the keyboard focus leaves the grid.
+    /// Tab (Shift+Tab: `back`), from any cell (## m3c-t40): the keyboard focus leaves the grid.
     Leave { back: bool },
     /// Copy this region (or say why not).
     Copy {
@@ -77,7 +77,10 @@ fn run(cmd: GridCommand, sel: &mut Selection, ctx: &KeyCtx<'_>) -> KeyOutcome {
         },
         GridCommand::Escape => changed(sel.collapse(ctx.map)),
         GridCommand::SelectAll => select(sel, ctx, |s, _| s.select_all()),
-        GridCommand::SelectRow => select(sel, ctx, |s, focus| s.extend_rows_to(focus.row)),
+        // ## m3c-t35: under a sort or a filter the rows are taken as shown.
+        GridCommand::SelectRow => {
+            select(sel, ctx, |s, focus| s.extend_rows_to_in(focus.row, ctx.map))
+        }
         GridCommand::SelectColumn => select(sel, ctx, |s, focus| s.extend_columns_to(focus.col)),
         nav => navigate(nav, sel, ctx),
     }
@@ -103,6 +106,10 @@ fn navigate(cmd: GridCommand, sel: &mut Selection, ctx: &KeyCtx<'_>) -> KeyOutco
             _ => KeyOutcome::Unchanged,
         };
     };
+    // ## m3c-t40 (R-M3-69): Tab leaves before anything is focused or moved.
+    if let GridCommand::NextCell { back } = cmd {
+        return KeyOutcome::Leave { back };
+    }
     let Some(focus) = sel.focus() else {
         // Nothing focused yet: the first key focuses the first cell.
         let first = grid.cell(ctx, 0, 0);
@@ -243,31 +250,25 @@ impl Grid {
                 };
                 to(row, snap, extend)
             }
-            GridCommand::NextCell { back: false } => {
-                let next = half.div_euclid(2) + 1;
-                if next <= self.last_col {
-                    to(row, next, false)
-                } else if row < self.last_row {
-                    to(row + 1, 0, false)
-                } else {
-                    Nav::Leave { back: false }
-                }
-            }
-            GridCommand::NextCell { back: true } => {
-                let prev = (half + 1).div_euclid(2) - 1;
-                if prev >= 0 {
-                    to(row, prev, false)
-                } else if row > 0 {
-                    to(row - 1, self.last_col, false)
-                } else {
-                    Nav::Leave { back: true }
-                }
-            }
+            // ## m3c-t40 (R-M3-69): Tab leaves the grid from any cell.
+            GridCommand::NextCell { back } => Nav::Leave { back },
             GridCommand::SelectAll
             | GridCommand::SelectRow
             | GridCommand::SelectColumn
             | GridCommand::Copy { .. }
             | GridCommand::Escape => return None,
+            // ## m3b-t01b-seams: `GridView::dispatch` handles these before the key model.
+            GridCommand::GrowSelection
+            | GridCommand::ShrinkSelection
+            | GridCommand::Find
+            | GridCommand::GotoRow
+            | GridCommand::OpenValue
+            | GridCommand::ContextMenu
+            | GridCommand::AutoFit
+            | GridCommand::Freeze
+            | GridCommand::Unfreeze => return None,
+            // ## m3c-t37
+            GridCommand::SelectAllOccurrences => return None,
         })
     }
 }

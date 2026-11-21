@@ -23,6 +23,25 @@
 //! closed or lost session) ends here: every unit `Skipped` (`Cancelled` after a cancel), an
 //! aborted summary, and the reply's error in the log. Without a runtime to await the reply on,
 //! the observer's drop does the same without the error.
+//!
+//! ## m3b-t16-run-service (ADR 0006 `m3b-t16`)
+//! - **The auditor chain** (R-M3-63, `audit.rs`) sees every event first; its history sink
+//!   records one statement per ended unit (masked text only), and what its sinks dropped ends
+//!   the run as one `Dropped { n }` line.
+//! - **Tabs** (R-M3-66): one per result set, titled by the unit's comment (else `Result N`),
+//!   ` (k)` for a unit's further sets; a prepared unit keeps up to 100 sets and a unit with more
+//!   says so (`exec-result-set-limit`) instead of `exec-more-result-sets`.
+//! - **Lines**: server notices and MySQL warnings (`Notice`, the server's text verbatim in its
+//!   own field), notices past the cap (`NoticesDropped`), a Run as one stopped before its end
+//!   (`ClosedEarly`), a PostgreSQL Run as one that failed (`RunAsOneRolledBack`: one implicit
+//!   transaction), a retried statement, the user's skips (`SkippedByUser`), an eviction of one
+//!   of the run's results (`Evicted`, through the service's [`Evictions`]); a DDL statement's
+//!   end is `exec-completed` on every engine (ledger 340, PO); a line keeps its statement's
+//!   command tag (ledger 340).
+//! - **Questions**: a `NeedsChoice` or `NeedsCommit` is published on the ticket's `choices`
+//!   with the run's request number until the run moves on; a `NeedsCommit` also goes to the
+//!   request's `ConfirmPort` (none: `RollBack`), whose answer is sent with
+//!   `SessionHandle::commit_decision` for exactly that question.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -48,14 +67,34 @@ use crate::log::{LogMsg, SessionLog};
 use crate::service::{ResultTab, TabKey};
 use crate::sqlctx::first_word;
 use crate::status::{ErrorView, RunStatus, UnitStatus, UnitStatusEntry, UnitSummary, error_view};
-use crate::titles::result_title;
 use crate::units::ExecUnit;
+// ## m3b-t16-run-service
+use std::sync::Weak;
+
+use hacivat_results::evict::Eviction;
+use hacivat_session::session::CommitAnswer;
+
+use crate::audit::AuditorChain;
+use crate::gate::{CommitQuestion, ConfirmPort};
+use crate::params::OffsetMap;
+use crate::titles::tab_title;
+// ## m3b-t24-exec-ui (named exception)
+use hacivat_session::session::UnitVerdict;
+
+/// The result sets a prepared unit keeps (R-M3-66).
+pub(crate) const MAX_RESULT_SETS: u32 = 100;
 
 /// Progress publishes inside a unit are at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(50);
 
 /// Result IDs, unique in the process.
 static NEXT_RESULT: AtomicU64 = AtomicU64::new(1);
+
+// ## m3b-t16-run-service
+/// A result ID unique in the process (a count's store too).
+pub(crate) fn next_result_id() -> ResultId {
+    ResultId(NEXT_RESULT.fetch_add(1, Ordering::Relaxed))
+}
 
 /// Each tab key's latest generation (a re-run into the same tab bumps it), shared by every run
 /// of the service.
@@ -69,8 +108,28 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Debug, Clone)]
 struct UnitInfo {
     id: UnitId,
+    /// The text sent (a server's error position is in it).
     text: Arc<str>,
     range: Range<usize>,
+    // ## m3b-t16-run-service
+    /// The comment title of its tabs.
+    title: Option<Arc<str>>,
+    /// From the text sent to the document (a prepared unit's rewrite); `None`: as written.
+    offsets: Option<OffsetMap>,
+    /// It keeps up to [`MAX_RESULT_SETS`] result sets (a prepared unit).
+    multi: bool,
+    /// It was sent as one (`Protocol::Simple`, R-M3-60).
+    run_as_one: bool,
+    /// A DDL statement: its end says `exec-completed` on every engine (ledger 340).
+    ddl: bool,
+    // ## m3b-t19-confirm-tx (fix round 2, R1-I1)
+    /// The gate's effects say it commits an open transaction first (`COMMITS_FIRST`).
+    commits_first: bool,
+    // ## m3b-t24-exec-ui (named exception: the T19 carry's log lines)
+    /// The gate's verdict (`Unknown` for an M3a unit): a `TxThenConfirm` unit that fails in an
+    /// open transaction, and an `ImplicitCommit` unit that ends the user's transaction, each
+    /// say so in the log.
+    verdict: UnitVerdict,
 }
 
 impl UnitInfo {
@@ -78,6 +137,104 @@ impl UnitInfo {
     fn n(&self) -> u32 {
         self.id.ordinal.saturating_add(1)
     }
+
+    // ## m3b-t16-run-service
+    /// The view of `e`, a failure of this unit, its position mapped to the document.
+    fn error_view(&self, engine: DbmsKind, e: &ExecError) -> ErrorView {
+        match &self.offsets {
+            None => error_view(engine, e, &self.text, self.range.start, None),
+            Some(map) => {
+                let mut view = error_view(engine, e, &self.text, 0, None);
+                view.doc_offset = view.doc_offset.map(|at| map.to_doc(at));
+                view
+            }
+        }
+    }
+}
+
+// ## m3b-t16-run-service
+/// Whether `sql` is a DDL statement by its first word (ledger 340's rule: its end is
+/// `exec-completed` on every engine, whatever count the server reported).
+pub(crate) fn is_ddl(sql: &str) -> bool {
+    let word = first_word(sql.trim_start());
+    ["CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "COMMENT"]
+        .iter()
+        .any(|w| word.eq_ignore_ascii_case(w))
+}
+
+/// Whether `kind` speaks PostgreSQL's protocol (its Run as one is one implicit transaction).
+fn pg_wire(kind: DbmsKind) -> bool {
+    matches!(
+        kind,
+        DbmsKind::Postgres
+            | DbmsKind::Redshift
+            | DbmsKind::Cockroach
+            | DbmsKind::Yugabyte
+            | DbmsKind::Timescale
+    )
+}
+
+/// Where an eviction of a result is logged: the console's log and the result's unit.
+struct EvictTarget {
+    log: Weak<SessionLog>,
+    store: Weak<ResultStore>,
+    range: Range<usize>,
+    unit: UnitId,
+}
+
+/// The service's map from results to their logs, for the budget's eviction listener
+/// (`MemoryBudget::on_evicted`, Task 8: `LogMsg::Evicted`). O(1) per eviction; results whose
+/// store is gone are pruned as the map grows.
+#[derive(Default)]
+pub(crate) struct Evictions {
+    targets: Mutex<(HashMap<ResultId, EvictTarget>, usize)>,
+}
+
+impl Evictions {
+    fn register(&self, id: ResultId, target: EvictTarget) {
+        let mut g = lock(&self.targets);
+        let (map, prune_at) = &mut *g;
+        if map.len() >= (*prune_at).max(64) {
+            map.retain(|_, t| t.store.strong_count() > 0 && t.log.strong_count() > 0);
+            *prune_at = map.len().saturating_mul(2);
+        }
+        map.insert(id, target);
+    }
+
+    /// The budget evicted a result: its console's log says so (never blocks on the result).
+    pub(crate) fn on_evicted(&self, e: &Eviction) {
+        let target = {
+            let g = lock(&self.targets);
+            g.0.get(&e.result)
+                .map(|t| (t.log.upgrade(), t.range.clone(), t.unit))
+        };
+        if let Some((Some(log), range, unit)) = target {
+            log.append(
+                LogMsg::Evicted { rows: e.kept_rows },
+                Some(range),
+                Some(unit),
+            );
+        }
+    }
+}
+
+/// A unit's place in an M3b run (Task 16): what the service sends for it.
+#[derive(Debug, Clone)]
+pub(crate) struct PlannedUnit {
+    /// The text sent (`PreparedUnit::final_text`).
+    pub sent: Arc<str>,
+    pub offsets: OffsetMap,
+    pub run_as_one: bool,
+    /// The gate's effects say DDL.
+    pub ddl: bool,
+    // ## m3b-t19-confirm-tx (named exception, fix round 2, R1-I1)
+    /// The gate's effects say MySQL/MariaDB commit an open transaction before it.
+    pub commits_first: bool,
+    /// The user skipped it at the confirmation (R-M3-84): never sent.
+    pub skipped: bool,
+    // ## m3b-t24-exec-ui (named exception)
+    /// The gate item's verdict, as sent (`RunUnit::verdict`).
+    pub verdict: UnitVerdict,
 }
 
 struct ResultInfo {
@@ -101,6 +258,27 @@ struct State {
     last_publish: Option<tokio::time::Instant>,
     /// `RunEnded` was seen, or the run was ended as never started.
     ended: bool,
+    // ## m3b-t16-run-service
+    /// Each unit's `Result N` number, given with its first tab.
+    numbered: HashMap<u32, usize>,
+    /// Each unit's command tag (its first `UpdateCount`'s), for its end line.
+    tags: HashMap<u32, Arc<str>>,
+    /// The question the ticket's `choices` shows while the request number is unknown.
+    pending_choice: Option<RunEvent>,
+    /// The form of each unit's confirm-in-transaction question (`NeedsCommit::savepoint`).
+    commit_savepoint: HashMap<u32, bool>,
+    // ## m3b-t26-prod-unlock (fix round 1)
+    /// Units whose rollback the session reported not undone (`RunEvent::ConfirmNotUndone`).
+    not_undone: std::collections::HashSet<u32>,
+    // Fix round 1 (review m9)
+    /// The user's transaction status now: the session's at the run's start, then each
+    /// `TxChanged`.
+    tx_now: TxStatus,
+    /// The user's transaction status when each unit started.
+    tx_at_start: HashMap<u32, TxStatus>,
+    // ## m3b-t24-exec-ui (named exception)
+    /// The units whose confirm-in-transaction question was asked (`NeedsCommit`).
+    commit_asked: std::collections::HashSet<u32>,
 }
 
 /// The parts a run shares with its observer.
@@ -114,6 +292,14 @@ pub(crate) struct RunParts {
     pub log: Arc<SessionLog>,
     pub session: SessionHandle,
     pub fetch: FetchPolicy,
+    // ## m3b-t16-run-service
+    /// What the service sends per unit (an M3b run); `None`: M3a's run, the units as written.
+    pub planned: Option<Vec<PlannedUnit>>,
+    pub chain: AuditorChain,
+    pub confirm: Option<Arc<dyn ConfirmPort>>,
+    pub evictions: Arc<Evictions>,
+    /// Where the observer awaits the confirm port's answers (the service's runtime).
+    pub rt: Option<Handle>,
 }
 
 /// One run's observer.
@@ -129,6 +315,17 @@ pub(crate) struct ExecObserver {
     status: watch::Sender<RunStatus>,
     results: watch::Sender<Arc<[ResultTab]>>,
     state: Mutex<State>,
+    // ## m3b-t16-run-service
+    run: RunId,
+    chain: Mutex<AuditorChain>,
+    /// Units the user skipped at the confirmation (never sent).
+    skipped_by_user: u32,
+    choices: watch::Sender<Option<(u64, RunEvent)>>,
+    /// The run's request number, once it is sent.
+    seq: watch::Sender<Option<u64>>,
+    confirm: Option<Arc<dyn ConfirmPort>>,
+    evictions: Arc<Evictions>,
+    rt: Option<Handle>,
 }
 
 /// The receivers a ticket holds.
@@ -136,6 +333,8 @@ pub(crate) struct Receivers {
     pub status: watch::Receiver<RunStatus>,
     pub results: watch::Receiver<Arc<[ResultTab]>>,
     pub done: oneshot::Receiver<RunSummary>,
+    // ## m3b-t16-run-service
+    pub choices: watch::Receiver<Option<(u64, RunEvent)>>,
 }
 
 impl ExecObserver {
@@ -144,21 +343,62 @@ impl ExecObserver {
             .units
             .iter()
             .enumerate()
-            .map(|(i, u)| UnitInfo {
-                id: UnitId {
+            .map(|(i, u)| {
+                let id = UnitId {
                     run: p.run,
                     ordinal: u32::try_from(i).unwrap_or(u32::MAX),
-                },
-                text: u.text.clone(),
-                range: u.doc_range.clone(),
+                };
+                // ## m3b-t16-run-service: an M3b unit is described by what is sent for it.
+                match p.planned.as_ref().and_then(|v| v.get(i)) {
+                    Some(plan) => UnitInfo {
+                        id,
+                        text: plan.sent.clone(),
+                        range: u.doc_range.clone(),
+                        title: u.title.clone(),
+                        offsets: Some(plan.offsets.clone()),
+                        multi: true,
+                        run_as_one: plan.run_as_one,
+                        ddl: plan.ddl || is_ddl(&plan.sent),
+                        commits_first: plan.commits_first,
+                        verdict: plan.verdict,
+                    },
+                    None => UnitInfo {
+                        id,
+                        text: u.text.clone(),
+                        range: u.doc_range.clone(),
+                        title: u.title.clone(),
+                        offsets: None,
+                        multi: false,
+                        run_as_one: false,
+                        ddl: is_ddl(&u.text),
+                        commits_first: false,
+                        verdict: UnitVerdict::Unknown,
+                    },
+                }
             })
             .collect();
+        // ## m3b-t16-run-service: units the user skipped are `Skipped` from the start.
+        let skipped: Vec<bool> = (0..units.len())
+            .map(|i| {
+                p.planned
+                    .as_ref()
+                    .and_then(|v| v.get(i))
+                    .is_some_and(|u| u.skipped)
+            })
+            .collect();
+        let skipped_by_user =
+            u32::try_from(skipped.iter().filter(|s| **s).count()).unwrap_or(u32::MAX);
         let entries: Arc<[UnitStatusEntry]> = units
             .iter()
-            .map(|u| UnitStatusEntry {
+            .zip(&skipped)
+            .map(|(u, skipped)| UnitStatusEntry {
                 unit: u.id,
                 doc_range: u.range.clone(),
-                status: UnitStatus::Queued { position: u.n() },
+                status: if *skipped {
+                    UnitStatus::Skipped
+                } else {
+                    UnitStatus::Queued { position: u.n() }
+                },
             })
             .collect();
         let (status, status_rx) = watch::channel(RunStatus {
@@ -169,6 +409,18 @@ impl ExecObserver {
         });
         let (results, results_rx) = watch::channel::<Arc<[ResultTab]>>(Arc::from(Vec::new()));
         let (done_tx, done) = oneshot::channel();
+        let (choices, choices_rx) = watch::channel(None);
+        // Fix round 1 (review m9): the user's transaction as the run starts (Hacivat's own
+        // around a cursor or the guard's is not the user's).
+        let tx_now = {
+            let snap = p.session.state();
+            let tx = &snap.borrow().tx;
+            if tx.owner.is_hacivats() {
+                TxStatus::Idle
+            } else {
+                tx.status
+            }
+        };
         let observer = Arc::new(ExecObserver {
             console: p.console,
             engine: p.engine,
@@ -182,15 +434,117 @@ impl ExecObserver {
             results,
             state: Mutex::new(State {
                 done: Some(done_tx),
+                tx_now,
                 ..State::default()
             }),
+            run: p.run,
+            chain: Mutex::new(p.chain),
+            skipped_by_user,
+            choices,
+            seq: watch::Sender::new(None),
+            confirm: p.confirm,
+            evictions: p.evictions,
+            rt: p.rt,
         });
         let receivers = Receivers {
             status: status_rx,
             results: results_rx,
             done,
+            choices: choices_rx,
         };
         (observer, receivers)
+    }
+
+    // ## m3b-t16-run-service
+    /// The run was sent as request `seq`: a question asked before that is published now.
+    ///
+    /// The request number, the pending question and the `choices` publish change under the
+    /// state's lock, so a question the actor asks while the caller sets the number is never
+    /// lost nor published after the run moved on.
+    pub(crate) fn set_seq(&self, seq: u64) {
+        let mut st = lock(&self.state);
+        self.seq.send_replace(Some(seq));
+        if let Some(ev) = st.pending_choice.take() {
+            self.choices.send_replace(Some((seq, ev)));
+        }
+    }
+
+    /// The question `ev` waits on the ticket's `choices`.
+    fn publish_choice(&self, ev: &RunEvent) {
+        let mut st = lock(&self.state);
+        let seq = *self.seq.borrow();
+        match seq {
+            Some(seq) => {
+                self.choices.send_replace(Some((seq, ev.clone())));
+            }
+            None => st.pending_choice = Some(ev.clone()),
+        }
+    }
+
+    /// The run moved on: no question waits.
+    fn clear_choice(&self) {
+        let mut st = lock(&self.state);
+        st.pending_choice = None;
+        self.choices.send_if_modified(|c| c.take().is_some());
+    }
+
+    /// The user skipped units at the confirmation (R-M3-84): one line says how many.
+    pub(crate) fn log_skipped_by_user(&self) {
+        if self.skipped_by_user > 0 {
+            self.line(
+                LogMsg::SkippedByUser {
+                    n: self.skipped_by_user,
+                },
+                None,
+            );
+        }
+    }
+
+    /// Forwards a confirm-in-transaction question to the request's port (none: `RollBack`)
+    /// and its answer to the session, for exactly that question (review I1).
+    fn forward_commit(
+        &self,
+        unit: UnitId,
+        question: u64,
+        affected: Option<u64>,
+        deadline: std::time::Instant,
+        savepoint: bool,
+    ) {
+        let session = self.session.clone();
+        let mut seq = self.seq.subscribe();
+        let answer = self.confirm.as_ref().map(|port| {
+            port.commit_decision(CommitQuestion {
+                run: self.run,
+                unit,
+                question,
+                affected,
+                deadline,
+                savepoint,
+                // Confirm-in-transaction exists on production only (R-M3-55, P-M3b-30); the
+                // port, which belongs to its console, names the connection.
+                production: true,
+                connection: Arc::from(""),
+            })
+        });
+        let send = async move {
+            let answer = match answer {
+                Some(rx) => rx.await.unwrap_or(CommitAnswer::RollBack),
+                None => CommitAnswer::RollBack,
+            };
+            if let Ok(seq) = seq.wait_for(Option::is_some).await
+                && let Some(seq) = *seq
+            {
+                // The command is queued at the call; its reply is not needed.
+                drop(session.commit_decision(seq, unit, question, answer));
+            }
+        };
+        match &self.rt {
+            Some(rt) => {
+                rt.spawn(send);
+            }
+            // No runtime to await on: the session's deadline answers (D-014).
+            None => drop(send),
+        }
     }
 
     fn unit(&self, ordinal: u32) -> Option<&UnitInfo> {
@@ -295,7 +649,7 @@ impl ExecObserver {
             ExecErrorKind::ReadOnlyDenied(layer) => LogMsg::ReadOnlyDenied(layer),
             _ => LogMsg::Error {
                 n: u.n(),
-                view: error_view(self.engine, e, &u.text, u.range.start, None),
+                view: u.error_view(self.engine, e),
             },
         }
     }
@@ -345,35 +699,69 @@ impl ExecObserver {
                         exec_ms,
                         fetch_ms,
                     },
+                    // ## m3b-t16-run-service (ledger 340, PO): a DDL statement completed, on
+                    // every engine (MySQL and SQLite count 0 rows for it).
+                    Some(RowsOutcome::Affected(_)) if u.ddl => LogMsg::Completed { ms },
                     Some(RowsOutcome::Affected(rows)) => LogMsg::RowsAffected { rows: *rows, ms },
                     None => LogMsg::Completed { ms },
                 };
-                self.line(msg, Some(&u));
+                // ## m3b-t16-run-service (ledger 340): with the statement's command tag.
+                let tag = lock(&self.state).tags.remove(&unit.ordinal);
+                self.log
+                    .append_tagged(msg, tag, Some(u.range.clone()), Some(u.id));
             }
             UnitEnd::Failed(e) => {
-                let view = error_view(self.engine, e, &u.text, u.range.start, None);
+                let view = u.error_view(self.engine, e);
                 self.set_unit(unit.ordinal, true, UnitStatus::Failed(view));
                 self.line(self.failure(e, &u), Some(&u));
+                if matches!(e.kind, ExecErrorKind::Db | ExecErrorKind::Cancelled) {
+                    self.run_as_one_aborted(unit, &u);
+                }
             }
             UnitEnd::Cancelled => {
                 self.set_unit(unit.ordinal, true, UnitStatus::Cancelled);
                 if was_in_flight {
                     self.line(LogMsg::Cancelled { ms }, Some(&u));
+                    self.run_as_one_aborted(unit, &u);
                 }
             }
             UnitEnd::Skipped => self.set_unit(unit.ordinal, true, UnitStatus::Skipped),
         }
-        let tx_ended = {
+        let (tx_ended, asked, at_start) = {
             let mut st = lock(&self.state);
             if st.current == Some(unit.ordinal) {
                 st.current = None;
             }
-            st.tx_ended.take_if(|(_, o)| *o == unit.ordinal)
+            (
+                st.tx_ended.take_if(|(_, o)| *o == unit.ordinal),
+                st.commit_asked.contains(&unit.ordinal),
+                st.tx_at_start.get(&unit.ordinal).copied(),
+            )
         };
-        if let Some((from, _)) = tx_ended
-            && let Some(msg) = tx_line(&u.text, from, outcome)
+        // ## m3b-t24-exec-ui (named exception: the T19 carry). The session says these only in
+        // its tracing, so the log derives them from the gate's verdict:
+        // - a MySQL/MariaDB statement confirmed although it commits the open transaction did
+        //   commit it (`TxChanged` to idle while it ran): `exec-implicit-commit`, in place of
+        //   the generic "the transaction ended" line;
+        // - a confirm-in-transaction statement that failed or was cancelled in the user's open
+        //   transaction before any question was asked ran in the savepoint form, which rolled
+        //   back only it (P-M3b-5, T19 m9): `exec-confirm-statement-failed`. Not when the
+        //   transaction ended with it (the server's rollback line says that instead).
+        if let Some((from, _)) = tx_ended {
+            let line = if u.verdict == UnitVerdict::ImplicitCommit && from == TxStatus::InTx {
+                Some(LogMsg::ImplicitCommit)
+            } else {
+                tx_line(&u.text, from, outcome, may_commit(&u))
+            };
+            if let Some(msg) = line {
+                self.line(msg, Some(&u));
+            }
+        } else if u.verdict == UnitVerdict::TxThenConfirm
+            && !asked
+            && matches!(outcome, UnitEnd::Failed(_) | UnitEnd::Cancelled)
+            && at_start.is_some_and(|s| s != TxStatus::Idle)
         {
-            self.line(msg, Some(&u));
+            self.line(LogMsg::ConfirmStatementFailed, Some(&u));
         }
     }
 
@@ -411,6 +799,8 @@ impl ExecObserver {
                 server_text: None,
                 hint_id: None,
                 doc_offset: None,
+                // ## m3b-t25-results (named exception)
+                vendor_code: None,
             };
             self.set_unit(ordinal, true, UnitStatus::Failed(view));
             return;
@@ -492,9 +882,32 @@ impl ExecObserver {
         );
     }
 
+    // ## m3b-t16-run-service (T13 review M-2; fix round 1, review m9)
+    /// A PostgreSQL Run as one that failed or was cancelled: started outside a transaction of
+    /// the user's, it ran as one implicit transaction, so the statements before the failure
+    /// were rolled back with it; started inside one, nothing was rolled back yet, but the
+    /// user's transaction failed and waits for their rollback.
+    fn run_as_one_aborted(&self, unit: UnitId, u: &UnitInfo) {
+        if !u.run_as_one || !pg_wire(self.engine) {
+            return;
+        }
+        let at_start = lock(&self.state)
+            .tx_at_start
+            .get(&unit.ordinal)
+            .copied()
+            .unwrap_or(TxStatus::Idle);
+        let msg = if at_start == TxStatus::Idle {
+            LogMsg::RunAsOneRolledBack
+        } else {
+            LogMsg::RunAsOneTxFailed
+        };
+        self.line(msg, Some(u));
+    }
+
     /// The user's transaction moved: its end is announced when the unit in flight ends, by
     /// [`tx_line`] (a COMMIT can fail at commit time and still leave the session idle).
     fn on_tx_changed(&self, from: TxStatus, to: TxStatus) {
+        lock(&self.state).tx_now = to;
         if to != TxStatus::Idle || from == TxStatus::Idle {
             return;
         }
@@ -510,6 +923,17 @@ impl ExecObserver {
             st.ended = true;
             st.done.take()
         };
+        // ## m3b-t16-run-service: the units the user skipped belong to the run (R-M3-84), and
+        // what the chain's sinks had no room for is said once.
+        let summary = RunSummary {
+            total: summary.total.saturating_add(self.skipped_by_user),
+            skipped: summary.skipped.saturating_add(self.skipped_by_user),
+            ..summary
+        };
+        let dropped = lock(&self.chain).dropped();
+        if dropped > 0 {
+            self.line(LogMsg::Dropped { n: dropped }, None);
+        }
         self.update(true, |s| s.summary = Some(summary));
         if summary.total > 1 {
             self.line(LogMsg::Summary(summary), None);
@@ -520,6 +944,20 @@ impl ExecObserver {
     }
 }
 
+// ## m3b-t19-confirm-tx (fix round 2, R1-I1)
+/// Whether `u` may have committed the user's open transaction itself before it failed: a unit
+/// run as one (its own `COMMIT`), one the gate says commits first, a DDL, a statement on
+/// MySQL/MariaDB's implicit-commit list (read from every word of its text), or one whose first
+/// word Hacivat can't read (a leading comment, a parenthesis). Then a transaction that ended
+/// with the failure is never reported as rolled back.
+fn may_commit(u: &UnitInfo) -> bool {
+    u.run_as_one
+        || u.commits_first
+        || u.ddl
+        || first_word(u.text.trim_start()).is_empty()
+        || crate::implicit_commit::commits(&crate::implicit_commit::raw_words(&u.text))
+}
+
 /// What a unit whose statement `sql` moved the user's transaction from `from` to idle says
 /// about it, once the unit ended as `outcome`:
 /// - `COMMIT`/`END` that succeeded: committed (unless the transaction had failed, which
@@ -527,8 +965,13 @@ impl ExecObserver {
 /// - `ROLLBACK`/`ABORT`, or any of these four that failed: rolled back (the server ended the
 ///   transaction without committing it: a failed COMMIT, as a deferred constraint or a
 ///   serialization failure, rolls it back);
-/// - anything else (an implicit end, a loss, a cancel): nothing. Better silent than wrong.
-fn tx_line(sql: &str, from: TxStatus, outcome: &UnitEnd) -> Option<LogMsg> {
+/// - ## m3b-t19-confirm-tx (fix rounds 1 and 2): any other statement that failed or was
+///   cancelled inside the transaction: the server rolled it back (`TxRolledBackByServer`),
+///   unless the statement `may_commit` it first, which only says it ended
+///   (`TxEndedByStatement`);
+/// - anything else (an implicit end after a success, a loss): nothing. Better silent than
+///   wrong.
+fn tx_line(sql: &str, from: TxStatus, outcome: &UnitEnd, may_commit: bool) -> Option<LogMsg> {
     let word = first_word(sql);
     let is = |w: &str| word.eq_ignore_ascii_case(w);
     let commit = is("COMMIT") || is("END");
@@ -539,6 +982,16 @@ fn tx_line(sql: &str, from: TxStatus, outcome: &UnitEnd) -> Option<LogMsg> {
         }
         UnitEnd::Succeeded { .. } if commit || rollback => Some(LogMsg::TxRolledBack),
         UnitEnd::Failed(_) if commit || rollback => Some(LogMsg::TxRolledBack),
+        // ## m3b-t19-confirm-tx (named exception, fix rounds 1 and 2, I1, R1-I1): any other
+        // statement that failed or was cancelled while the user's open transaction ended: the
+        // server rolled the whole transaction back (a SQLite interrupt, a MySQL deadlock), unless
+        // the statement may have committed it first ([`may_commit`]); then the line only says
+        // the transaction ended and asks the user to check what was committed.
+        UnitEnd::Failed(_) | UnitEnd::Cancelled if from == TxStatus::InTx => Some(if may_commit {
+            LogMsg::TxEndedByStatement
+        } else {
+            LogMsg::TxRolledBackByServer
+        }),
         _ => None,
     }
 }
@@ -565,12 +1018,28 @@ impl RunObserver for ExecObserver {
             // The actor's runtime: the control spawns its reply waits there.
             rt: Handle::try_current().ok(),
             engine: self.engine,
-            unit: info,
+            unit: info.clone(),
         });
         let source = StoreSource::new(store.clone(), control, self.fetch);
+        // ## m3b-t16-run-service: the console's log hears of the result's eviction.
+        if let Some(u) = &info {
+            self.evictions.register(
+                id,
+                EvictTarget {
+                    log: Arc::downgrade(&self.log),
+                    store: Arc::downgrade(&store),
+                    range: u.range.clone(),
+                    unit: u.id,
+                },
+            );
+        }
         let tabs: Arc<[ResultTab]> = {
             let mut st = lock(&self.state);
-            let title = result_title(st.tabs.len() + 1);
+            // ## m3b-t16-run-service: the comment title, else `Result N` (N counts the run's
+            // units that opened a tab), ` (k)` for a further set (R-M3-66).
+            let next = st.numbered.len() + 1;
+            let n = *st.numbered.entry(unit.ordinal).or_insert(next);
+            let title = tab_title(info.as_ref().and_then(|u| u.title.as_deref()), n, ordinal);
             st.tabs.push(ResultTab {
                 key,
                 title,
@@ -593,9 +1062,27 @@ impl RunObserver for ExecObserver {
     }
 
     fn event(&self, ev: &RunEvent) {
+        // ## m3b-t16-run-service: the auditor chain first (R-M3-63).
+        lock(&self.chain).on_event(ev);
         match ev {
             RunEvent::UnitStarted { unit, at } => {
-                lock(&self.state).current = Some(unit.ordinal);
+                // ## m3b-t16-run-service: an answered question; a failed unit run again.
+                self.clear_choice();
+                if matches!(self.unit_status(unit.ordinal), Some(UnitStatus::Failed(_))) {
+                    let u = self.unit(unit.ordinal).cloned();
+                    self.line(
+                        LogMsg::Retried {
+                            n: unit.ordinal.saturating_add(1),
+                        },
+                        u.as_ref(),
+                    );
+                }
+                {
+                    let mut st = lock(&self.state);
+                    st.current = Some(unit.ordinal);
+                    let now = st.tx_now;
+                    st.tx_at_start.insert(unit.ordinal, now);
+                }
                 let (ordinal, since) = (unit.ordinal, *at);
                 self.update(true, |s| {
                     s.started.get_or_insert(since);
@@ -618,10 +1105,30 @@ impl RunObserver for ExecObserver {
                 exec_ms,
                 fetch_ms,
             } => self.on_result_ended(*result, *rows, *completeness, *exec_ms, *fetch_ms),
+            // ## m3b-t16-run-service (ledger 340): the first command tag goes on the unit's line.
+            RunEvent::UpdateCount {
+                unit,
+                command_tag: Some(tag),
+                ..
+            } => {
+                lock(&self.state)
+                    .tags
+                    .entry(unit.ordinal)
+                    .or_insert_with(|| Arc::from(tag.as_str()));
+            }
             RunEvent::UpdateCount { .. } => {}
             RunEvent::MoreResultSets { unit, skipped } => {
                 let u = self.unit(unit.ordinal).cloned();
-                self.line(LogMsg::MoreResultSets { skipped: *skipped }, u.as_ref());
+                // ## m3b-t16-run-service (R-M3-66): past a prepared unit's 100 sets.
+                let msg = if u.as_ref().is_some_and(|u| u.multi) {
+                    LogMsg::ResultSetLimit {
+                        total: MAX_RESULT_SETS.saturating_add(*skipped),
+                        limit: MAX_RESULT_SETS,
+                    }
+                } else {
+                    LogMsg::MoreResultSets { skipped: *skipped }
+                };
+                self.line(msg, u.as_ref());
             }
             RunEvent::CursorReleased {
                 result,
@@ -635,8 +1142,90 @@ impl RunObserver for ExecObserver {
                 outcome,
                 exec_ms,
                 fetch_ms,
-            } => self.on_unit_ended(*unit, outcome, *exec_ms, *fetch_ms),
-            RunEvent::RunEnded(summary) => self.on_run_ended(*summary),
+            } => {
+                self.clear_choice();
+                self.on_unit_ended(*unit, outcome, *exec_ms, *fetch_ms);
+            }
+            RunEvent::RunEnded(summary) => {
+                self.clear_choice();
+                self.on_run_ended(*summary);
+            }
+            // ## m3b-t16-run-service
+            RunEvent::NeedsChoice { .. } => self.publish_choice(ev),
+            RunEvent::NeedsCommit {
+                unit,
+                question,
+                affected,
+                deadline,
+                savepoint,
+            } => {
+                {
+                    let mut st = lock(&self.state);
+                    st.commit_savepoint.insert(unit.ordinal, *savepoint);
+                    // ## m3b-t24-exec-ui (named exception)
+                    st.commit_asked.insert(unit.ordinal);
+                }
+                self.publish_choice(ev);
+                self.forward_commit(*unit, *question, *affected, *deadline, *savepoint);
+            }
+            // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+            RunEvent::ConfirmNotUndone { unit } => {
+                lock(&self.state).not_undone.insert(unit.ordinal);
+            }
+            RunEvent::CommitDecided {
+                unit,
+                answer,
+                by_deadline,
+            } => {
+                self.clear_choice();
+                let u = self.unit(unit.ordinal).cloned();
+                let (savepoint, not_undone) = {
+                    let mut st = lock(&self.state);
+                    (
+                        st.commit_savepoint.remove(&unit.ordinal).unwrap_or(false),
+                        st.not_undone.remove(&unit.ordinal),
+                    )
+                };
+                let msg = match answer {
+                    // Never "undone" or "discarded" when the server said otherwise.
+                    CommitAnswer::RollBack if not_undone => LogMsg::ConfirmNotUndone,
+                    CommitAnswer::Commit => LogMsg::ConfirmCommitted { rows: None },
+                    CommitAnswer::RollBack => LogMsg::ConfirmRolledBack {
+                        by_deadline: *by_deadline,
+                        savepoint,
+                    },
+                };
+                self.line(msg, u.as_ref());
+            }
+            RunEvent::Notice { unit, notice } => {
+                let u = self.unit(unit.ordinal).cloned();
+                self.line(
+                    LogMsg::Notice {
+                        severity: notice.severity,
+                        code: notice.code.clone(),
+                        text: notice.text.clone(),
+                    },
+                    u.as_ref(),
+                );
+            }
+            RunEvent::NoticesDropped { unit, n } => {
+                let u = self.unit(unit.ordinal).cloned();
+                self.line(LogMsg::NoticesDropped { n: *n }, u.as_ref());
+            }
+            RunEvent::ClosedEarly { unit, report } => {
+                let u = self.unit(unit.ordinal).cloned();
+                // Fix round 1 (review m10): nothing to say when nothing more ran (the stop's
+                // own line says the rest did not run).
+                if report.statements_ran > 0 {
+                    self.line(
+                        LogMsg::ClosedEarly {
+                            ran: report.statements_ran,
+                            rest_not_run: report.rest_not_run,
+                        },
+                        u.as_ref(),
+                    );
+                }
+            }
         }
     }
 }
@@ -688,7 +1277,7 @@ impl ExecControl {
                 ExecErrorKind::ReadOnlyDenied(layer) => LogMsg::ReadOnlyDenied(layer),
                 _ => LogMsg::Error {
                     n: u.n(),
-                    view: error_view(engine, &e, &u.text, u.range.start, None),
+                    view: u.error_view(engine, &e),
                 },
             };
             log.append(msg, Some(u.range.clone()), Some(u.id));
@@ -716,6 +1305,66 @@ mod tests {
     //! that fails and leaves the connection idle, as PostgreSQL's deferred-constraint and
     //! serialization failures do).
 
+    // ## m3b-t19-confirm-tx (named exception, fix round 2, R1-I1)
+    /// A failed statement whose user transaction ended is reported as rolled back by the
+    /// server only when it cannot have committed the transaction itself.
+    #[test]
+    fn a_transaction_ended_by_a_statement_that_may_commit_is_never_called_rolled_back() {
+        let info = |text: &str, run_as_one: bool, commits_first: bool| super::UnitInfo {
+            id: hacivat_session::session::UnitId {
+                run: hacivat_session::session::RunId(1),
+                ordinal: 0,
+            },
+            text: text.into(),
+            range: 0..text.len(),
+            title: None,
+            offsets: None,
+            multi: false,
+            run_as_one,
+            ddl: super::is_ddl(text),
+            commits_first,
+            verdict: hacivat_session::session::UnitVerdict::Unknown,
+        };
+        let failed = super::UnitEnd::Failed(hacivat_session::session::ExecError::of(
+            hacivat_session::session::ExecErrorKind::Db,
+        ));
+        let line = |u: &super::UnitInfo| {
+            super::tx_line(&u.text, TxStatus::InTx, &failed, super::may_commit(u))
+        };
+        for u in [
+            info("LOCK TABLES missing WRITE", false, false),
+            info("GRANT SELECT ON t TO no_such_user", false, false),
+            info("ANALYZE TABLE t", false, false),
+            info(
+                "INSERT INTO t VALUES (1); COMMIT; INSERT INTO t VALUES ('bad')",
+                true,
+                false,
+            ),
+            info("SET autocommit = 1", false, false),
+            info("CREATE TABLE x (a int)", false, false),
+            info("/* c */ UPDATE t SET a = 1", false, false),
+            info("UPDATE t SET a = 1", false, true),
+        ] {
+            assert_eq!(
+                line(&u),
+                Some(super::LogMsg::TxEndedByStatement),
+                "{}",
+                u.text
+            );
+        }
+        let plain = info("UPDATE t SET a = 1", false, false);
+        assert_eq!(line(&plain), Some(super::LogMsg::TxRolledBackByServer));
+        assert_eq!(
+            super::tx_line(
+                &plain.text,
+                TxStatus::InTx,
+                &super::UnitEnd::Cancelled,
+                super::may_commit(&plain)
+            ),
+            Some(super::LogMsg::TxRolledBackByServer)
+        );
+    }
+
     use std::sync::Arc;
     use std::time::Instant;
 
@@ -734,7 +1383,7 @@ mod tests {
     use sql_split::exec_range::UnitKind;
 
     use super::{ExecObserver, RunParts};
-    use crate::log::SessionLog;
+    use crate::log::{LogMsg, SessionLog};
     use crate::status::UnitStatus;
     use crate::units::ExecUnit;
 
@@ -769,6 +1418,7 @@ mod tests {
                     doc_range: at..at + s.len(),
                     kind: UnitKind::Statement,
                     suspendable: s.starts_with("SELECT"),
+                    title: None,
                 };
                 at += s.len() + 2;
                 u
@@ -784,6 +1434,12 @@ mod tests {
             log: log.clone(),
             session,
             fetch: FetchPolicy::default(),
+            // ## m3b-t16-run-service
+            planned: None,
+            chain: crate::audit::AuditorChain::new(),
+            confirm: None,
+            evictions: Arc::default(),
+            rt: None,
         });
         (observer, log)
     }
@@ -969,6 +1625,169 @@ mod tests {
                 ),
                 "{reason:?}"
             );
+        }
+    }
+
+    // ## m3b-t16-run-service
+
+    /// A port that records the commit questions and answers each `Commit`.
+    #[derive(Debug, Default)]
+    struct Port {
+        asked: std::sync::Mutex<Vec<crate::gate::CommitQuestion>>,
+    }
+
+    impl crate::gate::ConfirmPort for Port {
+        fn confirm(
+            &self,
+            _q: crate::gate::ConfirmQuestion,
+        ) -> tokio::sync::oneshot::Receiver<crate::gate::ConfirmAnswer> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(crate::gate::ConfirmAnswer::Cancel);
+            rx
+        }
+        fn commit_decision(
+            &self,
+            q: crate::gate::CommitQuestion,
+        ) -> tokio::sync::oneshot::Receiver<hacivat_session::session::CommitAnswer> {
+            self.asked.lock().unwrap().push(q);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(hacivat_session::session::CommitAnswer::Commit);
+            rx
+        }
+    }
+
+    /// The observer's half of a confirm-in-transaction question, on a synthetic event (the
+    /// session's half, which emits `NeedsCommit` since Task 19, is tested in the session
+    /// crate; ## m3b-t24-exec-ui: the stale "until Task 19" note fixed): the question reaches
+    /// the port and the ticket's `choices` with the run's request number, and the run's
+    /// decision clears it and is logged.
+    #[tokio::test]
+    async fn needs_commit_reaches_the_confirm_port_and_answer_returns() {
+        let profile = Profile {
+            name: "orders".into(),
+            engine: DbmsKind::Postgres,
+            endpoint: ProfileEndpoint::Server {
+                host: "127.0.0.1".into(),
+                port: None,
+            },
+            auth: AuthProviderId::None,
+            retention: Retention::Never,
+            ..Profile::default()
+        };
+        let (session, _f) = fake_session(
+            tokio::runtime::Handle::current(),
+            FakeDriver::new(DbmsKind::Postgres),
+            profile,
+        )
+        .await;
+        let log = SessionLog::new();
+        let port = Arc::new(Port::default());
+        let (o, mut rx) = ExecObserver::new(RunParts {
+            console: 1,
+            run: RUN,
+            engine: DbmsKind::Postgres,
+            units: vec![ExecUnit {
+                text: "UPDATE t SET a = 1".into(),
+                doc_range: 0..18,
+                kind: UnitKind::Statement,
+                suspendable: false,
+                title: None,
+            }],
+            budget: MemoryBudget::new(1 << 30, 256 << 20),
+            generations: Arc::default(),
+            log: log.clone(),
+            session,
+            fetch: FetchPolicy::default(),
+            planned: None,
+            chain: crate::audit::AuditorChain::new(),
+            confirm: Some(port.clone()),
+            evictions: Arc::default(),
+            rt: Some(tokio::runtime::Handle::current()),
+        });
+        let deadline = Instant::now() + std::time::Duration::from_secs(300);
+        let ask = RunEvent::NeedsCommit {
+            unit: unit(0),
+            question: 7,
+            affected: Some(3),
+            deadline,
+            savepoint: true,
+        };
+        // Asked before the request number is known: published once it is.
+        o.event(&ask);
+        assert!(rx.choices.borrow().is_none());
+        o.set_seq(41);
+        assert_eq!(*rx.choices.borrow_and_update(), Some((41, ask.clone())));
+        for _ in 0..100 {
+            if !port.asked.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let asked = port.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(
+            (
+                asked[0].unit,
+                asked[0].question,
+                asked[0].affected,
+                asked[0].savepoint
+            ),
+            (unit(0), 7, Some(3), true)
+        );
+        assert_eq!(asked[0].deadline, deadline);
+        o.event(&RunEvent::CommitDecided {
+            unit: unit(0),
+            answer: hacivat_session::session::CommitAnswer::Commit,
+            by_deadline: false,
+        });
+        assert!(rx.choices.borrow().is_none());
+        assert_eq!(ids(&log), ["exec-confirm-committed"]);
+    }
+
+    /// A Run as one stopped early says what ran past the closed result (Task 13's report); a
+    /// report of nothing says nothing.
+    #[tokio::test]
+    async fn a_closed_early_report_is_logged() {
+        let (o, log) = observer_of(&["SELECT 1; DELETE FROM t"]).await;
+        for (ran, rest) in [(2, false), (1, true), (0, false), (0, true)] {
+            o.event(&RunEvent::ClosedEarly {
+                unit: unit(0),
+                report: hacivat_driver::CloseReport {
+                    statements_ran: ran,
+                    rest_not_run: rest,
+                },
+            });
+        }
+        let lines = log.lines();
+        let got: Vec<&LogMsg> = lines.iter().map(|l| &l.msg).collect();
+        assert_eq!(
+            got,
+            [
+                &LogMsg::ClosedEarly {
+                    ran: 2,
+                    rest_not_run: false
+                },
+                &LogMsg::ClosedEarly {
+                    ran: 1,
+                    rest_not_run: true
+                },
+            ]
+        );
+        assert_eq!(lines[0].source, Some(0..23));
+    }
+
+    /// A DDL statement's end is `exec-completed` whatever count its server gave (ledger 340).
+    #[test]
+    fn ddl_is_known_by_its_first_word() {
+        for ddl in [
+            "CREATE TABLE t (a int)",
+            "  alter table t add b int",
+            "DROP VIEW v",
+        ] {
+            assert!(super::is_ddl(ddl), "{ddl}");
+        }
+        for not in ["INSERT INTO t VALUES (1)", "CREATED", "SELECT 1"] {
+            assert!(!super::is_ddl(not), "{not}");
         }
     }
 }

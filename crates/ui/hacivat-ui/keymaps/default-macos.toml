@@ -481,6 +481,132 @@ chord = "cmd-."
 command = "exec.cancel"
 context = "Console"
 
+## m3b-t01b-seams
+# M3b and M3c (Task 1b; P-M3b-21): every new chord of both milestones. Each command is
+# registered since Task 1b with a stub body (a no-op) until its task fills it: multi-cursor (31),
+# folding (32, palette-only), find (33, 37), lines and history recall (34), grid model (35), views
+# and the value viewer (38), the grid menu (39), result tabs (25), the history dialog (27).
+# `editor.find` and `grid.find` stay unbound until Tasks 33 and 37 bind them (controller ruling
+# R5): a stub must not take the explorer filter's chord (PO Q10 shadowing) before its find bar
+# exists. `results.next_tab`/`prev_tab` live in the `Results` context (the
+# results tile's root); `ctrl-tab` stays Workspace tab switching. A second `exec.cancel` while
+# cancelling escalates (Task 23): same chord, no new row.
+
+[[binding]]
+chord = "cmd-alt-up"
+command = "editor.add_caret_above"
+context = "Editor"
+
+[[binding]]
+chord = "cmd-alt-down"
+command = "editor.add_caret_below"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-g"
+command = "editor.select_next_occurrence"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-cmd-g"
+command = "editor.select_all_occurrences"
+context = "Editor"
+
+[[binding]]
+chord = "cmd-u"
+command = "editor.undo_selection"
+context = "Editor"
+
+[[binding]]
+chord = "cmd-g"
+command = "editor.find_next"
+context = "Editor"
+
+[[binding]]
+chord = "cmd-shift-g"
+command = "editor.find_prev"
+context = "Editor"
+
+[[binding]]
+chord = "cmd-/"
+command = "editor.toggle_comment"
+context = "Editor"
+
+[[binding]]
+chord = "cmd-d"
+command = "editor.duplicate_line"
+context = "Editor"
+
+[[binding]]
+chord = "cmd-shift-k"
+command = "editor.delete_line"
+context = "Editor"
+
+[[binding]]
+chord = "alt-shift-up"
+command = "editor.move_line_up"
+context = "Editor"
+
+[[binding]]
+chord = "alt-shift-down"
+command = "editor.move_line_down"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-alt-up"
+command = "editor.history_prev"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-alt-down"
+command = "editor.history_next"
+context = "Editor"
+
+[[binding]]
+chord = "cmd-shift-space"
+command = "grid.select_column"
+context = "Grid"
+
+[[binding]]
+chord = "alt-up"
+command = "grid.grow_selection"
+context = "Grid"
+
+[[binding]]
+chord = "alt-down"
+command = "grid.shrink_selection"
+context = "Grid"
+
+[[binding]]
+chord = "cmd-l"
+command = "grid.goto_row"
+context = "Grid"
+
+[[binding]]
+chord = "shift-enter"
+command = "grid.open_value"
+context = "Grid"
+
+[[binding]]
+chord = "shift-f10"
+command = "grid.context_menu"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-pagedown"
+command = "results.next_tab"
+context = "Results"
+
+[[binding]]
+chord = "ctrl-pageup"
+command = "results.prev_tab"
+context = "Results"
+
+[[binding]]
+chord = "cmd-shift-h"
+command = "history.open"
+context = "Workspace"
+
 ## m3a-f4-ime
 # M3a F4 (E7 row 6b, named exception): Edit > Emoji & Symbols opens the system character
 # palette with AppKit's standard chord. macOS only; no binding fires during a composition (F15).
@@ -489,3 +615,120 @@ context = "Console"
 chord = "ctrl-cmd-space"
 command = "app.character_palette"
 context = "Workspace"
+
+## m3b-t33-find
+# M3c Task 33 (named exception; controller ruling R5): the find bar. The chord shadows the
+# Workspace explorer filter only while the editor (or its find bar) has the focus (P-M3b-21).
+
+[[binding]]
+chord = "cmd-f"
+command = "editor.find"
+context = "Editor"
+
+## m3b-t37-find-goto
+# M3c Task 37 (named exception; controller ruling R5, NOTES Plan notes Task 37): the grid find
+# bar and its own Select all occurrences row. cmd-f shadows the Workspace explorer filter only while a
+# grid (or its find field) has the focus (P-M3b-21), as the editor's does. Note on the Task 1b
+# comment above ("`editor.find` and `grid.find` stay unbound…"): both are bound now (Tasks 33
+# and 37); this file is append-only, so the note lives here.
+
+[[binding]]
+chord = "cmd-f"
+command = "grid.find"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-cmd-g"
+command = "grid.select_all_occurrences"
+context = "Grid"
+
+## m3c-po
+# PO decisions on M3c-08 and M3c-09 (2026-11-17; named exception to the append-only rule, Task
+# 1b's rows stay as they are). Fold and unfold take VS Code's chords (the PO's habit), remappable
+# like every row. Fold all and unfold all stay palette-only: VS Code's `cmd-k cmd-0` and
+# `cmd-k cmd-j` start with `cmd-k`, the command palette's chord here, which a two-key chord in
+# the editor would hold back. `cmd-e` is macOS's "Use Selection for Find" (it seeds the find
+# query and the find pasteboard; the bar stays closed); in the explorer `cmd-e` stays Edit
+# connection. `alt-shift-f` is VS Code's Format Document, reserved for M5's reformat (no other
+# row may take it; as an Option+Shift printable it needs M5's own ruling against the
+# `option_only_printables` check). Collision check: `tests/m3b_routing.rs`
+# (`m3c_po_chords_collide_with_nothing_in_any_preset`).
+
+[[binding]]
+chord = "alt-cmd-["
+command = "editor.fold"
+context = "Editor"
+
+[[binding]]
+chord = "alt-cmd-]"
+command = "editor.unfold"
+context = "Editor"
+
+[[binding]]
+chord = "cmd-e"
+command = "editor.use_selection_for_find"
+context = "Editor"
+
+## m4-t01b-seams
+# M4 (plan-m4 Task 1b, PO-Q10): the explorer tree and the DDL view. Defaults follow VS Code where
+# VS Code has an equivalent, and every row is remappable. The commands are registered disabled
+# until their tasks land (Tasks 24, 25, 27), so until then the chord passes through.
+# - `explorer.view_ddl` F12: VS Code's Go to Definition.
+# - `explorer.copy_qualified_name`: VS Code's Copy Path (`cmd-alt-c`).
+# - `explorer.collapse_all`: VS Code's `list.collapseAll`. The `Explorer` context is the tree's
+#   own focus, so the chord never reaches the filter field or the editor.
+# - `explorer.refresh` F5, in the `Explorer` context only (the file-manager and browser
+#   convention; VS Code has no default).
+# - `ddl_view.copy` has no row (review I1): the `DdlView` tab context stays on the stack whatever
+#   has the focus, so a copy chord there would take the standard copy from the explorer filter,
+#   the list and every text field. Inside the DDL text the read-only editor's `editor.copy` is
+#   the copy; the command is the toolbar's Copy button and a palette entry.
+# - Palette only: `explorer.open_data` (Enter on a table or view row is the tree's own activate;
+#   on a profile row Enter stays `connection.toggle_connect`), `explorer.expand_all_children`,
+#   `explorer.edit_scope`, `explorer.set_level.*`, `metadata.clear_cache`, `ddl_view.copy`.
+# - `explorer.focus_filter` also takes VS Code's `list.find` chord here, in the `Explorer`
+#   context; the Workspace `cmd-f` row stays.
+# No row takes `alt-shift-f` (M5's reformat) or starts with the command palette's chord.
+# Checks: `crates/app/hacivat-app/tests/m4_routing.rs` and the AltGr CI
+# (`crates/ui/hacivat-ui/tests/keymap_collisions.rs`).
+# ## m4-t14-explorer (fix round 2, ruling R-W2-12b; named exception in Task 1b's rows): the
+# rows below are in the `ExplorerTree` context, which the tree's focus carries on every row;
+# `Explorer` (the connection rows above) is pushed only while the cursor is on a profile root.
+# Chords unchanged; each command decides whether it applies to the cursor's row (R-W1-5).
+
+[[binding]]
+chord = "f12"
+command = "explorer.view_ddl"
+context = "ExplorerTree"
+
+[[binding]]
+chord = "cmd-alt-c"
+command = "explorer.copy_qualified_name"
+context = "ExplorerTree"
+
+[[binding]]
+chord = "cmd-left"
+command = "explorer.collapse_all"
+context = "ExplorerTree"
+
+[[binding]]
+chord = "cmd-alt-f"
+command = "explorer.focus_filter"
+context = "ExplorerTree"
+
+[[binding]]
+chord = "f5"
+command = "explorer.refresh"
+context = "ExplorerTree"
+
+## m4-t25-ddl-view
+# Named exception in Task 1b's rows (coordinator, T25 round 1): F5 reloads the DDL view while
+# its read-only text has the focus (design/m4-explorer surface 11 "Reload is also F5 in the DDL
+# view"). The `DdlViewCode` context is the text's own focus, never the tab's (`DdlView` is on
+# the stack whatever has the focus, review I1), so F5 stays the explorer's refresh in the tree
+# and reaches no other field.
+
+[[binding]]
+chord = "f5"
+command = "ddl_view.reload"
+context = "DdlViewCode"

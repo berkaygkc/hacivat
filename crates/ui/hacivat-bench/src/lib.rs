@@ -302,10 +302,15 @@ fn write_dump(
     run: &RunInfo,
 ) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let ts = SystemTime::now()
+    // ## m3c-t44 (named exception, fix round 2 M6): seconds, then the sub-second nanos and a
+    // per-process sequence number, so two dumps of one label never share a name.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let path = dir.join(format!("{label}-{os}-{ts}.json"));
+        .unwrap_or_default();
+    let (ts, nanos) = (now.as_secs(), now.subsec_nanos());
+    let path = dir.join(format!("{label}-{os}-{ts}-{nanos:09}-{seq}.json"));
     let values: Vec<String> = values_ms.iter().map(|v| format!("{v}")).collect();
     let num_or_unknown = |v: Option<f64>| match v {
         Some(v) if v.is_finite() => format!("{v}"),
@@ -415,6 +420,12 @@ impl LatencyProbe {
         latency_stats_of(&self.samples_ms)
     }
 
+    // ## m3c-t44 (named exception): the real-app B3 bench also reports p99 of the samples.
+    /// The recorded samples, in milliseconds, in the order they were taken.
+    pub fn samples_ms(&self) -> &[f64] {
+        &self.samples_ms
+    }
+
     pub fn dump_json(&self, dir: &Path, os: &str, run: &RunInfo) -> io::Result<PathBuf> {
         write_dump(dir, &self.label, os, "latency", &self.samples_ms, run)
     }
@@ -498,6 +509,24 @@ mod tests {
         let s = p.stats();
         assert_eq!(s.samples, 1);
         assert!((s.max_ms - 5.0).abs() < 0.01);
+    }
+
+    // ## m3c-t44
+    #[test]
+    fn latency_samples_are_readable_in_order() {
+        let t0 = Instant::now();
+        let mut p = LatencyProbe::new("b3-typing");
+        assert!(p.samples_ms().is_empty());
+        for ms in [7, 3] {
+            p.mark_input(t0);
+            p.on_frame(t0 + Duration::from_millis(ms));
+        }
+        let s = p.samples_ms();
+        assert_eq!(s.len(), 2);
+        assert!(
+            (s[0] - 7.0).abs() < 0.01 && (s[1] - 3.0).abs() < 0.01,
+            "{s:?}"
+        );
     }
 
     #[test]
@@ -590,6 +619,10 @@ mod tests {
         ] {
             assert!(body.contains(field), "{field} missing in {body}");
         }
+        // ## m3c-t44: two dumps of one label in the same second keep both files.
+        let again = r.dump_json(&dir, "macos", &run).unwrap();
+        assert_ne!(again, path);
+        assert!(path.exists() && again.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

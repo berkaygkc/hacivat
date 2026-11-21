@@ -22,6 +22,8 @@ fn line(seq: u64, msg: LogMsg) -> LogLine {
         msg,
         source: None,
         unit: None,
+        // ## m3b-t16-run-service (named exception)
+        tag: None,
     }
 }
 
@@ -109,6 +111,8 @@ fn copy_invariant_is_iso_and_ascii_under_turkish() {
             },
             source: Some(0..8),
             unit: None,
+            // ## m3b-t16-run-service (named exception)
+            tag: None,
         },
         LogLine {
             seq: 1,
@@ -117,6 +121,8 @@ fn copy_invariant_is_iso_and_ascii_under_turkish() {
             msg: LogMsg::Error { n: 3, view },
             source: None,
             unit: None,
+            // ## m3b-t16-run-service (named exception)
+            tag: None,
         },
     ];
     let text = copy_invariant(&lines);
@@ -147,16 +153,27 @@ fn durations_and_sizes_are_one_message_with_the_unit_inside() {
         let m = duration_message(ms);
         (m.id, m.args)
     };
-    assert_eq!(dur(0), ("exec-dur-lt-ms", vec![]));
+    // ## m3b-t16-run-service (named exception; PO, ledger 535: one duration rule for the log,
+    // the gutter and the status bar: milliseconds under a second, else seconds with two
+    // decimals, cut as the status bar cuts them).
+    assert_eq!(dur(0), ("exec-dur-ms", vec![("ms", 0)]));
     assert_eq!(dur(340), ("exec-dur-ms", vec![("ms", 340)]));
-    assert_eq!(dur(2_000), ("exec-dur-s", vec![("s", 2)]));
-    assert_eq!(dur(2_340), ("exec-dur-s-ms", vec![("s", 2), ("ms", 340)]));
-    assert_eq!(dur(180_000), ("exec-dur-min", vec![("min", 3)]));
-    assert_eq!(dur(185_400), ("exec-dur-min-s", vec![("min", 3), ("s", 5)]));
+    assert_eq!(dur(999), ("exec-dur-ms", vec![("ms", 999)]));
+    assert_eq!(dur(1_000), ("exec-dur-seconds", vec![("seconds", 100)]));
+    assert_eq!(dur(2_349), ("exec-dur-seconds", vec![("seconds", 234)]));
     assert_eq!(
-        dur(2 * 3_600_000 + 1_000),
-        ("exec-dur-min-s", vec![("min", 120), ("s", 1)])
+        dur(185_400),
+        ("exec-dur-seconds", vec![("seconds", 18_540)])
     );
+    assert_eq!(
+        duration_message(2_349).decimal("seconds").as_deref(),
+        Some("2.34")
+    );
+    assert_eq!(
+        duration_message(1_005).decimal("seconds").as_deref(),
+        Some("1.00")
+    );
+    assert_eq!(duration_message(340).decimal("ms"), None);
     let size = |b| {
         let m = size_message(b);
         (m.id, m.args)
@@ -253,6 +270,8 @@ fn all_log_msgs() -> Vec<LogMsg> {
         server_text: None,
         hint_id: None,
         doc_offset: None,
+        // ## m3b-t25-results (named exception)
+        vendor_code: None,
     };
     let mut all = vec![
         LogMsg::RowsRetrieved {
@@ -283,6 +302,8 @@ fn all_log_msgs() -> Vec<LogMsg> {
             server_text: None,
             hint_id: None,
             doc_offset: None,
+            // ## m3b-t25-results (named exception)
+            vendor_code: None,
         }),
     ];
     for reason in every_close_reason() {
@@ -342,7 +363,8 @@ fn other_ids() -> Vec<&'static str> {
         ]
         .map(uncertain_message_id),
     );
-    ids.extend([RefuseReason::CopyStream, RefuseReason::RunAsOne].map(RefuseReason::fluent_id));
+    // ## m3b-t15-gate: `RunAsOne` is gone (R-M3-60).
+    ids.extend([RefuseReason::CopyStream].map(RefuseReason::fluent_id));
     ids
 }
 
@@ -396,11 +418,12 @@ fn every_log_id_exists_in_en_and_tr() {
         rolled_back: true,
         idle_ms: 20_000,
     };
+    // ## m3b-t16-run-service (named exception): a configured span, not a run's time.
     assert_eq!(
         idle.args(),
         vec![
             ("rows", LogArg::U64(9)),
-            ("duration", LogArg::DurationMs(20_000))
+            ("duration", LogArg::SpanMs(20_000))
         ]
     );
 }

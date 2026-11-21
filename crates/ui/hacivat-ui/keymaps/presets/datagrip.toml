@@ -54,3 +54,71 @@ chord = "ctrl-f2"
 command = "exec.cancel"
 context = "Console"
 platforms = ["windows", "linux"]
+
+## m3b-t01b-seams
+# DataGrip's chords where M3b's defaults differ (Task 1b). Fix round 2 (I1, I2): a chord that
+# works in M3a is never given to a stub. DataGrip's Delete line (cmd-backspace on macOS, today
+# `editor.delete_to_line_start`) is bound by Task 34, and Extend/Shrink selection in a grid
+# (ctrl-w/ctrl-shift-w on Windows and Linux, today `workspace.close_tab` through the Grid) by
+# Task 35, each as a named exception. Every other M3b chord is the default's.
+
+[[binding]]
+chord = "ctrl-alt-shift-j"
+command = "editor.select_all_occurrences"
+context = "Editor"
+platforms = ["windows", "linux"]
+
+# Accepted, documented AltGr shadowing (Task 1b): on TR-F AltGr+Shift+J types `<`, so there
+# DataGrip's Select all occurrences types the character instead; the command stays in the
+# palette.
+
+[[accepted_altgr_shadowing]]
+chord = "ctrl-alt-shift-j"
+layout = "tr-f"
+produces = "<"
+
+## m3c-t35-grid
+# Named exception (Task 35, as the Task 1b note above asks): DataGrip's Extend / Shrink selection
+# in a grid on Windows and Linux. With a grid innermost, ctrl-w grows the selection instead of
+# closing the tab (P-M3b-21 / Q10 accept the shadowing); elsewhere ctrl-w still closes the tab.
+# Ctrl-only letter chords: no AltGr collision on any CI layout (TR-Q, TR-F, DE, FR, PL).
+
+[[binding]]
+chord = "ctrl-w"
+command = "grid.grow_selection"
+context = "Grid"
+platforms = ["windows", "linux"]
+
+[[binding]]
+chord = "ctrl-shift-w"
+command = "grid.shrink_selection"
+context = "Grid"
+platforms = ["windows", "linux"]
+
+## m3b-t34-editor
+# Named exception (Task 34, as the Task 1b note above asks): DataGrip's Delete line on macOS,
+# cmd-backspace. Under this preset it replaces `editor.delete_to_line_start` on that chord in the
+# editor; the default preset keeps it. Windows and Linux keep the default's ctrl-y (DataGrip's
+# own). A cmd chord: no AltGr collision on any CI layout.
+
+[[binding]]
+chord = "cmd-backspace"
+command = "editor.delete_line"
+context = "Editor"
+platforms = ["macos"]
+
+## m3c-po
+# PO decision on M3c-10 (2026-11-17; named exception): the grid's Select all occurrences takes
+# DataGrip's own chord on Windows and Linux, as the editor's does above (it replaces the
+# default's `ctrl-shift-l` in the grid under this preset). macOS keeps the default's
+# `ctrl-cmd-g` in both, DataGrip's own. On TR-F the chord types `<` through AltGr: the same
+# accepted shadowing as the editor's row (listed once above, per chord). PO M3c-08 and M3c-09:
+# this preset inherits the default's fold, unfold and (macOS) `cmd-e` rows; no DataGrip chord
+# sits on them here. DataGrip's own fold chords (`cmd--`/`cmd-=`, `ctrl--`/`ctrl-=`) are not
+# added.
+
+[[binding]]
+chord = "ctrl-alt-shift-j"
+command = "grid.select_all_occurrences"
+context = "Grid"
+platforms = ["windows", "linux"]

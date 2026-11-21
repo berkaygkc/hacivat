@@ -35,6 +35,8 @@ use sql_split::exec_range::{
     CandidateKind, CaretOrSelection, ExecPolicy, RangeResolution, TextRange, TextSize, UnitKind,
     UnitSpan, resolve,
 };
+// ## m3b-t24-exec-ui (named exception)
+use sql_split::exec_range::{InsidePolicy, SelectionPolicy};
 use sql_split::{DocSnapshot, SplitMode};
 
 type Ranges = SmallVec<[Range<usize>; 2]>;
@@ -68,6 +70,8 @@ pub(crate) struct PreviewKey {
     pub at: ExecAt,
     pub action: ExecAction,
     pub remembered: Option<CandidateKind>,
+    // ## m3b-t24-exec-ui (named exception)
+    pub policy: RunPolicy,
 }
 
 /// Run's policy for `action` (the same table as `hacivat_exec::policy_for`): Run is D-011's
@@ -78,6 +82,47 @@ pub(crate) fn policy_for(action: ExecAction) -> ExecPolicy {
         ExecAction::Execute2 => ExecPolicy::largest(),
         ExecAction::Execute3 => ExecPolicy::whole_script(),
     }
+}
+
+// ## m3b-t24-exec-ui (named exception: CHOOSE-06 and R-M3-60)
+/// What a caret inside a statement runs with Run (CHOOSE-06's "Customize…": the console's
+/// choice, kept until it closes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InsideChoice {
+    /// D-011: offer the candidates (one runs directly).
+    #[default]
+    Ask,
+    Smallest,
+    Largest,
+    Whole,
+}
+
+/// A console's run policy (CHOOSE-06): what a caret inside a statement runs with Run, and how
+/// a selection runs with any Run. The default is M3a's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RunPolicy {
+    pub inside: InsideChoice,
+    /// A selection runs as one unit (R-M3-60), else as separate statements.
+    pub selection_as_one: bool,
+}
+
+/// The one policy table Run and its preview share: Run 2 and Run 3 keep their own carets
+/// (largest, whole script); Run takes the console's inside choice; every Run takes the
+/// console's selection choice. With the default `custom` this is [`policy_for`].
+pub fn run_policy(action: ExecAction, custom: &RunPolicy) -> ExecPolicy {
+    let mut p = policy_for(action);
+    if action == ExecAction::Execute1 {
+        p.inside = match custom.inside {
+            InsideChoice::Ask => InsidePolicy::Ask,
+            InsideChoice::Smallest => InsidePolicy::SmallestStatement,
+            InsideChoice::Largest => InsidePolicy::LargestStatement,
+            InsideChoice::Whole => InsidePolicy::WholeScript,
+        };
+    }
+    if custom.selection_as_one {
+        p.selection = SelectionPolicy::AsOne;
+    }
+    p
 }
 
 fn size(n: usize) -> TextSize {
@@ -116,12 +161,15 @@ fn ranges(units: &[UnitSpan]) -> Ranges {
 // `COPY t FROM STDIN;` without its rows). Which unit is such a `COPY` is the splitter's
 // answer (`UnitKind::CopyStream`), the one Run refuses by (`hacivat_exec::units`), so the
 // preview and Run read one analysis and never disagree on a `COPY`.
-fn sent(units: &[UnitSpan]) -> bool {
-    units.iter().all(|u| {
-        !matches!(
-            u.kind,
-            UnitKind::CopyIn { .. } | UnitKind::CopyStream | UnitKind::Verbatim
-        )
+// ## m3b-t24-exec-ui (named exception: R-M3-60): `sent(units)` became `sent_as(units, as_one)`.
+/// Under a policy whose selection runs as one, a verbatim selection (the one unit
+/// `SelectionPolicy::AsOne` resolves to) is then sent as one unit, exactly as Run sends it
+/// (`hacivat_exec::units`: a `Verbatim` unit runs as one). `COPY` streams never are.
+fn sent_as(units: &[UnitSpan], as_one: bool) -> bool {
+    units.iter().all(|u| match u.kind {
+        UnitKind::CopyIn { .. } | UnitKind::CopyStream => false,
+        UnitKind::Verbatim => as_one,
+        UnitKind::Statement | UnitKind::Subquery | UnitKind::Batch => true,
     })
 }
 
@@ -163,8 +211,31 @@ pub fn preview_of(
     connected: bool,
     remembered: Option<CandidateKind>,
 ) -> ExecPreview {
+    preview_with(
+        doc,
+        at,
+        action,
+        connected,
+        remembered,
+        &RunPolicy::default(),
+    )
+}
+
+// ## m3b-t24-exec-ui (named exception: CHOOSE-06, R-M3-60)
+/// [`preview_of`] under the console's run policy `custom` ([`run_policy`], the table Run uses):
+/// with a selection run as one, the verbatim selection previews as one runnable unit.
+pub fn preview_with(
+    doc: &DocSnapshot,
+    at: &ExecAt,
+    action: ExecAction,
+    connected: bool,
+    remembered: Option<CandidateKind>,
+    custom: &RunPolicy,
+) -> ExecPreview {
     let points = points(at);
-    let policy = policy_for(action);
+    let policy = run_policy(action, custom);
+    let as_one = policy.selection == SelectionPolicy::AsOne;
+    let sent = |units: &[UnitSpan]| sent_as(units, as_one);
     let run = resolve(
         doc,
         &points,
@@ -208,6 +279,29 @@ pub fn preview_of(
         }
         _ => 0,
     };
+    // ## m3c-t34-editor (named exception; NOTES surface 9): a selection sent as one unit says
+    // how many statements it holds ("as one · 2 statements"): the units the same selection
+    // would run as one by one.
+    let as_one = match (&run, state) {
+        (RangeResolution::Units(u), PreviewState::Units)
+            if as_one && u.len() == 1 && u[0].kind == UnitKind::Verbatim =>
+        {
+            let mut separate = policy;
+            separate.selection = SelectionPolicy::AsSeparate;
+            match resolve(
+                doc,
+                &points,
+                &separate,
+                SplitMode::Execution,
+                None,
+                remembered,
+            ) {
+                RangeResolution::Units(s) => u32::try_from(s.len()).unwrap_or(u32::MAX),
+                _ => 0,
+            }
+        }
+        _ => 0,
+    };
     ExecPreview {
         ranges,
         state: if connected {
@@ -216,5 +310,6 @@ pub fn preview_of(
             PreviewState::NoConnection
         },
         choices,
+        as_one,
     }
 }

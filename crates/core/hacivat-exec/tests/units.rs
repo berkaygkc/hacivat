@@ -13,6 +13,8 @@ use hacivat_exec::{
     OracleLane, RefuseReason, Resolution, RunAction, SplitOracle, resolve_units,
     resolve_units_with, uncertain_message_id, units_for_candidate,
 };
+// ## m3b-t15-gate
+use hacivat_exec::{expect_for, protocol_for};
 use hacivat_proto::DbmsKind;
 use sql_dialect::{DialectId, PgWireFlavor, ServerVersion};
 use sql_split::exec_range::{Candidate, CandidateKind, UnitKind, UnitSpan};
@@ -359,14 +361,26 @@ fn verbatim(doc: &DocSnapshot, range: (u32, u32)) -> Candidate {
     }
 }
 
+// ## m3b-t15-gate: replaces M3a's `a_verbatim_unit_is_refused_until_m3b` (R-M3-60).
 #[test]
-fn a_verbatim_unit_is_refused_until_m3b() {
+fn a_verbatim_unit_runs_as_one() {
     let doc = pg_doc("SELECT 1; SELECT 2;");
-    assert!(units_for_candidate(&doc, &verbatim(&doc, (0, 18))).is_empty());
-    assert_eq!(
-        RefuseReason::RunAsOne.fluent_id(),
-        "exec-run-as-one-unsupported"
-    );
+    let units_of_selection = units_for_candidate(&doc, &verbatim(&doc, (0, 18)));
+    assert_eq!(units_of_selection.len(), 1);
+    let u = &units_of_selection[0];
+    assert_eq!(&*u.text, "SELECT 1; SELECT 2");
+    assert_eq!(u.doc_range, 0..18);
+    assert_eq!(u.kind, UnitKind::Verbatim);
+    // One unit of several statements: never a cursor, sent with the simple protocol and
+    // classified as a script.
+    assert!(!u.suspendable);
+    assert_eq!(protocol_for(u), hacivat_driver::Protocol::Simple);
+    assert_eq!(expect_for(u), hacivat_exec::Expect::Script);
+    // A statement unit keeps the defaults.
+    let one = resolve_doc("SELECT 1;", caret(3), RunAction::Execute1);
+    let s = &units(&one)[0];
+    assert_eq!(protocol_for(s), hacivat_driver::Protocol::Extended);
+    assert_eq!(expect_for(s), hacivat_exec::Expect::SingleStatement);
 }
 
 #[test]
@@ -467,8 +481,8 @@ fn the_sql_context_follows_the_engine_the_version_and_the_probe() {
     assert!(!needs_reprobe("SETTINGS"));
 }
 
-/// Controller ruling (from Task 24): a run holding any `CopyIn` or `Verbatim` unit is refused as
-/// a whole — nothing is sent, the units before it included — and a `CopyIn` unit alone is refused
+/// Controller ruling (from Task 24): a run holding any `CopyIn` unit (M3a: or `Verbatim`; since
+/// M3b Task 15 a verbatim unit runs as one, R-M3-60) is refused as a whole — nothing is sent, the units before it included — and a `CopyIn` unit alone is refused
 /// too (M3b). Task 24's preview marks these units uncertain; Run never sends around them.
 #[test]
 fn a_run_holding_copy_in_or_verbatim_is_refused_whole() {
@@ -493,7 +507,8 @@ fn a_run_holding_copy_in_or_verbatim_is_refused_whole() {
             reason: RefuseReason::CopyStream
         }
     );
-    // A candidate of several units, one of them verbatim, runs nothing.
+    // ## m3b-t15-gate: a candidate of several units, one of them verbatim, now runs both (a
+    // verbatim unit runs as one, R-M3-60).
     let plain = pg_doc("SELECT 1; SELECT 2;");
     let mixed = Candidate {
         kind: CandidateKind::WholeScript,
@@ -513,7 +528,14 @@ fn a_run_holding_copy_in_or_verbatim_is_refused_whole() {
         ],
         label: String::new(),
     };
-    assert!(units_for_candidate(&plain, &mixed).is_empty());
+    let both = units_for_candidate(&plain, &mixed);
+    assert_eq!(
+        both.iter().map(|u| (&*u.text, u.kind)).collect::<Vec<_>>(),
+        [
+            ("SELECT 1", UnitKind::Statement),
+            ("SELECT 2", UnitKind::Verbatim)
+        ]
+    );
     // And a candidate whose first unit is the COPY's data-bearing statement.
     let copy = Candidate {
         kind: CandidateKind::WholeScript,

@@ -1,0 +1,276 @@
+# owner: Task 10 (the interim backend's known gaps, P-M3b-8; MySQL, MariaDB and SQLite).
+#
+# Every place where the interim backend (`sqlparser` 0.64.0 + our lexer pre-scan) reads a form
+# differently from the server, each with the class the backend answers today. The test
+# `known_gaps_each_have_a_test` (sql-safety/tests/interim.rs) classifies every row in every
+# dialect it names and asserts `expect`; a row of kind `accepted-by-sqlparser` must also never
+# be `Read`. Kinds:
+#
+# - `false-denial`: an honest read the backend calls `Unknown` (safe direction; the read corpus
+#   leaves it out). Owner: our own MySQL/SQLite parsers (M5) or a `sqlparser` bump.
+# - `stricter`: a non-read the backend calls `Unknown` where `alg/13` names a narrower class.
+# - `accepted-by-sqlparser`: MariaDB-only syntax `sqlparser` parses (or reads as a comment)
+#   as MySQL; the pre-scan, not a parse failure, keeps it from being `Read` (P-M3b-8).
+# - `rejected-by-sqlparser`: MariaDB-only syntax `sqlparser` rejects; the pre-scan still names
+#   its effect, so the report says why.
+#
+# No gap is permissive (fix round 1, I3): the information-disclosure `SHOW`s are Unknown, and
+# `tests/interim.rs` (`information_disclosure_is_unknown`) asserts their denial.
+#
+# `dialects` take `mysql`, `mariadb`, `sqlite`. `expect` is a `CoarseClass` name.
+version = 1
+
+# --- false denials -------------------------------------------------------------------------
+
+[[gap]]
+id = "mysql-mod-operator"
+kind = "false-denial"
+dialects = ["mysql", "mariadb"]
+sql = "SELECT n FROM numbers WHERE n MOD 2 = 0"
+expect = "Unknown"
+note = "sqlparser 0.64 has no infix MOD operator for MySqlDialect (ParseError); MOD(n, 2) and n % 2 read."
+
+[[gap]]
+id = "mysql-table-statement"
+kind = "false-denial"
+dialects = ["mysql"]
+sql = "TABLE customers"
+expect = "Unknown"
+note = "MySQL 8.0.19 TABLE statement: sqlparser rejects it for MySqlDialect."
+
+[[gap]]
+id = "mysql-cast-charset"
+kind = "false-denial"
+dialects = ["mysql", "mariadb"]
+sql = "SELECT CAST(full_name AS CHAR(10) CHARACTER SET utf8mb4) FROM customers"
+expect = "Unknown"
+note = "CAST … AS CHAR(n) CHARACTER SET: sqlparser rejects the charset clause; CONVERT(x USING cs) reads."
+
+[[gap]]
+id = "mysql-explain-extended"
+kind = "false-denial"
+dialects = ["mysql", "mariadb"]
+sql = "EXPLAIN EXTENDED SELECT 1"
+expect = "Unknown"
+note = "EXTENDED/PARTITIONS are outside the narrow EXPLAIN grammar (P-M3b-35); MySQL 8 removed them."
+
+[[gap]]
+id = "mysql-explain-for-connection"
+kind = "false-denial"
+dialects = ["mysql"]
+sql = "EXPLAIN FOR CONNECTION 3"
+expect = "Unknown"
+note = "Not a statement EXPLAIN classifies; the narrow grammar leaves it a parse error."
+
+[[gap]]
+id = "sqlite-table-valued-functions"
+kind = "false-denial"
+dialects = ["sqlite"]
+sql = "SELECT key, value FROM json_each('[1, 2]')"
+expect = "Unknown"
+note = "json_each/json_tree/pragma_* table functions are not on Task 3's reviewed SQLite allowlist: FnUnknown."
+
+[[gap]]
+id = "sqlite-pragma-table-function"
+kind = "false-denial"
+dialects = ["sqlite"]
+sql = "SELECT name FROM pragma_table_info('customers')"
+expect = "Unknown"
+note = "As above: the PRAGMA table function is a call the allowlist does not name."
+
+[[gap]]
+id = "sqlite-isnull-postfix"
+kind = "false-denial"
+dialects = ["sqlite"]
+sql = "SELECT id FROM customers WHERE city ISNULL"
+expect = "Unknown"
+note = "sqlparser rejects SQLite's ISNULL/NOTNULL postfix operators; IS NULL and NOT NULL read."
+
+[[gap]]
+id = "sqlite-materialized-cte"
+kind = "false-denial"
+dialects = ["sqlite"]
+sql = "WITH x AS MATERIALIZED (SELECT 1) SELECT * FROM x"
+expect = "Unknown"
+note = "sqlparser rejects AS [NOT] MATERIALIZED for SQLiteDialect."
+
+[[gap]]
+id = "sqlite-pragma-eq-introspection"
+kind = "false-denial"
+dialects = ["sqlite"]
+sql = "PRAGMA table_info = customers"
+expect = "Admin"
+note = "The guard's authorizer allows this form (same arguments as table_info(t)); the PRAGMA grammar reads every `=` form as a setter."
+
+[[gap]]
+id = "mysql-checksum-and-help"
+kind = "false-denial"
+dialects = ["mysql", "mariadb"]
+sql = "CHECKSUM TABLE customers"
+expect = "Unknown"
+note = "CHECKSUM TABLE (and HELP 'topic', CHECK TABLE) are not statements sqlparser reads for MySqlDialect."
+
+[[gap]]
+id = "mariadb-rows-examined"
+kind = "false-denial"
+dialects = ["mariadb"]
+sql = "SELECT * FROM customers LIMIT ROWS EXAMINED 100"
+expect = "Unknown"
+note = "MariaDB's LIMIT ROWS EXAMINED: sqlparser rejects it."
+
+[[gap]]
+id = "lone-carriage-return"
+kind = "false-denial"
+dialects = ["mysql", "mariadb", "sqlite"]
+sql = "SELECT 1\rFROM customers"
+expect = "Unknown"
+note = "sqlparser counts only LF as a line break, LineIndex also a lone CR: the span mapping is refused (ParserDisagreement)."
+
+# --- stricter than alg/13 --------------------------------------------------------------------
+
+[[gap]]
+id = "mysql-lock-in-share-mode"
+kind = "stricter"
+dialects = ["mysql", "mariadb"]
+sql = "SELECT * FROM customers LOCK IN SHARE MODE"
+expect = "Unknown"
+note = "alg/13: LOCK_ROWS (Write). sqlparser rejects the clause; the pre-scan adds LOCK_ROW."
+
+[[gap]]
+id = "mysql-into-outfile"
+kind = "stricter"
+dialects = ["mysql", "mariadb"]
+sql = "SELECT * FROM customers INTO OUTFILE '/tmp/x'"
+expect = "Unknown"
+note = "alg/13: Admin (file). sqlparser rejects INTO OUTFILE/DUMPFILE; the pre-scan adds EXTERNAL_IO."
+
+[[gap]]
+id = "mysql-load-data"
+kind = "stricter"
+dialects = ["mysql", "mariadb"]
+sql = "LOAD DATA INFILE '/tmp/x' INTO TABLE customers"
+expect = "Unknown"
+note = "alg/13: WRITE_DATA + EXTERNAL_FILE_READ. sqlparser rejects it for MySqlDialect; the pre-scan adds both."
+
+[[gap]]
+id = "sqlite-vacuum-into"
+kind = "stricter"
+dialects = ["sqlite"]
+sql = "VACUUM INTO '/tmp/copy.db'"
+expect = "Unknown"
+note = "alg/13 test 31: Admin. sqlparser rejects VACUUM INTO; the pre-scan adds EXTERNAL_IO."
+
+[[gap]]
+id = "mysql-user-variable-assignment"
+kind = "stricter"
+dialects = ["mysql", "mariadb"]
+sql = "SELECT @v := 1"
+expect = "Session"
+note = "alg/13 S-13 allows an in-statement assignment on read-only with a flag; M3b has no USER_VAR_ASSIGN flag, so SESSION_STATE denies on read-only."
+
+# --- MariaDB-only syntax (P-M3b-8) ------------------------------------------------------------
+
+[[gap]]
+id = "mariadb-nextval-function"
+kind = "accepted-by-sqlparser"
+dialects = ["mariadb"]
+sql = "SELECT NEXTVAL(s)"
+expect = "Write"
+note = "sqlparser parses NEXTVAL(s) as an ordinary call; Task 3's MariaDB deny list and the pre-scan make it SEQUENCE."
+
+[[gap]]
+id = "mariadb-setval-function"
+kind = "accepted-by-sqlparser"
+dialects = ["mariadb"]
+sql = "SELECT SETVAL(s, 5)"
+expect = "Write"
+note = "As NEXTVAL: SEQUENCE."
+
+[[gap]]
+id = "mariadb-lastval-function"
+kind = "accepted-by-sqlparser"
+dialects = ["mariadb"]
+sql = "SELECT LASTVAL(s)"
+expect = "Write"
+note = "LASTVAL only reads, but P-M3b-8 lists it with the sequence functions: SEQUENCE (safe direction)."
+
+[[gap]]
+id = "mysql-nextval-function"
+kind = "accepted-by-sqlparser"
+dialects = ["mysql"]
+sql = "SELECT NEXTVAL(s)"
+expect = "Unknown"
+note = "On MySQL NEXTVAL is no builtin: a user function (FnUnknown), and the pre-scan still names SEQUENCE."
+
+[[gap]]
+id = "mariadb-insert-returning"
+kind = "accepted-by-sqlparser"
+dialects = ["mariadb"]
+sql = "INSERT INTO customers (email, full_name) VALUES ('x', 'y') RETURNING id"
+expect = "Write"
+note = "sqlparser parses RETURNING on MySqlDialect; the statement is a write and the pre-scan adds WRITE_DATA."
+
+[[gap]]
+id = "mariadb-delete-returning"
+kind = "accepted-by-sqlparser"
+dialects = ["mariadb"]
+sql = "DELETE FROM visits WHERE visit_id = 10 RETURNING page"
+expect = "Write"
+note = "As INSERT … RETURNING."
+
+[[gap]]
+id = "mariadb-executable-comment"
+kind = "accepted-by-sqlparser"
+dialects = ["mysql"]
+sql = "SELECT 1 /*M!100000 , SLEEP(1) */ FROM DUAL"
+expect = "Read"
+note = "On MySQL, /*M! is an ordinary comment to the server and to sqlparser; the backend still reads its body as a threshold view and sets EXEC_COMMENT (the gate's Unknown), so a MariaDB server behind a MySQL profile is not trusted."
+
+[[gap]]
+id = "mariadb-executable-comment-on-mariadb"
+kind = "accepted-by-sqlparser"
+dialects = ["mariadb"]
+sql = "SELECT 1 /*M!100000 , SLEEP(1) */ FROM DUAL"
+expect = "Read"
+note = "On MariaDB the body is a threshold view: SLEEP is FnDenylisted and EXEC_COMMENT is set (D-058 denies on read-only)."
+
+[[gap]]
+id = "mariadb-next-value-for"
+kind = "rejected-by-sqlparser"
+dialects = ["mariadb", "mysql"]
+sql = "SELECT NEXT VALUE FOR s"
+expect = "Unknown"
+note = "sqlparser rejects it on MySqlDialect (ParseError); the pre-scan names SEQUENCE."
+
+[[gap]]
+id = "mariadb-previous-value-for"
+kind = "rejected-by-sqlparser"
+dialects = ["mariadb", "mysql"]
+sql = "SELECT PREVIOUS VALUE FOR s"
+expect = "Unknown"
+note = "As NEXT VALUE FOR: SEQUENCE named by the pre-scan."
+
+[[gap]]
+id = "mariadb-system-time"
+kind = "rejected-by-sqlparser"
+dialects = ["mariadb", "mysql"]
+sql = "SELECT * FROM customers FOR SYSTEM_TIME AS OF '2026-01-01'"
+expect = "Unknown"
+note = "System-versioned tables: the pre-scan makes FOR SYSTEM_TIME Unknown (ParserDisagreement) whatever sqlparser does."
+
+[[gap]]
+id = "mariadb-begin-not-atomic"
+kind = "rejected-by-sqlparser"
+dialects = ["mariadb"]
+sql = "BEGIN NOT ATOMIC SELECT 1; END"
+expect = "Unknown"
+note = "Anonymous compound statement: ProceduralCode from the pre-scan."
+
+[[gap]]
+id = "mariadb-oracle-mode"
+kind = "rejected-by-sqlparser"
+dialects = ["mariadb"]
+sql = "SELECT 1"
+sql_mode = "ORACLE"
+expect = "Unknown"
+note = "sql_mode=ORACLE changes MariaDB's grammar; no interim parser reads it (UnsupportedDialect)."

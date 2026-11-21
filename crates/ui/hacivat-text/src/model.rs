@@ -159,6 +159,45 @@ pub struct EditorModel {
     observers: Vec<Box<dyn TransactionObserver>>,
     queue: ObserverQueue,
     next_bracket: u32,
+    // ## m3c-t31-multi: the selection-only history and the commit count.
+    selections: SelectionHistory,
+    commits: u64,
+}
+
+// ## m3c-t31-multi
+/// Selection changes kept for `undo_selection`.
+const SELECTION_HISTORY_LEN: usize = 100;
+/// The most ranges the kept selections hold together (100 sets of 1,000 carets).
+const SELECTION_HISTORY_RANGES: usize = 100_000;
+
+/// The selection-only history (`EditorModel::undo_selection`, Task 31): the selection before
+/// each selection-only commit, with the version it is for, mapped through the change log when
+/// it is restored (a set the log no longer reaches is dropped). Text commits add nothing, so a
+/// typing burst is never many entries; the stacks survive them.
+#[derive(Debug, Default)]
+struct SelectionHistory {
+    undo: VecDeque<(u64, SelectionSet)>,
+    redo: Vec<(u64, SelectionSet)>,
+    /// A step is being applied: its own commit is not recorded.
+    stepping: bool,
+    // ## m3c-t31-multi (fix round 1, M2)
+    /// A gesture is open (a pointer drag): `Some(true)` once its first change was recorded,
+    /// so the rest of the gesture adds nothing.
+    gesture: Option<bool>,
+}
+
+impl SelectionHistory {
+    fn push_undo(&mut self, entry: (u64, SelectionSet)) {
+        self.undo.push_back(entry);
+        let mut ranges: usize = self.undo.iter().map(|(_, s)| s.ranges().len()).sum();
+        while self.undo.len() > SELECTION_HISTORY_LEN
+            || (ranges > SELECTION_HISTORY_RANGES && self.undo.len() > 1)
+        {
+            if let Some((_, s)) = self.undo.pop_front() {
+                ranges -= s.ranges().len();
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for EditorModel {
@@ -241,6 +280,8 @@ impl EditorModel {
             observers: Vec::new(),
             queue: ObserverQueue::default(),
             next_bracket: 0,
+            selections: SelectionHistory::default(),
+            commits: 0,
         }
     }
 
@@ -347,6 +388,18 @@ impl EditorModel {
             &self.buffer,
         );
         let before = std::mem::replace(&mut self.selection, after);
+        // ## m3c-t31-multi: a selection-only change is a step of the selection history.
+        self.commits += 1;
+        if !changed && !self.selections.stepping && before != self.selection {
+            // One gesture is one entry (fix round 1, M2): its first change only.
+            if self.selections.gesture != Some(true) {
+                self.selections.push_undo((self.version, before.clone()));
+            }
+            if self.selections.gesture.is_some() {
+                self.selections.gesture = Some(true);
+            }
+            self.selections.redo.clear();
+        }
         match action {
             Action::Undo => self.history.finish_undo(&old),
             Action::Redo => self.history.finish_redo(&old),
@@ -519,5 +572,80 @@ impl EditorModel {
     /// Adds an observer; observers run in the order added, after every commit.
     pub fn add_observer(&mut self, o: Box<dyn TransactionObserver>) {
         self.observers.push(o);
+    }
+
+    // ## m3c-t31-multi (fix round 1, M2)
+    /// Opens a gesture (a pointer press and its drag): until [`EditorModel::end_selection_gesture`]
+    /// its selection changes are one entry of the selection history, the selection before the
+    /// first of them. Opening one ends any still open.
+    pub fn begin_selection_gesture(&mut self) {
+        self.selections.gesture = Some(false);
+    }
+
+    /// Ends the open gesture (nothing when none is open).
+    pub fn end_selection_gesture(&mut self) {
+        self.selections.gesture = None;
+    }
+
+    // ## m3c-t31-multi
+    /// How many commits the model made (text or selection): a cheap key for state derived from
+    /// the selection (the status bar's selected count).
+    pub fn commit_count(&self) -> u64 {
+        self.commits
+    }
+
+    /// `undo_selection` (`redo`: `redo_selection`): the newest stored selection, mapped to the
+    /// current text, becomes the selection in a selection-only commit; the current one goes on
+    /// the other stack. Entries the change log no longer reaches, or equal to the current
+    /// selection, are skipped.
+    pub(crate) fn step_selection(&mut self, redo: bool) -> Option<Committed> {
+        loop {
+            let (at, sel) = if redo {
+                self.selections.redo.pop()?
+            } else {
+                self.selections.undo.pop_back()?
+            };
+            let Some(sel) = self.selection_at_now(at, sel) else {
+                continue;
+            };
+            if sel == self.selection {
+                continue;
+            }
+            let current = (self.version, self.selection.clone());
+            if redo {
+                self.selections.push_undo(current);
+            } else {
+                self.selections.redo.push(current);
+            }
+            let tr = Transaction {
+                changes: ChangeSet::identity(self.buffer.len_bytes()),
+                selection: Some(sel),
+                ann: Annotations {
+                    user_event: UserEvent::Select,
+                    add_to_history: true,
+                    // A selection-only commit: no undo group reads its time.
+                    time: Instant::now(),
+                    origin: Origin::User,
+                },
+            };
+            self.selections.stepping = true;
+            let done = self.dispatch(tr);
+            self.selections.stepping = false;
+            return done.ok();
+        }
+    }
+
+    /// `sel`, a selection of version `at`, mapped through every change since; `None` when the
+    /// log no longer holds them.
+    fn selection_at_now(&self, at: u64, sel: SelectionSet) -> Option<SelectionSet> {
+        if at == self.version {
+            return Some(sel);
+        }
+        let mapped = self
+            .log
+            .descs_since(at)?
+            .fold(sel, |s, d| s.map(d))
+            .snapped_to_graphemes(&self.buffer);
+        Some(fit_selection(mapped, &self.buffer))
     }
 }

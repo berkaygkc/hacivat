@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d31778f0d7572411661b4e5ee82bac564048a0717dcaccb592f06b17b83f7406 # shrinks to body = [If([(Not(Not(Version(">=", 10))), [If([(Or(Flag("mariadb"), And(Level("<", Names), Version(">=", 10))), [Marker])], None)])], None)], joinable = false

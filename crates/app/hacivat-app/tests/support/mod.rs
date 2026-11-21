@@ -37,11 +37,52 @@ use hacivat_ui::text::{RenderedText, TextRegistry};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::keymap::{ContextStack, KeyboardLayoutId, KeymapPlatform};
 
-/// Temp roots kept alive for the app's lifetime (the shell writes `workspace.json` there).
-#[derive(Default)]
-struct TempRoots(Vec<tempfile::TempDir>);
+/// What a test leaves to clean up when its thread ends: the core runtimes of its apps, then its
+/// temp roots (the shells' homes, fixture folders).
+///
+/// Not an app global: GPUI's test harness never drops the app a `VisualTestContext::into_mut`
+/// holds, so a root kept there outlived the test (R-W5-15). A thread-local is dropped when the
+/// test's thread ends, after the harness's teardown. The runtimes stop first: a worker still
+/// opening the history or saving a profile would re-create a removed root.
+struct TestEnd {
+    runtimes: Vec<std::sync::Arc<hacivat_session::runtime::CoreRuntime>>,
+    roots: Vec<tempfile::TempDir>,
+}
 
-impl Global for TempRoots {}
+impl Drop for TestEnd {
+    fn drop(&mut self) {
+        for rt in self.runtimes.drain(..) {
+            rt.shutdown(TEARDOWN_BUDGET);
+        }
+        // `roots` drops after this body: each folder is removed.
+    }
+}
+
+thread_local! {
+    static TEST_END: RefCell<TestEnd> = const {
+        RefCell::new(TestEnd {
+            runtimes: Vec::new(),
+            roots: Vec::new(),
+        })
+    };
+}
+
+/// A fresh temp folder that lives until the test's thread ends ([`TestEnd`]).
+pub fn temp_root() -> std::path::PathBuf {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().to_path_buf();
+    TEST_END.with(|t| t.borrow_mut().roots.push(dir));
+    path
+}
+
+/// Stops the app's core runtime (if it has one) when the test's thread ends, before the temp
+/// roots are removed ([`TestEnd`]).
+pub fn stop_core_runtime_at_test_end(cx: &App) {
+    if let Some(m) = cx.try_global::<hacivat_app::connections::ConnectionsModel>() {
+        let rt = m.core_runtime().clone();
+        TEST_END.with(|t| t.borrow_mut().runtimes.push(rt));
+    }
+}
 
 /// Text inputs built by test tabs, newest last.
 #[derive(Default)]
@@ -51,9 +92,7 @@ impl Global for TestInputs {}
 
 /// A shell in `lang` over a fresh temp root.
 pub fn shell(cx: &mut TestAppContext, lang: &str) -> &'static mut VisualTestContext {
-    let root = tempfile::tempdir().expect("temp dir");
-    let path = root.path().to_path_buf();
-    cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
+    let path = temp_root();
     shell_at(cx, &path, lang)
 }
 
@@ -71,9 +110,7 @@ pub fn shell_at(
 
 /// The `--vf-demo` shell: the harman production capsule, in English.
 pub fn shell_demo(cx: &mut TestAppContext) -> &'static mut VisualTestContext {
-    let root = tempfile::tempdir().expect("temp dir");
-    let path = root.path().to_path_buf();
-    cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
+    let path = temp_root();
     let window = boot(cx, &path, "en", Some(DemoCapsule::harman()));
     finish(cx, window)
 }
@@ -116,6 +153,7 @@ fn boot(
 }
 
 fn finish(cx: &mut TestAppContext, window: AnyWindowHandle) -> &'static mut VisualTestContext {
+    cx.read(stop_core_runtime_at_test_end);
     let vcx = VisualTestContext::from_window(window, cx).into_mut();
     vcx.run_until_parked();
     vcx
@@ -201,6 +239,45 @@ pub fn registry_frame(vcx: &VisualTestContext) -> Vec<RenderedText> {
             r
         })
         .collect()
+}
+
+// ## m4-t33-flaky3
+/// What a frame that renders every view again draws (`window.refresh()`), isolation marks
+/// stripped, read right after that frame. [`registry_frame`] reads the last frame, and a frame
+/// renders only the views that changed: a cached view it reuses (the console's editor,
+/// `hacivat_ui_editor::a11y::embed`) stays on screen but records none of its texts in it. Use
+/// this to ask what the window shows now, not whether the app repainted. Nothing runs between
+/// the frame and the read, so a later frame that reuses the cached view again cannot replace
+/// it.
+pub fn full_frame(vcx: &VisualTestContext) -> Vec<RenderedText> {
+    vcx.run_until_parked();
+    // The update draws the dirty window before it returns (GPUI's test mode).
+    in_window(vcx, |window, _| window.refresh());
+    vcx.cx
+        .read(|cx| {
+            cx.try_global::<TextRegistry>()
+                .map(|r| r.frame.clone())
+                .unwrap_or_default()
+        })
+        .into_iter()
+        .map(|mut r| {
+            r.text = strip(&r.text).into();
+            r
+        })
+        .collect()
+}
+
+// ## m4-t33d (T33 flaky3 follow-up)
+/// Brings the window up to date with every view rendered in its last frame: the app settles, a
+/// frame renders every view again, the app settles on what that frame started, and a last
+/// frame renders every view again. Nothing runs after that frame, so a getter that reads the
+/// last frame ([`registry_frame`], `debug_bounds`) sees every view, not a frame that reused a
+/// cached one (see [`full_frame`]). The `redraw()` helpers of the test targets use it.
+pub fn redraw_full(vcx: &VisualTestContext) {
+    vcx.run_until_parked();
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+    in_window(vcx, |window, _| window.refresh());
 }
 
 /// Texts drawn by `file` (a path suffix such as `hacivat-ui/src/toast.rs`), in paint order.
@@ -347,6 +424,93 @@ pub fn context_stack(vcx: &VisualTestContext) -> ContextStack {
 /// The focused element's handle.
 pub fn focused(vcx: &VisualTestContext) -> Option<FocusHandle> {
     in_window(vcx, |window, cx| window.focused(cx))
+}
+
+// ## m4-t33d (R-T33-1)
+/// The focus handle of the element drawn as `selector` (a `button-<id>`, whose own handle a
+/// test cannot name): a press focuses it, and the release lands outside the window, so nothing
+/// clicks. The focus stays there.
+pub fn handle_of(vcx: &mut VisualTestContext, selector: &'static str) -> FocusHandle {
+    let at = vcx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("`{selector}` is drawn"))
+        .center();
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+    vcx.simulate_mouse_up(
+        gpui::point(gpui::px(-100.0), gpui::px(-100.0)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    focused(vcx).unwrap_or_else(|| panic!("`{selector}` takes the focus"))
+}
+
+// ## m4-t33d-fr1 (ruling R-T33d-5)
+/// Presses and releases `key` on the focused element (a Button clicks on the key-up, and
+/// `simulate_keystrokes` sends only the key-down).
+pub fn press_key(vcx: &mut VisualTestContext, key: &'static str) {
+    let keystroke = gpui::Keystroke::parse(key).expect("a keystroke");
+    vcx.simulate_keystrokes(key);
+    vcx.simulate_event(gpui::KeyUpEvent { keystroke });
+    vcx.run_until_parked();
+}
+
+// ## m4-t33d-fr1 (ruling R-T33d-5)
+/// Asserts that the focus is on `handle` (`name` in the message).
+#[track_caller]
+pub fn assert_focus_on(vcx: &VisualTestContext, name: &str, handle: &FocusHandle) {
+    assert_eq!(
+        focused(vcx).as_ref(),
+        Some(handle),
+        "the focus is on {name}"
+    );
+}
+
+// ## m4-t33d (R-T33-1)
+/// The window's Tab order: every stop Tab visits from nothing focused, once each, in order
+/// (GPUI's `focus_next` over the last frame). The focus ends on the last stop.
+pub fn tab_order(vcx: &mut VisualTestContext) -> Vec<FocusHandle> {
+    vcx.run_until_parked();
+    in_window(vcx, |window, cx| {
+        window.blur(cx);
+        let mut seen = Vec::new();
+        for _ in 0..512 {
+            window.focus_next(cx);
+            match window.focused(cx) {
+                Some(h) if seen.contains(&h) => break,
+                Some(h) => seen.push(h),
+                None => break,
+            }
+        }
+        seen
+    })
+}
+
+// ## m4-t33d (R-T33-1)
+/// Asserts that `stops` come one right after the other in `order` (Tab from each is the next).
+#[track_caller]
+pub fn assert_consecutive(order: &[FocusHandle], stops: &[(&str, &FocusHandle)]) {
+    let at = |(name, h): &(&str, &FocusHandle)| {
+        order
+            .iter()
+            .position(|o| o == *h)
+            .unwrap_or_else(|| panic!("{name} is not a Tab stop"))
+    };
+    for pair in stops.windows(2) {
+        assert_eq!(
+            at(&pair[1]),
+            at(&pair[0]) + 1,
+            "Tab from {} is {}",
+            pair[0].0,
+            pair[1].0
+        );
+    }
+}
+
+/// Asserts that `handle` is not in `order`.
+#[track_caller]
+pub fn assert_not_a_stop(order: &[FocusHandle], name: &str, handle: &FocusHandle) {
+    assert!(!order.contains(handle), "{name} is not a Tab stop");
 }
 
 /// The fill of the largest quad the last frame painted (the root's background).
@@ -748,9 +912,7 @@ pub fn shell_with_connections_prepared(
     use hacivat_driver::fake::FakeDriver;
     use hacivat_proto::DbmsKind;
 
-    let root = tempfile::tempdir().expect("temp dir");
-    let path = root.path().to_path_buf();
-    cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
+    let path = temp_root();
     let paths = LocalPaths::under(&path);
     paths.ensure_dirs().expect("test dirs");
     prepare(&paths);
@@ -948,9 +1110,7 @@ pub fn shell_with_fake_backend(
     use hacivat_driver::{Driver as _, DriverRegistry};
     use hacivat_proto::DbmsKind;
 
-    let root = tempfile::tempdir().expect("temp dir");
-    let path = root.path().to_path_buf();
-    cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
+    let path = temp_root();
     let paths = LocalPaths::under(&path);
     paths.ensure_dirs().expect("test dirs");
     prepare(&paths);
@@ -1137,14 +1297,10 @@ pub fn settle_until<F: FnMut() -> bool>(
 
 // ## m2b-t20-ssh
 
-/// A fresh temp folder kept for the app's lifetime (with the shells' own roots), for fixture
-/// files the core runtime reads later (a `~/.ssh/config`).
-pub fn temp_dir(vcx: &VisualTestContext) -> std::path::PathBuf {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().to_path_buf();
-    vcx.cx
-        .update(|cx| cx.default_global::<TempRoots>().0.push(dir));
-    path
+/// A fresh temp folder kept until the test ends (with the shells' own roots, [`temp_root`]),
+/// for fixture files the core runtime reads later (a `~/.ssh/config`).
+pub fn temp_dir(_vcx: &VisualTestContext) -> std::path::PathBuf {
+    temp_root()
 }
 
 // ## m3a-t01b-seams
@@ -1359,4 +1515,685 @@ pub fn answers_probe_with(
     fake.tracks_transactions()
         .exec(exec)
         .queries(queries.into_iter().chain(extra).collect())
+}
+
+// ## m3c-t41-chrome (fix round 1, m8)
+
+/// As [`register_test_console`], but the console's tab is opened and the Settings tab shown
+/// again in the same update, so the console is attached (its results take the display of the
+/// moment) while its host has not drawn a frame yet.
+pub fn register_test_console_unseen(
+    vcx: &VisualTestContext,
+    profile: hacivat_proto::ProfileId,
+    session: hacivat_session::session::SessionHandle,
+) -> hacivat_app::console::ConsoleId {
+    use hacivat_app::console::{ConsoleId, ConsoleState, Consoles};
+    use hacivat_app::shell::TabKind;
+    let ws = workspace(vcx);
+    let id = in_window(vcx, |window, cx| {
+        let tab = ws
+            .update(cx, |ws, cx| ws.open_console_tab(Some(profile), window, cx))
+            .expect("a console tab opens");
+        let Some(TabKind::Console { n, .. }) = ws.read(cx).tab_kind(tab) else {
+            panic!("the new tab is a console");
+        };
+        let sql_service = hacivat_sql_editor::SqlLanguageService::new();
+        let service: Rc<dyn hacivat_ui_editor::LanguageService> = sql_service.clone();
+        // Test data, not a product label.
+        let label: hacivat_ui::text::TextFn = Rc::new(|_: &App| gpui::SharedString::from("SQL"));
+        let editor = cx.new(|cx| {
+            hacivat_ui_editor::EditorView::new(
+                hacivat_ui_editor::DocId(u64::from(tab.0)),
+                "",
+                hacivat_ui_editor::EditorConfig::default(),
+                service,
+                label,
+                window,
+                cx,
+            )
+        });
+        let log = hacivat_exec::SessionLog::new();
+        let results = cx.new(|_| hacivat_app::results::ConsoleResults::new(log.clone()));
+        let id = Consoles::register(
+            cx,
+            ConsoleState {
+                id: ConsoleId(0),
+                tab,
+                n,
+                profile: Some(profile),
+                client: hacivat_session::session::ClientId::DEFAULT,
+                session: Some(session),
+                editor: Some(editor.clone()),
+                results: Some(results),
+                sql: None,
+                log,
+                service: Some(sql_service),
+            },
+        );
+        hacivat_app::exec_ui::attach(id, &editor, window, cx);
+        ws.update(cx, |ws, cx| ws.open_registered_tab("settings", window, cx));
+        id
+    });
+    vcx.run_until_parked();
+    id
+}
+
+// ## m4-t14-explorer
+/// Catalog snapshots for the explorer tests (`hacivat-meta`'s `fixture` is behind its
+/// `test-support` feature, which this crate's tests do not enable): namespaces built through
+/// the model's public API, published as data (Task 1a's `CatalogSnapshot` fields).
+pub mod catalogs {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use hacivat_meta::name::{DialectId, FoldRule, IdentCtx, NameClass};
+    use hacivat_meta::namespace::{NsMeta, Subtree};
+    use hacivat_meta::props::{ColumnProps, GenericProps, Props, TableProps};
+    use hacivat_meta::snapshot::ContainerKey;
+    use hacivat_meta::{
+        CatalogSnapshot, Level, LoadState, NamespaceSnapshot, NsKey, Obj, ObjFlags, ObjectKind,
+        ServerFacts, ServerId,
+    };
+    use hacivat_proto::DbmsKind;
+
+    fn dialect(d: DbmsKind) -> DialectId {
+        match d {
+            DbmsKind::MySql => DialectId::MySql,
+            DbmsKind::MariaDb => DialectId::MariaDb,
+            DbmsKind::Sqlite => DialectId::Sqlite,
+            _ => DialectId::Postgres,
+        }
+    }
+
+    /// Table `name` (server id `oid`) with `columns` `(name, type)`, ordinals from 1.
+    pub fn table(name: &str, oid: Option<u32>, columns: &[(&str, &str)]) -> Subtree {
+        let mut root = Obj::new(ObjectKind::Table, name)
+            .with_props(Props::Table(Arc::new(TableProps::default())));
+        if let Some(oid) = oid {
+            root = root.with_server_id(ServerId::Oid(oid));
+        }
+        let mut t = Subtree::with_capacity(root, columns.len() + 1);
+        for (i, (c, ty)) in columns.iter().enumerate() {
+            t.add(
+                t.root(),
+                Obj::new(ObjectKind::Column, *c).with_props(Props::Column(Arc::new(ColumnProps {
+                    ordinal: i as u32 + 1,
+                    raw_type: Arc::from(*ty),
+                    nullable: true,
+                    ..Default::default()
+                }))),
+            );
+        }
+        t
+    }
+
+    /// A leaf object of `kind`.
+    pub fn leaf(kind: ObjectKind, name: &str) -> Subtree {
+        Subtree::new(Obj::new(kind, name))
+    }
+
+    /// An object of a kind this build does not know, with the server's raw kind text.
+    pub fn unknown(name: &str, raw_kind: &str) -> Subtree {
+        Subtree::new(
+            Obj::new(ObjectKind::Unknown, name).with_props(Props::Generic(Arc::new(
+                GenericProps {
+                    raw_kind: Some(Arc::from(raw_kind)),
+                    ..Default::default()
+                },
+            ))),
+        )
+    }
+
+    /// Schema namespace `path` of `dbms` read at `Structure`, holding `objects`; `system` marks
+    /// a built-in schema.
+    pub fn schema(
+        dbms: DbmsKind,
+        path: &[&str],
+        system: bool,
+        objects: Vec<Subtree>,
+    ) -> Arc<NamespaceSnapshot> {
+        schema_at(dbms, path, system, Level::Structure, objects)
+    }
+
+    /// [`schema`] read at `level`.
+    pub fn schema_at(
+        dbms: DbmsKind,
+        path: &[&str],
+        system: bool,
+        level: Level,
+        objects: Vec<Subtree>,
+    ) -> Arc<NamespaceSnapshot> {
+        let name = path.last().copied().unwrap_or_default();
+        let mut root = Obj::new(ObjectKind::Schema, name);
+        if system {
+            root = root.add_flags(ObjFlags::SYSTEM);
+        }
+        let mut tree = Subtree::new(root);
+        for o in objects {
+            let r = tree.root();
+            tree.graft_under(r, o);
+        }
+        let d = dialect(dbms);
+        let fold =
+            FoldRule::for_names(d, &IdentCtx::new(d), NameClass::Table).unwrap_or(FoldRule::Exact);
+        let meta = NsMeta {
+            level,
+            ..NsMeta::default()
+        };
+        Arc::new(
+            NamespaceSnapshot::build(NsKey::schema(path.iter().copied()), dbms, fold, meta, tree)
+                .expect("a valid test namespace"),
+        )
+    }
+
+    /// Generation `generation` of a `dbms` catalog with `namespaces` and namespace `states`.
+    pub fn catalog_gen(
+        dbms: DbmsKind,
+        generation: u64,
+        namespaces: Vec<Arc<NamespaceSnapshot>>,
+        states: Vec<(NsKey, LoadState)>,
+    ) -> Arc<CatalogSnapshot> {
+        let ns: BTreeMap<NsKey, Arc<NamespaceSnapshot>> = namespaces
+            .into_iter()
+            .map(|n| (n.key().clone(), n))
+            .collect();
+        let states: BTreeMap<ContainerKey, LoadState> = states
+            .into_iter()
+            .map(|(k, s)| (ContainerKey::Namespace(k), s))
+            .collect();
+        // T9's snapshot keeps lazy indexes of its own: start from an empty one and set the
+        // data fields (none of the indexes is built before they are set).
+        let mut snapshot = CatalogSnapshot::empty(Arc::new(ServerFacts::new(
+            dbms,
+            IdentCtx::new(dialect(dbms)),
+        )));
+        snapshot.generation = generation;
+        snapshot.namespaces = Arc::new(ns);
+        snapshot.states = Arc::new(states);
+        Arc::new(snapshot)
+    }
+
+    /// Generation 1 of a `dbms` catalog with `namespaces`.
+    pub fn catalog(
+        dbms: DbmsKind,
+        namespaces: Vec<Arc<NamespaceSnapshot>>,
+    ) -> Arc<CatalogSnapshot> {
+        catalog_gen(dbms, 1, namespaces, Vec::new())
+    }
+
+    /// One PostgreSQL schema `db.schema` with `tables` tables of `columns` columns each
+    /// (`t00000`…, columns `c00`…), the explorer perf scale.
+    pub fn wide_pg_schema(
+        db: &str,
+        schema_name: &str,
+        tables: usize,
+        columns: usize,
+    ) -> Arc<NamespaceSnapshot> {
+        let mut root = Subtree::with_capacity(
+            Obj::new(ObjectKind::Schema, schema_name),
+            tables * (columns + 1) + 1,
+        );
+        for t in 0..tables {
+            let name = format!("t{t:05}");
+            let tid = root.add(
+                root.root(),
+                Obj::new(ObjectKind::Table, name.as_str())
+                    .with_server_id(ServerId::Oid(16_384 + t as u32))
+                    .with_props(Props::Table(Arc::new(TableProps::default()))),
+            );
+            for c in 0..columns {
+                root.add(
+                    tid,
+                    Obj::new(ObjectKind::Column, format!("c{c:02}").as_str()).with_props(
+                        Props::Column(Arc::new(ColumnProps {
+                            ordinal: c as u32 + 1,
+                            raw_type: Arc::from("integer"),
+                            nullable: true,
+                            ..Default::default()
+                        })),
+                    ),
+                );
+            }
+        }
+        let meta = NsMeta {
+            level: Level::Structure,
+            ..NsMeta::default()
+        };
+        Arc::new(
+            NamespaceSnapshot::build(
+                NsKey::schema([db, schema_name]),
+                DbmsKind::Postgres,
+                FoldRule::Exact,
+                meta,
+                root,
+            )
+            .expect("a valid perf namespace"),
+        )
+    }
+}
+
+// ## m4-t24-live
+/// The live explorer's test doubles (Task 24): a `CatalogSource` over the engine with Task 15's
+/// fakes (no server, no keyring), cached namespaces, and a thread probe.
+pub mod live {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread::ThreadId;
+    use std::time::Duration;
+
+    use futures::future::BoxFuture;
+    use hacivat_app::explorer::live::CatalogSource;
+    use hacivat_introspect::engine::{
+        Engine, EngineConfig, EngineLimits, Filters, LevelPolicy, MetaSource,
+    };
+    use hacivat_introspect::hub::{CacheMode, HubError, ProfileCatalog};
+    use hacivat_introspect::scope::{CurrentCtx, parse_scope};
+    use hacivat_introspect::testing::fake::{FakeIntrospector, FakeMetaSource, FakeObject};
+    // ## m4-t24-live (fix round 2): the reporting wrapper's seam types.
+    use hacivat_introspect::engine::Phase;
+    use hacivat_introspect::filter::CompiledFilter;
+    use hacivat_introspect::freshness::NsCheck;
+    use hacivat_introspect::introspector::{
+        FacetRows, IntroCaps, IntroError, Introspector, ServerIdentity, Staleness, report_progress,
+    };
+    use hacivat_introspect::pack::Mode;
+    use hacivat_introspect::scope::NsInfo;
+    use hacivat_meta::merge::NamespaceResult;
+    use hacivat_meta::name::{DialectId, FoldRule, IdentCtx, NameClass};
+    use hacivat_meta::namespace::{NsMeta, Subtree};
+    use hacivat_meta::persist::{CacheStore, Encryption, RowKey, WriterId};
+    use hacivat_meta::props::FacetKind;
+    use hacivat_meta::props::{ColumnProps, Props, TableProps};
+    use hacivat_meta::{
+        Catalog, Level, Name, NamespaceSnapshot, NsKey, Obj, ObjectKind, ServerFacts, ServerId,
+    };
+    use hacivat_meta::{ObjectKey, StateMark};
+    use hacivat_proto::{DbmsKind, ProfileId};
+    use hacivat_session::meta::{MetaConn, MetaError};
+    use hacivat_session::profile::Profile;
+    use tokio_util::sync::CancellationToken;
+
+    /// 2025-11-17 14:05 UTC, the cached namespaces' read time.
+    pub const CACHED_AT_MS: i64 = 1_763_388_300_000;
+
+    fn dialect(d: DbmsKind) -> DialectId {
+        match d {
+            DbmsKind::MySql => DialectId::MySql,
+            DbmsKind::MariaDb => DialectId::MariaDb,
+            DbmsKind::Sqlite => DialectId::Sqlite,
+            _ => DialectId::Postgres,
+        }
+    }
+
+    /// Schema `path` of `dbms` read at `Structure` on [`CACHED_AT_MS`], with tables `tables`
+    /// (one column `id` each, OIDs from 20,000 on PostgreSQL, as `fake_tables` gives them).
+    pub fn cached_schema(dbms: DbmsKind, path: &[&str], tables: &[&str]) -> NamespaceSnapshot {
+        let name = path.last().copied().unwrap_or_default();
+        let mut t = Subtree::new(Obj::new(ObjectKind::Schema, name));
+        for (i, table) in tables.iter().enumerate() {
+            let mut obj = Obj::new(ObjectKind::Table, *table)
+                .with_props(Props::Table(Arc::new(TableProps::default())));
+            if dbms == DbmsKind::Postgres {
+                obj = obj.with_server_id(ServerId::Oid(20_000 + i as u32));
+            }
+            let id = t.add(t.root(), obj);
+            t.add(
+                id,
+                Obj::new(ObjectKind::Column, "id").with_props(Props::Column(Arc::new(
+                    ColumnProps {
+                        ordinal: 1,
+                        raw_type: Arc::from("integer"),
+                        nullable: false,
+                        ..Default::default()
+                    },
+                ))),
+            );
+        }
+        let d = dialect(dbms);
+        let fold =
+            FoldRule::for_names(d, &IdentCtx::new(d), NameClass::Table).unwrap_or(FoldRule::Exact);
+        let meta = NsMeta {
+            level: Level::Structure,
+            loaded_at_ms: CACHED_AT_MS,
+            ..NsMeta::default()
+        };
+        NamespaceSnapshot::build(NsKey::schema(path.iter().copied()), dbms, fold, meta, t)
+            .expect("a valid cached namespace")
+    }
+
+    /// Writes `namespaces` into the cache file at `path` (`key`: encrypted with it).
+    pub fn write_cache(path: &Path, key: Option<[u8; 32]>, namespaces: &[NamespaceSnapshot]) {
+        std::fs::create_dir_all(path.parent().expect("a folder")).expect("the cache folder");
+        let encryption = match key {
+            Some(k) => Encryption::Row(RowKey::from_bytes(&k)),
+            None => Encryption::None,
+        };
+        let mut store = CacheStore::open(path, encryption, WriterId(1))
+            .expect("a cache store")
+            .store;
+        for ns in namespaces {
+            store.save_namespace(ns).expect("saved");
+        }
+    }
+
+    /// Tables `names` of the fake server (column `id`, OIDs from 20,000).
+    pub fn fake_tables(names: &[&str]) -> Vec<FakeObject> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| FakeObject::table(n, &["id"]).with_oid(20_000 + i as u32))
+            .collect()
+    }
+
+    /// A metadata source that records the threads it is called on.
+    pub struct Probe {
+        pub inner: Arc<FakeMetaSource>,
+        pub threads: Arc<Mutex<Vec<ThreadId>>>,
+    }
+
+    impl MetaSource for Probe {
+        fn acquire<'a>(
+            &'a self,
+            database: Option<Name>,
+            cancel: &'a CancellationToken,
+        ) -> BoxFuture<'a, Result<MetaConn, MetaError>> {
+            self.threads
+                .lock()
+                .unwrap()
+                .push(std::thread::current().id());
+            self.inner.acquire(database, cancel)
+        }
+        fn user_in_transaction(&self) -> bool {
+            self.inner.user_in_transaction()
+        }
+        fn released(&self) {
+            self.inner.released();
+        }
+    }
+
+    /// What a pass reports through the progress sink: its phase, done and the total.
+    pub type Report = Arc<Mutex<Option<(Phase, u64, Option<u64>)>>>;
+
+    /// The fake introspector, reporting a phase and counts through the engine's progress sink
+    /// (`report_progress`, R-W3-12) before each pass, as the real introspectors do.
+    pub struct Reporting {
+        pub inner: FakeIntrospector,
+        pub report: Report,
+    }
+
+    impl Introspector for Reporting {
+        fn list_namespaces<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+        ) -> BoxFuture<'a, Result<Vec<NsInfo>, IntroError>> {
+            self.inner.list_namespaces(c)
+        }
+
+        fn introspect<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            ns: &'a NsKey,
+            mode: Mode,
+            level: Level,
+            filter: &'a CompiledFilter,
+            prev: Option<&'a NamespaceSnapshot>,
+            cancel: &'a CancellationToken,
+        ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
+            let report = *self.report.lock().unwrap();
+            let pass = self
+                .inner
+                .introspect(c, ns, mode, level, filter, prev, cancel);
+            // Reported while the pass runs (inside the engine's sink scope), as a real pass does.
+            Box::pin(async move {
+                if let Some((phase, done, total)) = report {
+                    report_progress(phase, done, total);
+                }
+                pass.await
+            })
+        }
+
+        fn fragment<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            ns: &'a NsKey,
+            keys: &'a [ObjectKey],
+            level: Level,
+            filter: &'a CompiledFilter,
+            cancel: &'a CancellationToken,
+        ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
+            self.inner.fragment(c, ns, keys, level, filter, cancel)
+        }
+
+        fn stamps<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            keys: &'a [ObjectKey],
+        ) -> BoxFuture<'a, Result<Vec<Option<StateMark>>, IntroError>> {
+            self.inner.stamps(c, keys)
+        }
+
+        fn facet<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            ns: &'a NsKey,
+            keys: &'a [ObjectKey],
+            kind: FacetKind,
+        ) -> BoxFuture<'a, Result<FacetRows, IntroError>> {
+            self.inner.facet(c, ns, keys, kind)
+        }
+
+        fn check_state<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            keys: &'a [ObjectKey],
+        ) -> BoxFuture<'a, Result<Vec<Staleness>, IntroError>> {
+            self.inner.check_state(c, keys)
+        }
+
+        fn check_namespace<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            ns: &'a NsKey,
+            snap: &'a NamespaceSnapshot,
+        ) -> BoxFuture<'a, Result<NsCheck, IntroError>> {
+            self.inner.check_namespace(c, ns, snap)
+        }
+
+        fn capabilities(&self) -> IntroCaps {
+            self.inner.capabilities()
+        }
+
+        fn identity<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+        ) -> BoxFuture<'a, Result<ServerIdentity, IntroError>> {
+            self.inner.identity(c)
+        }
+
+        fn server_facts<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+        ) -> BoxFuture<'a, Result<Option<ServerFacts>, IntroError>> {
+            self.inner.server_facts(c)
+        }
+    }
+
+    /// A `CatalogSource` over the engine with the fakes: one engine per profile, cached in a
+    /// plaintext store under `dir`.
+    pub struct FakeSource {
+        pub rt: tokio::runtime::Handle,
+        pub intro: FakeIntrospector,
+        pub meta: Arc<FakeMetaSource>,
+        pub dir: PathBuf,
+        /// The schema the engine takes as current (what the user's session would report).
+        pub current_schema: Option<String>,
+        /// The threads `ensure`, `has_cache` and every metadata connection ran on.
+        pub threads: Arc<Mutex<Vec<ThreadId>>>,
+        pub ensures: AtomicU64,
+        made: Mutex<HashMap<ProfileId, ProfileCatalog>>,
+        // ## m4-t24-live (fix round 1)
+        /// What the source did, in order: `ensure sensitive=<bool>`, `shutdown watched=<bool>`
+        /// (whether [`FakeSource::watch`] existed when the store was closed).
+        pub log: Mutex<Vec<String>>,
+        /// What every pass reports through the engine's progress sink (R-W3-12) before it
+        /// reads, when set.
+        pub report: Report,
+        /// A file whose presence `shutdown` records.
+        pub watch: Mutex<Option<PathBuf>>,
+    }
+
+    impl FakeSource {
+        pub fn new(rt: tokio::runtime::Handle, intro: FakeIntrospector, dir: PathBuf) -> Self {
+            let meta = FakeMetaSource::new(intro.dbms);
+            intro.link_meta(meta.clone());
+            FakeSource {
+                rt,
+                intro,
+                meta,
+                dir,
+                current_schema: Some("public".to_string()),
+                threads: Arc::default(),
+                ensures: AtomicU64::new(0),
+                made: Mutex::new(HashMap::new()),
+                log: Mutex::new(Vec::new()),
+                report: Arc::default(),
+                watch: Mutex::new(None),
+            }
+        }
+
+        /// The cache file of `profile`.
+        pub fn cache_path(&self, profile: ProfileId) -> PathBuf {
+            self.dir.join(format!("{}.sqlite", profile.0))
+        }
+
+        /// The catalog made for `profile`, if any.
+        pub fn made(&self, profile: ProfileId) -> Option<ProfileCatalog> {
+            self.made.lock().unwrap().get(&profile).cloned()
+        }
+
+        fn note(&self) {
+            self.threads
+                .lock()
+                .unwrap()
+                .push(std::thread::current().id());
+        }
+    }
+
+    impl CatalogSource for FakeSource {
+        fn ensure(&self, profile: Arc<Profile>) -> BoxFuture<'_, Result<ProfileCatalog, HubError>> {
+            Box::pin(async move {
+                self.note();
+                self.ensures.fetch_add(1, Ordering::SeqCst);
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("ensure sensitive={}", profile.catalog_sensitive()));
+                if let Some(pc) = self.made(profile.id) {
+                    return Ok(pc);
+                }
+                let path = self.cache_path(profile.id);
+                let opened = self
+                    .rt
+                    .spawn_blocking(move || {
+                        std::fs::create_dir_all(path.parent().expect("a folder")).ok();
+                        CacheStore::open(&path, Encryption::None, WriterId(2)).ok()
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                let cache = opened.map(|o| Arc::new(Mutex::new(o.store)));
+                let d = dialect(profile.engine);
+                // As the hub does (T17 review I-2): a MySQL-family placeholder knows no
+                // `lower_case_table_names` until the scope refresh reads the real facts.
+                let mut ident = IdentCtx::new(d);
+                if matches!(d, DialectId::MySql | DialectId::MariaDb) {
+                    ident.lower_case_table_names = u8::MAX;
+                }
+                let catalog = Arc::new(Catalog::new(Arc::new(ServerFacts::new(
+                    profile.engine,
+                    ident,
+                ))));
+                let publisher = catalog.publisher().ok_or(HubError::Shutdown)?;
+                let scope = parse_scope(if d == DialectId::Postgres { "@:*" } else { "*" }, d)
+                    .expect("the scope parses");
+                let database = profile.database.as_deref().map(Name::from);
+                let current = CurrentCtx {
+                    database: database.clone(),
+                    schema: match profile.engine {
+                        DbmsKind::Postgres => self.current_schema.as_deref().map(Name::from),
+                        DbmsKind::Sqlite => Some(Name::from("main")),
+                        _ => database,
+                    },
+                    ident: None,
+                };
+                let handle = Engine::start(EngineConfig {
+                    profile: profile.id,
+                    dbms: profile.engine,
+                    meta: Arc::new(Probe {
+                        inner: self.meta.clone(),
+                        threads: self.threads.clone(),
+                    }),
+                    introspector: Arc::new(Reporting {
+                        inner: self.intro.clone(),
+                        report: self.report.clone(),
+                    }),
+                    catalog: catalog.clone(),
+                    catalog_publisher: publisher,
+                    cache,
+                    levels: LevelPolicy::default(),
+                    scope,
+                    current,
+                    filters: Filters::default(),
+                    validate_every: None,
+                    limits: EngineLimits {
+                        save_debounce: Duration::from_millis(10),
+                        bulk_window: Duration::from_millis(10),
+                        fragment_window: Duration::from_millis(5),
+                        busy_retry: Duration::from_millis(10),
+                        ..EngineLimits::default()
+                    },
+                    runtime: self.rt.clone(),
+                });
+                let _ = handle.ready().await;
+                let pc = ProfileCatalog {
+                    catalog,
+                    handle,
+                    cache: CacheMode::Persistent {
+                        encrypted: false,
+                        rebuilt: None,
+                    },
+                };
+                self.made.lock().unwrap().insert(profile.id, pc.clone());
+                Ok(pc)
+            })
+        }
+
+        fn shutdown(&self, profile: ProfileId) -> BoxFuture<'_, ()> {
+            Box::pin(async move {
+                self.note();
+                let watched = self
+                    .watch
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|p| p.exists());
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("shutdown watched={watched}"));
+                let gone = self.made.lock().unwrap().remove(&profile);
+                if let Some(pc) = gone {
+                    pc.handle.shutdown();
+                    pc.handle.closed().await;
+                }
+            })
+        }
+
+        fn has_cache(&self, profile: ProfileId) -> bool {
+            self.note();
+            self.cache_path(profile).exists()
+        }
+    }
 }

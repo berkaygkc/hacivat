@@ -2003,3 +2003,1112 @@ verify (an unanswered canary, e.g. a PostgreSQL-wire server without
   on the read-only session, the profile stays `Connected` and the session `Idle`, `SELECT 1`
   runs and a `CREATE TABLE` is refused) and F1-a's
   `a_parenthesis_before_copy_is_a_syntax_error_on_postgresql` (ADR 0005 `m3a-f1`).
+
+## m3b-t01c — core seams
+
+M3b Task 1c's session seams (P-M3b-1, -3, -10, -11, -12, -33). Every M3a behaviour is kept;
+nothing new is wired into Run (R-M3-52).
+
+- **Out-of-band answers (P-M3b-3).** `Command::{Choose, CommitDecision}` with a
+  `oneshot::Sender<bool>` reply; `SessionHandle::{choose, commit_decision}` return the
+  receiver. `Ladder::command` answers them while a request runs and the idle loop otherwise,
+  through the session's one `RunGate` (`Mutex<{pending, answer}>` + `Notify`, shared by `Ctl` and
+  `Core` like `StopSignal`). **Question identity (fix round 1, review I1):** `RunGate::ask`
+  gives every question an id from a counter that only grows for the session's life;
+  `RunEvent::{NeedsChoice, NeedsCommit}` carry it as `question`, and
+  `choose(run_seq, question, choice)` / `commit_decision(run_seq, unit, question, answer)`
+  name it. An answer counts only when its kind, request sequence number and question id (and,
+  for a commit, the unit) match the question waiting now. A double click, an answer from an
+  older bar that arrives after the run asked again (also after a Retry re-asked for the same
+  unit), any other id, an answer after the request ended, or a closed session answers `false`
+  and changes nothing. Tasks 11 and 19 call `ask` before emitting the event, with no `.await`
+  between them. `run_one` sets `Core::request_seq` and withdraws any question before and after
+  each request. `Request` gains no variant. No run waits yet (Tasks 11, 19), so every answer
+  is `false`.
+- **Verdicts.** `RunUnit` gains `binds`, `verdict` (`UnitVerdict`, default `Unknown`),
+  `effects` (`SessionEffects`, `bitflags`), `masked`, `max_result_sets`, `cell_cap`
+  (`RunUnit::plain` builds M3a's shape). Until their tasks: a `TxThenConfirm` or
+  `ExplainAnalyzeRollback` unit, and a unit with binds, end `Failed(Internal)` before anything
+  of them is sent (the Manual `BEGIN` included); `max_result_sets` is clamped to 1; `cell_cap`
+  overrides the run's when set. The verdict is scheduling only: the read-only guard never
+  trusts it (R-M3-83). `RunSpec::confirm_deadline` (D-014: 300 s, `RunSpec::CONFIRM_DEADLINE`).
+  `ErrorPolicy::Ask` stops as `StopOnError` until Task 11. New `RunEvent`s (`NeedsChoice`,
+  `NeedsCommit { savepoint }`, `CommitDecided`, `Notice`); a driver notice is forwarded as
+  `RunEvent::Notice` already.
+- **The classifier hook (R-M3-83, P-M3b-11).** `StatementClassifier` (`Debug` supertrait) in
+  `session/verdict.rs`; `ManagerConfig::classifier` (`None` in `default()` and `m2b()`;
+  equality and hashing compare it by pointer) → `SessionManager::set_classifier` →
+  `spawn_supervised` → `Core::classifier`. `Core::step0b` (in `readonly.rs`, `&mut self` so
+  Task 18 can read `Core::observed_sql_mode` once) is called right before `guarded` (M2b
+  `Exec`, user statements only) and before `guarded_query` (typed units); it is a stub
+  (`Ok(())`). `track_statement(t, sql, effects)`: the typed path passes the gate's effects when
+  the unit has a verdict, the `Exec` path `None`; the effects are ignored until Task 18. So
+  Task 18 edits only `readonly.rs` and `recovery.rs`.
+- **Hacivat's transactions (P-M3b-12).** `TxOwner::Confirm` and `TxOwner::is_hacivats()`
+  (`Cursor | Guard | Confirm`) replace the five ownership checks: `TxState::user_open`
+  (`tx.rs`), the liveness tick and the close check (`actor.rs`), `shown_status` (`run.rs`) and
+  `OpenCursor::in_user_tx` (`cursor.rs`). `TxError::ImplicitCommitUnconfirmed` (P-M3b-1).
+  `DenyLayer::Classifier`, `ExecErrorKind::{SafetyDenied, QueueFull}`.
+- **Profile fields (P-M3b-10).** `startup_script`, `read_only_fn_allowlist`, `record_history`
+  (default `true`), each written only when it differs from its default, so an M2b/M3a file
+  round-trips byte for byte. The key is `read_only_fn_allowlist`, not R-M3-56's
+  `read_only.function_allowlist`: `read_only` is already a boolean key of the entry, and TOML
+  cannot make it a table too. An invalid value (a wrong type, a script over 64 KiB or with a
+  NUL, an allowlist entry with whitespace, a control character, `;`, `(`, `)`, `,` or `'`, or
+  more than 1,000 entries) makes the entry invalid (`InvalidEntry`): it stays on disk untouched
+  and is shown, never loaded half-read.
+- `testing::fake_session_classified` gives Task 18's tests a fake session with a classifier.
+
+## m3b-t11 — runs
+
+M3b Task 11 (HV-EXEC-05/-07/-08 session side; C9, C13; R-M3-60, -61, -66, -74, -77).
+
+- **Binds.** `query_spec` passes `RunUnit::binds` in slot order. The session neither formats
+  nor checks them: a driver that cannot bind refuses the query before sending it (M3a's drivers
+  answer `Unsupported`; Task 13's bind as parameters). What is bound (the rewritten text and
+  its slots, nothing sent when a placeholder is unbindable) is Task 15's.
+- **Result sets (R-M3-66).** `max_result_sets` is clamped to 1..=100 and passed to the driver.
+  Each set gets its own result (`open_result(unit, ordinal, schema)`; the ordinal is the set's
+  place in the unit, so a set without columns, which opens none, still takes a number). A set's
+  update count is reported when it ends; its `ResultEnded` (`Complete`, or `Truncated(ResultCap)`)
+  comes when the unit ends, after what Hacivat opened around the statement held: a gap the
+  read-only guard finds closes every result of the unit (`Closed { EnforcementGap }`). The guard
+  judges the statement by the first set's end with the most rows any set reported affected, so
+  a write in a later set is never hidden behind a read. After the first set the stream admits
+  every chunk against the budgets (a query with several sets never suspends); only the first
+  set of the last unit may stay suspended.
+- **Run as one (R-M3-60).** A `Protocol::Simple` unit is sent whole and never suspends (no
+  transaction of Hacivat's around it). A read-only session refuses it,
+  `ReadOnlyDenied(Protocol)`, nothing sent: its guard judges one statement through the prepared
+  protocol. What a reconnect would lose, a schema switch and MySQL's `autocommit` are read from
+  each `;`-separated part (a split inside a string errs toward "seen"; in a batch only an
+  `autocommit` "off" is believed).
+- **Notices (R-M3-77).** At most 100 `RunEvent::Notice` per unit; the rest are counted and one
+  `notices_dropped` count is logged when the unit's result ends, never their text.
+- **The `Ask` policy (R-M3-61, P-M3b-3, P-M3b-19).** A unit that fails while later units wait
+  (and the session is usable, no stop asked for) asks: `RunGate::ask_choice` gives the question
+  its id and records whether the user's PostgreSQL transaction failed with it; `NeedsChoice`
+  goes out with no `.await` between; the run then selects on the gate's answer and the stop
+  signal while `Ladder::command` serves commands. No cursor is open meanwhile (only the last
+  unit keeps one, and it never asks).
+  - The gate checks the choice against the question: inside a failed transaction
+    `RollbackAndContinue`, `IgnoreAll`, `Stop`; elsewhere `Retry`, `Ignore`, `IgnoreAll`,
+    `Stop`. Anything else is `false` and the question keeps waiting, so no `ROLLBACK` is ever
+    sent for a transaction the question did not name.
+  - `Retry` runs the unit again (`UnitStarted`/`UnitEnded` again; the summary counts its last
+    attempt); a new failure asks a new question. `Ignore` goes on; `IgnoreAll` goes on and
+    never asks again in this run. `Stop` skips the rest; the reply is the unit's error.
+    `RollbackAndContinue` sends `ROLLBACK` (logged without text, `TxChanged`, schema reprobe)
+    and goes on with the session's mode: a Manual session opens its next transaction before
+    the next unit, as for any unit. A failed `ROLLBACK` ends the run with its error.
+  - A cancel answers `Stop`, also when it races an answer (the stop is checked after the
+    answer is taken). A close that comes while a request runs is queued behind it and answers
+    the run's choice `Stop` (`RunGate::close`); a close already queued when a request starts
+    makes it ask nothing (`RunGate::set_closing`). Commit questions (Task 19) are not touched.
+  - A run that goes on to its end replies `Ok` unless its last unit failed.
+- **`ABORT` (R-M3-74).** In a failed transaction the advisory check lets `ROLLBACK` through and,
+  on PostgreSQL only, `ABORT` (`actor::ends_failed_tx`), on the `Exec` and the typed path.
+- **Queue cap (C9).** `QUEUE_CAP` = 256 requests wait behind the running one; the next is
+  answered `QueueFull` at once and never queued (closes do not count; queued fetches still
+  coalesce when they run). A recovering session's waiting internal reads count too.
+- **A cancelled queued run (ledger 318).** When a cancel (or a deactivate) drops the queue, a
+  queued `Run` reports every unit `Cancelled` and `RunEnded` before its `Cancelled` reply, so its
+  observer reads "cancelled" whether or not anyone awaits the reply (`ExecService::with_runtime`).
+  A run dropped for any other reason (a loss, a close) still never started.
+- **FakeDriver (named exception, `hacivat-driver/src/fake.rs`).** A typed query with
+  `Protocol::Simple` answers its scripted sets and never suspends; in a failed PostgreSQL
+  transaction a typed query that ends or recovers it is taken (the server takes `ROLLBACK` and
+  `ABORT` on either protocol).
+- **Fix round 1.**
+  - **Publishing while a choice waits (I1).** `Core` holds the session's snapshot sender and
+    event sender. `Core::publish_tx` republishes `tx` while the request runs (the state stays
+    `Busy`) and emits `SessionEvent::TxChanged` when the state moved. It runs right before
+    `NeedsChoice` and after the `ROLLBACK` of Roll back and continue. `run_one` compares the
+    request's end with what was last published, so one state never gives two events.
+  - **Binds (I2).** A unit with binds is refused before anything is sent (`Internal`) when
+    the driver's typed path does not bind (`TypedCaps::binds`), and always when it runs "as
+    one": a simple query or a batch carries no parameters. The FakeDriver now reports
+    `binds: true`, as Task 13's drivers do (named exception).
+  - **Memory (I3).** A suspendable stream that runs past the rows admitted for it without
+    suspending (the first batch, then each `fetch_more`) admits every further chunk against the
+    budgets, as a stream that cannot stop does. A MySQL `CALL` and a text-route statement can
+    no longer stream their first set past the budgets.
+  - **Gap on the failure path (I4).** `fail_stream` reads the guard's verdict: a gap closes
+    every result of the unit (`Closed { EnforcementGap }`). The reply stays the statement's
+    error; whether it should be the gap is left to the T18/T22 owner.
+  - **Sets past the limit (m1).** When a driver emits more sets than the unit keeps, the
+    stream counts them with the driver's skipped sets (`MoreResultSets`,
+    `Truncated(FollowingResultSets)`), keeps their rows out of the kept set, and still lets the
+    guard judge their affected rows.
+  - **Run-as-one bookkeeping (m2, m3).** For a unit run "as one" that failed or was stopped,
+    the session still tracks each part and reprobes the schema when a part needs it. Each part
+    counts in the user's open transaction (`TxState::statements`).
+  - **`QueueFull` (m6).** A run refused with `QueueFull` tells its observer: its first unit
+    ends `Failed(QueueFull)`, the rest `Skipped`, then `RunEnded`.
+  - **Stopping a Run as one (T13 review I-1, ruling (b)).** The overdue time is zero for a
+    unit run "as one". A Stop then sends the server cancel at once, both while the session
+    waits on a call and when it closes the query, whatever the transaction state.
+  - **Noted.** `Close { RefuseIfOpenTx }` answers a pending choice `Stop` even when that close
+    is then refused (R-M3-61: any close of the console) (m4). The notice cap is per unit,
+    which differs from per statement only for a Run-as-one unit (m10). Earlier sets of a
+    dropped stream publish their own state (m5; recorded, unchanged).
+
+## m3b-t12 — M2 carries
+
+M3b Task 12 (C3, C6, C7 with R-M3-73, C10, C11; ledger 294, 331, 370, 373). Code blocks are
+fenced `// ## m3b-t12-session-carries`.
+
+- **After connect (C3, C11).** Connect sets the identity and the read-only settings (Q27); the
+  session now sends, once, what connect cannot: PostgreSQL's time zone and, on a read-write
+  session, the profile's startup script (`EnvPlan::after_connect`). Both are in the environment
+  plan, so a reset and a reconnect send them again. The script comes after the time zone and
+  before the schema restore (fix round 1, I3a): it sets the starting context, and the user's own
+  schema switch wins on a reset or reconnect.
+- **Startup scripts (C3).** Split in execution mode with the engine's client flavor
+  (`env::startup_statements`); an uncertain boundary or a client command refuses the whole
+  script and nothing of it is sent. A refused or failing script breaks the session with
+  `config.invalid` (a lost connection keeps its own class), at connect, on a reset and on a
+  reconnect alike (fix round 1, m2): a session never runs without the environment its profile
+  asks for, and the failure is reported, never skipped. The script's text is never logged. A
+  script that leaves a transaction open is refused the same way (I3c), and after it the
+  schema is probed again and published (I3b).
+- **After connect, bounded and served (fix round 1, I2).** The steps after connect run as a
+  reconnect's replay does: under the profile's connect timeout (past it: `config.invalid`, or
+  `network.timeout` when only Manual MySQL's `autocommit = 0` was sent), serving commands
+  (a close ends it at once, a cancel finds nothing running, requests wait their turn), with the
+  session `Busy` (request 0) while a time zone or a script runs. A Manual MySQL session sends
+  `SET autocommit = 0` after the script, at connect, on a reconnect and after a reset (I3d). A read-only session (production included while it is read-only) never
+  runs it: the guard's reset after each statement would wipe it, and its replay is trusted SQL,
+  which a user's script is not. It logs one notice, `exec-startup-script-skipped-read-only`.
+- **MySQL autocommit (C6).** After a request, a Manual MySQL session whose server reports
+  `autocommit` on follows it to Auto (`TxChanged`, one log line); its initial mode becomes Auto
+  too, so neither a reset nor a reconnect sends `SET autocommit = 0` again.
+- **Per-session liveness (C7, R-M3-73).** The pool starts every console session with the
+  default session's policy and `LivenessRole::Console`: its own keep-alive and its own idle
+  clock, so `SessionEvent::IdleTransaction` fires on the session whose transaction idles, once
+  per idle period. Only the default session (`LivenessRole::Profile`) disconnects; its idle
+  disconnect ends the profile and waits for the latest user activity, user transaction and user
+  request on any session (F1-b). The manager relays only the default's warning as
+  `ConnectionEvent::IdleTransaction`; a console reads its own from its session's events.
+- **Disconnect scope (R-M3-73).** `Escalation::Deactivate` on the default session closes the
+  profile (`end_live`, every session closed with a rollback); on any other console it breaks
+  only that session. Before either, `SessionManager::open_transactions` lists every user
+  transaction open on a usable session, and (fix round 1, I1) every session running a user
+  request, which may be opening one the snapshot does not show yet (`OpenTransaction::running`),
+  so the UI names each one and says it will be rolled back (T23 carry). After it, the default's
+  Disconnect reports another session's transaction, held or maybe opening at that moment, as
+  `ConnectionEvent::SessionLost { open_tx }` (`end_live` is `end_live_with(.., None)`).
+- **Lost user transactions (fix round 1, C1).** A session that cannot reconnect (every console,
+  and an M2a default) and ends with a user transaction open, maybe opening (a user request in
+  flight) or under the user's own MySQL `autocommit = 0` emits `SessionEvent::Lost { open_tx:
+  true }`; its `SessionManager` relays it as `ConnectionEvent::SessionLost` (as it relays
+  enforcement gaps). So a console whose own keep-alive finds its connection dead, or that the
+  user disconnects, never ends a transaction silently. A closing rollback of a user transaction
+  is logged, and every closed or broken session publishes its end. A broken session's
+  supervisor stops ticking (m6).
+- **Close and break (ledger 331).** A session that closes, breaks or ends a recovery on a close
+  publishes its final `TxState` (`Idle`, owner `None`, no statements, mode and isolation kept)
+  and `cursor: None`, and emits `TxChanged` when the transaction state moved. A request that
+  broke the session first emits the transaction as it left it.
+- **Warm MySQL side connection (C10).** A MySQL session's side connector is wrapped in
+  `cancel::WarmSide`: from a statement's 500 ms mark (`SIDE_PREWARM`, for typed requests too)
+  and while a cursor is suspended it holds one side connection; a kill takes it after a ping
+  (a dead one is replaced by a fresh connect); 30 s after its last use (`SIDE_KEEP`) it closes,
+  and at once when the session closes, breaks or loses its connection. Fix round 1 (m3): the
+  last use is the end of the statement or cursor that held it; requests that did not need it
+  never move that clock; a failed connect is tried once more; a cursor release asks for it only
+  when it really kills (a release that drains in time leaves it warm).
+- **Time zone (C11).** `ManagerConfig::time_zone` carries the settings' `ui.time_zone`; an IANA
+  zone becomes `EnvStep::TimeZone` on PostgreSQL only (never MySQL or MariaDB, R5); `System`
+  sends nothing. The app's boot sets it (Task 22 or a later boot touch; `boot.rs` is not this
+  task's). Fix round 1 (m7): the zone is one `SessionZone` per `ConnectionManager`; a name that
+  is no IANA shape is never sent, and one a server refuses breaks that one session with
+  `config.invalid`, is logged once naming `ui.time_zone`, and is sent by no session again (a
+  runtime change of the setting needs a setter: T22).
+- **Pooler fallback (C11, ledger 294).** `hacivat-driver-pg`'s `connect_conn` (named
+  exception): a read-only connect refused for its startup `options` (`08P01` "unsupported
+  startup parameter: options", a proxy's `0A000`) whose options are Hacivat's own only connects
+  once more without them and sends `SET default_transaction_read_only = on; SET
+  idle_in_transaction_session_timeout = '30s'` before the connection is handed out; a failure
+  fails the connect. With the profile's own options, or any other refusal, it is not retried.
+  Fix round 1 (m1): a startup value survives the role probe's reset and the guard's `RESET ALL`
+  / `DISCARD ALL`; these `SET`s do not. Read-only still holds (the guard's `BEGIN … READ ONLY`
+  and its replayed `session_setup`), but the idle bound is missing between a guarded reset and
+  its replay, and under PgBouncer transaction pooling a session `SET` does not stick across
+  transactions at all. Accepted: the fallback only makes such a pooler usable; the guard's
+  per-statement transaction keeps each statement read-only.
+- **Notices (the T13 carry).** After a query's `Done` the session adds
+  `RawConn::take_notices_dropped` to the unit's dropped count, so the log line at its end has
+  the driver's drops too.
+
+## m3b-t19 — confirm in transaction
+
+M3b Task 19 (HV-EXEC-04 session side; C2; D-014, D-062, R-M3-55, P-M3b-1, P-M3b-5,
+P-M3b-12). Code blocks are fenced `// ## m3b-t19-confirm-tx`; the bodies are
+`session/{confirm,smart}.rs`.
+
+- **The form is the session's, per unit, at execution time (P-M3b-1).** The gate's verdict
+  (`UnitVerdict::TxThenConfirm`) carries no form. After a Manual session's `BEGIN` and Smart's,
+  the session asks whether a transaction is open now: the protocol's status, and on
+  MySQL/MariaDB also Manual mode and the user's own `autocommit = 0` (a transaction is then
+  always open, MySQL 8.4 §15.3.1; `SAVEPOINT` is valid without `START TRANSACTION`).
+  - Open: **the savepoint form.** `SAVEPOINT hv_confirm`, the statement, `NeedsCommit {
+    savepoint: true }`; Keep → `RELEASE SAVEPOINT hv_confirm`; Undo, the deadline, a cancel
+    or a close → `ROLLBACK TO SAVEPOINT hv_confirm`, then `RELEASE SAVEPOINT hv_confirm` (two
+    control statements: the release is not sent when the rollback failed). The transaction
+    stays open and the user's (`TxOwner::User`) in every branch.
+  - Truly idle in Auto: **Hacivat's own transaction.** `BEGIN` (`START TRANSACTION` on
+    MySQL/MariaDB after the isolation level when one is set, `BEGIN IMMEDIATE` on SQLite) with
+    `holder = Confirm`, the statement, `NeedsCommit { savepoint: false }`; Commit → `COMMIT`,
+    anything else → `ROLLBACK`.
+  - So no confirm path sends `COMMIT` while the user's transaction is open, and MySQL/MariaDB
+    never get `START TRANSACTION` inside one (it would commit it implicitly).
+- **The wait.** The question is asked through the run gate (`RunGate::ask`, which gives it its
+  id) and `NeedsCommit` is emitted with nothing awaited in between; the run then selects,
+  biased, on the stop signal, the answer and the deadline (`RunSpec::confirm_deadline`,
+  D-014's 5 minutes; tests inject 2 s). A stale, duplicate, guessed or other-unit answer is
+  refused (`false`, T1c I1). A cancel beats an answer that raced it. A cancel, the deadline and
+  a close roll back; `CommitDecided { answer, by_deadline }` follows once the server answered
+  the `COMMIT`/`RELEASE` or the rollback. A cancel ends the unit `Cancelled` (the run stops).
+  Fix round 1 (C2) replaced "a rollback leaves the unit `Succeeded` and the run goes on": the
+  deadline's rollback ends the unit `Failed(Tx(ConfirmTimedOut))` and stops the run whatever
+  its error policy (the user is away; a pre-confirmed `DROP` after an undone copy must never
+  run); the user's Undo (and a close) ends it `Failed(Tx(ConfirmUndone))`, so the error policy
+  decides (`StopOnError` stops, `Ask` asks). Whether a run should go on after an Undo is on
+  the PO list; the error policy is the default.
+- **A close (P-M3b-12, D-014).** `RunGate::close` answers a waiting commit question
+  `RollBack`, and one asked after the close at once (as a choice is answered `Stop`), so the
+  run rolls back before the queued close runs. Hacivat's own transaction is never "the user's"
+  (`is_hacivats`): `RefuseIfOpenTx` never refuses because of it and the liveness supervisor
+  never warns about it (it does not tick while a request runs, and the transaction ends before
+  the request does). In the savepoint form the close's own policy then applies to the user's
+  transaction, which is never committed.
+- **A failure or cancel of the statement (P-M3b-5).** Nothing is asked. The savepoint form
+  rolls back to the savepoint and releases it: the user's transaction returns to `InTx`
+  (PostgreSQL's aborted state recovered) and the unit keeps the server's error; the log line
+  is `exec-confirm-statement-failed` ("only it was rolled back, the transaction is intact").
+  The own form sends `ROLLBACK`. *Accepted difference:* psql leaves the transaction aborted;
+  Hacivat's own savepoint can undo its own statement, so it does.
+- **A lost connection** at the end (or one found lost when the wrap ends): the server rolled
+  back, `CommitDecided` is not emitted, and the unit ends `Failed(ConnectionLost)`
+  (`outcome_unknown: false` after a rollback; after a `COMMIT` that met the loss the outcome is
+  reported unknown, never "committed"). The log says the server rolled back these changes.
+- **Hacivat's transaction is never left open.** A `COMMIT`/`ROLLBACK` of its own after which
+  the server still reports a transaction, or a `ROLLBACK TO SAVEPOINT` the server refused,
+  breaks the session (`Internal`; the server rolls back on close, reported like any loss), as
+  for a cursor's transaction (`m3a-t18`). Fix round 1 (m1): a refused `RELEASE` (after Keep, or
+  after a `ROLLBACK TO` that worked) is logged and the session stays, with the transaction as
+  the server reports it. A `COMMIT` the server refused (a deferred constraint)
+  rolled back: the unit fails with the server's text, no `CommitDecided`.
+- **Fail closed.** A wrapped unit run "as one" (`Protocol::Simple`; its own `COMMIT` could end
+  the wrapping transaction before the question) is refused with `Internal`, and a wrapped unit
+  on a read-only session with `ReadOnlyDenied(Transaction)`; nothing is sent.
+- **The implicit-commit backstop (P-M3b-1, T15 round 2).** Before anything of a unit is sent
+  (the Manual `BEGIN` included): a MySQL/MariaDB unit whose effects carry
+  `SessionEffects::COMMITS_FIRST` (the gate's `hacivat_exec::implicit_commit` list; the session
+  reads only the bit and has no exec dependency) and whose verdict is not `ImplicitCommit`
+  meets an open transaction (as above: status, Manual, `autocommit = 0`) → refused with
+  `ExecErrorKind::Tx(TxError::ImplicitCommitUnconfirmed)`, nothing sent. `DDL` is not the key:
+  it means "a DDL statement" on every engine. An `ImplicitCommit` unit that ended an open
+  transaction is logged (`exec-implicit-commit`).
+- **The D-062 wrap.** `ExplainAnalyzeRollback`: the same two forms with `hv_explain`, always
+  rolled back, whatever the statement's outcome: `BEGIN … ROLLBACK` when idle (`START
+  TRANSACTION … ROLLBACK` on MySQL/MariaDB, `BEGIN … ROLLBACK` on SQLite), `SAVEPOINT hv_explain
+  … ROLLBACK TO SAVEPOINT hv_explain; RELEASE SAVEPOINT hv_explain` inside a transaction. A
+  wrapped statement never suspends (its rows are read to the end inside the wrap).
+- **Savepoint names.** PostgreSQL and SQLite stack savepoints of one name, so a user's own
+  `hv_confirm`/`hv_explain` is shadowed while Hacivat's is open and intact after it.
+  *Accepted:* MySQL/MariaDB replace a savepoint of the same name, so a user's own `hv_confirm`
+  there is lost when Hacivat sets its own (a reserved-name collision; documented).
+- **Smart (C2).** Before a unit whose verdict is not `Read`, while no transaction is open, the
+  session opens the user's transaction (owner `User`): PostgreSQL `BEGIN` (isolation level),
+  SQLite `BEGIN IMMEDIATE` unless the statement reads, MySQL/MariaDB `START TRANSACTION` (Smart
+  keeps `autocommit` on). A `Read` never opens one; `Unknown` (no verdict) does, the safe
+  direction. Not before the user's transaction control, an `EXPLAIN ANALYZE` (its wrap rolls
+  back), or a MySQL/MariaDB `COMMITS_FIRST` statement (it would end the new transaction at
+  once and the backstop would refuse it). After the user's `COMMIT`/`ROLLBACK` the mode stays
+  Smart. `SetMode(Smart)` is accepted like Auto (refused with `InProgress` while a transaction
+  is open; a Manual MySQL session sends `SET autocommit = 1`), a profile's Smart mode starts as
+  Smart (it started as Manual until now), and a user `Request::Exec` (no verdict) opens before
+  any statement but the user's transaction control. `TxError::NeedsClassifier` stays in the
+  enum (the log and status texts map it) but the session no longer answers it.
+- **Never silent.** Every rollback the session makes here is logged (run, unit, form, why;
+  never the statement's text) and the transaction state is published while the request still
+  runs (`Core::publish_tx`: the snapshot and `SessionEvent::TxChanged`), before the question and
+  after the decision.
+- **Fix round 1 (controller rulings on the review).**
+  - *C1, an already-committed change is never offered Keep/Undo.* "Open" reads MySQL's own
+    `autocommit` flag (`RawConn::autocommit`, read after every round trip) before the mode: a
+    Manual session whose script ran `SET autocommit = 1` has nothing open, so the confirmed
+    statement takes Hacivat's own `START TRANSACTION`. And after any wrapped statement that
+    succeeded with nothing open (a savepoint taken outside a transaction is a no-op on MySQL;
+    a statement that ended the transaction itself), nothing is asked and no `ROLLBACK TO` is
+    sent: the unit ends `Failed(Tx(ConfirmAlreadyCommitted))`, its log title is
+    `exec-confirm-already-committed`, and the run stops whatever its policy.
+  - *C2:* above (the deadline stops the run; Undo is no success).
+  - *I1, the server rolled back the whole transaction.* A wrapped statement that failed or was
+    cancelled with nothing open any more (a SQLite interrupt of an `INSERT`/`UPDATE`/`DELETE`,
+    a MySQL deadlock 1213 roll back the whole transaction, and the savepoint with it) sends no
+    `ROLLBACK TO` (it would fail and break the session); the session publishes the state
+    (`TxChanged` to idle) and stays usable; the unit keeps its error. The run service logs
+    `exec-tx-rolled-back-by-server` after the error for any non-DDL statement that failed or
+    was cancelled while the user's transaction ended (`observer::tx_line`; a MySQL DDL commits
+    first, so it is excluded). `exec-confirm-statement-failed` ("intact") is logged only after
+    an undo that worked.
+  - *m3:* a stop asked for while the statement ran to its end rolls it back without a question
+    (`Cancelled`).
+  - *m4 (a ruled deviation from the plan):* Smart never pre-opens before a statement that cannot
+    run inside a transaction (PostgreSQL `VACUUM`, `CREATE`/`DROP DATABASE`, `CREATE`/`DROP
+    INDEX CONCURRENTLY`, `REINDEX … CONCURRENTLY`, `ALTER SYSTEM`, `CREATE`/`DROP TABLESPACE`,
+    `CLUSTER` without a table; MySQL/MariaDB `SET TRANSACTION` and `LOCK`/`UNLOCK TABLES`,
+    which end any transaction themselves; SQLite `VACUUM`), on the run and the `Exec` paths.
+  - *m5:* MySQL/MariaDB table locks. The session follows `LOCK TABLE[S]` (text, or the gate's
+    `SessionEffects::LOCK_TABLES`), released by `UNLOCK TABLES`, a transaction's start, a reset
+    and a reconnect. While they may be held, Hacivat's own `START TRANSACTION` (confirm or
+    D-062) and Smart's pre-open are refused with `Tx(TableLocksHeld)`
+    (`exec-error-tx-table-locks`), nothing sent: starting a transaction would release the locks
+    silently. The savepoint form (Manual, `autocommit = 0`) is unaffected.
+  - *Savepoint name:* `hv_confirm`/`hv_explain` stay fixed (controller ruling).
+  - *Strings:* the `exec-confirm-*`, `exec-implicit-commit` and `exec-error-tx-implicit-commit`
+    strings Task 16 left to Task 19, plus `exec-confirm-already-committed`,
+    `exec-error-confirm-timed-out`, `exec-error-confirm-undone`, `exec-error-tx-table-locks` and
+    `exec-tx-rolled-back-by-server` (en, tr marked `Review: PO`).
+- **Fix round 2 (controller rulings on the re-check).**
+  - *R1-I1.* The run service never says the server rolled back a transaction that the failed
+    statement may have committed first: a unit run as one, a unit whose gate effects carry
+    `COMMITS_FIRST`, a DDL, a statement on the implicit-commit list (`implicit_commit::commits`
+    over every word of its text, e.g. `LOCK TABLES`, `GRANT`), or one whose first word cannot be
+    read get the neutral `exec-tx-ended-by-statement` ("check whether your earlier changes were
+    committed") instead of `exec-tx-rolled-back-by-server`.
+  - *R1-m1.* Table locks are read with `smart::leading_words` (leading comments skipped, an
+    executable comment read as code); only `UNLOCK TABLE[S]`, `START TRANSACTION` and `BEGIN`
+    (not `BEGIN NOT ATOMIC`) release them, besides a reset and a reconnect; `START REPLICA` and
+    `UNLOCK INSTANCE` do not.
+  - *R1-m2.* Keep whose `RELEASE` the server refused and left the PostgreSQL transaction failed
+    is no success: no `CommitDecided`, the unit fails with the server's text, the snapshot shows
+    the failed transaction, the session stays.
+  - *R1-m3.* A D-062 `EXPLAIN ANALYZE` that left nothing open ends `Tx(ExplainNotRolledBack)`
+    (`exec-explain-not-rolled-back`) instead of the confirm wording; the run stops.
+  - *R1-m4.* Smart's "cannot run in a transaction" check reads past leading comments.
+
+## m3b-t18 — classifier on the read-only path
+
+Task 18 fills step 0b (`Core::step0b`, `session/readonly.rs`): the read-only guard now asks the
+injected classifier (`ManagerConfig::classifier`, R-M3-83) before its own layers, and the app's
+boot installs `hacivat_exec::classify_pool::ClassifyPool::new(2)` (`boot.rs`, one line).
+
+- **Where it runs.** Every user statement of a read-only session: a typed `Run` unit (after
+  M3a's first-keyword write list, DEMO-7) and an M2b `Request::Exec { origin: User }`.
+  Internal statements (the schema probe, the context probe, the guard's own text) never reach
+  it. A read-write session never asks it. `None` (run B, and every test that builds a manager
+  without one) keeps M2b/M3a's layers alone.
+- **What it may do.** Only deny early: `RoCheck::Deny(d)` is `ExecErrorKind::SafetyDenied(d)`
+  (Fluent IDs only, never the text) and nothing is sent; `Allow` sends the statement into the
+  guard exactly as before (L3–L6, the post-checks, the reset). The carried `RunUnit.verdict` is
+  never consulted for safety (`alg/13` §0.1). The profile is `ReadOnlyPlusExplain` for a human
+  (R-M3-56) with the profile's `read_only_fn_allowlist`; a `Confirm` is a denial. `CALL` is
+  denied (ER15; on the M2b path step 0b is the layer that refuses it, the MySQL driver's
+  text-tag check stays as defence in depth).
+- **One denial ID (T1c review M2).** `exec-deny-classifier` ("Not sent: this console is
+  read-only, and Hacivat couldn't confirm that the statement only reads."); the unused
+  `DenyLayer::Classifier` maps to the same ID.
+- **The session's context (plan amendment C2(b)/I1).** The classifier is told the server's
+  real lexing-mode setting, search path and version (`ClassifierContext` through the new
+  `StatementClassifier::check_read_only_in`, a named exception extending the trait; the
+  context-free `check_read_only` stays for Count rows). They are read at connect, in a round
+  trip the connect makes anyway where there is one (`RawConn::session_settings`, a default
+  method, named exceptions in the drivers):
+  - MySQL and MariaDB: `@@session.sql_mode` and `DATABASE()` join the connect's `SELECT @@net_write_timeout,
+    @@session.time_zone` (no round trip of its own, the T18 carry).
+  - PostgreSQL: `standard_conforming_strings` from the startup `ParameterStatus` (no round trip);
+    on a read-only connection only, `SELECT pg_catalog.current_setting('search_path')` once
+    after the handshake (there is no connect query to fold it into).
+  - The modes are *known* (`ClassifyCtx::with_known_modes`, one reading, T14 round 2) when the
+    setting was read: PostgreSQL only when it reads `on` (the replay's setup pins it `on`
+    after every reset, so a connection that started `off` lexes its first statement otherwise:
+    then unknown); MySQL/MariaDB any pinnable `sql_mode`; SQLite always (no session mode).
+    Unknown modes stay T14's fail-closed multi-reading path.
+  - The search path is the one the replay restores when it restores one (the session's last
+    schema context), else the one read at connect, split and folded as the server reads it
+    (`$user` kept). Unread, it is one unreadable element, so an unqualified builtin is
+    `Unknown` (T9 D5/T14: an empty path would assume `pg_catalog` first).
+  - MariaDB `sql_mode=ORACLE` is known and refused: the interim backend cannot read that
+    grammar (`UnsupportedDialect`), so every statement is `Unknown` and denied.
+  - MySQL and MariaDB (the T20 carry): `ClassifyCtx.search_path[0]` is the current database,
+    `DATABASE()` in the same connect round trip as `sql_mode`, the one the replay restores
+    (`USE`, the session's last schema) when it restores one, and read again with the mode after
+    a context change (`USE` included). Unread (or no database), the path stays empty, as
+    before. T20 reads unqualified `performance_schema`/`sys` names (`threads`, `session`) by it.
+- **Read again after a context change.** When the classifier says an allowed statement may
+  change the context (`sql_safety::changes_context`: `SET`, `RESET`, `DISCARD`, `ROLLBACK`,
+  `USE`, and the statement that actually runs code defined earlier, `FETCH`/`MOVE`/`EXECUTE`,
+  T9 R1-M5), the next check first reads the context again with Hacivat's own constant query
+  outside the guard (`SELECT pg_catalog.current_setting('standard_conforming_strings'),
+  pg_catalog.current_setting('search_path')`; `SELECT @@SESSION.sql_mode, DATABASE()`). A read that fails
+  leaves the context unknown (fail-closed). A reconnect starts over from the new connection's
+  connect read. (On a read-only session the guard's `ROLLBACK`, reset and replay already undo a
+  statement's context change; the read makes the classifier's view the server's, not ours.)
+- **`classify` only in the pool.** The session never classifies; `ClassifyPool` runs every
+  check on its 16 MiB threads (T14), with the 10 s deadline that denies.
+- **`sql_mode` pin (R-M3-57, P-M3b-33).** `hacivat_guard::plan_for_with(kind, &GuardInputs {
+  sql_mode })` puts `SET SESSION sql_mode = '<observed>'` in the plan's new `pinned` list
+  (`plan_for` is unchanged for its M2b callers). The observed value is the first connection's
+  connect read (`Core.observed_sql_mode`, filled at spawn rather than lazily: the carry folds
+  the read into the connect, so it is there from the start); the environment plan's read-only
+  step appends it, so every replay after `COM_RESET_CONNECTION`, and a reconnect's, puts it
+  back. A value that is not a mode list (`[A-Za-z0-9_,]*`) is never put into a statement and
+  leaves the modes unknown. Docker shows the pin is accepted on mysql80/84 and mariadb106/1011/
+  114 and the mode after resets equals the connect read; the test account cannot change the
+  global mode, so a reset that would restore another mode is the FakeDriver test's.
+- **C8: lost state from effects.** `track_statement(t, sql, Some(effects))` reads the unit's
+  classifier effects (`WRITE_TEMP`, `SESSION_STATE`, `ADVISORY_LOCK`, MySQL `LOCK_TABLES`,
+  `PREPARE`, with `DEALLOCATE` lowering the count); `None` keeps the first-keyword scan.
+- **SAFE-06 (`sql-testkit/bypass/{pg,mysql,mariadb,sqlite}.toml`).** Every row of P1–P39,
+  M1–M19, L1–L9, X1–X5 and the SQL-SAFE-02 table of the engines with a backend, with run A's
+  verdict and the reason codes the denial names, run B's stopping outcomes, who runs it and its
+  kind. Run B (`docker_m2b_bypass.rs`) reads its rows from the files and is otherwise
+  unchanged. Run A (`sql-safety/tests/bypass_run_a.rs`, offline): every row as recorded; the
+  allowed rows are exactly the documented ones. Run A′ (`hacivat-exec/tests/docker_m3b_bypass.rs`,
+  the real pool on Docker): every denied row `SafetyDenied` with the side channel unchanged
+  (on PostgreSQL the console backend's last statement too), every allowed row meets the guard
+  (P20's writing view is refused by the read-only transaction; nothing persisted).
+  Deviation from `alg/13` S-13, recorded: `SELECT @v := 1` (M14's in-statement form, SAFE-02
+  row 27) is denied on read-only (the T4 policy refuses `SESSION_STATE`), stricter than "allow,
+  flagged".
+- **C19 (R-M3-58).** `mariadb.toml` records run B's observed outcome per row and account
+  (the three MariaDB lines agree); `docker_m3a_readonly.rs` now judges MariaDB's server-blocked
+  rows through `Run` with those outcomes. The access label stays "read-only (guarded)" for
+  MariaDB.
+- **Cross-crate equalities (digest 01 R18, `hacivat-exec/tests/cross_crate_equalities.rs`).**
+  `PG_NON_TRANSACTIONAL_FUNCTIONS` ⊆ the PostgreSQL deny list; the SQLite read-pragma lists are
+  equal; for generated statements the guard's first-keyword readings ⊆ the lexer's (a stray
+  top-level `*/`, which the guard's scanner skips and the server reads as an operator, is left
+  out: the guard then over-reads, which only refuses more).
+- **Fix round 1 (review `task-m3b-18-review.md`, controller rulings).**
+  - *I1.* `StatementClassifier::check_read_only_in` has no default: an implementer that
+    dropped the context would classify with an empty search path (read by the PostgreSQL
+    backend as `pg_catalog` first) and without MySQL's database. Every implementer, test fakes
+    included, says how it uses the context.
+  - *m1 (ledger 279).* A typed statement that completed without a result end (a release whose
+    drain read a MySQL result to its end has no final OK) has no tag and no count. When a
+    reading of its first keyword is judged by its count (`INSERT`, `UPDATE`, `DELETE`, `MERGE`,
+    `COPY`, `REPLACE`, `LOAD`; on MySQL/MariaDB also `CALL`, `DO`; readings cut short too) it
+    is unknown, never clean: the guard ends, then the connection is discarded as a gap
+    (`WriteSucceeded`). A drained `SELECT` or `WITH … SELECT` (the common release; Docker's
+    locking `WITH` cursor) stays clean: such a read writes only through a function or `INTO
+    OUTFILE`, which the read-only transaction, the principal and step 0b stop, and a MySQL
+    `WITH … DELETE` has no result set to drain.
+  - *m2.* A failed context read stays due: the check it was for is told nothing (fail-closed),
+    and the next check reads again, at most once per check (one per statement).
+  - *m3.* After `SwitchSchema`, a re-probe that fails (or reads nothing) leaves the database /
+    search path unknown to the classifier (`RoContextRead::DatabaseUnknown`), never the
+    replay's old one or the connect's, until the next context read or a switch that probes
+    (`Core::reprobe` now says whether it answered; named exception in `actor.rs`).
+  - *m4.* A′'s PostgreSQL side channel is the console backend's `query_start`: any statement
+    sent moves it; only Hacivat's own context read may run on a denied row. MySQL/MariaDB: the
+    test account cannot read another thread's statements, so A′ checks server state only and
+    the offline FakeDriver call-log tests are the proof that nothing is sent.
+  - *m5.* An allowed A′ row that run B also runs ends as run B allows (`server_off`; a
+    neutralised row runs or draws a server code). Only PostgreSQL has such rows.
+  - *m7.* Run B judges MariaDB's catalogue rows by their recorded outcome (`observed`);
+    `docker_m3a_readonly`'s MariaDB rows are generated from MySQL's plus `mariadb.toml`'s
+    recorded outcomes (one `Run`-only difference, `WITH … DELETE` → `1064`). PO list: MariaDB
+    `CALL hv_t23_escape()` as the owner, without a classifier, committed a row (the reason
+    MariaDB stays "guarded"; step 0b denies it).
+  - *m8.* C8 counts a prepared statement only for a part that prepares (a unit's effects are
+    its union, passed with each part).
+  - *m9.* `GuardPlan.pinned` is documented as the environment plan's: the guard's own steps
+    never read it. *m10.* `read_context_again`'s arms merged. *m11.* MySQL's connect read
+    steps down from four values to T7's pair (keeping the zone), then to `net_write_timeout`.
+  - *m12* (Count rows keeps the context-free check) is carried to T24.
+
+## m3b-t26 — production unlock
+
+**Decision (R-M3-6 REVISED ends; R-M3-29, R-M3-52, R-M3-78, R-M3-81; D-036).** A production tag
+no longer makes a session read-only. `effective_read_only(profile)` is the profile's own
+`read_only` flag; `ManagerConfig.production_read_only`, `SessionPolicy` (with
+`SessionManager::set_policy`/`policy` and `ConnectionManager::policy`), the Test connection's
+policy parameter (`test_connection_with_policy`, folded into `test_connection_continuing`), the
+console UX's `forced_read_only`, the app boot's `true`, the console toolbar's production
+read-only notice and its explanation popover (with their six Fluent ids) are deleted. A
+production console opens a read-write session in Manual mode (`default_mode`, D-036) and every
+unit that is not a read meets the exec gate's production rows (R-M3-55): `Confirm` (with the
+typed name for the destructive kinds) before anything is sent, `RunInTxThenConfirm` for a DML
+(the savepoint form in Manual, kept only on Keep), `Warn` for a lock, `Deny` for what has no
+single name to type or was not analysed. What used to keep production safe at the session (the
+read-only guard) is replaced by the gate before the send and the session's confirm-in-
+transaction after it (Task 19); the session itself runs no production policy.
+
+- **Retag (R-M3-78).** A profile tagged production while its console is open reconnects
+  nothing: the app's gate reads the live profile's environment on every Run
+  (`orchestrator::conn_safety`), so confirmations apply from the next Run; the open session
+  keeps its transaction mode (Manual applies to sessions opened after the tag). Count rows is
+  tag-independent: it is sent only when the read-only check allows it, on every session.
+  Marking a profile read-only keeps M3a's `pending_read_only` reconnect.
+- **No ungated send.** The app sends a user statement only through `ExecService::run` with a
+  checked plan (the orchestrator) or as Count rows (the read-only check); it has no
+  `Request::Exec` of the user's and builds no `RunSpec` of its own; the run service's plan-less
+  (M3a) path is reached only from the error bar's `test-support` seam. `prod_unlock`'s
+  `no_ungated_send_path_in_the_app` pins this over the app's sources.
+- **The context generation (carry MUST 2).** When Run's context read times out (no
+  generation), a production (live tag) or read-only session sends nothing
+  (`exec-run-context-unconfirmed`); Count rows carries the generation of the context it was
+  checked in (`SessionHandle::run_context`), so the session refuses it when the context moved
+  between the check and the send, and a session that gave no generation counts nothing.
+- **Startup scripts on production (carry MUST 3, the T12 ruling).** A production profile's
+  startup script runs only statements the classifier's read-only check allows (a read, a
+  harmless `SET`), checked statement by statement through the session's classifier
+  (`ManagerConfig::classifier`, the app's pool) in the context the session reads now; a
+  statement that may change the context leaves the later ones checked in an unknown context.
+  One refused statement (or no classifier at all) refuses the whole script and the session
+  (`config.invalid`), on connect, reset and reconnect; the warning names the statement's
+  number, never its text (`session/startup_check.rs`). The check applies when the tag the
+  session opened with **or the profile's live tag** is production (fix round 1, below).
+- **Run's context read on read-write sessions (carry MUST 4).** T24's rule stands: the read
+  is made inside an open transaction on PostgreSQL, Timescale, Yugabyte and the MySQL family
+  (the constant `current_setting`/`@@SESSION.sql_mode, DATABASE()` text cannot fail or abort a
+  transaction there), never on Redshift and CockroachDB (not in the Docker matrix; unknown
+  context instead). Proved on Docker (`docker_prod_unlock`): PostgreSQL 14–18 read-write, MySQL
+  and MariaDB with `DATABASE()` NULL (no search path, never a stale one), and a read inside the
+  user's open transaction that never aborts it.
+- **MySQL/MariaDB `UPDATE` targets (carry MUST 1; named exceptions in `sql-safety`'s
+  `interim.rs` and `hacivat-exec`'s `gate.rs`).** A joined or comma `UPDATE`'s targets are the
+  tables its `SET` names (by alias or name; an unqualified column, or a qualifier that names no
+  listed table, makes every listed table a target); two are several targets (denied on
+  production, as a multi-table `DELETE`). The comma form is read as `CROSS JOIN`s (its commas are
+  no missing `ON`). The `UPDATE`/`DELETE` modifiers (`LOW_PRIORITY`, `QUICK`, `IGNORE`) are read
+  as white space: `sqlparser` read a lone modifier as the table, so a production confirmation
+  asked to type "LOW_PRIORITY" (or "QUICK") while the real table changed. A destructive pattern
+  without a target of its own names every object its statement writes, never only the first.
+  Two `t10all` seeds moved from `admin = deny` (unparsed) to `allow` (named exception in
+  `classifier_seeds.toml`).
+- **The run service's deadline** is injectable (`ExecService::with_confirm_deadline`), so the
+  production deadline leg runs through the service.
+- **The transaction menu's production note** is a menu note (`MenuItemSpec::note`: 12 px
+  `text-2`, never selectable; named exception in `hacivat-ui`), not a disabled row in `text-3`
+  on the raised menu (T22 review m12).
+- **Shots (R-M3-81).** The M3a production states change on purpose (no notice; the Manual chip;
+  `marks-denied` now shows the gate's refusal of a `DROP SCHEMA` of two names); a new
+  `tx-chip-production` state shows the production menu. The task report lists every PNG.
+
+### m3b-t26 fix round 1 (the controller's rulings on reviews A and B)
+
+- **Typed names (A-C1, A-C2, B-C1, A-M1).** `update_targets` and the multi-table `DELETE`'s
+  targets walk nested and parenthesised joins; a reference that names no listed table (an
+  unknown alias or name) is never guessed: `TooComplex`, denied on production. A multi-table
+  `DELETE` resolves aliases (`DELETE x FROM t AS x`, `DELETE FROM x USING t AS x`): the name to
+  type is the table, never the alias; the same for `UPDATE … SET alias.col`. The modifiers
+  (`LOW_PRIORITY`, `QUICK`, `IGNORE`) are white space wherever the statement's `UPDATE`/`DELETE`
+  keyword stands, also after a `WITH` clause. Only the commas the comma form rewrites into
+  `CROSS JOIN`s skip the missing-`ON` check; a user's own `CROSS JOIN` keeps it. A form the
+  interim parser does not read (`JOIN (t AS q)`) is a parse error: denied on production.
+- **Always-true `WHERE` (review B).** `|| 1`, `OR 1`, `XOR` forms, `x <=> x`,
+  `x IS NULL OR x IS NOT NULL`, `ISNULL(NULL)`, `COALESCE`/`IFNULL` of constants, `1 IN (1)`,
+  `TRUE`, `NOT FALSE`, `EXISTS (SELECT 1)` and similar count as no `WHERE` (MySQL's `||` is OR
+  unless `PIPES_AS_CONCAT`).
+- **Non-transactional MySQL tables: D-043 closes this way (A-I2, B-I1).** On production,
+  MySQL, MariaDB and TiDB confirm every DML **before it is sent** (`Confirm`, never the
+  run-then-Keep/Undo form): a MyISAM, MEMORY or other non-transactional table keeps a write no
+  rollback undoes, so the confirmation must come first. PostgreSQL and SQLite keep the savepoint
+  form. Everywhere (development consoles included), when the rollback of a confirmed statement
+  is answered with warning 1196 (or 1751/1752), the log says "Not undone: the table doesn't
+  support transactions" (`exec-confirm-not-undone`, `exec-error-confirm-not-undone`), never
+  "undone" or "discarded", and the unit fails with `ConfirmNotUndone`. Proved on mysql84 with
+  MyISAM tables (`docker_prod_unlock`). No undo scripts are generated (D-043's other branch).
+- **Routine bodies (B-I2).** `CREATE [OR REPLACE] FUNCTION/PROCEDURE/TRIGGER/EVENT` and their
+  `ALTER` are never suppressible on production; elsewhere the suppression key also hashes the
+  whole statement text, so "don't ask again" for one body never covers another.
+- **Execute all on production (B-I3).** It covers only the later units of the same gate class
+  as the shown unit, never a unit that needs a typed name (a lock warning's Execute all does not
+  carry a `DROP TABLE`, a `GRANT`, a `CALL`, a `DO` or an unknown statement).
+- **The live tag reaches the sessions (A-I1).** `SessionManager::update_profile` records the
+  profile's live environment in the profile's shared activity, which every session reads; a
+  session's startup script is checked when its opening tag or the live tag is production, so a
+  session opened before a retag is checked on its reset or reconnect. A retag to production
+  closes the idle pooled sessions.
+- **The send re-reads the tag (B-M4, A-M4).** Right before the send the orchestrator reads the
+  live profile's tag and the session's read-only flag again (the session checks the context
+  generation): a plan gated under another tag or flag sends nothing
+  (`exec-run-connection-changed`). The confirmation dialogs show the tag the plan was gated
+  under (the live one), not the job's snapshot.
+- **Session settings that weaken later writes (B-M1).** On production, `SET
+  session_replication_role`, `sql_log_bin = 0`, `foreign_key_checks = 0`, `unique_checks = 0`
+  and `NOTIFY` ask (`Confirm`).
+- **`EXPLAIN` (B-M2, B-M6).** A production PostgreSQL `EXPLAIN ANALYZE` of any inner that is not
+  a read asks first, with the rollback note; a plain `EXPLAIN <dml>` (no `ANALYZE`) is a read
+  (no Keep/Undo), decided in the gate (the classifier's own verdict is unchanged).
+  Since `m3b-gate-explain` (fenced `// ## m3b-gate-explain`) the read is decided after the
+  production AND-check and D-062, never before them, and only for a plan of code-free
+  statements: a `ROUTINE_CALL` bit (statement or request), a touched call, a destructive
+  pattern, any `ANALYZE` evidence (kind, flag or reason), a request-level class above `Dml`, or
+  a policy that does not simply allow it under `Admin` (a routine reason, session effects)
+  keeps the class, so production asks. Planning runs code. PostgreSQL may pre-evaluate
+  IMMUTABLE functions with constant arguments while planning
+  (<https://www.postgresql.org/docs/current/xfunc-volatility.html>). MySQL builds derived
+  tables under a plain `EXPLAIN`, so a stored function in a `FROM` subquery runs; MySQL bug
+  #31468 (<https://bugs.mysql.com/bug.php?id=31468>, 2007, versions 4.1 and later) shows its
+  `INSERT` executing, and was closed as documented behaviour. A Percona post
+  (<https://www.percona.com/blog/uncommon-sense-mysql-when-explain-can-trash-your-database/>,
+  2020) shows a `DELETE` run the same way on MySQL 8.0.21 and earlier.
+  Residual risk: code the text does not show (column defaults, RLS policies, rules, view
+  bodies, overloaded operators, type input functions) can run while planning. A production
+  `SELECT` over the same objects has the same exposure, so this read does not widen it.
+- **The plan-less run (A-M2, A-M3).** `ExecService` refuses a request with neither prepared
+  units nor a plan unless built `with_plan_less_runs` (a test seam); the app opts in only in a
+  `test-support` build, and `prod_unlock` checks that.
+- **To the PO:** B-M3 (a typed name for `TRUNCATE` and `DROP TABLE` on production too;
+  unchanged, per the plan and the controller's ruling); D-043 closed by confirm-first on the
+  MySQL family plus the "not undone" line; the Turkish wording of the new lines
+  (`exec-confirm-not-undone`, `exec-error-confirm-not-undone`,
+  `hv-confirm-execute-all-scope-production`).
+
+### m3b-t26 fix round 2 (the controller's rulings on the round-1 re-checks)
+
+This round simplifies production on purpose; it replaces the round-1 bullets on routine bodies
+(B-I2) and Execute all (B-I3) where they differ.
+
+- **No "don't ask again" on production (N1, R1, A R1-m2).** It is never offered on production,
+  for any class (`offers_suppress`), and the gate marks every production item unsuppressible;
+  a production item never consults the `SuppressSet`, so a pair recorded off production (or on
+  it, before this round) never silences a production statement. This closes N1: since round 1
+  a production MySQL-family DML is a `Confirm`, and one "don't ask again" on `DELETE … WHERE id >
+  1000000` had silenced `… WHERE id > 0` (the key is constant-blind).
+- **Bodies off production (R1).** `RULE`, `POLICY` and `VIEW` (`CREATE [OR REPLACE]`, `ALTER`)
+  join the code-like definitions whose suppression key also hashes the whole text.
+- **Execute all on production (R2).** Not offered: it covers nothing, so every unit shows its own
+  dialog. The ruling allowed covering only byte-identical repeats or hiding it; hiding is the
+  simpler, and repeats were its only use. Off production RC-1 stands.
+- **Session settings (R3).** Compared by bare name (quotes, `@@` and scope dropped, any case), and
+  the list grows: `sql_safe_updates`, `gtid_next`, `pseudo_replica_mode`/`pseudo_slave_mode` and
+  `synchronous_commit` join `session_replication_role`, `sql_log_bin`, `foreign_key_checks` and
+  `unique_checks` (any value: fail closed).
+- **Always-true `WHERE`, the fail-closed rule (A R1-m1).** On both backends a `WHERE` that reads no
+  column of the statement's tables (an unqualified column, or one qualified by a target's name or
+  alias, anywhere in it) is constant for the statement and counts as keeping every row
+  (`AlwaysTrue`: the typed name on production); so does an expression compared with itself
+  (`a = a`, `t.id >= t.id`, `a <=> a`, `a LIKE a`, `IS NOT DISTINCT FROM`), `X OR NOT X` (MySQL
+  backend) and `x IS NULL OR x IS NOT NULL`. MySQL's `||` precedence is read under `NOT` and
+  `IS [NOT] NULL` too (`NOT x = 3 || 1` is `(NOT x = 3) OR 1`). Statements that were bounded and
+  now ask for the name: `WHERE 1 = 0`, `NULL`, `NULL = NULL`, `id = id`, `now() < …`, `EXISTS
+  (SELECT 1 FROM u WHERE u.a = 1)`.
+- **To the PO (B-M3):** `TRUNCATE` and `DROP TABLE` keep no typed name, as R-M3-55 says.
+
+## m4-t01c — metadata session seams
+
+M4 Task 1c (W0). Seams only; every body is a fail-closed stub until its filling task.
+
+- **`hacivat_session::meta` (bodies Task 5).** `MetaConnSpec`, `SessionManager::meta_conn`,
+  `MetaConn` (`dbms`, `server`, `begin_snapshot`, `join`, `debug_xid_assigned` under
+  `test-support`), `SnapshotTxn` (`rows`, `commit`), `Rows` and `MetaError`. Acquisition and
+  `MetaConn::join` answer `MetaError::Unavailable` and open nothing, so a namespace stays
+  `Failed` ("Not loaded"), never empty-and-loaded (F31).
+- **`MetaQuery` is the only door (R-M4-7).** Its fields are private and `MetaQuery::new`
+  (`#[doc(hidden)]`) is its only constructor: no `Default`, `From`, `Deserialize` or builder, so a
+  struct literal cannot bypass check-deps `MetaQueryOnlyFromPacks`. A `compile_fail` doctest
+  (E0451) pins it. A `joinable` flag travels with the text, for R-M4-29's joined connections.
+- **`SessionEvent::TxEnded { outcome: TxOutcome }` was added.** `TxChanged(TxState)` cannot
+  express how a transaction ended: its `status` goes `InTx` → `Idle` after both `COMMIT` and
+  `ROLLBACK`, stays `InTx` across `ROLLBACK TO SAVEPOINT`, and `TxState` names no savepoint.
+  Refresh after DDL (R-M4-42) needs all three (`Committed`, `RolledBack`, `RolledBackTo(name)`).
+  No session emits it until Task 21; every existing match on `SessionEvent` has a wildcard arm.
+  Fix round 1 (I4): `TxOutcome::Unknown` covers a connection lost after `COMMIT` or `ROLLBACK`
+  was sent and before the answer; it counts as committed for refresh
+  (`TxOutcome::counts_as_committed`: refresh more, never less). The emitter derives the outcome
+  from the server's command tag or transaction status, never from the statement text
+  (PostgreSQL's `COMMIT` in a failed transaction answers `ROLLBACK`; `END`, `ABORT`, `COMMIT AND
+  CHAIN`, MySQL's implicit commits and SQLite's outermost `RELEASE` end a transaction silently),
+  and compares savepoint names through `sql_ident::key::match_key`.
+- **`Profile.catalog_sensitive` (R-M4-15)** is a `connections.toml` key left out at `false`, so
+  M2a, M2b and M3 files round-trip byte for byte (P-M3b-10); a non-boolean value makes the entry
+  invalid (kept on disk, shown), like every M3b key.
+- **`SecretSlot::CatalogKey`** (`catalog-key`) holds the profile's 32-byte catalog data key
+  (Task 11 creates it on the profile's first encrypted cache write). It is one of
+  `backend_slots`, so deleting a profile removes it from the keyring. Fix round 1 (ruling on
+  concern 3): `copy_slots` and `copy_all` never copy it, so a duplicated profile gets its own
+  key (it has a new id and an empty cache, and is often re-pointed at another server).
+- **Per-profile data (`hacivat_settings::profile_data`).** The only reader and writer of
+  `profiles/<uuid>.toml`: one top-level table per owner (`[metadata]`: M4). A save re-reads the
+  file under a process-wide lock, replaces only its own table and writes atomically with mode
+  `0600`; every other byte stays. A file that is not TOML is never overwritten, and only a
+  canonical UUID names a file. Fix round 1 (M3): a leading byte-order mark and CRLF line
+  endings are kept as read; a file that mixes CRLF and LF is read but never rewritten
+  (`MixedLineEndings`); an inline `metadata = { … }` becomes a table at the end. The lock is per
+  process: two app instances saving at the same moment can lose one save.
+- **`StmtReport.ddl` stub scope (fix round 1, I2).** Opaque (refresh the current namespace)
+  when the kind is DDL-class, `Do`, `Call`, `Execute`, `Prepare`, `Other` or `Explain {
+  analyze: true }`; when the flags hold `EXEC_COMMENT`, `DYNAMIC_SQL` or `EXPLAIN_ANALYZE`; or
+  when the effects hold `DDL`, `DDL_TEMP`, `PRIVILEGE`, `ADMIN`, `PREPARE`, `ROUTINE_CALL` or
+  `UNKNOWN`, or are empty. It is a function of the item's kind, effects and flags, recomputed
+  wherever `classify` changes them (the doubt helper, the readings' union, after the taint
+  pass), so it never changes a verdict.
+- **Fixture logins (R-M4-43, carry R-C1-1).** In `docker/m2a/init/mysql.sql`, from the MySQL
+  8.0/8.4 and MariaDB manuals:
+  - `hv_catalog` reads the system schemas (`SELECT` on `mysql.*`, `performance_schema.*`;
+    `SELECT, SHOW VIEW, EXECUTE` on `sys.*`) and holds `EXECUTE` on the empty database
+    `hv_catalog_probe`, its probe's default database. An unqualified name that is not a built-in
+    names a stored function of the default database, and the server checks `EXECUTE` before it
+    looks the function up. Without the privilege a missing function answered 1370 (C-1, run
+    44505051940), indistinguishable from a present one; with it, 1305. `sys` is not used as the
+    probe's database: its stored functions (`format_bytes`, `ps_thread_id`, ...) carry names that
+    are built-ins on some servers only, so they would read as built-ins where they are not.
+    `hv_catalog` does see `hv_catalog_probe` in `SHOW DATABASES` and `SCHEMATA` (an account
+    sees every database it holds a privilege on): the snapshot generator reads only the four
+    system schemas, and Task 23 asserts the probe database is absent from a snapshot. Note:
+    `SELECT` on `mysql.*` includes the password hashes of `mysql.user` (and MariaDB's
+    `global_priv`); R-M4-43 asks for it, and every account there is a throwaway test account.
+  - `hv_fixture` (fix round 1, ruling I1) holds only `EXECUTE` on the database
+    `hv_fixture_admin`, and signs in on `information_schema` (a sign-in that names a database
+    needs a privilege on it: MySQL 8.4 `USE`; every account may use `information_schema`). Its two
+    jobs run through `SQL SECURITY DEFINER` procedures there:
+    - `set_global(name, value)`: `time_zone` only;
+    - `create_user(user, password)`, `drop_user(user)`, `change_grant(grant, privilege, db,
+      table, user)`: accounts matching `^hvm4_[a-z0-9_]{1,27}$`, databases matching
+      `^hvm4_[a-z0-9_]{1,59}$` (or one of their tables), and 16 allowlisted privileges (no
+      `GRANT OPTION`, no global privilege).
+
+    Each procedure refuses anything else with `SIGNAL SQLSTATE '45000'` (error 1644) before it
+    builds a statement; it quotes values with `QUOTE()` and accepts identifiers of `[a-z0-9_]`
+    only; its parameters are `ascii` with `ascii_bin`, so `IN` and `REGEXP` are exact and
+    case-sensitive. A name is also refused when it holds any character outside `[a-z0-9_]`
+    (fix round 2: the pattern's `$` matches before a final newline). `CREATE USER`, `DROP USER`,
+    `GRANT` and `REVOKE` are prepared (MySQL 8.4 "SQL Syntax Permitted in Prepared Statements";
+    MariaDB ≥ 10.6.2 "all statements"; a stored procedure may use `PREPARE`). `set_global` runs
+    a static `SET GLOBAL time_zone = p_value`: that MySQL list names `SET ROLE` only (fix round
+    2).
+  - The definer `hv_fixture_definer@localhost` is created `ACCOUNT LOCK` and can never sign in.
+    Locking does not affect running stored programs that name it as `DEFINER` (MySQL 8.4
+    "Account Locking"); MariaDB's lock refuses new client connections only ("Account
+    Locking"). It holds `CREATE USER` (global), `ALL` on `hvm4\_%` databases `WITH GRANT
+    OPTION` (a grantor must hold what it grants), and the global-variable privilege
+    (`SYSTEM_VARIABLES_ADMIN` on MySQL, `SUPER` on MariaDB, which has no narrower one; chosen by
+    `VERSION()` and prepared, since neither server parses the other's name). The procedures are
+    the only way to use them. It also holds `EXECUTE` on `hv_fixture_admin` (fix round 2): a
+    definer-context routine runs with its `DEFINER`'s privileges, and that account "must have
+    the EXECUTE privilege" for the routine (MySQL 8.4 "Stored Object Access Control"). Root
+    created the procedures, so `automatic_sp_privileges` gave `EXECUTE` to root, not to the
+    definer, and every call failed with 1370 (CI run 44524750230, mysql80).
+  - `hacivat_testkit::fixture_sql` spells the `CALL`s and refuses the same inputs first;
+    `DockerTarget::as_test_account` signs in as a created `hvm4_*` account, so a grant is
+    checked from that account's side (`SHOW GRANTS` for the current user needs no privilege).
+  - Tests: `crates/core/hacivat-driver-mysql/tests/docker_m4_fixtures.rs` (CI's fresh stack;
+    locally after C-2).
+
+## m4-t05 — metadata sessions
+
+M4 Task 5 (W1; R-M4-7, R-M4-29, R-M4-38, R-M4-46, U-6(e)). The bodies of T1c's
+`hacivat_session::meta` seam. Security-sensitive; two independent reviews.
+
+- **Three ways to read.** A `MetaConn` reads on its own connection, on the user's idle default
+  session, or on a joined job session. `SessionManager::meta_conn` picks the way:
+  - PostgreSQL, MySQL and MariaDB in multiple-session mode, and SQLite files, get their own
+    connection.
+  - Single-session profiles, SQLite `:memory:` and SQLite's `temp` schema
+    (`MetaConnSpec.database == Some("temp")`, alg/02 HV-INTRO-08 step 4) read on the user's
+    session. A separate connection would see another server session, another in-memory
+    database or another `temp`.
+  - Any other engine is `Unavailable`, and so is a spec that names another profile.
+- **The lease of an own connection.**
+  1. A token the next `close_all` cancels, taken first.
+  2. A slot of the per-database cap (`MetaPools`: 1 by default, `set_meta_pool_size` up to
+     `META_POOL_MAX` = 3).
+  3. A budget permit at `Priority::Introspection` through the manager's gate, so `close_all`
+     ends the wait. SQLite's reader takes none: it is a separate read-only reader and does not
+     count against SQLite's budget of 1 (U-6(e)).
+  4. A headless `Purpose::Probe` connect for `Department::Introspection` with
+     `application_name = "Hacivat (metadata)"` and the spec's database. The connect is
+     read-only and goes through the manager's overlay. It is never dropped half-way.
+
+  A watcher task closes the connection when the `MetaConn` drops or the profile disconnects,
+  and only then gives back the permit and the slot. A connection opened after the token was
+  cancelled is closed at once (`Unavailable`). The pool has no idle parking: a `MetaConn` holds
+  its slot for its lifetime, so the engine (Task 15) drops it between tasks.
+- **Named exception in `session/pool.rs` (block `// ## m4-t05-meta`).**
+  - `connect_live` became a wrapper of `connect_live_as`, which applies a profile adjustment
+    before the connect. `same_destination` ignores the database and `application_name`, so the
+    overlay's secrets still apply.
+  - New `pub(crate)` accessors: `meta_runtime`, `meta_profile`, `meta_manager`, `meta_pools`,
+    `meta_single`, `meta_closed_token`, `meta_permit`, `meta_connect`, `meta_driver`.
+  - One new field, `meta: MetaPools`.
+- **Server enforcement per engine.** The set-up runs at connect and after every reconnect.
+  - PostgreSQL: `SET statement_timeout = <ms>`; the read-only connect already sets
+    `default_transaction_read_only`. A snapshot is `BEGIN ISOLATION LEVEL REPEATABLE READ
+    READ ONLY`, then `SET LOCAL search_path = pg_catalog, pg_temp` (R-M4-46).
+  - MySQL: `SET NAMES utf8mb4` (fix round 1, I3-A, the T4 carry), `SET SESSION TRANSACTION
+    READ ONLY`, `SET time_zone = '+00:00'`, `SET SESSION max_execution_time = <ms>` (SELECTs
+    only).
+  - MariaDB: the same, with `SET SESSION max_statement_time = <s.mmm>`.
+  - MySQL and MariaDB, before every snapshot, one probe: the session's read-only variable must
+    read `1`, and `character_set_client`, `character_set_connection` and
+    `character_set_results` must read `utf8mb4` (an `init_connect` or
+    `character_set_client_handshake = OFF` can override the handshake's request; GBK would let
+    a lead byte break T17's backtick quoting). Otherwise `ReadOnlyNotEnforced`, and nothing
+    starts. Then `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` (fix round 2, R-W1-13: the
+    consistent snapshot needs REPEATABLE READ whatever the session's isolation, and the
+    statement covers this one transaction only) and `START TRANSACTION WITH CONSISTENT
+    SNAPSHOT, READ ONLY`. The variable is
+    `@@session.transaction_read_only`; MariaDB before 11.1 has only `@@session.tx_read_only`.
+    MariaDB documents `transaction_read_only` as "Introduced: MariaDB 11.1", and `tx_read_only`
+    as "Deprecated: MariaDB 11.1". The gate reads the version the server reported at connect.
+  - No `group_concat_max_len`.
+  - SQLite: the main file is opened `SQLITE_OPEN_READ_ONLY` (the flag form of `mode=ro`)
+    straight through the registered driver, with `DriverConnect.read_only = false`. So there is
+    no user-facing authorizer (R-M4-38), and `BEGIN` and `pragma_table_list` work. A snapshot is
+    a deferred `BEGIN`. `MetaConn::attach_read_only(schema, file)` runs `ATTACH DATABASE ? AS ?`
+    with binds, outside a snapshot. SQLite opens an attached file with the main file's flags,
+    so it is read-only too; the driver does not set `SQLITE_OPEN_URI`, so a `file:…?mode=rw`
+    name is a plain path. Tested: `CREATE TABLE aux.u` and `INSERT INTO aux.t` answer
+    `SQLITE_READONLY`; a URI asking for `rw` and a missing file are refused, and no file is
+    created.
+  - Review A M8: "read-only" does not mean nothing is ever written. The reader's own private
+    `temp` schema (and an attached `:memory:` database) accepts a table. Neither is persisted,
+    and both die with the connection.
+  - Every `BEGIN` must leave the connection `InTx`, and every `COMMIT` must leave it `Idle`;
+    otherwise `ReadOnlyNotEnforced`, and the connection is dropped.
+- **Reads on an own connection.**
+  - A read is one typed query with binds (`Protocol::Extended`, not suspendable, the cell cap
+    off). One result set is kept; the extended protocol and the SQLite driver refuse a second
+    statement.
+  - Fix round 2 (review B R-M3; round 1 had a first-keyword check only): `meta::check_own_text`
+    runs the same token guard as the session paths (the read allowlist below), in the lexer
+    contexts of the connection's engine, before anything is sent.
+    - One addition, on SQLite only: a reading `PRAGMA` (no `=` token in it). That connection
+      is opened read-only, and T18 reads `schema_version` and the built-in lists through
+      pragmas. A setting pragma (`PRAGMA writable_schema = ON`) is refused.
+    - Writes, locks and side-effect functions never reach an own connection, so a pack that
+      called `pg_advisory_lock` or `set_config(…, false)` cannot leave a lock or a setting on
+      it past `COMMIT`.
+    - The server's read-only enforcement remains the guard behind it.
+  - `SnapshotTxn::rows_unguarded` skips the token guard on an own connection only.
+    - The Docker tests use it to prove that the **server** refuses writes (`25006`, `1792`,
+      `SQLITE_READONLY`) and enforces the statement timeout and the XID canary, whose probes
+      name denied functions.
+    - Fix round 3: it exists only under `cfg(all(debug_assertions, feature =
+      "test-support"))`. Only dev-dependencies enable `test-support`: `hacivat-exec`'s, and
+      `hacivat-app`'s self dev-dependency. `cargo tree -e normal,features` shows only `default`
+      for `hacivat`, `hacivat-app`, `hacivat-exec` and `hacivat-introspect`, so no product
+      build has it, debug or release.
+    - It still takes only a `MetaQuery`, which only packs and tests can build.
+    - `tests/meta_conn.rs::rows_unguarded_is_named_only_in_tests` fails if any file outside a
+      `tests/` directory (but its definition in `meta.rs`) names it.
+    - The tests reach it through `cfg(feature = "test-support")`. `cargo test --workspace` and
+      the default Docker run (`hacivat-exec` in the same invocation) enable the feature. A run
+      of `-p hacivat-session` alone skips the engine-side checks in `meta_conn` and the hostile
+      files; the guard-side checks still run. In that run, `docker_meta_conn`'s probes fail
+      loudly, never silently.
+    - A self dev-dependency on `hacivat-session` with `test-support` (the `hacivat-app`
+      precedent) would turn the feature on for every run of this crate's tests. That needs a
+      manifest edit, which is T1a's (NEEDS_CONTEXT in the report).
+  - Values come back as text: text, JSON and XML as sent; bytes as UTF-8 when they are; any
+    other value as `valfmt::raw_text` writes it, for the connection's engine. A cut value is
+    `Unavailable` (it cannot happen with the cap off).
+  - Errors map to:
+    - `ConnectionLost`: an I/O, protocol, TLS or timeout error, or a server error that ends the
+      connection (`recovery::connection_ending`);
+    - `Timeout`: PostgreSQL `57014` (a metadata connection is never cancelled otherwise),
+      MySQL 3024, MariaDB 1969;
+    - `Server` with the server's message: any other server error.
+  - A lost connection is dropped. Nothing is retried inside a snapshot. The next
+    `begin_snapshot` connects again and runs the set-up and the MySQL assertion again.
+  - Fix round 1 (review A M5): after every read the transaction must still be open. A MySQL
+    deadlock or `innodb_rollback_on_timeout` ends it silently; the read then answers
+    `ConnectionLost` and the connection is dropped, so the snapshot is never read on in
+    autocommit.
+  - Fix round 1 (review B I4-B): a snapshot dropped without a commit is rolled back at once.
+    `SnapshotTxn`'s drop spawns the `ROLLBACK` on the manager's runtime, so no read
+    transaction, and no lock (SQLite's SHARED lock, PostgreSQL's xmin and `AccessShareLock`s,
+    MySQL's read view and metadata locks) outlives it while the `MetaConn` lives on.
+    - The connection, its open snapshot and an in-flight mark share one locked slot. The
+      spawned rollback acts only if that snapshot is still the open one, so a later
+      `begin_snapshot` that took the connection first is never rolled back.
+    - A snapshot whose statement was cut short, or whose rollback fails, closes the connection
+      instead.
+    - Tested: the reviewer's SQLite case. The user's `INSERT` commits in milliseconds, not after
+      the 5 s busy timeout.
+  - A begin that was cut short (the driver reports a transaction) is rolled back by the next
+    `begin_snapshot`. A read whose future was dropped mid-statement discards the connection.
+  - Fix round 1 (review A M3): the per-database cap keys a spec without a database by the
+    profile's database, so `None` and the profile's name share one slot.
+- **Reads on a session: `Request::MetaRead`** (fix round 1, ruling R-W1-9; review A C1, I1,
+  I4; review B C1, I1, I2, M3, M5).
+  - **The defect.** A read on the user's session was an ordinary user `Request::Run` with
+    verdict `Unknown`. Smart mode began the user's transaction for it, and so did Manual mode
+    (the production default). A request queued before it could open a transaction the read
+    then rode, and the read moved the console's run context (`ContextChanged`).
+  - **The request.** A dedicated request, `Request::MetaRead(MetaRead)`. `MetaRead`'s fields
+    are crate-private, so only `crate::meta` builds one.
+  - **When the actor takes it.** `Core::handle` takes it in the same step that runs it, next to
+    the existing `ContextChanged` refusal (`Core::meta_read`, in `meta.rs`). It never passes
+    through `handle_request`, the user run path, the transaction modes, the verdicts, the
+    read-only guard, the history or the activity.
+    - `changes_run_context` answers `false` for it, so the run context is never marked stale.
+    - `is_activity` and `is_retryable` answer `false`.
+    - `may_open_tx` answers `false`: Hacivat's own read transaction loses nothing of the
+      user's.
+  - **The user's session.** The read runs only when all of these hold; otherwise the actor
+    refuses with `Tx(InProgress)` (`Busy`) and sends nothing:
+    - the transaction is idle, both in the session's state and in the driver's status;
+    - no cursor is open;
+    - MySQL: no `LOCK TABLES` is held, and the driver reports `autocommit` on (Manual mode, or
+      a user's `SET autocommit = 0`, turns it off);
+    - MySQL: the three character sets are `utf8mb4` (`ReadOnlyDenied(Protocol)`, mapped to
+      `ReadOnlyNotEnforced`, otherwise).
+
+    The read then runs inside Hacivat's own read-only transaction, rolled back in the same step:
+    - PostgreSQL: `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`, `SET LOCAL search_path =
+      pg_catalog, pg_temp`, `SET LOCAL statement_timeout = <ms>`, the read, `ROLLBACK`. This
+      also closes review B I2 (no server-side read-only and no pinned path) and review A M7 (no
+      statement timeout).
+    - MySQL and MariaDB: `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` (fix round 2), then
+      `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`, the read, `ROLLBACK`. The
+      session-level read-only setting is never changed, and MySQL applies no statement timeout
+      to the user's session (carry below).
+    - **Known limit (ruling R-W1-13, review B R-M2).** A `SET TRANSACTION` without `SESSION` or
+      `GLOBAL` applies to the session's next transaction only. When the user leaves one pending
+      (say, `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`, run before their next
+      `START TRANSACTION`), Hacivat's read transaction takes the next-transaction slot, and the
+      user's next transaction runs at the session's isolation instead. Hacivat cannot see a
+      pending one-shot setting: the server keeps no variable for it.
+      - Before fix round 2, the read also inherited the session's isolation; under SERIALIZABLE,
+        `WITH CONSISTENT SNAPSHOT` is ignored and plain reads take shared locks.
+      - Fix round 2 sends `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` first. That
+        statement is scoped to Hacivat's own transaction, so the read always runs at REPEATABLE
+        READ with a consistent snapshot and no shared locks. It does not make the limit worse:
+        a pending one-shot setting is consumed by the next `START TRANSACTION` either way. The
+        Docker matrix does not exercise the one-shot case.
+    - SQLite: a deferred `BEGIN`, the read, `ROLLBACK`. A read-only profile's connection
+      refuses `BEGIN` (its authorizer, F7) and its engine is read-only already
+      (`SQLITE_OPEN_READ_ONLY`, `query_only`), so the read runs there alone.
+    - If the rollback fails, or the connection is not idle afterwards, the session is marked
+      broken (closed and recovered by the actor), so no user statement ever runs inside a
+      transaction of Hacivat's.
+    - A read answers `Busy` when its condition fails; it is never queued again.
+  - **The joined path.** The read runs only while the session was spawned as a
+    `Job(DdlApply | DriftCheck)` (`Core::meta_joinable`) and is inside its transaction, with no
+    cursor. Otherwise the actor answers `Tx(Unsupported)` (`NotJoinable`) and sends nothing.
+    Nothing but the read is sent.
+    - The kind decides that the transaction is Hacivat's, not `TxState::owner` (review A M9): a
+      job begins its transaction with its own statements.
+    - A failed joined read on PostgreSQL aborts the job's transaction (`25P02`); the apply then
+      rolls back (review B M4).
+  - `SnapshotTxn::commit` on a session sends nothing: each read is its own step.
+  - Acquisition is unchanged. It waits while the default session runs a request; it answers
+    `Busy` while the session holds a transaction or a cursor (alg/02 HV-INTRO-01 edge 10), and
+    `Unavailable` when there is no default session. `begin_snapshot` and `rows` check again,
+    for a fast answer; the actor decides.
+  - **Named exceptions** (fenced `// ## m4-t05-meta`):
+    - `session/mod.rs`: the `Request::MetaRead` variant and the `MetaRead` struct.
+    - `session/actor.rs`:
+      - the `meta_joinable` computation in `spawn_supervised`, and its `Core` field and
+        initializer;
+      - the dispatch in `Core::handle`;
+      - the `handle_plain`, `is_activity` and `is_retryable` arms.
+    - `session/run_context.rs`: the `changes_run_context` arm.
+- **Joined connections (R-M4-29).**
+  - `MetaConn::join(&SessionHandle)` accepts only a usable `Job(_, DdlApply | DriftCheck)`
+    session inside a transaction (`TxStatus::InTx`); the actor checks again when it takes each
+    read.
+  - It refuses `Console`, `Editor`, `Introspection`, `Service`, `Job(Export | Import)` and a job
+    outside a transaction with `NotJoinable`.
+  - The SQLite writer under an M7 apply has no seam yet, so it is refused too. M7 adds it.
+  - `begin_snapshot` and `commit` send nothing.
+  - `rows` refuses a query that is not `joinable` (`NotJoinable`) before submitting it; the
+    actor then applies the allowlist below (`RefusedText`) before anything is sent.
+  - A joined `MetaConn` reports `DbmsKind::Unknown`: a `SessionHandle` does not carry its
+    engine, and the caller (Task 15b) knows the profile's. The actor checks the text with its
+    own engine.
+- **The read allowlist (`meta::check_read_text_for(sql, engine)`; fix round 1, I2-A/I3-B).**
+  - **Where it runs.** It is the carries' primary guard on the two session paths (the
+    check-deps token rule is defence in depth, R-W0-2). The actor applies it with its own
+    engine, so it covers both the joined path and the user's session.
+  - **How it reads.** It works on tokens of the project's lexer (`sql-lexer`), not on string
+    scanning.
+    - **One reading per server setting.** A text is lexed in every lexer context its engine
+      can be in, and every context must accept it:
+      - PostgreSQL 14, 15 and 16 profiles, each with `standard_conforming_strings` on and off;
+      - MySQL and MariaDB with the default `sql_mode`, with `NO_BACKSLASH_ESCAPES` and with
+        `ANSI_QUOTES`;
+      - SQLite.
+
+      An unknown engine takes all of them (`check_read_text`).
+    - **What that handles.** PostgreSQL ends a `--` comment at `\r` and MySQL does not;
+      PostgreSQL nests block comments; dollar quotes; `1INTO`. All are read by the lexer
+      itself.
+  - **The rules.** A text is accepted only when all of these hold:
+    - it has no control character but `\n` and `\t` (so `\r`, vertical tab and C1 controls
+      are refused before lexing; packs are LF-normalized);
+    - fix round 2: it has no space character but ASCII's (no NBSP, no U+2028) and no
+      invisible format character (zero-width spaces and joiners, the word joiner, the BOM, the
+      soft hyphen). Engines read them as name characters, and packs never hold them;
+    - it has no MySQL executable comment (`/*!`, `/*M!`), and no `;` but one at the very end
+      (a raw check, before lexing);
+    - it lexes without an error, and has no unknown, client-command or executable-comment
+      token;
+    - fix round 2 (review A I5): it has no PostgreSQL `U&"…"` identifier at all. Its escapes
+      can spell any name (`U&"\006Eextval"`), so the token is refused outright, never decoded.
+      The word `UESCAPE` is refused with it;
+    - its first significant token is a word, `SELECT`, `WITH`, `SHOW`, `TABLE` or `VALUES`;
+    - fix round 2: no word or quoted name holds a non-ASCII character. Pack text names catalog
+      objects in ASCII, and user names travel as binds, so such a name is a lookalike
+      (`nеxtval` with a Cyrillic `е`) or glued to an invisible character;
+    - no word, and no quoted name, is one of:
+      - `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `INTO`, `COPY`, `CALL`, `PREPARE`, `DECLARE`,
+        `EXECUTE`, `UESCAPE`;
+      - the functions `set_config`, `nextval`, `setval`, `lastval`, `pg_notify`, `GET_LOCK`,
+        `RELEASE_ALL_LOCKS`, `SLEEP`, `BENCHMARK`, `pg_terminate_backend`,
+        `pg_cancel_backend`, `pg_sleep`, `pg_promote`, `pg_reload_conf` and SQLite's
+        `load_extension`;
+      - a name starting with `pg_advisory`, `pg_try_advisory`, `lo_`, `dblink`,
+        `txid_current`, `pg_current_xact_id` or `RELEASE_LOCK`;
+    - fix round 2 (review A minor, review B R-M1), the pattern rule for PostgreSQL's
+      administration families: no name starting with any of these is **called** (followed by
+      `(`):
+      - `pg_stat_reset`, `pg_switch_`, `pg_reload_`, `pg_rotate_`;
+      - `pg_create_`, `pg_drop_`, `pg_copy_`, `pg_replication_`, `pg_logical_` (replication
+        slots and origins, restore points, logical messages and decoding);
+      - `pg_log_`, `pg_backup_`, `pg_wal_replay_`, `pg_file_`, `pg_import_`, `pg_promote`.
+
+      A call is the rule, so the catalog views of the same families stay readable:
+      `pg_replication_slots`, `pg_replication_origin_status`, `pg_file_settings`;
+    - no `FOR` is followed by `UPDATE`, `SHARE`, `KEY` or `NO`, and no `LOCK` by `IN`;
+    - fix round 2: no MariaDB `NEXT VALUE FOR` or `PREVIOUS VALUE FOR`, and no MySQL
+      `LAST_INSERT_ID(…)` with an argument (it sets the session's value; `LAST_INSERT_ID()`
+      only reads it);
+    - no `:=` (also `@x :=`).
+  - Accepted as harmless (reviews' probes): `IS_USED_LOCK` (it only reads), MySQL optimizer
+    hints (`/*+ … */`, one statement's scope), and a PostgreSQL nested comment that hides a
+    word (the server reads one comment).
+  - A denylist of first keywords would miss PostgreSQL `END`/`ABORT`, MySQL `XA` and `PREPARE
+    TRANSACTION`.
+  - SQLite `PRAGMA` statements are refused on the session paths, so `temp` and `:memory:`
+    sections use the table-valued `pragma_*` forms. The own reader takes a reading `PRAGMA`
+    (above).
+  - Joinable and user-session sections must not hold the refused words even in a literal, and
+    bind such values instead.
+  - Packs are trusted text, so this is defence in depth against a pack mistake. Function side
+    effects outside the lists stay the pack lint's (carry).
+- **`MetaConn::offline`** stays inert: `Via::Offline` holds no connection, and every read,
+  snapshot and attach answers `Unavailable`.
+- **Carries.**
+  - T15: drop a `MetaConn` at the end of each task, or give its slot to a higher-priority
+    waiter (review A M2): a `MetaConn` holds its budget slot for its lifetime.
+  - T4/T16/T17: a pack lint for joinable functions (T4 is doing it).
+  - T17: MySQL reads on a single-session user's session have no statement timeout. A
+    `MAX_EXECUTION_TIME` optimizer hint in the pack text would add one.
+  - Review B M2: a reset (`DISCARD ALL`, `COM_RESET_CONNECTION` plus the set-up) of an own
+    connection after a snapshot ends with an error is not done. Since fix round 2 the token
+    guard keeps the known side-effect functions off the own connection too. Functions outside
+    the lists stay the pack lint's (an allowlist of the catalog functions packs may call;
+    review A minor, review B R-M1).
+- **Tests.**
+  - `crates/core/hacivat-session/tests/meta_conn.rs`: fakes, plus SQLite on real files.
+  - `crates/core/hacivat-session/tests/hostile_t05_review_a.rs` and `hostile_t05_review_b.rs`:
+    the two reviews' hostile tests, flipped to assert the fixes.
+  - `crates/core/hacivat-session/tests/docker_meta_conn.rs`: `#[ignore = "docker"]`, run on
+    CI's fresh stack. It covers:
+    - no XID (`#pg-canary`);
+    - DML and DDL refused per engine;
+    - the MySQL/MariaDB read-only session and `utf8mb4` character sets, restored after a
+      reconnect;
+    - a single-session PostgreSQL read inside Hacivat's read-only transaction.
+  - The MariaDB DDL code per server comes from that run (`mariadb_meta_session_refuses_ddl`
+    prints it); ver/01 never ran it on MariaDB.

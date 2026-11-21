@@ -61,6 +61,10 @@ pub enum BodyReading {
     /// Inside a string or quoted identifier opened by `quote` (`'`, `"` or `` ` ``; the
     /// session's modes say whether a backslash escapes in it).
     Quoted { quote: u8 },
+    // ## m3b-t05-incremental: lexer follow-up (a), ledger 200.
+    /// Inside a bit or hex literal (`b'…'`, `x'…'`) opened by `quote`: raw, so the first
+    /// `quote` closes it and a backslash is text, as the lexer's own `BitString`/`HexString`.
+    RawQuoted { quote: u8 },
     /// Inside a `#` or `-- ` comment, to the line feed.
     LineComment,
     /// Inside the one nested `/* … */` (opaque to its first `*/`).

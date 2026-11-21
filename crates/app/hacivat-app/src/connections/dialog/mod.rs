@@ -34,6 +34,8 @@
 
 pub mod form;
 pub mod paste;
+// ## m4-t01b-seams: the Schemas section (M4 Task 20).
+pub mod schemas;
 // ## m2b-t01-interfaces: the SSH section (Task 20).
 pub mod ssh;
 pub mod url_row;
@@ -143,6 +145,19 @@ pub(crate) enum SaveProblem {
     SecretNotStored,
     // ## m2b-t21-prompts (fix round 1, I1): nothing was saved; the stored secrets could not move.
     Unchanged,
+    // ## m4-t20-scope (fix round 1, M-3; named lines): the Schemas section's Save steps.
+    CacheNotDeleted,
+    DataUnreadable,
+    DataNotWritten,
+}
+
+// ## m4-t20-scope (fix round 1; named lines)
+impl ConnectionDialog {
+    /// Why the last save did not land, as the top of the form shows it (`None`: it did not
+    /// fail). Tests read it.
+    pub fn save_problem_text(&self, cx: &App) -> Option<SharedString> {
+        self.problem.map(|p| form::problem_text(p, cx))
+    }
 }
 
 /// The focus targets of the dialog that are not text fields (tests name them, P16 keyboard
@@ -171,6 +186,8 @@ pub(crate) struct Focus {
     pub(crate) cancel: FocusHandle,
     pub(crate) save: FocusHandle,
     pub(crate) save_connect: FocusHandle,
+    // ## m3b-t22-tx-ui (named exception): the single-session checkbox (Advanced).
+    pub(crate) single_session: FocusHandle,
 }
 
 impl Focus {
@@ -201,6 +218,8 @@ impl Focus {
             cancel: stop(cx),
             save: stop(cx),
             save_connect: stop(cx),
+            // ## m3b-t22-tx-ui (named exception)
+            single_session: stop(cx),
         }
     }
 }
@@ -835,6 +854,8 @@ impl ConnectionDialog {
             ("cancel", &f.cancel),
             ("save", &f.save),
             ("save-connect", &f.save_connect),
+            // ## m3b-t22-tx-ui (named exception)
+            ("single-session", &f.single_session),
         ];
         if let Some((name, _)) = selects.iter().find(|(_, h)| h.is_focused(window)) {
             return Some(name);
@@ -846,6 +867,10 @@ impl ConnectionDialog {
         // its elements).
         if ssh::contains_focus(window, cx) {
             return Some("ssh");
+        }
+        // ## m4-t20-scope (named lines): the Schemas section.
+        if schemas::contains_focus(window, cx) {
+            return Some("scope");
         }
         let groups = [
             ("engine", &f.engine),
@@ -997,6 +1022,9 @@ impl ConnectionDialog {
             self.consent_endpoint = None;
         }
         self.apply_env_rule();
+        // ## m4-t20-scope (named line; fix round 1, R-W3-1): an environment change that flips
+        // a saved profile's derived "Encrypt cached metadata" asks first.
+        schemas::environment_changed(self, cx.entity_id(), window, cx);
         self.sync_env_select(cx);
         self.sync_url(window, cx);
         self.refresh_pgpass(cx);
@@ -1801,6 +1829,12 @@ impl ConnectionDialog {
             cx.notify();
             return;
         }
+        // ## m4-t20-scope (named lines): a scope pattern that does not parse, or an open
+        // all-databases question, is never saved (Save is disabled; this stops the command too).
+        if schemas::blocks_save(cx.entity_id(), cx) {
+            cx.notify();
+            return;
+        }
         let Some(model) = cx.try_global::<ConnectionsModel>() else {
             return;
         };
@@ -1950,9 +1984,28 @@ impl ConnectionDialog {
         let draft = self.draft_of(profile);
         let password = draft.password.clone();
         let name = draft.profile.name.clone();
-        let saved = ConnectionsModel::save(cx, draft);
+        // ## m4-t20-scope (named line): the cache files first when "Encrypt cached metadata"
+        // changed, then the scope pattern, then the profile through `ConnectionsModel`.
+        let saved = schemas::save_profile(draft, cx);
         cx.spawn_in(window, async move |this, cx| {
-            let result = saved.await;
+            // ## m4-t20-scope (fix round 1, M-3): the section's steps say what failed.
+            let result = match saved.await {
+                Ok(id) => Ok(id),
+                Err(schemas::ScopeSaveError::Profile(e)) => Err(e),
+                Err(e) => {
+                    let problem = match e {
+                        schemas::ScopeSaveError::CacheNotDeleted => SaveProblem::CacheNotDeleted,
+                        schemas::ScopeSaveError::DataUnreadable => SaveProblem::DataUnreadable,
+                        _ => SaveProblem::DataNotWritten,
+                    };
+                    let _ = this.update_in(cx, |d, _window, cx| {
+                        d.saving = false;
+                        d.problem = Some(problem);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
             let _ = this.update_in(cx, |d, _window, cx| {
                 d.saving = false;
                 match result {

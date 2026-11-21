@@ -16,7 +16,9 @@ use std::rc::Rc;
 
 use hacivat_text::TokenOracle;
 use smallvec::SmallVec;
-use sql_lexer::{GateStatus, TokenClass, TokenKind, exec_comment, exec_comment_gate, token_class};
+use sql_lexer::{
+    GateStatus, TokenClass, TokenFlags, TokenKind, exec_comment, exec_comment_gate, token_class,
+};
 use sql_text::{TextRange, TextSize};
 
 use crate::service::DocShared;
@@ -105,4 +107,56 @@ impl TokenOracle for TokenWords {
         let a = self.shared.current()?;
         Some(on_line(&a, line))
     }
+
+    // ## m3c-t31-multi (named exception): the IME's plain-text check (R-M3-64).
+    fn in_string_or_comment(&self, at: usize) -> Option<bool> {
+        let a = self.shared.current()?;
+        Some(in_literal(&a, at))
+    }
+}
+
+// ## m3c-t31-multi
+/// A string (of any kind) or a comment (an executable comment too: its body is not plain text
+/// to an input method's mirror).
+fn is_literal(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::String
+            | TokenKind::DollarString
+            | TokenKind::BitString
+            | TokenKind::HexString
+            | TokenKind::LineComment
+            | TokenKind::BlockComment
+            | TokenKind::HintComment
+            | TokenKind::ExecutableComment
+    )
+}
+
+/// Text typed at `at` lands inside a string or a comment of analysis `a`: `at` strictly inside
+/// one, or at the end of a line comment or of an unterminated one (typing there continues it).
+fn in_literal(a: &Analysis, at: usize) -> bool {
+    let lexed = a.doc.lexed();
+    if at > a.doc.text().len() {
+        return false;
+    }
+    let Some(i) = lexed.token_at(size(at)) else {
+        return false;
+    };
+    let r = range(lexed.range(i));
+    if r.start < at && at < r.end && is_literal(lexed.kind(i)) {
+        return true;
+    }
+    let ending = if r.end == at {
+        Some(i)
+    } else if r.start == at {
+        i.checked_sub(1)
+    } else {
+        None
+    };
+    ending.is_some_and(|j| {
+        let kind = lexed.kind(j);
+        range(lexed.range(j)).end == at
+            && is_literal(kind)
+            && (kind == TokenKind::LineComment || lexed.flags(j).contains(TokenFlags::UNTERMINATED))
+    })
 }

@@ -705,32 +705,28 @@ fn home_end_and_page_keys() {
     assert_eq!(s.rects(), &[rect(0..100, 0..1)]);
 }
 
+// ## m3c-t40 (named exception, R-M3-69): Tab no longer wraps rows inside the grid; it
+// leaves from every cell (M3a left only from the last one).
 #[test]
-fn tab_wraps_rows_inside_the_grid_and_leaves_from_the_last_cell() {
+fn tab_leaves_the_grid_from_every_cell() {
     let m = ViewMap::identity(2);
     let order = cols(3);
     let k = ctx(&m, &order);
     let tab = GridCommand::NextCell { back: false };
     let back = GridCommand::NextCell { back: true };
-    let mut s = Selection::default();
-    s.select_cell(c(0, 1), &m);
-    assert_eq!(apply_command(tab, &mut s, &k), moved(0, 2));
-    assert_eq!(apply_command(tab, &mut s, &k), moved(1, 0));
-    assert_eq!(apply_command(tab, &mut s, &k), moved(1, 1));
-    assert_eq!(apply_command(tab, &mut s, &k), moved(1, 2));
-    assert_eq!(
-        apply_command(tab, &mut s, &k),
-        KeyOutcome::Leave { back: false }
-    );
-    assert_eq!(s.focus(), Some(c(1, 2)), "leaving keeps the focus");
-    assert_eq!(apply_command(back, &mut s, &k), moved(1, 1));
-    s.select_cell(c(1, 0), &m);
-    assert_eq!(apply_command(back, &mut s, &k), moved(0, 2));
-    s.select_cell(c(0, 0), &m);
-    assert_eq!(
-        apply_command(back, &mut s, &k),
-        KeyOutcome::Leave { back: true }
-    );
+    for (r, col) in [(0, 0), (0, 1), (1, 0), (1, 2)] {
+        let mut s = Selection::default();
+        s.select_cell(c(r, col), &m);
+        assert_eq!(
+            apply_command(tab, &mut s, &k),
+            KeyOutcome::Leave { back: false }
+        );
+        assert_eq!(
+            apply_command(back, &mut s, &k),
+            KeyOutcome::Leave { back: true }
+        );
+        assert_eq!(s.focus(), Some(c(r, col)), "leaving keeps the focus");
+    }
 }
 
 #[test]

@@ -436,3 +436,936 @@ pg17-tr is a `full` line.
 - `turkish_collation_text_round_trips_on_pg17_tr`
 - `incomplete_cursor_leaves_no_transaction_in_pg_stat_activity`
 - `dml_and_ddl_report_update_counts_on_a_dev_console`
+
+## m3b-t01c — core seams
+
+M3b Task 1c's run-service and result-store seams. Every stub fails closed (F31) and none is
+wired into Run before Task 24 (R-M3-52).
+
+- **Gate (Task 15).** `gate()` denies every unit: `exec-gate-stale-classification` when the
+  unit's report does not match its `final_text` (P-M3b-2, `SafetyReport::matches_text`), else
+  `exec-gate-not-implemented`. `ConnSafety`, `GateReason`, `GateDecision` (no form for
+  `RunInTxThenConfirm`: the session picks it, P-M3b-1), `GateItem`, `GatePlan`,
+  `ConfirmPort` (`Debug` supertrait), `ConfirmQuestion`/`ConfirmAnswer`/`CommitQuestion`.
+  `explain_analyze_inner` answers `None`; `SuppressSet` works.
+- **Params (Task 15).** `prepare_units` refuses the first unit holding a `:`, `$` or `?` byte
+  (`ParamDiag::TooManyBinds`, at its document offset); every other unit is `Ready` as written
+  with an identity `OffsetMap` (a working piecewise-linear map).
+- **Classifier pool (Task 14).** `ClassifyPool::classify` answers `sql-safety`'s stub at once;
+  as a `StatementClassifier` it denies every statement and knows no effects. Nothing installs
+  it before Task 18.
+- **Run service.** `RunRequest` gains `prepared`, `plan`, `policy`, `run_as_one`, `history`,
+  `confirm` (P-M3b-22: every M3a literal sets `None`/`StopOnError`/`false`). A request with
+  `prepared`, `plan` or `run_as_one` is refused before anything is sent (`never_started`,
+  `Internal`) until Task 16: ignoring a plan could send what the gate denied. `policy` reaches
+  the session. `with_history`, `with_classifier`; `count` answers `Err(Internal)` and
+  `count_sql` `None` (Task 16). The units keep M3a's shape (`RunUnit::plain`).
+- **Log.** `LogMsg` gains `Notice`, `ResultSetLimit`, `ImplicitCommit`, `SafetyDenied`,
+  `ConfirmCommitted`, `ConfirmRolledBack`, `ConfirmStatementFailed`, `SkippedByUser`, `Retried`,
+  `Evicted`, each with a literal Fluent ID; their strings come with the tasks that write them
+  (none is written before). `SessionLog::lines_since(seq)` answers the lines from `seq` and
+  whether some left the ring first. `DenyLayer::Classifier` → `exec-deny-read-only-classifier`;
+  the new error kinds have titles (`status.rs`, named exception).
+- **Auditor chain (Task 16).** `SyncAuditor`, `AuditorChain` (the synchronous half works; no
+  sinks yet), `SINK_CAPACITY` = 10,000.
+- **History (Task 17).** The types, and `HistoryStore::open` answering
+  `Err(HistoryError::Disabled)` with nothing touched on disk. `rusqlite` (`bundled`) has FTS5
+  (`fts5_is_compiled_in`).
+- **Results (Task 8).** `CloseReason::Evicted`, `ResultSource::{cap_raised, set_visible}`
+  (defaults `false` and nothing), `MemoryBudget::evict_for` (stub `0`), `EvictionRegistry`
+  (weak stores and their visibility; nothing evicts yet).
+- **Values (P-M3b-17).** `format_cell` dispatches `Purpose::Tooltip` to `valfmt/tooltip.rs`
+  (Task 38) and `Purpose::A11y` to `valfmt/a11y_text.rs` (Task 40); both answer the cell's text.
+- **Settings (P-M3b-9).** `[exec]`, `[results]`, `[history]`, `[grid]` are hand-loaded like
+  `[editor]`; `results.max_value_bytes` is a `ValueLimit` clamped to 64 KiB..=64 MiB with a
+  `settings-invalid-value` diagnostic; an M3a file loads with no diagnostic and saves unchanged.
+- **Ruling I2.** The app takes no `sql-safety` dependency: `hacivat-exec` re-exports
+  `ClassifyCtx`, `Expect`, `FnCatalog`, `GateClass`, `Limits`, `Reason`, `ReasonCode` and
+  `SafetyReport`, and the session's `CommitAnswer`, `ErrorPolicy` and `RunChoice`.
+
+## m3b-t08 — eviction
+
+- **Shared tail.** A result's rows and state (the chunk list, starts, counts, completeness)
+  move from the writer into the store, behind a mutex the writer takes per append or state
+  change. Eviction is the second publisher: it cuts a result to its first chunk under the same
+  mutex, so versions only grow and no second copy of the chunk list keeps evicted rows alive.
+  Readers still never lock (one `ArcSwap` load).
+- **Who is evicted (R-M3-68, HV-RES-07).** `admit` asks `MemoryBudget::evict_for(shortfall)`
+  before it answers `Pause(GlobalBudget)`, and pauses only if that did not make room. The
+  budget's `EvictionRegistry` (every `ResultStore` joins it in `ResultStore::new`) takes
+  hidden results whose run has ended (`Complete`, `Closed` but not `Evicted`, `Cancelled`,
+  `Truncated`) and that hold more than one chunk, longest out of sight first (a logical clock,
+  no ties). A `Streaming` or `Suspended` result is never taken: its session would keep
+  appending, and only the session closes a server cursor. The evicted result keeps chunk 0 and
+  publishes `Closed { reason: Evicted }`; its writer's later appends and states are dropped,
+  so it never reads as `Complete` again.
+- **Visible by default.** A result joins the registry visible; it becomes a candidate only
+  when the app calls `StoreSource::set_visible(false)` (Task 25: `true` for the active tab of
+  every console, `false` for the others). A console that never reports visibility loses
+  nothing — its results are simply never evicted (the run pauses as in M3a). Rejected: hidden
+  by default, which would evict an on-screen result until Task 25 is wired.
+- **Accounting (P-M3b-29).** `evict_for` answers the bytes that left `used()` during the call:
+  a chunk a held snapshot still shows is released when that snapshot drops and is not
+  counted, so the pass goes on to the next result. A held snapshot keeps every row it showed:
+  a copy or a frame in progress never changes under it. The pass holds the registry lock, so a
+  tab shown during it is either spared or finds the result evicted.
+- **Not in M3b.** HV-RES-07's 30-second grace after a tab is hidden and the pinned-result
+  exemption: the order (longest hidden first) stands in for the grace, and pins are Task 25's
+  (a pinned tab can stay `set_visible(true)`). Spill to disk stays v1.x.
+- **Coalescing (ledger 109 M4).** The ask ledger moves from `StoreSource` into the store, so
+  every source over one store shares it: per snapshot version the asks add up to what the
+  farthest reader needs, a need already asked asks nothing, and a farther need asks only for
+  the rows past those asked. The session merges queued `FetchMore`s of one result into one
+  fetch of the sum (`Ctl::coalesce`), so no row is fetched twice.
+- **Sources.** `StoreSource::cap_raised` reads the store's flag (ledger 253 M7).
+  `FetchPolicy::with_cell_cap` takes `results.max_value_bytes` (Task 25 passes it) clamped to
+  `MIN_CELL_CAP` 64 KiB ..= `MAX_CELL_CAP` 64 MiB, the cap of the value viewer's "Re-run with a
+  64 MiB value limit" (R-M3-82).
+- **Review fix round 1.**
+  - *Only what is needed (M1).* `admit` evicts until its chunk fits, and the room is re-checked
+    under the registry lock before each result. The check counts bytes already cut but not yet
+    freed (`releasing`) as free. Two runs over the budget at once cut one result, not two.
+  - *Frees outside the lock (M3).* Under the lock the pass only cuts and collects. It drops
+    the cut chunks, and the stores it upgraded, after releasing the lock, so `set_visible` on
+    the UI thread never waits for a large free.
+  - *Previous outcome (M4).* `StoreSnapshot::before_eviction()` keeps the state an evicted
+    result had ended in, so the strip can still name it beside "Closed to free memory".
+  - *Notification seam (M6).* `MemoryBudget::on_evicted(listener)` is called once per
+    eviction with `evict::Eviction { result, kept_rows, previous }`. The call comes after the
+    lock is released and the chunks are freed, on the evicting thread. Listeners must not
+    block. The run service turns it into `LogMsg::Evicted` (Task 16).
+
+## m3b-t17 — history
+
+- **Store (R-M3-62, `alg/20` HV-EXEC-12).** `hacivat-exec::history`: SQLite + FTS5 at
+  `LocalPaths::history_db()`, schema version 1 (`PRAGMA user_version`), WAL, a 5 s busy
+  timeout and `BEGIN IMMEDIATE` writes, so several windows (or two processes) share the file.
+  One writer task owns the connection and runs every call on the blocking pool; searches,
+  recall and pins go through it, after the records already queued, so a search sees what was
+  sent before it. A batch that fails (disk full, a lock past the timeout) is dropped. History
+  is never an audit trail: it drops records when full, busy or broken.
+- **Secrets (HV-EXEC-12 step 2).** The writer redacts before it hashes, fingerprints, caps or
+  stores. No dialect rides on a record, so the scan reads the text with and without backslash
+  escapes and masks the union. It masks every string after `PASSWORD`/`PASSWD`/`PWD`/
+  `SECRET`/`IDENTIFIED` (or a word with such an `_` part, `MASTER_PASSWORD`) up to `;`, the
+  bare value in value position (Oracle `IDENTIFIED BY tiger`, `REPLACE`, `SET PASSWORD FOR …
+  =`), any string carrying `password`/`pwd=`/`secret` or a URI password, and psql
+  meta-commands to the end of the line through `HvNorm1` (`\connect ?`). The values found
+  are also removed from the error message (MySQL 1064 quotes the statement) and the
+  parameter text. `redacted` is set when anything was masked.
+- **Hash and fingerprint are the store's.** `text_hash` is SHA-256 of the whole redacted
+  statement and `fingerprint` is `HvNorm1` (generic dialect) of it; the record's values are
+  ignored. Rejected: storing the producer's hash of the sent text, a guessing oracle for the
+  password it held.
+- **Caps and retention (D-061).** Statements over `statement_cap` (64 KiB) keep a prefix ending
+  on a character boundary and the hash of the whole; error messages 4 KiB. Dedup by
+  `(data source, text_hash)` increments `run_count` and moves the entry to the front (latest
+  start, outcome and metrics). Per data source the newest 10,000 unpinned entries stay, and
+  unpinned entries last run more than 90 days ago go: after each batch for the touched
+  sources, at open, and every 10 minutes, in batches of 1,000; `auto_vacuum = INCREMENTAL`
+  gives the pages back. Pinned entries never expire and do not count against the cap.
+- **Search.** FTS5 (`unicode61 remove_diacritics 2`) over two shadow columns, the folded
+  statement (`search_key`) and the folded error message (`error_key`, an addition to the
+  `alg/20` schema so Turkish error text is found the same way). The fold is a fixed table
+  (`İ`, `I`, `ı` → `i`; `ş` `s`, `ğ` `g`, `ç` `c`, `ö` `o`, `ü` `u`; ASCII capitals; combining
+  marks U+0300–U+036F dropped), never locale casing, applied to both sides. The user's text is
+  never FTS5 syntax: its words (letters and digits) become quoted prefix phrases ANDed in one
+  bound parameter; text with no word matches nothing. Recall is an exact prefix
+  (`substr(…) = ?`, never `LIKE`). `HistoryQuery` gains `fingerprint` ("Similar").
+- **File.** Created `0600` before SQLite opens it (SQLite gives `-wal`/`-shm` the same mode);
+  a wider mode on an existing file is tightened. The directory is the app's (T1a review M7).
+  `PRAGMA quick_check` at open: a file SQLite calls not a database or corrupt is renamed
+  `history.sqlite.corrupt-<unix seconds>` with its `-wal`/`-shm` (an old log is never replayed
+  into the new file) and a fresh file is made; `recovered_from()` tells the app, once. A busy
+  file is an error, never a rotation.
+- **Who is not recorded.** A private console never reaches the sink (Task 16); a profile with
+  "do not record history" is dropped by the run service (Task 24) and by the writer too
+  (`set_do_not_record`).
+- **Shutdown.** `shutdown(grace)` writes what is queued, checkpoints the log and closes within
+  the grace (2 s); later calls answer `Disabled`.
+- **Review fix round 1 (redaction).**
+  - *Comments follow the reading (I1).* The MySQL reading takes `#` as a line comment, `--`
+    only before whitespace, block comments that do not nest, and the bodies of `/*!…*/` and
+    `/*M!…*/` as code; the standard reading nests block comments. A comment's body is read as
+    code by the same rules, and `password=` values and URI passwords in it are masked in place
+    (m1). An apostrophe in `# Bob's` or in a nested PostgreSQL comment no longer hides what
+    follows.
+  - *Quoted names (I2).* `"password" '…'` and `` `passwd` = '…' `` arm like the bare word.
+  - *Turkish keyboard (I3).* Keywords are compared through a fixed table (ASCII capitals;
+    `İ`, `ı` → `I`), so `İDENTİFİED` and `ıdentıfıed` arm. No locale casing.
+  - *Functions (m2).* Every string argument of `crypt`, `pgp_sym_encrypt`/`decrypt`
+    (`_bytea`), `pgp_pub_decrypt` (`_bytea`), `encrypt`/`decrypt` (`_iv`),
+    `AES_ENCRYPT`/`AES_DECRYPT` and `DES_ENCRYPT`/`DES_DECRYPT` is masked and scrubbed from
+    errors; so is `set_config`'s value when its name has a secret part.
+  - *Also.* The corrupt file's `-wal`/`-shm` are moved before the file itself, so a crash in
+    between never leaves an old log beside a fresh file (m7); `temp_store = MEMORY` (m13);
+    only FTS5 syntax errors read as "no match" (m9).
+  - *Tested by* the review's hostile probe, kept as a table
+    (`review_probe_every_case_is_caught_or_a_documented_gap`, 87 rows): each row is caught
+    (statement, error, parameters, search and the file's bytes) or is a gap whose phrase the
+    module docs must contain.
+- **What redaction does not catch.** Known limits: a secret written this way can reach the
+  history file. m3–m5 are on the PO list.
+  - *Other secret words (m3):* `TOKEN`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY` and other
+    names without a `password`/`passwd`/`pwd`/`secret` part (`OPTIONS (token '…')`);
+    SQLCipher `PRAGMA key`/`rekey` and `ATTACH … KEY '…'`; MySQL user variables without a
+    secret part in their name (`SET @pw = '…'`, then `IDENTIFIED BY @pw`).
+  - *URIs (m4):* a password with an unencoded `/`, `#`, `?`, `'` or whitespace; a scheme-less
+    `user:password@host`; shell command lines such as `COPY … PROGRAM 'curl -u u:pw …'`.
+  - *Error echoes (m5):* only whole secret values are scrubbed from errors. An echo cut short
+    (MySQL `near '%.80s'`) keeps the part it shows, and a string masked only because it follows
+    a secret word (the second of two adjacent strings, `PASSWORD 'a' 'b'`) is not removed
+    from the error.
+  - *Bind values* quoted back by the server: the store never sees them; Task 16 scrubs them.
+  - *Free text and other functions:* a secret in prose (`-- the pw is …`), in a function not
+    listed (`hmac`, user-defined functions), or built at run time
+    (`'… PASSWORD ' || quote_literal(v)`).
+  - *Depth:* code quoted in code, and comments, are read to three levels.
+  - *Over-masking* is accepted: every string after a secret word in its statement, the next
+    non-keyword word after `PASSWORD`, whole strings and comment words near `password`/`secret`,
+    and error text such as `password authentication failed for user …` (m6, not changed).
+
+## m3b-t16 — run service
+
+- **Two paths.** A `RunRequest` without `prepared`, `plan` and `run_as_one` is M3a's run,
+  unchanged. With `prepared` and `plan` it is an M3b run: each unit is sent as
+  `PreparedUnit::final_text` with its binds, the gate item's verdict and effects, its masked
+  text and `max_result_sets: 100`; `run_as_one` sends `Protocol::Simple`, never suspended.
+- **The plan is checked, never assumed.** It must hold one item per prepared unit in order,
+  and the prepared units must be the request's units. `Run`, `RunInTxThenConfirm` and
+  `ExplainAnalyzeRollback` are sent. A unit the user skipped is not sent: `apply_answer` turns
+  its `Confirm`/`Warn` into `Deny(exec-skipped-by-user)`, logged once as `SkippedByUser { n }`
+  and counted in the summary's skipped (R-M3-84). An unanswered `Confirm`/`Warn`, any other
+  `Deny`, a short or empty plan, or `plan`/`prepared`/`run_as_one` alone sends nothing. An
+  answer never turns a `Deny` into a run.
+- **Questions on the ticket.** `RunTicket::choices` carries the pending `NeedsChoice` or
+  `NeedsCommit` with the run's request number, and clears when the run moves on (`UnitStarted`,
+  `UnitEnded`, `CommitDecided`, `RunEnded`). A question asked before the request number is
+  known is published as soon as it is. A `NeedsCommit` also goes to `RunRequest::confirm`
+  (none answers `RollBack`). The port's answer goes back with
+  `SessionHandle::commit_decision(seq, unit, question, ..)`, for exactly that question.
+  `CommitQuestion::production` is `true` (confirm-in-transaction exists only on production,
+  P-M3b-30). `connection` is empty: the port belongs to its console and names it.
+- **Tabs and titles (R-M3-66).** One tab per result set, `TabKey { console, unit, set }`. The
+  title is the unit's directly preceding comment, without its markers, its last comment and
+  first line (`ExecUnit::title`, set by `resolve_units` from `UnitSpan::title_comment`); else
+  `Result N`, where N counts the run's units that opened a tab. Further sets add ` (k)`.
+  `ResultTab::title` keeps the whole title (the tooltip). `short_title()` cuts it after 40
+  graphemes with `…`. Clusters are approximated without a segmentation table, since the crate
+  takes no new dependency: combining marks, variation selectors, emoji modifiers, tags, ZWJ
+  joins and regional-indicator pairs. A prepared unit past 100 sets logs
+  `ResultSetLimit { total, limit: 100 }`; M3a's units keep `MoreResultSets`.
+- **Count rows (R-M3-76).** `count_sql` reads the unit's tokens. The first word must be
+  `SELECT`/`WITH`/`VALUES`/`TABLE`. A locking clause, `INTO`, a second statement, an executable
+  comment, a client command or a lexer error refuses it. A trailing `;` and trivia go. A
+  top-level `ORDER BY` goes unless a top-level `LIMIT`/`FETCH`/`OFFSET` follows. The count is a
+  separate query sent only by `ExecService::count`, never implicitly. The read-only check
+  (`StatementClassifier::check_read_only`; the pool's from `with_classifier`) must allow it;
+  without a check it is refused (fail closed). It runs on a pooled `Service` session when the
+  console holds no transaction of the user's, else on the console (after its cursor is
+  released, as for any run). It runs as a `Request::Run`, so a read-only or production
+  session's guard applies unchanged (R-M3-52). It is cancelled after 30 s
+  (`CountError::TimedOut`) and can be cancelled earlier (`CountTicket::cancel`).
+- **Auditor chain (R-M3-63).** Every event goes first to the synchronous auditors in order,
+  then is `try_send` to each sink. A full sink counts a drop and never waits. A closed sink is
+  ignored. `RowsFetched` reaches the sinks at most once per 50 ms per result. The output log
+  stays the console's bounded, non-blocking `SessionLog` ring, written by the observer as in
+  M3a, so its order and timing are M3a's. The chain's drops end the run as one
+  `Dropped { n }` line.
+  The chain is an event pipeline, not an audit trail. What a sink drops is gone, and the
+  history is never evidence of what ran.
+- **History sink.** There is one record per `UnitEnded` of a unit that ran, sent when
+  `RunRequest::history` is `Some` and not private. A profile that records no history gets
+  `None` from Task 24, and the store's `set_do_not_record` drops its records as well. The
+  record holds `PreparedUnit::masked` only, never the text sent. Its `error_message` has every
+  bind value scrubbed out: longest first, and a value of one or two bytes only where it stands
+  alone. `text_hash` and `fingerprint` are left zero, since the store computes both from its
+  own redacted text (Task 17). A record is never `{:?}`-formatted.
+- **Log lines.**
+  - *Notices and MySQL warnings.* These are `Notice` lines. The server's text stays verbatim in
+    its own field, and the code is a chip, not a sentence argument. The session reads MySQL
+    warnings (`RawConn::warnings`) after a statement whose `Done` counted some, on read-write
+    sessions only (T13 review M-8). Notices past the cap are `NoticesDropped { n }`, carried by
+    `RunEvent::NoticesDropped`.
+  - *Run as one.* A stop that closed it early is `ClosedEarly { ran, rest_not_run }`, from
+    `take_close_report` via `RunEvent::ClosedEarly`. A PostgreSQL failure adds
+    `RunAsOneRolledBack`, because it is one implicit transaction (T13 review M-2).
+  - *Other events.* A retried statement logs `Retried`. An eviction of one of the run's results
+    logs `Evicted` on its console, through `MemoryBudget::on_evicted`.
+  - *DDL.* A DDL statement ends `exec-completed` on every engine (first word `CREATE`/`ALTER`/
+    `DROP`/`TRUNCATE`/`RENAME`/`COMMENT`, or the gate's DDL effect; PO, ledger 535). The unit's
+    status keeps the server's count.
+  - *Command tag.* A line keeps its statement's command tag (`LogLine::tag`, copied as
+    `tag=…`; ledger 340).
+- **One duration rule (PO, ledger 535).** `duration_message` gives `exec-dur-ms` under a
+  second, else `exec-dur-seconds` with two decimals, cut as the status bar's
+  `hv-status-duration-*` cuts them. The app formats the hundredths through
+  `UnitMsg::decimal`. The running clock keeps whole seconds and minutes.
+  `exec-dur-lt-ms` and `exec-dur-s-ms` are deleted: no code names them any more.
+- **Fix round 1 (review of e1bc91c).**
+  - *Titles (I-1).* A comment title never carries what could re-order or restyle the chrome.
+    - C0/C1 controls (a lone `\r`, ESC, NUL, tab), U+2028/2029, bidi marks, embeddings, overrides and isolates, and U+FEFF become white space.
+    - Runs of white space become one space.
+    - The stored title is cut after 256 graphemes with `…`; the tab shows 40.
+    - An optimizer hint or executable comment (`/*+`, `/*!`, `/*M!`) is never a title.
+  - *Two named exceptions to the one duration rule (m2; on the PO list).*
+    - Configured spans (`LogArg::SpanMs`, the idle bound) read the way the setting reads: whole seconds under a minute ("20 s"), then minutes and seconds ("10 min").
+    - The running clock shows whole seconds, then minutes and seconds. It repaints once a second.
+  - *Server text in the log (m3, ruling).* Server error and notice text stays verbatim in the console's output log, even when it echoes a bind value.
+    - The log is session-only and in memory, and nothing persists or traces it.
+    - The value was typed by the same user in the same session, so the exposure equals that of a literal in the editor.
+    - Scrubbing it would hide which value failed.
+    - History, the only store that outlives the session, is scrubbed.
+    - Anything that ever writes the log to disk (an export, a crash report) must apply the same scrub.
+  - *Not-run units (m5).* A unit that ends without starting (a queued run cancelled, a full queue) still gets a history record: at the run's start, with duration 0 and no rows, masked text as always. `HistoryRecord` has no flag of its own for this.
+  - *Count rows (m6–m8).*
+    - `count_prepared` wraps a prepared unit's `final_text` and carries its binds (`CountRequest::binds`) in slot order. A top-level `ORDER BY` holding a placeholder is kept. `count_sql` refuses placeholders, since it has no values.
+    - The cancel and the 30 s timeout cover the whole count: the read-only check and the pooled session's connect too.
+    - Dropping the ticket, or keeping only `done`, never cancels the count.
+  - *PostgreSQL Run as one (m9).* The line is chosen from the user's transaction status when the unit started (the session's at the run's start, then each `TxChanged`).
+    - Outside a transaction, a failure or a cancel logs `exec-run-as-one-rolled-back`.
+    - Inside one, nothing was rolled back yet, so it logs `exec-run-as-one-tx-failed`.
+  - *Stopped early (m10).* `ClosedEarly` is logged only when more statements ran; the stop's own line covers the rest.
+  - *Read-only sessions (m11).* MySQL warnings on a read-only session are not read, and their count is not logged either; the guard's `ROLLBACK` follows at once.
+  - *The output log is not a chain sink (m12, ruling).* The observer writes the output log directly, keeping M3a's order and timing, instead of through an async chain sink. The M8 chain sinks (`hacivat-audit`) will consume the same `RunEvent`s through `AuditorChain::push_sink`.
+
+## m3b-t15 — gate
+
+- **Order (R-M3-55).** Per unit, the first rule that decides wins: a stale report (no report,
+  a report count that differs from the unit count, or `matches_text(final_text)` false;
+  P-M3b-2) is denied; the classifier stub's `NotImplemented` pre-decision is denied on every
+  connection (F31); a read-only connection runs only `Read`, or `Session` on the harmless-`SET`
+  list, and only when `decide(.., ReadOnlyPlusExplain, Human)` allows (R-M3-56); on
+  production `decide(.., Admin, Human)` must not deny; then the D-062 wrap; then the class row;
+  then type-to-confirm, the MySQL/MariaDB implicit commit and suppression. Production stays
+  read-only until Task 26 because its consoles are read-only connections: the gate is gated as
+  read-only first, so it unlocks nothing (R-M3-52).
+- **The production AND-check.** `decide(Admin)` is the profile whose rules R-M3-55 does not
+  contradict (`ReadWriteDml`/`Ddl` would deny what R-M3-55 runs or confirms). Its `Deny`
+  denies (its first reason is the gate's reason: a parse error, a lexical-mode change, a role
+  switch, an ambiguous boundary). Its `Confirm` on a class whose own `admin` row allows (`Read`,
+  `Lock`, `Dml`, `DmlUnsafe`, `DdlOther`, `DdlDestructive`) means it saw evidence the gate
+  class did not, so the unit becomes `Unknown` (Confirm). The request-level class, effects and
+  flags also floor the class through `gate_class` of a synthetic statement, so they never lower
+  it. Off production the AND-check does not run: R-M3-55's "everything else runs" and the
+  server decides.
+- **Type-to-confirm** comes from the destructive kinds, not the class (a `DROP` in the same
+  unit hides `DmlUnsafe`): every unsafe-DML target and every `DROP DATABASE/SCHEMA` target.
+  The name is the user's spelling (each part's bytes as written, quotes removed, never folded):
+  the pattern's range when it reads as the target, else the first dotted name in the
+  statement whose parts `ident_eq` the target's, else the classifier's spelling (PG targets
+  are server-resolved, T9 carry). A pattern without a target, or two different targets, deny
+  (`exec-unsafe-no-target`, `exec-unsafe-several-targets`): typing one name never approves
+  another table.
+- **Implicit commit.** `SessionEffects::DDL` is set for every DDL statement (temporary ones
+  included on PostgreSQL; on MySQL/MariaDB/TiDB see fix round 1: temporary `CREATE`/`DROP`
+  excluded) and, on MySQL/MariaDB/TiDB, for privilege statements. With a transaction open as the gate sees it (any status but idle,
+  or a Manual session) the unit is `Confirm` with verdict `ImplicitCommit`, never suppressible;
+  `irreversible` is set for every such DDL on those engines.
+- **Verdicts.** `Read` only when the report reads only (`reads_only`: every statement's class
+  field, effects and gate class `Read`, none opening a write, the request-level fields agreeing);
+  `Routine` and `Unknown` are `Unknown` with every session effect but `DDL`, never `Write`.
+  R-M3-23 is ANDed through `units::suspendable_for` (`apply_read_verdicts`), the same condition
+  as the `Read` verdict: `RunUnit.suspendable = prepared.unit.suspendable && verdict == Read`.
+- **D-062.** A lone `EXPLAIN ANALYZE` whose inner class is not `Read` is wrapped; an `Unknown`
+  inner gets the wrap; `Routine`/`Admin` inners are refused, and so are DDL inners on
+  MySQL/MariaDB/TiDB (their implicit commit would end the wrapping transaction). One inside a
+  unit of several statements is refused (the rollback would undo the other statements).
+- **Suppression.** `(console, fingerprint)` for a suppressible `Confirm` or `Warn`, production
+  included (NOTES ruling 4); never with type-to-confirm or an implicit commit.
+- **Parameters.** `prepare_units` refuses the first unit with any diagnostic but the
+  informational `QuestionMarkOff`, or a placeholder without a rewrite (any unbindable
+  placeholder: nothing is sent), and a bind plan with a slot no name fills (`$2` alone). Values
+  come from the store; one prompt per distinct name of the run. `masked` masks every literal and
+  comment of a text that mentions a password (`password`, `identified`, `passwd`, `pwd=`), the
+  rest of the text after an unclean token; bind values never appear in the text.
+- **Run as one.** `RefuseReason::RunAsOne` is gone: a `Verbatim` unit resolves like any other
+  and runs as one (`protocol_for` → `Protocol::Simple`, `expect_for` → `Expect::Script`).
+- **Fix round 1 (controller rulings on the review).**
+  - *Not analysed (I1).* A pre-decided report, or one with no statement, is denied on
+    production and read-only connections. Off production it never runs silently: when the
+    unit's words hold a write or DDL keyword (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `REPLACE`,
+    `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `CALL`, `DO`, `LOAD`, `COPY`,
+    `INTO`, `EXEC`, … including the words inside MySQL executable comments, and the rest of the
+    text after a token the lexer could not read), it asks one calm confirmation
+    (`exec-gate-not-analysed`, never suppressible); otherwise it runs, so dumps such as
+    `/*!40101 SET NAMES utf8 */` keep working. A `Verbatim` unit whose only reason is
+    `AmbiguousBoundary` follows the same rule (R-M3-60 on production is denied: PO list).
+  - *D-062 on production (I2, M7).* An `Unknown` inner, a unit the AND-check made `Unknown`,
+    and on MySQL/MariaDB/TiDB every wrapped inner ask before the wrap: `Confirm` with verdict
+    `ExplainAnalyzeRollback`, never suppressible, naming what a rollback does not undo
+    (sequence advances, session advisory locks, dblink and other file or network I/O, writes to
+    non-transactional MyISAM tables; `exec-explain-analyze-not-undone`). The wrap itself is
+    unchanged off production.
+  - *DROP DATABASE/SCHEMA (I3).* The gate also reads `DROP DATABASE|SCHEMA [IF EXISTS] <name>`
+    from the statement's words and asks for the typed name whatever kind the backend gave the
+    target; no readable name denies (`exec-unsafe-no-target`). The interim backend (named
+    exception in T10's `interim.rs`) now gives a `DROP` target its object kind (`Database`,
+    `Schema`, `Table`, `View`, `Role`, `Sequence`, `Other`).
+  - *Parameters (I4, M2, M5, D8 ruling).* Remembered values only pre-fill the prompt: a
+    statement with parameters always returns `NeedsValues` first, and only this run's
+    `ParamAnswers` (`prepare_units_with`) make it `Ready`. Ordinal and anonymous parameters
+    (`?`, `?NNN`, `$n`) are never remembered (`ParamPrompt::rememberable`) and belong to their
+    unit (`ParamPrompt.unit`): two units never share one prompt. A bind plan with a slot no
+    placeholder fills (`$2` alone) is refused before any prompt.
+  - *Implicit commits on MySQL/MariaDB/TiDB (I5, M3).* One list in
+    `hacivat_exec::implicit_commit`, from MySQL 8.4 Reference Manual §15.3.3 "Statements That
+    Cause an Implicit Commit" (8.0: §13.3.3) and the MariaDB Knowledge Base page "SQL statements
+    That Cause an Implicit Commit": DDL except `CREATE`/`DROP TEMPORARY TABLE` (which do not
+    commit), `GRANT`/`REVOKE`, `CREATE`/`ALTER`/`DROP`/`RENAME USER`, roles, `SET PASSWORD`,
+    `BEGIN`/`START TRANSACTION`, `LOCK`/`UNLOCK TABLES`, `SET autocommit = 1`,
+    `ANALYZE`/`CHECK`/`OPTIMIZE`/`REPAIR TABLE`, `FLUSH`, `RESET`, `CACHE INDEX`,
+    `LOAD INDEX`, `LOAD DATA`/`XML`, `INSTALL`/`UNINSTALL`, replication start/stop/change.
+    The gate sets `SessionEffects::DDL` for exactly these statements on those engines, which is
+    how the session's T19 backstop (`TxError::ImplicitCommitUnconfirmed`) reuses the list.
+    `irreversible` covers their DDL (temporary `CREATE`/`DROP` excluded) and privilege
+    statements.
+  - *One SessionEffects mapping (M8).* `gate::session_effects_of(report, text, engine)` is the
+    single mapping; the classifier pool's `StatementClassifier::effects` (Task 14) delegates to
+    it at the merge.
+  - *Suppression (controller ruling, M4, M9).* On production "don't ask again" never covers
+    `DdlDestructive`, `Admin`, `Routine` or `Unknown` units (`Routine` added because R-M3-55
+    treats it as `Unknown`); a unit of several statements with a write is never suppressible;
+    the key (`GateItem.fingerprint`) mixes the fingerprint with the class.
+- **Fix round 2.**
+  - *Two bits (R1-I1, controller ruling).* `SessionEffects::COMMITS_FIRST = 128` (named
+    exception in `hacivat-session` `verdict.rs`) is set on MySQL/MariaDB/TiDB for exactly the
+    statements of `implicit_commit::commits` (plus privilege statements and DDL other than
+    `CREATE`/`DROP TEMPORARY TABLE`); the gate's implicit-commit rule and T19's backstop key on
+    it. `DDL` means "a DDL statement" again on every engine, temporary-table DDL included, so
+    T16's "schema change" reading holds (`LOAD DATA` keeps its row count). The round-1 bullet
+    that put the list into `DDL` is superseded.
+  - *Raw words (R1-M1).* An unanalysed report's scan reads every ASCII word of the text, strings
+    and comments included, so a lexing-mode difference (`NO_BACKSLASH_ESCAPES`) cannot hide a
+    write; over-counting asks more, never less. Added keywords (R1-M2): `COMMENT`, `NOTIFY`,
+    `XA`, `BINLOG`, `RESTART`, `CLONE`, `ANALYZE`, and `SET GLOBAL`/`PERSIST`/`PERSIST_ONLY`/
+    `@@global.`.
+  - *Listed schemas (R1-M3).* `DROP SCHEMA a, b` read from the words names no single name, so it
+    is denied on production (`exec-unsafe-no-target`).
+
+## m3b-t21 — confirmation dialogs and the app's ConfirmPort
+
+- **Closes answer the safe value, by construction.** The confirmation (`exec_ui::confirm`) and
+  the confirm-in-transaction prompt (`exec_ui::commit_prompt`) own their `oneshot` reply and
+  send it once. Escape, the close button and ⌘W (Ctrl+W) answer Cancel / Roll back; a dialog
+  dropped without an answer (its window closed, the app quit) answers it from `Drop`; the quit
+  guard answers every open one first (one named line in `close_prompt::quit_guard`, so a quit or
+  a window close never leaves a question pending). Enter acts on key down on the focused button
+  only, never in the type field; the initial focus is the safe answer.
+- **The typed name is compared as bytes.** `name_matches` is `typed.as_bytes() == name.as_bytes()`
+  with the name exactly as `GateItem` carries it: no case or Turkish İ/i folding, no trimming,
+  no Unicode normalisation (an NFD spelling fails closed; the Copy button copies the exact bytes
+  for a name the keyboard can't reproduce). Names, reason arguments and the SQL are drawn made
+  visible (bidi and invisible characters as `\u{…}`), so a name cannot reorder the sentence it
+  sits in.
+- **"Don't ask again" is checked twice.** The gate's flag (which already refuses typed names,
+  implicit commits and multi-statement units with a write) and the dialog's own rule
+  (`offers_suppress`: never with a typed name, never for `exec-gate-not-analysed` or an implicit
+  commit, and on production never for `DdlDestructive`, `Admin`, `Unknown`, `Routine` or an
+  unknown class). `answer_plan` returns the item's class-mixed `fingerprint` only when the dialog
+  offered it.
+- **Answers change decisions only.** `answer_plan` goes through `apply_answer`, so an item's
+  verdict (`ExplainAnalyzeRollback`, `ImplicitCommit`), effects, class and fingerprint reach the
+  run unchanged. Execute all (RC-1) answers only later units that would ask without a typed name
+  and never a `RunInTxThenConfirm` unit; Skip all skips every later unit that would ask.
+- **The port reads the console at question time.** `AppConfirmPort::for_console` sends each
+  question over an `mpsc` to one foreground task (the `AppUiPort` pattern); the task fills the
+  connection name and the production flag from the console's live profile (T16 m13: the run
+  service sends `production: true` and an empty name), or answers the safe value when the console
+  is gone. `follow(choices, sql)` makes an open commit prompt close once its question is no longer
+  the one the run waits on (`CommitDecided`, T1c M7); the outcome is the session's event.
+- **The countdown runs on the executor's clock**: the time left is read once from the session's
+  `Instant` deadline, then counted on `background_executor().now()` and repainted when its `m:ss`
+  text changes (once a second). At 0:00 the prompt answers Roll back; the session's own deadline
+  is what undoes the statement (D-014).
+- **Fix round 1.**
+  - *Arming (I1).* Every button that runs or keeps a change (Execute, Execute all, "don't ask
+    again", Commit, Keep) answers only `ARM_DELAY` (400 ms, executor clock) after its dialog was
+    shown, by click or by Enter, and never on a click whose `click_count > 1`. The safe answers
+    are live at once. Chained dialogs of the same shape put Execute at the same pixel, so the
+    second click of a double-click must never reach the next dialog.
+  - *Runs, not slots (I2).* The port's book keys follows and losses by `RunId`
+    (`follow(run, choices, status, sql)`, `connection_lost(run, n)`); a commit question attaches
+    its own run's follow whenever it arrives and never another run's. Once its question stops
+    waiting, the run's own `RunStatus` decides: a unit failed with a lost connection shows the
+    lost form, an ended unit or run closes the prompt. An explicit loss shows the lost form in
+    any order and supplies the statement count when it comes later.
+  - *Stack-aware focus (I3).* `Workspace::remove_layer` gives the focus back only when the top
+    layer closes; a layer removed from under another hands its restore target to the layer above
+    (named exception in `shell/{workspace,layers}.rs`).
+  - *Production is never downgraded (m2):* the port's production flag is
+    `question.production || profile is production`.
+  - *Untypeable names (m8):* a name with a control character (a tab or a line break in a quoted
+    identifier) cannot be typed or pasted (the field turns controls into spaces), so it can never
+    be confirmed. That stays fail-closed, and the dialog says why
+    (`hv-confirm-type-untypeable`). PO list: whether such statements need another way to run.
+  - *IME (m7):* Escape during a composition in the type field ends the composition (its text
+    stays) and keeps the dialog; the next Escape cancels.
+
+## m3b-t25 — results: tabs per result set, pinning, Count rows, notices, eviction in the app
+
+- **Titles.** A result tab shows its statement's comment as the run service gave it (Task 16
+  sanitised it), as data, else the console's `Result N` (N per statement, shared by its further
+  sets). The app tells a comment from the service's own `Result n[ (k)]` by recomputing n over
+  the run's tab list (`tabs::comment_of`); a comment that reads exactly so is shown as the
+  console's `Result N`. A title an earlier tab already shows gets `(2)`, `(3)` …
+  (`hv-results-tab-dup`): further sets and repeated comments alike. Titles cap at 190 px (120 px
+  in a short strip, measured each frame; NOTES ruling 30), the whole title in the tooltip.
+- **Pinning.** A pinned tab is never reused: `apply` reuses only an unpinned tab of the key
+  (`tab_by_key` prefers it); a tab already showing the result is left alone, so a pinned tab and
+  its successor may share a key. The strip facts are keyed by key and unit for the same reason.
+  Re-run prefers the active tab (named exception in `exec_ui/orchestrator.rs`).
+- **Visibility (Task 8 carries).** Every tab reports `ResultSource::set_visible`: true at once
+  while it is the console's active tab, pinned, or claimed by another view
+  (`set_view_visible`, for Task 38); false only after `HIDE_GRACE` (30 s, executor clock) with
+  no claim. An evicted result, once shown again, moves its adapter to a new generation over the
+  same result, which clears the grid's selection to its focus cell; a copy request reaching past
+  the kept rows is refused with `hv-results-copy-evicted`. `cap_raised` is read from the source.
+- **Count rows.** Only the button sends it: the tab's unit (the run UI's `tab_units`) is lexed
+  alone under the console's known context, wrapped by `count_sql` (no parameters, so no binds
+  yet), and handed to `ExecService::count` on the live session and its connection's pool.
+  Anything uncountable says so and sends nothing. No spinner: the static amber marker,
+  "Counting…" and Cancel (design ruling 21). A count past the per-result cap makes Fetch all ask
+  first ("Fetch up to the memory limit" focused, the bounded choice).
+- **Log.** The output view reads `SessionLog::lines_since` (a change costs its new lines), keeps
+  as many lines as the ring, and heads the list with one "n events not shown" row for lines the
+  ring dropped unread. Notices are one row each with the server's text verbatim at the row's
+  end; a MySQL error chip shows `vendor · SQLSTATE` from the new `ErrorView::vendor_code`
+  (`code` stays the SQLSTATE the bypass rows judge by). ↑/↓/Enter are element-level keys.
+- **Untyped results.** A result whose every column is text of `NativeType::Unknown` is marked
+  "untyped (run as one)": PostgreSQL's simple protocol; MySQL's text protocol still types its
+  columns, so it is not marked; nor is a column of another logical type (a fake driver's).
+
+## m3b-t28 — conformance
+
+**What the matrix is.** `crates/core/hacivat-exec/tests/docker_m3b_matrix.rs` holds twelve
+Docker tests (the E-rows of the M3b gate), with their helpers in `tests/common/mod.rs`
+(`// ## m3b-t28-matrix`, module `t28`). Each case goes the app's M3b way:
+
+1. a console document in the context the console read at bind;
+2. `resolve_units` (Execute3), or one `Verbatim` unit sent as written (Run as one);
+3. `prepare_units`, every prompt answered by name (`prepare_units_with`);
+4. the real `ClassifyPool` (`classify_units`) over exactly the prepared bytes, in the
+   session's own context read from the server (lexing-mode setting, PostgreSQL's search path or
+   the MySQL family's `DATABASE()`, the server version; `guard_ctx_in`, modes known);
+5. `gate` on the live connection (the session snapshot's transaction status, owner and mode),
+   with `Confirm`/`Warn` answered through `apply_answer`;
+6. `ExecService::run`, a real session from a `ConnectionManager` with `ManagerConfig::m2b()`, and
+   the typed driver.
+
+An admin side channel (M3a T31's `matrix::Side`) checks what reached the server after each
+case.
+
+- **Lines.** These come from `matrix::lines()`: the `targets(Some(engine))` properties, never a
+  list. Under `full` they are PostgreSQL 14–18, MySQL 8.0 and 8.4, and MariaDB 10.6, 10.11 and
+  11.4; under `pr` they are pg17 and mysql84; SQLite (a file per test) runs in every set.
+  - Every test ends in `Table::finish`. It fails when a line of the active set recorded nothing,
+    and it writes `t28-<test>.tsv`.
+  - Per-engine differences are explicit expectations, never skips. Examples: no `CALL` on
+    SQLite; PostgreSQL's Run-as-one cells are `Text` (the simple protocol names no type, T13);
+    `EXPLAIN ANALYZE` is a syntax error on MariaDB and SQLite; no notices on SQLite.
+- **Production writes.** A production console here is `ManagerConfig::m2b()`, which keeps
+  production writable as Task 26 will. The production policy flag is never named (P-M3b-7). A
+  production profile starts in Manual (`tx::default_mode`); the test asserts that and sets Auto
+  for the own-form legs.
+- **The 2 s deadline.** `ExecService::run` always sends D-014's 5 minutes, so the deadline legs
+  use `Con::run_with_deadline`. It sends the same prepared units, with the gate's verdicts and
+  effects, straight to the session with a 2 s `confirm_deadline` (the T31 precedent of a pass
+  through `SessionHandle::run`). That reply is `Tx(ConfirmTimedOut)`, and the events carry
+  `CommitDecided { RollBack, by_deadline: true }`.
+- **Read-only, layer by layer.** The cases below run on a read-only console whose guard asks
+  the real pool:
+  - The gate denies `INSERT`, and the run service refuses a denied plan: nothing executed or
+    failed, every unit `Skipped`, the log's "not started" (fix round 1, I2).
+  - With the gate bypassed, the session's first-keyword input layer refuses it (DEMO-7, outcome
+    `input`).
+  - A write that starts like a read is denied by the gate. With the gate bypassed, step 0b
+    denies it (`exec-deny-classifier`):
+    - PG: a writable CTE;
+    - MySQL: `WITH … DELETE` (fix round 1, M2: a real write, not a locking read);
+    - MariaDB: `SET STATEMENT … FOR DELETE` (MariaDB has no `WITH … DELETE`);
+    - SQLite: `WITH … INSERT`.
+  - With a classifier that allows everything (`AllowAll`), the server's own layers stop the
+    same statement:
+    - PostgreSQL and the MySQL family answer `25006`, the read-only transaction (the MySQL
+      family's 1792, by its SQLSTATE);
+    - SQLite answers `23`, the read-only connection's authorizer.
+  - On PostgreSQL, a read that the real classifier allows still writes through a view over a
+    `VOLATILE` function. The server stops it with `25006`.
+  - The side channel's row count is unchanged after every step. Every statement of these
+    legs would change that count if the server ran it, so the count is evidence on every
+    engine.
+- **Mutation check (plan Step 2).** Undo's `ROLLBACK TO SAVEPOINT` was replaced by `RELEASE`
+  only in `session/confirm.rs`. `confirm_in_tx_both_forms_per_engine` then went red on pg17
+  ("Undo keeps the user's transaction": `Failed`, not `InTx`). The mutation was reverted.
+- **Case 12** (`physical_memory_bytes_is_known`) is not in this file: `hacivat-exec` may not
+  reach `hacivat-ui-core` (layering). `hacivat-ui-core`'s
+  `physical_memory_is_known_on_this_platform` runs in `build-test` on all three OSes.
+- **Case 11** runs both offline and on Docker. Task 15's
+  `gate::gate_end_to_end_over_real_classify` is no longer `#[ignore]`d (a named exception in
+  `tests/gate.rs`), and the Docker case runs the same shapes on live production, development and
+  read-only consoles of every line. `DROP TABLE`/`TRUNCATE` on production ask without a typed
+  name (R-M3-55 types only unsafe-DML targets and `DROP DATABASE`/`SCHEMA`, which the rows
+  include).
+
+**Fix round 1 (review I1, I2, M1–M5, M7).**
+
+- **pg17-tr (I1).** `turkish_cases_on_pg17_tr` runs on the `pg17-tr` twin
+  (`lc_messages = tr_TR.UTF-8`) through `require_target`, and fails under `full` when the target
+  is missing (M3a's pattern). It covers:
+  - Turkish text binds stored byte for byte (side channel) and found by a Turkish bind;
+  - a notice in Turkish (`tablo "…" mevcut değil, atlanıyor`) that still names the table;
+  - Ask decided by the SQLSTATE `42P01` under a Turkish message;
+  - production's typed name for `DELETE FROM hv_t31_m3b_müşteri_…`, which equals the table's
+    exact bytes;
+  - a Turkish-identifier `UPDATE … WHERE` through confirm-in-transaction, visible only after
+    Commit.
+- **A denied plan sends nothing (I2).** `denied_plan_sends_nothing_on_production`: a production
+  console in Auto runs as one `DELETE FROM a; DELETE FROM b`.
+  - The gate denies it (`exec-unsafe-several-targets`). Nothing later would stop it: the session
+    is writable and the server would run it.
+  - The test asserts the refused shape (executed 0, failed 0, every unit `Skipped`, "not
+    started"), and the side channel still sees both tables' rows.
+  - Mutation: the run service sending a `Deny` unit (`service.rs`, `Planned`) turned this test
+    and case 7 red on pg17, mysql84 and SQLite. The side channel went from (2, 2) to (0, 0). The
+    mutation was reverted.
+- **D-062 (M1).**
+  - PG and MySQL run the savepoint form inside the user's transaction: the explained `DELETE` is
+    undone, and the user's own `INSERT` and transaction stay (4 rows after the user's COMMIT).
+  - MariaDB and SQLite have no `EXPLAIN ANALYZE`: the server answers a syntax error, so their
+    "rows kept" cell proves nothing about the wrap ("n/a" below).
+  - **MariaDB `ANALYZE <dml>`** really executes its statement. By the controller ruling, the
+    interim backend (`sql-safety` `backend/interim.rs`, named exception) classifies
+    `ANALYZE INSERT|UPDATE|DELETE|REPLACE` as the bare statement. `ANALYZE SELECT` and
+    `ANALYZE FORMAT=…` stay `Unknown`. The gate then treats it exactly like the bare DML:
+    `run` on development (`WHERE`), `tx-confirm` on production.
+  - On Docker, production's `ANALYZE DELETE` asks. Roll back leaves 3 rows; Commit leaves 0,
+    showing that it executes.
+  - The T20 seed for `ANALYZE DELETE FROM t` (MariaDB) moved from admin `deny` to `allow`, a
+    named exception in `classifier_seeds.toml`. Read-only stays `deny`. PO list: MariaDB
+    `ANALYZE <dml>` and D-062.
+- **A multi-table `DELETE` names every target (found in this round).**
+  - Before: MySQL and MariaDB `DELETE a, b FROM a JOIN b …` and `DELETE FROM a, b USING …`
+    reported a no-`WHERE` pattern on `a` only, so typing `a` approved deleting from `b` too.
+  - Now the interim backend reports every listed table (named exception, unit test). The gate
+    then denies the several targets on production.
+- **Side channel in case 1 (M3).** Each hint's bound row equals its literal row as the server's
+  own text, and the NULL bind is stored as NULL.
+- **Typed names (M4).** Case 11 asserts the exact bytes of production's typed name: `müşteri`,
+  `s` (`DROP SCHEMA`) and `d` (`DROP DATABASE`).
+- **Artifacts (M5).** Every `t28-<test>.tsv` row now holds measured values: outcomes, codes,
+  counts, end states. No row is a constant description.
+- **E-row mapping for T30 (M7).**
+  - E5's 100-result-set cap is not on Docker; T11 and T16 cover it offline.
+  - E2's "DmlUnsafe, DDL and Admin send nothing before an answer" is not on Docker here, since
+    every `Planned::answer` is Execute. T30 cites T26's Docker test for that clause.
+  - E4, E5 (multi-result, Run as one, error policy) and E2's confirm-in-transaction clauses are
+    this file.
+- **Carried to T24's merge (M6, controller):** the classify context is still rebuilt by the
+  helper. It should switch to T24's session-held source.
+
+| Case (test) | pg14–18 | mysql80, mysql84 | mariadb106, 1011, 114 | SQLite |
+|---|---|---|---|---|
+| 1 `binds_round_trip_every_type_hint` | 14/14 hints stored equal + NULL | 11/11 + NULL | 11/11 + NULL | 9/9 + NULL |
+| 1 `value_with_quote_is_bound_not_spliced` | stored as written | same | same | same |
+| 2 `multi_result_call_and_run_as_one` | CALL 1 tab (INOUT); as one 3 text tabs | CALL 3 tabs; as one 2 | CALL 3 tabs; as one 2 | as one 2 |
+| 3 `error_policy_ask_ignore_stop_and_rollback_and_continue` | Ignore, Stop, Roll back and continue (Auto, Manual) | Ignore, Stop, Ignore in tx (Auto, Manual) | same as MySQL | same as MySQL |
+| 4 `confirm_in_tx_both_forms_per_engine` | own ×3, savepoint ×4, Manual keep+undo, Smart | same | same | same |
+| 5 `smart_mode_opens_only_before_writes` | read: none; write: opened | same | same | same |
+| 6 `explain_analyze_dml_is_rolled_back` | wrap, ran, rows kept; savepoint form in a user tx | same | n/a (no `EXPLAIN ANALYZE`: 42000); `ANALYZE DELETE` gated as bare DML, rollback 3 / commit 0 | n/a (no `EXPLAIN ANALYZE`: 1) |
+| 7 `read_only_classifier_denies_and_server_layers_hold` | gate (refused shape), input, 0b, server 25006, view 25006 | gate, input, 0b, server 25006 (`WITH … DELETE`) | gate, input, 0b, server 25006 (`SET STATEMENT … FOR DELETE`) | gate, input, 0b, authorizer 23 |
+| 8 `notices_and_warnings_reach_the_log` | 2 notices | 1 warning | 1 warning | none |
+| 9 `count_rows_matches_count_star` | 20, 15 | 20, 15 | 20, 15 | 20, 15 |
+| 10 `type_goldens_match` | 72 values (T7 file) | 31 values (T7 file) | 31 values (T7 file) | 8 values |
+| 11 `gate_end_to_end_over_real_classify` | 9 × 3 consoles, typed `müşteri`, `s` | 9 × 3, typed `müşteri`, `d` | 9 × 3, typed `müşteri`, `d` | 5 × 3, typed `müşteri` |
+| (I2) `denied_plan_sends_nothing_on_production` | refused shape, rows (2, 2) | same | same | same |
+
+| pg17-tr | `turkish_cases_on_pg17_tr` |
+|---|---|
+| binds | 5 Turkish words stored byte for byte; found by `İstanbul` |
+| notice | `tablo "hv_t31_m3b_yok_ğ_…" mevcut değil, atlanıyor` |
+| Ask | unit 1, `42P01` |
+| production | typed name = the table's bytes; `UPDATE … WHERE` own form, `İstanbul` → `Ömer` after Commit |
+
+## m3b-t25 — results, fix round 1
+
+- **Crowded strips (I1).** A result tab never shrinks: it is drawn whole or not at all. The
+  strip is fitted to last frame's width: every tab whole, else every tab in its short form
+  (ruling 30), else the short form of as many as fit, in order, the active tab always among
+  them, and a "+N" button whose menu lists the rest by their whole titles. Every drawn tab,
+  with its environment swatch, is therefore inside the strip. Text widths are cached per
+  string (m12) and the titles computed in one pass.
+- **Titles (m8, m9).** The comment comes from the unit (`ExecUnit::title`, the run UI's
+  `tab_units`); the service's title is read back only for a result the run UI does not know. A
+  repeat's `(k)` is its own label after the cut title (`hv-results-tab-repeat`); the whole
+  title (`hv-results-tab-dup`) stays the accessible name.
+- **Lifecycle (m4–m7).** An eviction the shown tab has not answered is answered after the
+  tile's frame; a closed tab is hidden to eviction at once; a count stops when its console's
+  results drop; the toolbar's Clear empties the view directly.
+
+## m3b-t24 — execution wiring in the app
+
+- **One pipeline, nothing sent before every step agreed** (`exec_ui::orchestrator`, section
+  `m3b-t24-exec-ui`). Run's resolved units (as previewed) → `prepare_units` with a fresh
+  `ParamAnswers` (the parameter prompt on `NeedsValues`; Cancel sends nothing) → the classifier
+  pool's `classify_units` on exactly the prepared `final_text`s (P-M3b-2: the gate denies a
+  stale report) → `gate` with the connection's live `ConnSafety` → the confirmations in unit
+  order (`confirm::ask_plan_at`, R-M3-84) → one `ExecService::run` with the answered plan. Each
+  early end logs a `LogMsg::RunUi` line (a refusal with its reason and arguments, or the user's
+  answer), marks the refused units' gutter `Failed` (its tooltip the reason, its end-of-line
+  words "not sent" or M3a's "not sent: read-only"), and says it once (toast and
+  announcement). Every unit is either confirmed, sent, or refused visibly.
+- **Off the UI thread.** Preparation and the gate run on the background executor; the
+  classification on the pool's 16 MiB threads (the UI's foreground task awaits a `oneshot`). A
+  Run being prepared holds the console like a run in flight (one at a time; its gutter shows
+  nothing yet).
+- **The real context: the session's own (plan amendment C2(b)/I1, T18 carries; fix round 1,
+  I1/I2).** Run asks the session it will run on for its classification context first
+  (`SessionHandle::classifier_context`, a queued `Request::ReadContext`): the lexing-mode
+  setting, the search path (MySQL/MariaDB: the current database) and the server version, kept
+  **per session**, so every console that shares a session gets the same one. A read-only
+  session answers what its guard's classifier is told (T18); a read-write session reads T18's
+  own constant text (`readonly::read_context_again`: PostgreSQL `current_setting(...)`, split
+  by `schema::split_search_path`; MySQL/MariaDB `@@SESSION.sql_mode, DATABASE()`), a read
+  that cannot fail in an open transaction, run outside the guard and not counted as a statement
+  of the user's transaction (`observe(false)`). **Never stale:** the question is answered in
+  queue order, and every request that may change the context (a user statement, a run with a
+  unit not proved a read, a transaction command, a schema switch, a reset, a reconnect) marks
+  it stale before the next request is taken; a stale one is read again before it is answered.
+  **Fail-closed:** in a failed transaction, or while a suspended cursor holds the connection,
+  nothing is read and the answer is unknown; a Run that gets no answer within 10 s classifies
+  with unknown modes. The units were split in the console's context: when the session now reads
+  text in other modes (the `standard_conforming_strings` example: `SELECT '\'\n' ; DELETE FROM
+  t; --'`), nothing is sent (`exec-run-context-changed`) and the console reads its context
+  again. The context is asked again after the prompt and the confirmations, just before the
+  send: if another console on the same session changed it meanwhile, nothing is sent (same
+  line). **The context's generation (fix round 2):** the session's answer carries a
+  generation that moves with every stale-marking (marked before the request runs, so a request
+  that never finishes still moves it); the run carries the generation of the last answer
+  (`RunSpec::context_generation`), and the session refuses a run whose generation has moved,
+  sending nothing (`ExecErrorKind::ContextChanged`, `exec-run-context-changed`): another
+  console's request queued between that answer and the run cannot change the context the run
+  was classified in. **Unproven engines (fix round 2):** on Redshift and Cockroach the read is
+  not sent while a user transaction is open (not proven to succeed there); the answer is then
+  unknown. PostgreSQL, Timescale and Yugabyte read. A function on the profile's
+  `read_only_fn_allowlist` is a proved read and never marks the context stale: the list is the
+  user's declaration that it only reads. **One context per run (M12):** the parameter scan and the classification both use it
+  (`orchestrator::classify_ctx_in` → `classify_pool::run_ctx_in`, exactly `guard_ctx_in`'s
+  rules). Count rows checks in the context of the session it runs on, read from that session.
+  Within one run, a later unit is classified in the context a literal `USE db` (MySQL/MariaDB)
+  or `SET search_path TO <literal list>` (PostgreSQL) of an earlier unit sets; any other
+  context change leaves the later units `Unknown` (`sql-safety` `classify_units`, fix round 1,
+  I5).
+- **Unknown modes stay fail-closed for parameters too**: the units are prepared under every
+  reading of the modes, and a run whose parameters read differently is refused
+  (`exec-param-modes-unknown`).
+- **Production stays read-only until Task 26 (R-M3-52).** `ConnSafety.read_only` is the
+  session's read-only flag **or** a production profile: the gate denies every non-`Read` unit
+  there, whatever the session underneath (the guard still applies). Task 26 deletes that one
+  rule in `conn_safety`.
+- **Run as one (R-M3-60).** A unit run as one is a `Verbatim` unit: a selection under the
+  console's "As one" policy, or the uncertain chooser's "Run as one" row, whose region is the
+  execution statements holding the uncertain boundaries (Run 3: the whole text; a selection: the
+  selection), without outer white space, refused when it cuts a token or reaches a client command
+  or `COPY` rows. The row is never preselected (`PopupMenu::clear_selection`, named exception);
+  the band shows the region while it is highlighted; on a read-only session it is disabled with
+  its reason. It is classified with `Expect::Script`; a unit run as one whose verdict would be
+  `TxThenConfirm` or `ExplainAnalyzeRollback` is denied (`exec-gate-run-as-one-refused`, the T19
+  carry: the session refuses them). MySQL/MariaDB: the gate does not model a Smart
+  transaction an earlier unit of the run opens, so DML then DDL in one Smart run is refused by the
+  session (`ImplicitCommitUnconfirmed`): fail-closed (T19 m8).
+- **CHOOSE-06.** The console's `RunPolicy` (inside: Ask / Smallest / Largest / Whole script; a
+  selection as separate statements or as one) is kept until the console closes and read by Run
+  (`resolve_units_in`) and its band (`preview_with`, the service's `set_run_policy`) through one
+  table, `hacivat_sql_editor::run_policy`, so the preview-truth rule holds under any policy
+  (property `preview_equals_execution_under_the_console_policy`).
+- **Parameters (R-M3-79).** Values are remembered per `(profile, name)` for the app session
+  (`ParamMemory`, never persisted), only for named parameters; they pre-fill the prompt and
+  never skip it. Values are read machine format first: a canonical integer gets an integer
+  hint, `\x`+hex pairs bytes (malformed `\x` refused on every engine, the T13 M-6 carry), the
+  rest text (decimals stay exact). A dot-grouped number where the format locale groups with a
+  dot is ambiguous until edited or confirmed ("Use 1.234"). **Known limit (fix round 1, M11):**
+  a value that begins with `\x` or `\X` is never sent as text (read as bytes, or refused as
+  bad hex); a "send as text" choice is left for later.
+- **The run's questions.** After `run`, the port follows the run (`follow(run, choices,
+  status, masked)`), a `NeedsChoice` goes to the error bar (`error_bar::on_choice`, Task 23), a
+  `NeedsCommit` disables the transaction badge (`set_choice_pending`) and marks its unit
+  "waiting for Commit or Roll back" (or Keep or Undo). Every loss of a run that had such a
+  question reaches the port (`connection_lost`, with the statements before the confirmed one in
+  the savepoint form), whichever of the loss and the question's end the app sees first (fix
+  round 1, I3: `LossLink`; the listener outlives the run by 30 s).
+- **The observer's derived lines (T19 carry).** `PlannedUnit` carries the gate's verdict: an
+  `ImplicitCommit` unit that ends the user's transaction logs `exec-implicit-commit` (instead of
+  the generic "the transaction ended" line), and a `TxThenConfirm` unit that fails or is
+  cancelled in an open transaction before any question logs `exec-confirm-statement-failed`.
+- **History (T17 carries).** The store opens on the core runtime at boot (its integrity check
+  never holds the window) in the private `data/` directory (`create_dir_all_private`); records
+  go through a channel the run service writes from the start and are forwarded once the store
+  answers; a store recovered from a corrupt file says so once; a profile with
+  `record_history == false` gets no `HistoryMeta` and is marked do-not-record in the store too.
+- **Tests' hook (T1c M7).** `ClassifyPool::observed(threads, hook)`: the hook sees each text and
+  its context on the pool thread before the real classifier reads it (Task 24's
+  `classifier_receives_final_text`, `classification_never_runs_on_the_ui_thread`).
+- **Refusals say what happened to every unit (fix round 1).** When the gate refuses a unit,
+  nothing of the run is sent, and each other unit gets its own mark and log line naming the
+  refused statement (`exec-gate-run-refused`, I4). A selection run as one that holds a parameter
+  is refused before any prompt (`exec-param-run-as-one`, M1: one simple-query message carries
+  no bind values); the "As one" policy on a read-only session is refused at the gate
+  (`exec-gate-run-as-one-read-only`, M2: the chooser's reason). A console whose session changed
+  between the gate and the send says so (`exec-run-connection-changed`, M4). Run as one trims
+  only SQL white space (M3). The gate reads the profile as it is at gate time (M5). A history
+  store that cannot open is logged (M9).
+- **A carried context switch must take effect (fix round 2, R1-C1).** When a unit before the
+  last is a literal `USE` / `SET search_path` whose new context the later units were classified
+  in (`sql_safety::carried_switches`), the run is sent with `ErrorPolicy::StopOnError` whatever
+  the error-policy setting says (no Ignore, Skip or Retry past its failure), and skipping it at
+  a confirmation cancels the run (nothing sent): otherwise a failed `USE app` would run
+  `SELECT * FROM session` against the old database although it was classified as a read of
+  `app.session`.
+
+## m3b-po — PO answers to the M3 decision list (M3b-04, M3b-23, M3b-26)
+
+- **`TRUNCATE` and `DROP TABLE` type the table's name on production (PO M3b-04; R-M3-55
+  amended).** The gate's typed name (`typed_name`) now also takes the target of every
+  `Truncate` pattern and of every `Drop` of a table: the pattern's target is a table, or the
+  statement's own leading words read `DROP [TEMPORARY|TEMP|FOREIGN] TABLE` (so a backend that
+  names the kind wrongly cannot drop the typed name, as for `DROP DATABASE`/`SCHEMA`);
+  `ALTER TABLE … DROP PARTITION` keeps its row. It fails closed like the unsafe-DML rule: no
+  table to name is `exec-unsafe-no-target`, and more than one typed target in one unit
+  (`TRUNCATE a, b`, `DROP TABLE a, b`, `DELETE FROM a; TRUNCATE b`; since m3c-p2-07 fix round 3
+  also the same name twice) is `exec-unsafe-several-targets` (typing one name must never approve
+  another). Off production
+  nothing changes. Views, indexes, functions, sequences and column drops keep a plain
+  confirmation.
+- **Limit of the typed name (fix round 1, review m4; narrowed by m3c-p2-07).** The typed name
+  needs a target the classifier can see. A `TRUNCATE` or `DROP TABLE` hidden from it — inside a
+  `DO` block, dynamic SQL (`EXECUTE '…'`), `dblink_exec(…)`, MySQL or PostgreSQL
+  `PREPARE`/`EXECUTE` (the prepared body is deferred; `EXECUTE p` is `Unknown`), or a routine a
+  `CALL` runs — gets the plain production confirmation instead: never suppressible, nothing sent
+  before the answer, but no name to type.
+- **`DROP OWNED BY` types the role's name on production (## m3c-p2-07, PO P2-07, approved
+  2026-11-18).** PostgreSQL's `DROP OWNED BY <role> [, …] [CASCADE | RESTRICT]` (which drops
+  every object the role owns in the database, every table included) now names each role as its
+  `Drop` pattern's target (`ObjectKind::Role`, where the role is written), and the gate's typed
+  name takes it when the statement is a `DROP OWNED` (since fix round 2 by the classifier's
+  statement kind, which the statement's own words must confirm). The rules are the
+  `TRUNCATE`/`DROP TABLE` ones: production only (`EnvTag::Production`), never suppressible,
+  off production nothing changes; the name is typed as written (quotes removed, letter case
+  kept, compared byte for byte). `CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER` (and `PUBLIC`)
+  are not resolved to a role name — Hacivat has no way to — so the keyword is typed as written.
+  The multi-target rule is the one `DROP TABLE a, b` follows: one typed target per unit, so
+  `DROP OWNED BY a, b`, `DROP OWNED BY a, a` (since fix round 3), two `DROP OWNED` statements,
+  or a `DROP OWNED` beside a `TRUNCATE` or unbounded `DELETE` is denied,
+  `exec-drop-owned-several-targets`. A `DROP OWNED` whose role the classifier could not name is
+  denied, `exec-drop-owned-no-target`. The dialog's reason is
+  `safety-destructive-drop-owned[-cascade]` ("Removes every object `r` owns in this database
+  …"), never `safety-destructive-drop` ("Removes `r`.", which `DROP ROLE` keeps).
+- **One typed name approves exactly one destructive target occurrence (## m3c-p2-07 fix round
+  3, controller ruling; replaces the merging of fix rounds 1 and 2).** Fix rounds 1 and 2 merged
+  the typed names of a unit that named "the same object" (by an engine case rule, a 63-byte
+  rule and a cross-statement scope). Every such rule had holes: a list of two long names that
+  libpg_query cuts alike, MySQL `DROP TABLE a, A` found through a case-insensitive search, a
+  `DROP` or a `set_config(…)` call that changes what the next name resolves to, a rename or a
+  re-`ATTACH` under a qualified name. The rule is now counting, with no merging:
+  - **Every typed target at its own position is one occurrence** (fix round 4, S1: several
+    patterns of one written target, such as `NoWhere` and `UpdateLimitNoOrder` in
+    `DELETE FROM logs LIMIT 1000`, or `NoWhere` and `JoinWithoutOn` in
+    `UPDATE t JOIN u SET t.a = 1`, are one occurrence): `TRUNCATE a, b` is two, `TRUNCATE a, A`
+    is two, `DELETE FROM t; DELETE FROM t` is two, `DROP OWNED BY a, a` is two, and a
+    multi-table `UPDATE`/`DELETE` without a bounding `WHERE` is one per written table.
+  - **More than one occurrence is denied**, `exec-unsafe-several-targets` (or
+    `exec-drop-owned-several-targets` when a `DROP OWNED` role is among them), whatever their
+    names. Run each destructive statement on its own.
+  - **Exactly one occurrence asks for its own spelling**, read at its own position, the range
+    the classifier gives that one pattern: each part's bytes as written, quotes removed, never
+    case-folded or cut (`DELETE FROM "Ürün"` asks for `Ürün`, a 70-byte name for all 70 bytes,
+    `DROP OWNED BY CURRENT_USER` for `CURRENT_USER`). The spelling is never looked up elsewhere
+    by name: the PostgreSQL backend takes each target's span from its own parse location (for
+    `DROP TABLE|FOREIGN TABLE|SCHEMA` lists, by position in the list), the interim backend from
+    `sqlparser`'s span of that name, and `DROP DATABASE|SCHEMA` from the statement's own words.
+    A position that does not read as its name is denied (`exec-unsafe-no-target`, or
+    `exec-drop-owned-no-target`).
+  - **Accepted limit: the user types the name as written; what it resolves to follows the
+    session.** `SET search_path TO archive; DELETE FROM orders` asks for `orders`, and the
+    server empties `archive.orders`. A single occurrence approves exactly the one statement the
+    dialog shows, under whatever session state the unit itself sets up.
+  - The typed comparison is unchanged: byte for byte against that spelling. A doubled quote
+    inside a quoted name is one quote, as the server reads it (fix round 4, S3): `` `a``b` ``
+    and `"a""b"` ask for ``a`b`` and `a"b`.
+  - **Implicit effects are neither counted nor typed (fix round 4, S2).** The typed name
+    confirms only the written target. What the server changes beyond it is not an occurrence:
+    `TRUNCATE … CASCADE` (every referencing table), inheritance and partition children (unless
+    `ONLY`), `ON DELETE CASCADE` foreign keys, and writes through views, rules and triggers.
+    Counting them is not feasible statically. `TRUNCATE … CASCADE` is at least named: the PG
+    backend reads its `CASCADE` (`DestructiveKind::TruncateCascade`), and the dialog says
+    "Removes every row of `orders` and of every table that references it (CASCADE)."
+    (`safety-destructive-truncate-cascade`).
+  - **Known denials (fix round 4, S4 and S5; rare, fail closed):** a comment inside a qualified
+    name (`app /*x*/ . orders`), a PostgreSQL `U&"…"` name, and a MySQL/SQLite statement whose
+    text has a lone `\r` line ending before the name cannot be read at their position, so they
+    are denied (`exec-unsafe-no-target`).
+- **Scope of the typed name (fix round 2, review M2):** only typed-target kinds compete for the
+  one name. A `DROP OWNED`, `TRUNCATE` or `DROP TABLE` beside a `DROP VIEW`, a `DROP COLUMN` or
+  another plain-confirmation drop still asks for its one name, and the dialog lists every
+  destructive pattern of the unit.
+- **`DROP OWNED` is known by the classifier's statement kind (fix round 2, review M5).**
+  libpg_query's `DropOwnedStmt` is `StmtKind::DropOwned`. When that kind and the statement's
+  own words (`DROP OWNED`) disagree, the unit is denied (`exec-drop-owned-no-target`). The
+  reason text also says that `DROP OWNED` revokes the role's privileges on shared objects
+  (databases, tablespaces) and its default privileges.
+- **More secret forms are masked in history (PO M3b-23; narrowed in fix round 1).** Secret
+  name parts are now also `BEARER`, a bare `TOKEN` or a `TOKEN` after a secret-ish qualifier
+  (`access_token`, `refresh_token`, `api_token`, `auth_token`; never `token_type`,
+  `token_count`), and a `KEY` after an allow-listed prefix (`API`, `ACCESS`, `SECRET`,
+  `PRIVATE`, `ENCRYPTION`, `MASTER`, `SIGNING`, `AUTH`, `CLIENT`, `SERVICE`, `LICENSE`, `HMAC`,
+  `SESSION`) — never surrogate, table or public keys (`customer_key`, `date_key`,
+  `idempotency_key`, `public_key`, `PRIMARY KEY`). They apply to words, quoted names,
+  `set_config` names, `name=value` and JSON pairs (`"access_token": "…"`, camelCase too)
+  inside strings. SQLCipher's `PRAGMA key|rekey|hexkey|hexrekey|textkey` (also after
+  `EXPLAIN [QUERY PLAN]`), `ATTACH … KEY` and SQLite URI keys (`?key=`, `&hexkey=`,
+  `textkey=`) take a value; a MySQL user variable named like a secret (`@pw`, `@db_pass`,
+  `@key`; never `@pass_count` or `@@…`) takes a value after `=` or `:=`, and
+  `SELECT '…' INTO @pw` masks the strings before it; `Bearer <credential>` in a string is
+  masked. A type name after a secret column in DDL is never its value.
+- **The error scrub replaces whole secrets of at least 4 bytes only (fix round 1, review I1).**
+  Before, a secret `1` or `int` turned `ERROR 1054 … at line 1` into `ERROR ***054 … at line
+  ***`. A secret glued to other word characters in an echo, or shorter than 4 bytes, now stays
+  in the error text (documented gap).
+- **The Execute all scope line names the real environment (PO M3b-26).** Execute all is never
+  offered on production, so the line's old "a production change still waits for your answer"
+  clause could never apply; it is gone, and the line says which environment the connection is
+  (`hv-conn-env-*`, "no environment" untagged).
+
+## m4-t21 — catalog refresh sink
+
+- `CatalogRefreshSink` (installed per run by Task 27) is a synchronous auditor that feeds the
+  run's `hacivat_introspect::refresh_coord::RunTracker`: `UnitStarted`, `TxChanged` (the
+  driver status mapped to `TxPhase`), `UpdateCount` (the `ROLLBACK` tag) and `UnitEnded`, in
+  order, on the session's actor task. The tracker reads the session's namespace and search
+  path when a unit ends (execution time) and pushes the unit's meaning into the profile's
+  `RefreshInbox`.
+- **It never slows the run.** A push is a short lock and never awaits; the inbox holds 1,024
+  messages and drops its **oldest** when full, counting it (the HV-EXEC-06 pattern, but
+  drop-oldest so the newest state wins). A drop is never silent for the catalog: the
+  coordinator refreshes the affected session's pending targets and its whole database at
+  once and again at its next commit. Planning, catalog reads and refreshes run on the
+  coordinator's own task on the `CoreRuntime`.
+- The unit's text is read only to find a savepoint name (`SAVEPOINT`, `RELEASE`, `ROLLBACK
+  TO`) or `PREPARE TRANSACTION` when the tracker is built; only the folded name is kept. The
+  sink never sees or keeps bind values.
+- **Seam change (review m8).** The T1c stub's `CatalogRefreshSink::new()` (and `Default`)
+  became `CatalogRefreshSink::new(RunTracker)` plus `CatalogRefreshSink::for_run(&SessionHandle,
+  DbmsKind, Vec<TrackedUnit>, RefreshInbox)`; nothing installed the stub, and Task 27 installs
+  `for_run` in `RunService::chain_for`. The plan's cross-plan interface line for the sink reads
+  with these constructors.
+
+## m4-t27 — the refresh sink per run
+
+- `ExecService::run_with_refresh(console, req, Option<CatalogRun>)` (named exception; `run` is
+  `run_with_refresh(.., None)`): with a `CatalogRun` (the profile coordinator's inbox, the
+  console's dialect and the classifier's reports of each unit) the run's auditor chain gains
+  `CatalogRefreshSink::for_run`, built with the run's own `UnitId`s, after the history sink.
+  A unit's text (the prepared final text) is read only for a savepoint name. A private console
+  still refreshes the catalog (nothing of the text is kept). `RunRequest` is unchanged, so no
+  literal of it moves. `hacivat_exec` re-exports `StmtKind` and `StmtReport` (ruling I2: the
+  app takes no `sql-safety` dependency).

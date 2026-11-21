@@ -199,3 +199,31 @@ fn token_words_come_from_the_current_analysis(cx: &mut TestAppContext) {
         ["SELECT", "/*!80000", "1", ",", "2", "*/", "x"]
     );
 }
+
+// ## m3c-t31-multi (named exception): the token oracle's plain-text check for the IME
+// (R-M3-64): inside a string or a comment, at the end of a line comment or of an unterminated
+// string; a quoted identifier is plain text; a stale analysis does not know.
+#[gpui::test]
+fn the_oracle_knows_strings_and_comments(cx: &mut TestAppContext) {
+    use hacivat_ui_editor::LanguageService as _;
+    let mut d = Doc::analysed(cx, "SELECT 'a b', \"x\" -- c\nFROM t /* d */ 'open", pg());
+    let at = |d: &Doc, at: usize| d.svc.token_oracle(support::DOC).in_string_or_comment(at);
+    for (pos, inside) in [
+        (7, false),
+        (9, true),
+        (12, false),
+        (15, false),
+        (21, true),
+        (22, true),
+        (28, false),
+        (33, true),
+        (37, false),
+        (43, true),
+    ] {
+        assert_eq!(at(&d, pos), Some(inside), "at {pos}");
+    }
+    d.edit(cx, 0..0, " ");
+    assert_eq!(at(&d, 10), None, "stale: not known");
+    cx.run_until_parked();
+    assert_eq!(at(&d, 10), Some(true));
+}

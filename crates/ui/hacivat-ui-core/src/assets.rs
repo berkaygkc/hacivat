@@ -98,6 +98,39 @@ const ICONS: &[(&str, &[u8])] = lucide![
     "clipboard-x",
     "ban",
     "copy-check",
+    // ## m3b-t01b-seams (P-M3b-37): the M3b icons not bundled yet (`play`, `filter` and `sigma`
+    // are above): Pin (result tabs, history), Sort (`arrow-up-down`) and Freeze (`snowflake`).
+    "pin",
+    "arrow-up-down",
+    "snowflake",
+    // ## m3b-t01b-seams (controller ruling RC-4): the M3b mocks' icons: History, the countdown
+    // (`timer`), waiting (`hourglass`), single-session (`users`), hidden columns (`eye-off`),
+    // Terminate (`octagon-x`) and the idle-transaction toast (`clock`).
+    "history",
+    "timer",
+    "hourglass",
+    "users",
+    "eye-off",
+    "octagon-x",
+    "clock",
+    // ## m3c-t31-multi (controller ruling 8, a named exception like RC-4): the M3c find
+    // toggles and the ascending sort (Tasks 33 and 36 draw them).
+    "arrow-up",
+    "case-sensitive",
+    "whole-word",
+    "regex",
+    // ## m4-t01b-seams (named exception, the P-M3b-37 precedent): the M4 explorer kinds
+    // (column, foreign key, trigger, type, schema), the Built-in group, the DDL view's source
+    // caption and Open in console, and Refresh (`design/m4-explorer/NOTES.md`).
+    "columns-3",
+    "link",
+    "zap",
+    "type",
+    "folder-tree",
+    "library",
+    "server",
+    "terminal",
+    "refresh-cw",
 ];
 const HV_MARK: &[u8] = include_bytes!("../assets/icons/hacivat/hv-mark.svg");
 

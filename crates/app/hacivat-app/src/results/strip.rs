@@ -8,7 +8,9 @@
 //! were drained, R-M3-25); [`render`] lays it out on the Overflow Rule [`Toolbar`], whose compact
 //! forms give the strip its narrow shape: first the word "Selection" goes, then the cursor
 //! sentence becomes "Cursor open" (its whole text stays in the tooltip). Every item is pinned:
-//! buttons and counts never truncate or move into a menu.
+//! buttons and counts never truncate or move into a menu. ## m4-m3carry (U-6 a): in the
+//! toolbar's narrow stage (a pane too narrow to hold every item whole on a line) Fetch more is
+//! its arrow-down icon, its word the tooltip and the accessible name.
 //!
 //! - **Close cursor** goes through `ResultSource::close_cursor`, whose reason follows the state:
 //!   `MemoryLimit` while paused at a memory limit, else `UserClosed` (ledger ruling on T7).
@@ -16,6 +18,13 @@
 //! - **Re-run** emits `ResultsEvent::Rerun` for the console's run UI.
 //!
 //! Counts are formatted in the format locale; the selection's size likewise.
+//!
+//! ## m3b-t25-results
+//! - **Closed to free memory** (R-M3-68): a background result eviction cut to its first chunk
+//!   says so ("Closed to free memory; the first 4,096 rows are kept.", info glyph `text-2`) and
+//!   offers Re-run (design/m3b-safe surface 10).
+//! - **The result-set limit** (R-M3-66) is read from the log as the drained sets are, for the
+//!   tile's info row ([`StripFacts::set_limit`]).
 
 use std::rc::Rc;
 
@@ -25,6 +34,8 @@ use hacivat_results::{CloseReason, Completeness, StoreSnapshot, TruncReason};
 use hacivat_session::session::UnitId;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
+// ## m3c-narrow (T43b review m9)
+use hacivat_ui::metrics::{STRIP_GAP_PX, WRAP_LINE_PX};
 use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui::toolbar::{ItemFn, Toolbar, ToolbarItem, Wrap};
 use hacivat_ui_core::gpui_surface::{
@@ -72,6 +83,11 @@ pub enum StripKind {
     Cancelled {
         rows: u64,
     },
+    // ## m3b-t25-results
+    /// Closed to free memory (R-M3-68): `rows` kept.
+    Evicted {
+        rows: u64,
+    },
 }
 
 // ## m3a-t30 fix round 1 (I2): the facts the strip takes from the log, kept per tab by the tile
@@ -85,13 +101,23 @@ pub struct StripFacts {
     pub closed: Option<(CloseReason, bool, u64)>,
     /// Result sets read and not shown (R-M3-25).
     pub more_sets: Option<u32>,
+    // ## m3b-t25-results
+    /// The statement returned more result sets than a run keeps (R-M3-66): `(total, limit)`.
+    pub set_limit: Option<(u32, u32)>,
 }
 
 impl StripFacts {
     /// What `log` says about `unit` (its newest lines win).
     pub fn from_log(log: &[LogLine], unit: UnitId) -> StripFacts {
+        Self::from_lines(log, unit)
+    }
+
+    // ## m3b-t25-results
+    /// [`from_log`](Self::from_log) over any run of lines (the tile's rows, the new lines of a
+    /// change).
+    pub fn from_lines<'a>(log: impl IntoIterator<Item = &'a LogLine>, unit: UnitId) -> StripFacts {
         let mut facts = StripFacts::default();
-        for line in log.iter().filter(|l| l.unit == Some(unit)) {
+        for line in log.into_iter().filter(|l| l.unit == Some(unit)) {
             match line.msg {
                 LogMsg::CursorClosed {
                     reason,
@@ -101,6 +127,10 @@ impl StripFacts {
                 } => facts.closed = Some((reason, rolled_back, idle_ms)),
                 LogMsg::MoreResultSets { skipped } if skipped > 0 => {
                     facts.more_sets = Some(skipped);
+                }
+                // ## m3b-t25-results
+                LogMsg::ResultSetLimit { total, limit } if total > limit => {
+                    facts.set_limit = Some((total, limit));
                 }
                 _ => {}
             }
@@ -115,6 +145,10 @@ impl StripFacts {
         }
         if newer.more_sets.is_some() {
             self.more_sets = newer.more_sets;
+        }
+        // ## m3b-t25-results
+        if newer.set_limit.is_some() {
+            self.set_limit = newer.set_limit;
         }
     }
 }
@@ -158,6 +192,10 @@ impl StripModel {
                 StripKind::Complete { rows }
             }
             Completeness::Truncated(TruncReason::ResultCap) => StripKind::Truncated { rows },
+            // ## m3b-t25-results
+            Completeness::Closed {
+                reason: CloseReason::Evicted,
+            } => StripKind::Evicted { rows },
             Completeness::Closed { reason } => closed(*reason),
             Completeness::Cancelled => StripKind::Cancelled { rows },
             // The rows were given back with their tab: nothing on screen shows them.
@@ -191,6 +229,8 @@ impl StripModel {
             StripKind::Complete { .. } => ids::hv::STRIP_COMPLETE.id,
             StripKind::Truncated { .. } => ids::hv::STRIP_TRUNCATED.id,
             StripKind::Cancelled { .. } => ids::hv::STRIP_CANCELLED.id,
+            // ## m3b-t25-results
+            StripKind::Evicted { .. } => ids::hv::STRIP_EVICTED.id,
             StripKind::Closed { .. } if self.idle_unknown().is_some() => {
                 ids::hv::STRIP_CLOSED_IDLE.id
             }
@@ -254,6 +294,12 @@ impl StripModel {
                 ids::hv::STRIP_CANCELLED,
                 ids::hv::HvStripCancelled { rows: Count(rows) },
             ),
+            // ## m3b-t25-results
+            StripKind::Evicted { rows } => tr(
+                cx,
+                ids::hv::STRIP_EVICTED,
+                ids::hv::HvStripEvicted { rows: Count(rows) },
+            ),
             StripKind::Closed { .. } => match self.idle_unknown() {
                 Some(rows) => tr(
                     cx,
@@ -278,6 +324,8 @@ impl StripModel {
                 | StripKind::Cancelled { .. }
                 | StripKind::Memory { .. }
                 | StripKind::Truncated { .. }
+                // ## m3b-t25-results
+                | StripKind::Evicted { .. }
         )
     }
 
@@ -285,7 +333,7 @@ impl StripModel {
     pub fn offers_rerun(&self) -> bool {
         matches!(
             self.kind,
-            StripKind::Closed { .. } | StripKind::Cancelled { .. }
+            StripKind::Closed { .. } | StripKind::Cancelled { .. } | StripKind::Evicted { .. }
         )
     }
 }
@@ -305,12 +353,25 @@ pub struct StripActions {
 pub const STRIP_ID: &str = "results-strip";
 
 // ## m3a-f2-visual: the wrapped reason's line pitch (NOTES surface 11).
-const WRAP_LINE_PX: f32 = 16.0;
+// ## m3c-narrow (T43b review m9): it, and the 6 px between the strip's sentence and its glyph
+// or buttons, are the chrome metrics' names now (`hacivat_ui::metrics::{WRAP_LINE_PX,
+// STRIP_GAP_PX}`, imported above), not the strip's own copies of their numbers.
 
-/// The cursor strip of `model`, with the selection's size (`rows × cols`) on the right.
+// ## m3c-t35 (named exception): a selection of several ranges (NOTES M3c-22).
+/// The selection's size the strip shows on its right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripSelection {
+    /// One block: "Selection 3 × 2".
+    Dims { rows: u64, cols: u64 },
+    /// Several ranges (⌘/Ctrl-click): "Selection 2 ranges · 10 cells".
+    Ranges { n: u64, cells: u64 },
+}
+
+/// The cursor strip of `model`, with the selection's size (`rows × cols`, or its ranges and
+/// cells) on the right.
 pub fn render(
     model: StripModel,
-    selection: Option<(u64, u64)>,
+    selection: Option<StripSelection>,
     actions: StripActions,
     cx: &App,
 ) -> AnyElement {
@@ -323,7 +384,10 @@ pub fn render(
     let lead = lead_glyph(model.kind);
     let count_like = matches!(
         model.kind,
-        StripKind::Suspended { .. } | StripKind::Memory { .. } | StripKind::Closed { .. }
+        StripKind::Suspended { .. }
+            | StripKind::Memory { .. }
+            | StripKind::Closed { .. }
+            | StripKind::Evicted { .. }
     );
     let sentence_text: TextFn = {
         let s = sentence.clone();
@@ -348,7 +412,8 @@ pub fn render(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(t.spacing.sm))
+                    // ## m3c-narrow (m9): the same 6 px, by its name.
+                    .gap(px(STRIP_GAP_PX))
                     .flex_1()
                     .min_w(px(0.0))
                     .children(lead.map(|g| g.element(cx)))
@@ -384,7 +449,7 @@ pub fn render(
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(STRIP_GAP_PX))
                 .children(lead.map(|g| g.element(cx)))
                 .child(
                     Label::new(
@@ -453,12 +518,23 @@ pub fn render(
                 actions.close_cursor.clone(),
                 cx,
             ));
-            bar = bar.item(button(
-                "strip-fetch-more",
-                ids::hv::STRIP_FETCH_MORE,
-                actions.fetch_more.clone(),
-                cx,
-            ));
+            // ## m4-m3carry (U-6 a; M3c-34, design/m3b-safe surface 24): Fetch more's narrow
+            // form is its arrow-down icon.
+            bar = bar.item(
+                button(
+                    "strip-fetch-more",
+                    ids::hv::STRIP_FETCH_MORE,
+                    actions.fetch_more.clone(),
+                    cx,
+                )
+                .narrow(icon_button(
+                    "strip-fetch-more",
+                    ids::hv::STRIP_FETCH_MORE,
+                    IconName::ArrowDown,
+                    actions.fetch_more.clone(),
+                    cx,
+                )),
+            );
             bar = bar.item(button(
                 "strip-fetch-all",
                 ids::hv::STRIP_FETCH_ALL,
@@ -512,7 +588,7 @@ pub fn render(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(STRIP_GAP_PX))
                     .child(
                         Icon::new(IconName::Layers)
                             .size(IconSize::Chrome)
@@ -532,16 +608,26 @@ pub fn render(
             label,
         ));
     }
-    if let Some((rows, cols)) = selection {
+    if let Some(selection) = selection {
         let word = tr(cx, ids::hv::STRIP_SELECTION, NoArgs);
-        let dims = tr(
-            cx,
-            ids::hv::STRIP_DIMS,
-            ids::hv::HvStripDims {
-                rows: Count(rows),
-                cols: Count(cols),
-            },
-        );
+        let dims = match selection {
+            StripSelection::Dims { rows, cols } => tr(
+                cx,
+                ids::hv::STRIP_DIMS,
+                ids::hv::HvStripDims {
+                    rows: Count(rows),
+                    cols: Count(cols),
+                },
+            ),
+            StripSelection::Ranges { n, cells } => tr(
+                cx,
+                ids::hv::STRIP_RANGES,
+                ids::hv::HvStripRanges {
+                    n: Count(n),
+                    cells: Count(cells),
+                },
+            ),
+        };
         let label: TextFn = {
             let dims = dims.clone();
             Rc::new(move |_| dims.clone())
@@ -611,6 +697,8 @@ fn lead_glyph(kind: StripKind) -> Option<Lead> {
         StripKind::Truncated { .. } => Some(Lead::Icon(IconName::CircleAlert, Ink::Text)),
         StripKind::Closed { .. } => Some(Lead::Icon(IconName::Info, Ink::Text2)),
         StripKind::Cancelled { .. } => Some(Lead::Icon(IconName::Ban, Ink::Text2)),
+        // ## m3b-t25-results
+        StripKind::Evicted { .. } => Some(Lead::Icon(IconName::Info, Ink::Text2)),
     }
 }
 
@@ -655,7 +743,7 @@ fn selection_item(word: Option<SharedString>, dims: SharedString) -> ItemFn {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(STRIP_GAP_PX))
             .children(word.clone().map(|w| {
                 Label::new(w, TextSource::Fluent, t.type_ramp.caption, ink).id("strip-selection")
             }))
@@ -694,4 +782,28 @@ fn button(
         label,
     )
     .on_choose(move |window, cx| run(window, cx))
+}
+
+// ## m4-m3carry (U-6 a)
+/// A strip button's narrow form (`button-<id>`, the same button): its `icon` alone, in the
+/// strip's 20 px compact size; its word is the tooltip and the accessible name (N1).
+fn icon_button(
+    id: &'static str,
+    msg: hacivat_l10n::MsgRef<NoArgs>,
+    icon: IconName,
+    on_click: Action,
+    cx: &App,
+) -> ItemFn {
+    let text: SharedString = tr(cx, msg, NoArgs);
+    Rc::new(move |_, _| {
+        let on_click = on_click.clone();
+        Button::new(id, text.clone())
+            .kind(ButtonKind::Default)
+            .on_raised(true)
+            .compact(true)
+            .icon(icon)
+            .icon_only(true)
+            .on_click(move |_, window, cx| on_click(window, cx))
+            .into_any_element()
+    })
 }

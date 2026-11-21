@@ -57,13 +57,18 @@ fn run_inner(args: Vec<String>) -> Result<PathBuf, String> {
 }
 
 /// A milestone name (`m0`, `m1`, ...): it becomes a file name, so no path syntax is accepted.
+// ## m3c-t44 (named exception): `m<number>` with an optional one-letter suffix (m3a, m3b,
+// m3c), so the split milestones' reports take rows too. Still never a path.
 pub fn parse_milestone(s: &str) -> Result<String, String> {
-    let digits = s.strip_prefix('m').unwrap_or("");
+    let rest = s.strip_prefix('m').unwrap_or("");
+    let digits = rest
+        .strip_suffix(|c: char| c.is_ascii_lowercase())
+        .unwrap_or(rest);
     if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
         Ok(s.to_string())
     } else {
         Err(format!(
-            "bad milestone \"{s}\" (expected m<number>, e.g. m1)"
+            "bad milestone \"{s}\" (expected m<number> with an optional lowercase letter, e.g. m1 or m3c)"
         ))
     }
 }
@@ -388,6 +393,21 @@ mod tests {
         assert!(parse_milestone("M1").is_err());
         assert!(parse_milestone("m").is_err());
         assert_eq!(parse_milestone("m1").unwrap(), "m1");
+    }
+
+    // ## m3c-t44: the split milestones (m3a, m3b, m3c) have a one-letter suffix.
+    #[test]
+    fn milestone_takes_a_one_letter_suffix() {
+        for m in ["m3a", "m3b", "m3c", "m10", "m12z"] {
+            assert_eq!(parse_milestone(m).unwrap(), m);
+        }
+        for bad in [
+            "m3ab", "m3A", "ma", "m3-a", "m3a/x", "../m3a", "m3a.md", "m3 a", "m3é",
+        ] {
+            assert!(parse_milestone(bad).is_err(), "{bad}");
+        }
+        let err = parse_milestone("m3ab").unwrap_err();
+        assert!(err.contains("m3c"), "{err}");
     }
 
     #[test]

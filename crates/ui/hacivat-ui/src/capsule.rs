@@ -217,6 +217,39 @@ pub struct Capsule {
     // ## m2b-t22-live (fix round 1, I1, M5)
     max_width: Option<f32>,
     access_hint: Option<SharedString>,
+    // ## m4-m3carry (U-6 c, P2-04)
+    on_trust_room: Option<TrustRoomHandler>,
+}
+
+// ## m4-m3carry (U-6 c, P2-04)
+/// Told, each frame the capsule measures itself, where its trust words give way. See
+/// [`Capsule::on_trust_room`].
+pub(crate) type TrustRoomHandler = Rc<dyn Fn(TrustRooms, &mut Window)>;
+
+// ## m4-m3carry (U-6 c, P2-04)
+/// Where the capsule's trust words give way (the access word, read-only or read-write, and the
+/// unencrypted word): for each one it shows, in [`Fit`]'s order, the room (`max_width`) below
+/// which its fit gives that word up; `None` past the words it shows. The read-only word keeps
+/// its lock and the unencrypted word its glyph, but the word is still a trust word given up.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TrustRooms(pub [Option<f32>; 3]);
+
+impl TrustRooms {
+    /// How many trust words a capsule `max` px wide at most gives up.
+    pub fn given_up_at(&self, max: f32) -> usize {
+        self.0.iter().flatten().filter(|t| max < **t).count()
+    }
+
+    /// Whether `other` gives any word way at another room (by more than half a pixel).
+    pub(crate) fn differs(&self, other: &TrustRooms) -> bool {
+        self.0
+            .iter()
+            .zip(other.0.iter())
+            .any(|(a, b)| match (a, b) {
+                (Some(a), Some(b)) => (a - b).abs() > 0.5,
+                (a, b) => a.is_some() != b.is_some(),
+            })
+    }
 }
 
 impl Capsule {
@@ -228,7 +261,18 @@ impl Capsule {
             inert: false,
             max_width: None,
             access_hint: None,
+            on_trust_room: None,
         }
+    }
+
+    // ## m4-m3carry (U-6 c; M3 PO item P2-04)
+    /// Reports, each frame the capsule measures itself, its [`TrustRooms`]: the room below
+    /// which each trust word gives way. They depend on the capsule's natural width only, never
+    /// on its room. The title bar collapses its palette field to an icon when the room that
+    /// frees keeps a trust word the capsule would otherwise give up.
+    pub(crate) fn on_trust_room(mut self, handler: TrustRoomHandler) -> Self {
+        self.on_trust_room = Some(handler);
+        self
     }
 
     // ## m2b-t22-live (fix round 1, ruling I1)
@@ -283,6 +327,10 @@ impl Capsule {
     }
 }
 
+// ## m3c-shotfix (capsule)
+/// A cell's padding on each side.
+const CELL_PAD_PX: f32 = 9.0;
+
 /// One cell after the environment block: 9 px padding, a `seam_strong` divider on its left.
 fn cell(t: &ThemeTokens) -> Div {
     let c = &t.colors;
@@ -291,7 +339,7 @@ fn cell(t: &ThemeTokens) -> Div {
         .flex_row()
         .items_center()
         .gap(px(t.spacing.sm))
-        .px(px(9.0))
+        .px(px(CELL_PAD_PX))
         .h_full()
         .flex_none()
         .border_l_1()
@@ -439,6 +487,12 @@ const FIT_SLACK_PX: f32 = 2.0;
 /// "Reconnecting · attempt n", idle, "Couldn't connect"), which keeps its glyph, and Retry's
 /// text, which keeps its icon; last the name. A collapsed segment keeps its whole text as its
 /// tooltip and accessible name.
+///
+/// ## m3c-shotfix (capsule): a read-write access word (a trust signal with no glyph to keep)
+/// is the last thing given up before the name: after the unencrypted text (which keeps its
+/// glyph) and the engine. It goes as a whole cell, and the plan counts the whole cell: counting
+/// only its text left the next frame's natural width a cell's padding short, so near its room
+/// the capsule flipped between showing and dropping it from one frame to the next.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Fit {
     hide_latency: bool,
@@ -446,6 +500,8 @@ struct Fit {
     access_icon_only: bool,
     unencrypted_icon_only: bool,
     hide_engine: bool,
+    // ## m3c-shotfix (capsule)
+    hide_read_write: bool,
     hide_next: bool,
     // ## m2b-t22-live (fix round 2, R1-I1)
     state_icon_only: bool,
@@ -455,7 +511,7 @@ struct Fit {
 }
 
 /// The steps of [`Fit`], in order.
-const STEPS: usize = 8;
+const STEPS: usize = 9;
 
 impl Fit {
     /// The degradation that brings a capsule `full` px wide (nothing given up) within `max`:
@@ -478,8 +534,9 @@ impl Fit {
                 2 => fit.access_icon_only = true,
                 3 => fit.unencrypted_icon_only = true,
                 4 => fit.hide_engine = true,
-                5 => fit.hide_next = true,
-                6 => fit.state_icon_only = true,
+                5 => fit.hide_read_write = true,
+                6 => fit.hide_next = true,
+                7 => fit.state_icon_only = true,
                 _ => fit.retry_icon_only = true,
             }
             over -= step;
@@ -491,6 +548,39 @@ impl Fit {
             saved += cut;
         }
         (fit, saved)
+    }
+
+    // ## m4-m3carry (U-6 c, P2-04)
+    /// The steps that give up a trust word: the read-only access text (its lock stays), the
+    /// unencrypted text (its glyph stays) and the read-write access word.
+    const TRUST_STEPS: [usize; 3] = [2, 3, 5];
+
+    /// Where [`Fit::plan`] gives each trust word up for a capsule `full` px wide: `plan` takes
+    /// every step that applies, in order, while it is still over, so it takes a trust step
+    /// exactly when `max` is below `full`, plus the slack, less every step before it.
+    fn trust_rooms(full: f32, steps: [f32; STEPS]) -> TrustRooms {
+        let mut rooms = TrustRooms::default();
+        let mut slot = rooms.0.iter_mut();
+        let mut before = 0.0;
+        for (i, step) in steps.into_iter().enumerate() {
+            if step <= 0.0 {
+                continue;
+            }
+            if Self::TRUST_STEPS.contains(&i)
+                && let Some(room) = slot.next()
+            {
+                *room = Some(full + FIT_SLACK_PX - before);
+            }
+            before += step;
+        }
+        rooms
+    }
+
+    /// How many trust words this fit gives up.
+    fn trust_given_up(&self) -> u8 {
+        u8::from(self.access_icon_only)
+            + u8::from(self.unencrypted_icon_only)
+            + u8::from(self.hide_read_write)
     }
 }
 
@@ -511,19 +601,41 @@ struct FitMemo {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CapsuleProbe {
     pub bounds: Option<Bounds<Pixels>>,
+    // ## m4-m3carry (U-6 c, P2-04): what the shots harness needs to check that the palette
+    // field collapses exactly when that keeps a trust word.
+    /// How many trust words the painted capsule gave up (access words, the unencrypted word).
+    pub trust_given_up: u8,
+    /// Its room (`max_width`) and its [`TrustRooms`], as that frame planned with them.
+    pub max_width: Option<f32>,
+    pub trust_rooms: TrustRooms,
 }
 
 impl Global for CapsuleProbe {}
 
-/// Records the frame's bounds into [`CapsuleProbe`] when it is installed.
-fn record_frame() -> impl IntoElement {
+// ## m4-m3carry (U-6 c, P2-04)
+/// What [`record_frame`] records besides the bounds.
+#[derive(Clone, Copy)]
+struct FrameFacts {
+    trust_given_up: u8,
+    max_width: Option<f32>,
+    trust_rooms: TrustRooms,
+}
+
+/// Records the frame's bounds into [`CapsuleProbe`] when it is installed, with its trust facts
+/// (## m4-m3carry).
+fn record_frame(facts: FrameFacts) -> impl IntoElement {
     canvas(
-        |bounds, _, cx| {
+        move |bounds, _, cx| {
             if cx.has_global::<CapsuleProbe>() {
                 // The probe starts empty with each frame's first record, so a frame without
                 // the capsule never reports the bounds of an earlier one.
                 crate::text::begin_record(cx);
-                cx.global_mut::<CapsuleProbe>().bounds = Some(bounds);
+                *cx.global_mut::<CapsuleProbe>() = CapsuleProbe {
+                    bounds: Some(bounds),
+                    trust_given_up: facts.trust_given_up,
+                    max_width: facts.max_width,
+                    trust_rooms: facts.trust_rooms,
+                };
             }
         },
         |_, _, _, _| {},
@@ -601,6 +713,7 @@ impl Capsule {
                     .as_ref()
                     .map_or(0.0, |l| gap + text_width(window, l, mono)),
                 gap + text_width(window, path, body),
+                // A read-only access keeps its lock; its text goes.
                 if *read_only {
                     gap + text_width(window, access, body)
                 } else {
@@ -610,6 +723,14 @@ impl Capsule {
                     .as_ref()
                     .map_or(0.0, |u| gap + text_width(window, u, body)),
                 engine_w(engine),
+                // ## m3b-t29-shots (named exception; T29 review I2): a read-write access word
+                // gives way too (whole, before the name), now that production consoles write.
+                // ## m3c-shotfix (capsule): last before the name, counted as its whole cell.
+                if *read_only {
+                    0.0
+                } else {
+                    text_width(window, access, body) + 2.0 * CELL_PAD_PX + 1.0
+                },
                 0.0,
                 0.0,
                 0.0,
@@ -626,6 +747,7 @@ impl Capsule {
                 0.0,
                 0.0,
                 engine_w(engine),
+                0.0,
                 next.as_ref().map_or(0.0, |n| {
                     gap + text_width(window, n, mono).max(RUN_MONO_MIN_PX)
                 }),
@@ -640,11 +762,13 @@ impl Capsule {
                 0.0,
                 engine_w(engine),
                 0.0,
+                0.0,
                 gap + text_width(window, label, body),
                 0.0,
             ],
             // ## m2b-t22-live (fix round 2, R1-I1): "Couldn't connect", then Retry's text.
             CapsuleModel::Failed { label, retry, .. } => [
+                0.0,
                 0.0,
                 0.0,
                 0.0,
@@ -667,6 +791,8 @@ impl Capsule {
         };
 
         let max_width = self.max_width;
+        // ## m4-m3carry (U-6 c, P2-04)
+        let on_trust_room = self.on_trust_room.clone();
         let frame_id = ElementId::from("capsule");
         let (hover, _) = interaction_state(&frame_id, window, cx);
         let hovered = *hover.read(cx);
@@ -688,7 +814,14 @@ impl Capsule {
             .bg(c.panel.to_hsla())
             .on_hover(hover_listener(hover))
             .child(bounds_probe(frame_bounds.clone(), 1.0, 1.0))
-            .child(record_frame());
+            .child(record_frame(FrameFacts {
+                trust_given_up: fit.trust_given_up(),
+                max_width,
+                trust_rooms: memo
+                    .get()
+                    .full
+                    .map_or_else(TrustRooms::default, |full| Fit::trust_rooms(full, steps)),
+            }));
         // ## m2b-t22-live (fix round 2, R1-I1): the hard clamp. The frame is never laid out
         // wider than its room, so the palette field and the trailing controls never move. The
         // segments sit in a row of their own, which the clamp never squeezes: the row's width
@@ -716,6 +849,10 @@ impl Capsule {
                         if memo.get().full.is_none_or(|f| (f - full).abs() > 0.5) {
                             memo.set(FitMemo { full: Some(full) });
                             window.refresh();
+                        }
+                        // ## m4-m3carry (U-6 c, P2-04): where its trust words give way.
+                        if let Some(report) = &on_trust_room {
+                            report(Fit::trust_rooms(full, steps), window);
                         }
                     },
                     |_, _, _, _| {},
@@ -1024,7 +1161,7 @@ impl Capsule {
                         );
                         self.access_hint.clone()
                     };
-                    access_segment(
+                    Some(access_segment(
                         t,
                         window,
                         cx,
@@ -1036,11 +1173,18 @@ impl Capsule {
                         self.access_hint.clone(),
                         // ## m2b-t24-shots
                         expanded == Some(CapsuleSegment::Access),
-                    )
+                    ))
+                } else if fit.hide_read_write {
+                    // ## m3b-t29-shots (named exception; T29 review I2): "read-write" yields
+                    // before the connection's name: the segment goes (the capsule's accessible
+                    // description and the status bar still say it).
+                    None
                 } else {
-                    cell(t)
-                        .child(text(access, body, c.text_2.to_hsla()).id("capsule-text-access"))
-                        .into_any_element()
+                    Some(
+                        cell(t)
+                            .child(text(access, body, c.text_2.to_hsla()).id("capsule-text-access"))
+                            .into_any_element(),
+                    )
                 };
                 let (path_icon, path_ink) = if *direct {
                     (IconName::ArrowLeftRight, c.green)
@@ -1065,7 +1209,7 @@ impl Capsule {
                         .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
                         .declare(Role::Label, path.clone(), None);
                 }
-                row = row.child(access_cell).child(path_cell);
+                row = row.children(access_cell).child(path_cell);
                 if let Some(label) = unencrypted {
                     let mut content =
                         vec![icon(IconName::LockOpen, c.text_2.to_hsla()).into_any_element()];
@@ -1209,7 +1353,7 @@ mod fit_tests {
     use super::*;
 
     /// A failed capsule: "Couldn't connect" (60 px) goes first, then Retry's text (40 px).
-    const FAILED: [f32; STEPS] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 60.0, 40.0];
+    const FAILED: [f32; STEPS] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 60.0, 40.0];
 
     #[test]
     fn a_failed_capsule_gives_up_its_text_then_retry_then_the_name() {
@@ -1227,11 +1371,61 @@ mod fit_tests {
 
     #[test]
     fn a_reconnect_gives_up_the_engine_the_countdown_then_its_label() {
-        let steps = [0.0, 0.0, 0.0, 0.0, 30.0, 50.0, 120.0, 0.0];
+        let steps = [0.0, 0.0, 0.0, 0.0, 30.0, 0.0, 50.0, 120.0, 0.0];
         let (fit, _) = Fit::plan(600.0, 560.0, steps, 90.0);
         assert!(fit.hide_engine && fit.hide_next && !fit.state_icon_only);
         let (fit, _) = Fit::plan(600.0, 500.0, steps, 90.0);
         assert!(fit.state_icon_only);
         assert_eq!(fit.name_cut, 0.0);
+    }
+
+    // ## m3c-shotfix (capsule): a read-write word (80 px of text in its 99 px cell) gives way
+    // after the path text (50), the unencrypted text (90) and the engine (70), and before the
+    // name; a capsule the earlier steps fit keeps it.
+    const READ_WRITE: [f32; STEPS] = [0.0, 50.0, 0.0, 90.0, 70.0, 99.0, 0.0, 0.0, 0.0];
+
+    #[test]
+    fn a_read_write_word_gives_way_last_before_the_name() {
+        let (fit, saved) = Fit::plan(700.0, 600.0, READ_WRITE, 120.0);
+        assert!(fit.path_icon_only && fit.unencrypted_icon_only && !fit.hide_engine);
+        assert!(!fit.hide_read_write, "the access word stays: {fit:?}");
+        assert_eq!(saved, 140.0);
+        let (fit, _) = Fit::plan(700.0, 480.0, READ_WRITE, 120.0);
+        assert!(fit.hide_engine && fit.hide_read_write && fit.name_cut == 0.0);
+        // Every step spent: then the name.
+        let (fit, _) = Fit::plan(700.0, 300.0, READ_WRITE, 120.0);
+        assert!(fit.hide_read_write && fit.name_cut > 0.0);
+    }
+
+    // ## m4-m3carry (U-6 c, P2-04): the trust rooms the title bar reads say exactly how many
+    // trust words the plan gives up at any room.
+    #[test]
+    fn the_trust_rooms_say_how_many_trust_words_the_plan_gives_up() {
+        // Read-write: the latency, the path and the engine go before the access word.
+        let rw = [30.0, 60.0, 0.0, 0.0, 80.0, 90.0, 0.0, 0.0, 0.0];
+        // Read-only and unencrypted: the access text, then the unencrypted text, then the
+        // engine.
+        let ro = [30.0, 60.0, 70.0, 80.0, 90.0, 0.0, 0.0, 0.0, 0.0];
+        let at = |before: f32| Some(700.0 + FIT_SLACK_PX - before);
+        for (steps, want) in [
+            (rw, [at(170.0), None, None]),
+            (ro, [at(90.0), at(160.0), None]),
+            (READ_WRITE, [at(50.0), at(210.0), None]),
+        ] {
+            let rooms = Fit::trust_rooms(700.0, steps);
+            assert_eq!(rooms, TrustRooms(want));
+            for max in (200..=720).map(|m| m as f32 * 0.5 + 300.0) {
+                let (fit, _) = Fit::plan(700.0, max, steps, 120.0);
+                assert_eq!(
+                    usize::from(fit.trust_given_up()),
+                    rooms.given_up_at(max),
+                    "{steps:?} at {max}: {fit:?}"
+                );
+            }
+        }
+        // No trust word to give up: the failed and reconnecting states.
+        assert_eq!(Fit::trust_rooms(500.0, FAILED), TrustRooms::default());
+        let reconnecting = [0.0, 0.0, 0.0, 0.0, 80.0, 0.0, 30.0, 90.0, 0.0];
+        assert_eq!(Fit::trust_rooms(500.0, reconnecting), TrustRooms::default());
     }
 }

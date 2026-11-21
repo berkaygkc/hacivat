@@ -3,7 +3,6 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::snapshot::StoreSnapshot;
@@ -27,6 +26,10 @@ pub enum CloseReason {
     Cancelled,
     /// The read-only guard found a write (the connection was discarded).
     EnforcementGap,
+    // ## m3b-t01c-core-seams
+    /// The memory budget needed room: a background result kept only its first chunk
+    /// (R-M3-68; Task 8). Re-run brings it back.
+    Evicted,
 }
 
 /// Why a result kept fewer rows than the server sent.
@@ -79,7 +82,9 @@ pub struct SourceCaps {
 }
 
 /// A result the grid adapter reads: snapshots, changes, and cursor commands. `ensure_rows`
-/// coalesces: one `fetch_more` per snapshot version while suspended, nothing otherwise.
+/// coalesces: one `fetch_more` per snapshot version while suspended, nothing otherwise
+/// (`StoreSource` since M3b Task 8: per snapshot version, a later ask only for rows past those
+/// already asked, shared by every source of the store).
 pub trait ResultSource: Send + Sync + 'static {
     fn snapshot(&self) -> Arc<StoreSnapshot>;
     fn changes(&self) -> tokio::sync::watch::Receiver<(u64, u64)>;
@@ -89,21 +94,33 @@ pub trait ResultSource: Send + Sync + 'static {
     fn close_cursor(&self);
     /// "Fetch more anyway": the store's cap rises to the global budget, then `fetch_all`.
     fn raise_cap(&self);
+    // ## m3b-t01c-core-seams (Task 8 fills them for `StoreSource`)
+    /// Whether "Fetch more anyway" raised this result's cap (R-M3-68).
+    fn cap_raised(&self) -> bool {
+        false
+    }
+    /// The result's tab became visible (or hidden): eviction spares a visible result
+    /// (R-M3-68).
+    fn set_visible(&self, _visible: bool) {}
 }
 
+// ## m3b-t08-store (the type's docs: the shared ask ledger)
 /// The [`ResultSource`] over a store and its session (Task 7).
 ///
 /// `ensure_rows` coalesces without a timer: while the result is `Suspended` and the reader
-/// needs rows within the prefetch margin of the loaded end, it sends **one** `fetch_more` for
-/// the snapshot version it saw, then nothing until a later version (the session's reply moves
-/// the version: rows, a state change, or both).
+/// needs rows within the prefetch margin of the loaded end, it asks the session for them,
+/// then nothing more for that need until a later version (the session's reply moves the
+/// version: rows, a state change, or both).
+///
+/// Since M3b Task 8, the asks go through the store's ledger (ledger 109 M4), so every source over one store
+/// shares them: per snapshot version the asks add up to what the farthest reader needs, a
+/// need already asked asks nothing, and a farther need asks only for the rows past those
+/// already asked. The session merges the queued `FetchMore`s of one result into one fetch of
+/// the sum (M3a Task 18, `Ctl::coalesce`), so no row is asked for twice.
 pub struct StoreSource {
     store: Arc<ResultStore>,
     control: Arc<dyn FetchControl>,
     policy: FetchPolicy,
-    /// One more than the snapshot version of the last `fetch_more` (0: none yet). Only grows,
-    /// so a caller holding an older snapshot can never ask again.
-    asked_after: AtomicU64,
 }
 
 impl fmt::Debug for StoreSource {
@@ -111,7 +128,6 @@ impl fmt::Debug for StoreSource {
         f.debug_struct("StoreSource")
             .field("store", &self.store)
             .field("policy", &self.policy)
-            .field("asked_after", &self.asked_after.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
@@ -126,7 +142,6 @@ impl StoreSource {
             store,
             control,
             policy,
-            asked_after: AtomicU64::new(0),
         })
     }
 }
@@ -140,23 +155,18 @@ impl ResultSource for StoreSource {
         self.store.changes()
     }
 
-    /// One `fetch_more` per snapshot version while `Suspended`; nothing while `Streaming`,
-    /// `Complete`, `Closed`, `Cancelled`, `Truncated` or `Released`, and nothing while the
-    /// result is paused at a memory limit (the banner's "Fetch more anyway" is the way on,
-    /// R-M3-33).
+    /// While `Suspended`, asks for the rows `upto` needs that no source of the store has asked
+    /// for at this snapshot version (the type's docs); nothing while `Streaming`, `Complete`,
+    /// `Closed`, `Cancelled`, `Truncated` or `Released`, and nothing while the result is
+    /// paused at a memory limit (the banner's "Fetch more anyway" is the way on, R-M3-33).
     fn ensure_rows(&self, upto: u64) {
         let snap = self.store.snapshot();
         if !matches!(snap.completeness(), Completeness::Suspended(_)) || snap.paused().is_some() {
             return;
         }
-        let Some(rows) = self.policy.rows_to_fetch(upto, snap.row_count()) else {
-            return;
-        };
-        let mark = snap.version().saturating_add(1);
-        if self.asked_after.fetch_max(mark, Ordering::AcqRel) >= mark {
-            return;
+        if let Some(rows) = self.store.ask(&snap, upto, &self.policy) {
+            self.control.fetch_more(self.store.id(), rows);
         }
-        self.control.fetch_more(self.store.id(), rows);
     }
 
     /// A cursor while the result is `Suspended`; never editable in M3a.
@@ -189,5 +199,18 @@ impl ResultSource for StoreSource {
     fn raise_cap(&self) {
         self.store.raise_cap_to_global();
         self.control.fetch_all(self.store.id());
+    }
+
+    // ## m3b-t08-store
+    /// The store's flag (ledger 253 M7): raised by this source, a sibling, or the store.
+    fn cap_raised(&self) -> bool {
+        self.store.cap_raised()
+    }
+
+    /// The app calls it for every result tab: `true` for the active tab of each console,
+    /// `false` for the others. A result counts as visible until told otherwise, and a visible
+    /// result is never evicted (R-M3-68).
+    fn set_visible(&self, visible: bool) {
+        self.store.set_visible(visible);
     }
 }

@@ -15,8 +15,8 @@
 mod common;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use common::*;
@@ -73,9 +73,14 @@ async fn jump_pair() -> (TestSshServer, TestSshServer) {
     (a, b)
 }
 
-fn dir() -> &'static std::path::Path {
-    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
+thread_local! {
+    /// This test thread's fixture folder, removed when the thread ends (a process-wide static
+    /// is never dropped, so its folder outlived every run).
+    static DIR: tempfile::TempDir = tempfile::tempdir().unwrap();
+}
+
+fn dir() -> std::path::PathBuf {
+    DIR.with(|d| d.path().to_path_buf())
 }
 
 /// An empty, private `known_hosts` store.

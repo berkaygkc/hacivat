@@ -429,6 +429,43 @@ const SPECIAL: &[(&str, &str)] = &[
         "editor.describe_exec_range",
         "describe_says_what_run_would_execute",
     ),
+    // ## m3b-t01b-seams (named exception): the M3b rows are stubs until Tasks 31-34; each
+    // task moves its ids from `m3b_stub_commands_change_nothing` to a test of its own.
+    // ## m3c-t31-multi (named exception): Task 31's rows.
+    ("editor.add_caret_above", "multi_cursor_commands"),
+    ("editor.add_caret_below", "multi_cursor_commands"),
+    ("editor.select_next_occurrence", "multi_cursor_commands"),
+    ("editor.select_all_occurrences", "multi_cursor_commands"),
+    ("editor.split_selection_into_lines", "multi_cursor_commands"),
+    ("editor.undo_selection", "multi_cursor_commands"),
+    ("editor.redo_selection", "multi_cursor_commands"),
+    // ## m3c-t32-fold (named exception): Task 32's rows.
+    ("editor.fold", "fold_commands_never_edit_the_text"),
+    ("editor.unfold", "fold_commands_never_edit_the_text"),
+    ("editor.fold_all", "fold_commands_never_edit_the_text"),
+    ("editor.unfold_all", "fold_commands_never_edit_the_text"),
+    // ## m3c-t33-find (named exception): Task 33's rows.
+    ("editor.find", "find_commands_ask_for_the_bar_and_step"),
+    ("editor.find_next", "find_commands_ask_for_the_bar_and_step"),
+    ("editor.find_prev", "find_commands_ask_for_the_bar_and_step"),
+    (
+        "editor.find_close",
+        "find_commands_ask_for_the_bar_and_step",
+    ),
+    // ## m3c-po (named exception; PO M3c-08).
+    (
+        "editor.use_selection_for_find",
+        "use_selection_for_find_seeds_the_query_only",
+    ),
+    // ## m3c-t34-editor (named exception): Task 34's rows (and `tests/lines.rs`).
+    ("editor.toggle_comment", "line_commands_edit_lines"),
+    ("editor.duplicate_line", "line_commands_edit_lines"),
+    ("editor.delete_line", "line_commands_edit_lines"),
+    ("editor.move_line_up", "line_commands_edit_lines"),
+    ("editor.move_line_down", "line_commands_edit_lines"),
+    ("editor.normalize_line_endings", "line_commands_edit_lines"),
+    ("editor.history_prev", "line_commands_edit_lines"),
+    ("editor.history_next", "line_commands_edit_lines"),
 ];
 
 fn untested_commands() -> Vec<&'static str> {
@@ -468,6 +505,214 @@ fn every_command_has_a_test(cx: &mut TestAppContext) {
     for (id, before, want) in CASES {
         assert_eq!(after(cx, before, id), *want, "{id} on {before:?}");
     }
+}
+
+// ## m3b-t01b-seams (named exception)
+// ## m3c-t34-editor (named exception): the stubs' test became the line commands' (Task 34
+// filled the last stubs); `tests/lines.rs` tests them in depth.
+/// The line commands edit the caret's line; recall at the last line of an empty editor only asks
+/// the host; normalising uniform endings changes nothing.
+#[gpui::test]
+fn line_commands_edit_lines(cx: &mut TestAppContext) {
+    for (id, before, want) in [
+        ("editor.toggle_comment", "a\nb┃\nc", "a\n-- b┃\nc"),
+        ("editor.duplicate_line", "a\nb┃\nc", "a\nb\nb┃\nc"),
+        ("editor.delete_line", "a\nb┃\nc", "a\nc┃"),
+        ("editor.move_line_up", "a\nb┃\nc", "b┃\na\nc"),
+        ("editor.move_line_down", "a\nb┃\nc", "a\nc\nb┃"),
+        ("editor.normalize_line_endings", "a\nb┃\nc", "a\nb┃\nc"),
+        ("editor.history_prev", "a\nb┃\nc", "a\nb┃\nc"),
+        ("editor.history_next", "a\nb┃\nc", "a\nb┃\nc"),
+    ] {
+        assert_eq!(after(cx, before, id), want, "{id}");
+    }
+}
+
+// ## m3c-t32-fold
+/// The folding commands change what is shown, never the text; without foldable ranges (this
+/// file's service reports none) they change nothing at all. What they fold is tested in
+/// `fold_view.rs`.
+#[gpui::test]
+fn fold_commands_never_edit_the_text(cx: &mut TestAppContext) {
+    for id in [
+        "editor.fold",
+        "editor.unfold",
+        "editor.fold_all",
+        "editor.unfold_all",
+    ] {
+        assert_eq!(
+            after(cx, "SELECT «a┃», b\nFROM t\nWHERE x;", id),
+            "SELECT «a┃», b\nFROM t\nWHERE x;",
+            "{id}"
+        );
+    }
+}
+
+// ## m3c-t33-find
+/// A literal matcher.
+struct Lit(&'static str);
+
+impl hacivat_ui_editor::FindMatcher for Lit {
+    fn find(&self, hay: &str, from: usize) -> Option<Range<usize>> {
+        let i = hay.get(from..)?.find(self.0)?;
+        Some(from + i..from + i + self.0.len())
+    }
+    fn find_back(&self, hay: &str, before: usize) -> Option<Range<usize>> {
+        let i = hay.get(..before)?.rfind(self.0)?;
+        Some(i..i + self.0.len())
+    }
+}
+
+/// UI-EDIT-22 (Task 33): `editor.find` asks the host for its bar, seeded with a one-line
+/// selection; the steps ask for it too while no query is set, and step once one is;
+/// `editor.find_close` clears the query. None edits the text.
+#[gpui::test]
+fn find_commands_ask_for_the_bar_and_step(cx: &mut TestAppContext) {
+    let requested = |o: &Opened<'_>| -> Vec<Option<String>> {
+        o.events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                EditorEvent::FindRequested { seed } => Some(seed.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut o = open(cx, "SELECT «a┃, b;\nFROM t, a;");
+    run(&mut o, "editor.find");
+    assert_eq!(requested(&o), [Some("a".to_string())]);
+    o.events.borrow_mut().clear();
+    run(&mut o, "editor.find_next");
+    run(&mut o, "editor.find_prev");
+    assert_eq!(
+        requested(&o),
+        [None, None],
+        "no query yet: the bar is asked for"
+    );
+    run(&mut o, "editor.find_close");
+    assert_eq!(state(&o), "SELECT «a┃, b;\nFROM t, a;");
+    o.editor.update(o.vcx, |v, cx| {
+        v.set_find(Some(std::sync::Arc::new(Lit("a"))), cx)
+    });
+    o.vcx.run_until_parked();
+    o.events.borrow_mut().clear();
+    run(&mut o, "editor.find_next");
+    assert_eq!(state(&o), "SELECT a, b;\nFROM t, «a┃;");
+    run(&mut o, "editor.find_prev");
+    assert_eq!(state(&o), "SELECT «a┃, b;\nFROM t, a;");
+    assert_eq!(requested(&o), Vec::<Option<String>>::new());
+    run(&mut o, "editor.find_close");
+    assert!(!o.vcx.read(|cx| o.editor.read(cx).find_status().active));
+    // A selection over two lines seeds nothing.
+    let mut o = open(cx, "SELECT «a,\nb┃;");
+    run(&mut o, "editor.find");
+    assert_eq!(requested(&o), [None]);
+}
+
+// ## m3c-po (PO M3c-08)
+/// macOS's "Use Selection for Find" (⌘E): a one-line selection seeds the host's find query
+/// (`EditorEvent::FindSeeded`) without asking for the bar; a caret or a selection over two
+/// lines seeds nothing. Neither the text nor the selection changes.
+#[gpui::test]
+fn use_selection_for_find_seeds_the_query_only(cx: &mut TestAppContext) {
+    let events = |o: &Opened<'_>| -> (Vec<String>, usize) {
+        let e = o.events.borrow();
+        let seeded = e
+            .iter()
+            .filter_map(|e| match e {
+                EditorEvent::FindSeeded { seed } => Some(seed.clone()),
+                _ => None,
+            })
+            .collect();
+        let asked = e
+            .iter()
+            .filter(|e| matches!(e, EditorEvent::FindRequested { .. }))
+            .count();
+        (seeded, asked)
+    };
+    let mut o = open(cx, "SELECT «a┃, b;\nFROM t, a;");
+    run(&mut o, "editor.use_selection_for_find");
+    assert_eq!(events(&o), (vec!["a".to_string()], 0));
+    assert_eq!(state(&o), "SELECT «a┃, b;\nFROM t, a;");
+    let mut o = open(cx, "SELECT a┃, b;");
+    run(&mut o, "editor.use_selection_for_find");
+    assert_eq!(events(&o), (Vec::new(), 0));
+    let mut o = open(cx, "SELECT «a,\nb┃;");
+    run(&mut o, "editor.use_selection_for_find");
+    assert_eq!(events(&o), (Vec::new(), 0));
+}
+
+// ## m3c-t31-multi
+/// The text with every range drawn (`┃` head, `«` anchor).
+fn states(o: &Opened<'_>) -> String {
+    o.vcx.read(|cx| {
+        let s = o.editor.read(cx).snapshot();
+        let text = s.buffer.to_string();
+        let mut out = String::new();
+        for (i, c) in text.char_indices().chain([(text.len(), '\0')]) {
+            for r in s.selection.ranges() {
+                if r.head == i {
+                    out.push(HEAD);
+                }
+                if r.anchor == i && r.anchor != r.head {
+                    out.push(ANCHOR);
+                }
+            }
+            if i < text.len() {
+                out.push(c);
+            }
+        }
+        out
+    })
+}
+
+/// UI-EDIT-05 multi (Task 31): carets above and below at the goal column, the next and every
+/// occurrence (whole words from a caret, the language service's words), a selection split
+/// into lines, and the selection-only undo and redo, which never touch the text; moves and
+/// Escape act on every caret.
+#[gpui::test]
+fn multi_cursor_commands(cx: &mut TestAppContext) {
+    let mut o = open(cx, "SELECT i┃d, idx\nFROM t\nWHERE id = 1");
+    run(&mut o, "editor.add_caret_below");
+    run(&mut o, "editor.add_caret_below");
+    // The goal column (8) survives the short line between.
+    assert_eq!(states(&o), "SELECT i┃d, idx\nFROM t┃\nWHERE id┃ = 1");
+    // Above the main caret (line 3) is the end of line 2, a caret already: they merge, and the
+    // merged one is the main caret.
+    run(&mut o, "editor.add_caret_above");
+    assert_eq!(states(&o), "SELECT i┃d, idx\nFROM t┃\nWHERE id┃ = 1");
+    run(&mut o, "editor.move_right");
+    assert_eq!(states(&o), "SELECT id┃, idx\nFROM t\n┃WHERE id ┃= 1");
+    run(&mut o, "editor.escape");
+    assert_eq!(states(&o), "SELECT id, idx\nFROM t\n┃WHERE id = 1");
+    o.editor.update(o.vcx, |v, cx| v.select_range(29..29, cx));
+    // Next occurrence: the word first, then whole-word matches only (not `idx`), wrapping.
+    run(&mut o, "editor.select_next_occurrence");
+    assert_eq!(states(&o), "SELECT id, idx\nFROM t\nWHERE «id┃ = 1");
+    run(&mut o, "editor.select_next_occurrence");
+    assert_eq!(states(&o), "SELECT «id┃, idx\nFROM t\nWHERE «id┃ = 1");
+    run(&mut o, "editor.select_next_occurrence");
+    assert_eq!(states(&o), "SELECT «id┃, idx\nFROM t\nWHERE «id┃ = 1");
+    // Undo selection walks back through the selection changes; the text never changes.
+    let version = o.vcx.read(|cx| o.editor.read(cx).snapshot().version);
+    run(&mut o, "editor.undo_selection");
+    assert_eq!(states(&o), "SELECT id, idx\nFROM t\nWHERE «id┃ = 1");
+    run(&mut o, "editor.undo_selection");
+    assert_eq!(states(&o), "SELECT id, idx\nFROM t\nWHERE i┃d = 1");
+    run(&mut o, "editor.redo_selection");
+    assert_eq!(states(&o), "SELECT id, idx\nFROM t\nWHERE «id┃ = 1");
+    assert_eq!(
+        o.vcx.read(|cx| o.editor.read(cx).snapshot().version),
+        version
+    );
+    // Every occurrence of a quoted string (one word of the service) from a caret in it.
+    let mut o = open(cx, "SELECT 'a b', 'a b┃', 'a'");
+    run(&mut o, "editor.select_all_occurrences");
+    assert_eq!(states(&o), "SELECT «'a b'┃, «'a b'┃, 'a'");
+    // A selection over three lines splits into one range per line.
+    let mut o = open(cx, "SELECT a,«\n  b,\n  c┃\nFROM t");
+    run(&mut o, "editor.split_selection_into_lines");
+    assert_eq!(states(&o), "SELECT a,┃\n«  b,┃\n«  c┃\nFROM t");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1005,6 +1250,7 @@ fn describe_says_what_run_would_execute(cx: &mut TestAppContext) {
             ranges: ranges.iter().map(|&(a, b)| a..b).collect(),
             state,
             choices: 0,
+            as_one: 0, // ## m3c-t34-editor (named exception)
         })
     };
     // One statement on one line, with its text.
@@ -1114,6 +1360,17 @@ fn the_context_menu_opens_at_the_caret_and_runs_its_entries(cx: &mut TestAppCont
             "",
             "editor.run",
             "editor.describe_exec_range",
+            // ## m3c-t34-editor (named exception, NOTES 17): the line commands, then Select
+            // all occurrences and Undo the selection change.
+            "",
+            "editor.toggle_comment",
+            "editor.duplicate_line",
+            "editor.delete_line",
+            "editor.move_line_up",
+            "editor.move_line_down",
+            "",
+            "editor.select_all_occurrences",
+            "editor.undo_selection",
         ]
     );
     assert!(entries[4].separator);
@@ -1140,7 +1397,8 @@ fn the_context_menu_opens_at_the_caret_and_runs_its_entries(cx: &mut TestAppCont
     // Run from the menu asks for an execution.
     run(&mut o, "editor.context_menu");
     draw(o.vcx);
-    o.vcx.simulate_keystrokes("end up enter");
+    // ## m3c-t34-editor (named exception): Run is the fifth entry since the menu grew.
+    o.vcx.simulate_keystrokes("home down down down down enter");
     assert_eq!(requests(&o).len(), 1);
     assert!(!menu_open(&o));
 }
@@ -1242,7 +1500,19 @@ fn a_right_click_opens_the_menu_at_the_pointer(cx: &mut TestAppContext) {
         .filter(|e| e.disabled && !e.separator)
         .map(|e| e.action.as_ref())
         .collect();
-    assert_eq!(disabled, ["editor.cut", "editor.paste"]);
+    // ## m3c-t34-editor (named exception): the line commands edit too.
+    assert_eq!(
+        disabled,
+        [
+            "editor.cut",
+            "editor.paste",
+            "editor.toggle_comment",
+            "editor.duplicate_line",
+            "editor.delete_line",
+            "editor.move_line_up",
+            "editor.move_line_down",
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

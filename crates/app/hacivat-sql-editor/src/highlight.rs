@@ -183,7 +183,8 @@ fn push_token(
 
 /// The lexer profile of `ctx` (the generic one when the dialect has none), as the splitter
 /// picks it.
-fn profile(ctx: &DialectCtx) -> &'static sql_dialect::LexDialect {
+// ## m3c-t32-fold (named exception): the fold scan lexes dollar bodies with it.
+pub(crate) fn profile(ctx: &DialectCtx) -> &'static sql_dialect::LexDialect {
     match lex_profile(ctx) {
         Ok(p) => p,
         Err(_) => match lex_profile(&DialectCtx::new(DialectId::Generic, None)) {

@@ -20,10 +20,9 @@ use crate::text::{Label, TextSource};
 
 // ## m3a-f2-visual (named exception): the compact size (NOTES "Strip buttons": the Button at
 // 20 px height, padding 0/7, 12 px label; the mock's `.strip .btn` gap 5).
-pub const COMPACT_HEIGHT_PX: f32 = 20.0;
-const COMPACT_PAD_PX: f32 = 7.0;
-const COMPACT_GAP_PX: f32 = 5.0;
-const COMPACT_LABEL_PX: f32 = 12.0;
+// ## m3c-t41-chrome (F2 review M9): named in `metrics`.
+pub use crate::metrics::COMPACT_HEIGHT_PX;
+use crate::metrics::{COMPACT_GAP_PX, COMPACT_LABEL_PX, COMPACT_PAD_PX};
 
 /// A click handler shared between the widgets that take one.
 pub type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -61,6 +60,14 @@ pub struct Button {
     expanded: Option<bool>,
     // ## m3a-f2-visual (named exception): the cursor strip's compact size.
     compact: bool,
+    // ## m3b-t21-confirm (named exception): a minimum outer width (the gate dialog's Cancel).
+    min_width: Option<f32>,
+    // ## m3c-t41 (named exception): any kind drawn as its icon alone (N1: Run and Stop in a
+    // narrow pane); the label is its tooltip and accessible name.
+    glyph_only: bool,
+    // ## m4-t33d (R-T33-1): `None` = the default (its own handle is a stop; a passed handle
+    // keeps its flag).
+    tab_stop: Option<bool>,
 }
 
 impl Button {
@@ -80,6 +87,9 @@ impl Button {
             on_raised: false,
             expanded: None,
             compact: false,
+            min_width: None,
+            glyph_only: false,
+            tab_stop: None,
         }
     }
 
@@ -125,15 +135,43 @@ impl Button {
         self
     }
 
-    /// Uses `handle` as this button's focus handle (a dialog focuses its buttons itself).
+    /// Uses `handle` as this button's focus handle (a dialog focuses its buttons itself). The
+    /// handle's own Tab-stop flag decides whether the button is a Tab stop, unless
+    /// [`Button::tab_stop`] sets it.
     pub fn focus_handle(mut self, handle: FocusHandle) -> Self {
         self.focus = Some(handle);
+        self
+    }
+
+    // ## m4-t33d (R-T33-1)
+    /// Whether the button is a Tab stop. A button is one by default (HTML parity), on the
+    /// handle it keeps itself; `false` takes it out of the Tab order where a surface's NOTES
+    /// say so (the record inspector's ▲ ▼). On a handle passed with [`Button::focus_handle`]
+    /// this sets that handle's flag; without this call a passed handle keeps its own. A
+    /// disabled or inert button is never a stop.
+    ///
+    /// ## m4-t33d-fr1 (T33d review m2): GPUI keeps the flag on the handle, not on the button:
+    /// on a passed handle this mutates that handle, for every clone of it and after the button
+    /// is gone (the handle is a stop or not wherever else it is tracked). An owner that passes
+    /// its own handle makes it a stop or not where it creates it (`cx.focus_handle().tab_stop(..)`)
+    /// and leaves this call to buttons on their own handle, or to a flag that is the owner's to
+    /// set each frame (a toast's buttons).
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = Some(tab_stop);
         self
     }
 
     /// Fixes the outer width (the title bar's 24 px overflow button).
     pub fn fixed_width(mut self, width: f32) -> Self {
         self.fixed_width = Some(width);
+        self
+    }
+
+    // ## m3b-t21-confirm (named exception)
+    /// At least `width` px wide, the label centred (NOTES M3b surface 1: Cancel, 72 px); a
+    /// longer label grows the button, never truncates.
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.min_width = Some(width);
         self
     }
 
@@ -166,6 +204,14 @@ impl Button {
         self.compact = compact;
         self
     }
+
+    // ## m3c-t41 (named exception)
+    /// Draws the button's icon alone, in its kind's look (a primary keeps its blue fill), with
+    /// 6 px padding; its label is the tooltip and the accessible name (design/m3b-safe N1).
+    pub fn icon_only(mut self, on: bool) -> Self {
+        self.glyph_only = on;
+        self
+    }
 }
 
 /// The ink, fill and outline of a button in one state.
@@ -180,9 +226,10 @@ fn look(kind: ButtonKind, disabled: bool, hot: bool, theme: &Theme) -> Look {
     let c = &theme.tokens.colors;
     let clear = TRANSPARENT;
     if disabled {
-        // text-3 ink; the seam-strong outline stays except on ghost, which has none.
+        // ## m3c-t41 (M3c-38): the `text-disabled` ink (never remapped on a raised surface);
+        // the seam-strong outline stays except on ghost, which has none.
         return Look {
-            ink: c.text_3.to_hsla(),
+            ink: c.text_disabled.to_hsla(),
             fill: None,
             outline: match kind {
                 ButtonKind::Ghost | ButtonKind::Icon => clear,
@@ -363,11 +410,21 @@ impl Button {
             on_raised,
             expanded,
             compact,
+            min_width,
+            glyph_only,
+            tab_stop,
         } = self;
 
         // Hover and focus state live with the element across frames.
         let (hover, keyed_focus) = interaction_state(&id, window, cx);
-        let handle = focus.unwrap_or(keyed_focus);
+        // ## m4-t33d (R-T33-1): the button's own handle is a Tab stop unless it opts out; a
+        // handle its owner passes carries its own flag (a dialog that orders or traps Tab).
+        // GPUI reads the flag from the tracked handle, never from the element.
+        let handle = match (focus, tab_stop) {
+            (Some(passed), None) => passed,
+            (Some(passed), Some(stop)) => passed.tab_stop(stop),
+            (None, stop) => keyed_focus.tab_stop(stop.unwrap_or(true)),
+        };
         let focused = !disabled && focus_visible(&handle, window);
         let hot =
             !disabled && !inert && (*hover.read(cx) || (kind == ButtonKind::Danger && focused));
@@ -384,7 +441,8 @@ impl Button {
         if kind == ButtonKind::Primary {
             style.weight = 600;
         }
-        let icon_only = kind == ButtonKind::Icon;
+        // ## m3c-t41: or any kind drawn as its icon alone.
+        let icon_only = kind == ButtonKind::Icon || glyph_only;
         let selector = format!("button-{id}");
         let node_id = ElementId::from((id.clone(), "node"));
         // ## m2b-t24-shots (follow-up): the label's ID (`button-label-<id>`), so a test or a
@@ -413,6 +471,10 @@ impl Button {
         if let Some(width) = fixed_width {
             body = body.w(px(width)).justify_center();
         }
+        // ## m3b-t21-confirm (named exception)
+        if let Some(width) = min_width {
+            body = body.min_w(px(width)).justify_center();
+        }
         if let Some(fill) = look.fill {
             body = body.bg(fill);
         }
@@ -428,11 +490,14 @@ impl Button {
                 Some(&label_id),
             ));
         }
-        if let Some(hint) = key_hint {
+        // ## m3c-t41: an icon-only button's keys are in its label (its tooltip).
+        if let Some(hint) = key_hint.filter(|_| !icon_only) {
             // A primary's hint takes its own ink (on-accent) on every surface: text-3 on its
             // blue fill is unreadable (m2a-t21-shots). On a raised surface the others use
             // text-2 (never text-3).
             let dim = match (on_raised, kind) {
+                // ## m3c-t41 (M3c-38): a disabled button's keys take its disabled ink.
+                _ if disabled => look.ink,
                 (_, ButtonKind::Primary) => look.ink,
                 (true, _) => t.colors.text_2.to_hsla(),
                 (false, _) => t.colors.text_3.to_hsla(),
@@ -457,7 +522,7 @@ impl Button {
         let body = body
             .relative()
             .child(crate::follow::focus_probe(handle.clone()));
-        let mut body = focus_outline(body.track_focus(&handle).tab_stop(true), &theme, focused)
+        let mut body = focus_outline(body.track_focus(&handle), &theme, focused)
             .declare_full(decl)
             .cursor_pointer()
             .on_hover(hover_listener(hover));
@@ -515,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_buttons_have_text_3_ink_no_fill_and_no_hover_response() {
+    fn disabled_buttons_have_disabled_ink_no_fill_and_no_hover_response() {
         for kind in [
             ButtonKind::Default,
             ButtonKind::Primary,
@@ -524,7 +589,7 @@ mod tests {
             ButtonKind::Icon,
         ] {
             let rest = look(kind, true, false, &theme());
-            assert_eq!(rest.ink, DARK.colors.text_3.to_hsla(), "{kind:?}");
+            assert_eq!(rest.ink, DARK.colors.text_disabled.to_hsla(), "{kind:?}");
             assert_eq!(rest.fill, None, "{kind:?}");
         }
         assert_eq!(

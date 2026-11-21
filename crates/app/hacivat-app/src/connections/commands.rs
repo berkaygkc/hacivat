@@ -135,6 +135,14 @@ pub fn register(cx: &mut App) {
             on_selected(|p, window, cx| delete::confirm(p.id, window, cx)),
             can_change_selection,
         ),
+        // ## m4-t32-shots (named exception; PO R-W5-14 b)
+        (
+            "connection.clear_history",
+            "hv-cmd-connection-clear-history",
+            EXPLORER,
+            on_selected(|p, _, cx| crate::history::clear::ask(p.id, cx)),
+            |cx| crate::history::clear::can_clear(selected(cx).map(|p| p.id), cx),
+        ),
         (
             "connection.context_menu",
             ids::hv::CMD_CONNECTION_CONTEXT_MENU.id,
@@ -168,6 +176,16 @@ pub fn register(cx: &mut App) {
             ids::hv::CMD_WORKSPACE_FOCUS_NOTIFICATION.id,
             WORKSPACE,
             Rc::new(|window, cx| {
+                // ## m3c-t33-find (named exception; NOTES M3c cross-cutting 7): an open find
+                // bar comes first (find bar → error bar → toasts → editor).
+                if crate::console::find_bar::focus_cycle(window, cx) {
+                    return;
+                }
+                // ## m3b-t23-escalation (named exception; design/m3b-safe M6): with an
+                // error-policy bar the first F6 enters the bar, the next the toasts.
+                if crate::exec_ui::error_bar::focus_cycle(window, cx) {
+                    return;
+                }
                 toast::focus_newest_sticky(window, cx);
             }),
             always,

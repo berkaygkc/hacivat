@@ -12,10 +12,17 @@
 //! says "Waiting for a free connection … (in use of max in use)" with Cancel (R-M3-43).
 //!
 //! **Read-only is never weaker than the profile (R-M3-6, R-M3-29).** A session that is
-//! read-write where `effective_read_only` now says read-only (the profile was tagged production
-//! or marked read-only while connected) is dropped from every console of the profile at once,
-//! and the profile reconnects, so its new sessions open read-only. The console never takes such
-//! a session either (`acquire`).
+//! read-write where `effective_read_only` now says read-only (the profile was marked read-only
+//! while connected) is dropped from every console of the profile at once, and the profile
+//! reconnects, so its new sessions open read-only. The console never takes such a session
+//! either (`acquire`).
+//!
+//! ## m3b-t26-prod-unlock (R-M3-78): a production tag no longer makes a console read-only, so
+//! retagging a profile as production while its console is open reconnects nothing: the gate
+//! reads the live profile's environment on every Run (`orchestrator::conn_safety`), so the
+//! confirmations apply from the next Run; the session keeps its transaction mode (D-036's
+//! Manual default applies to new sessions). Marking a profile read-only keeps the reconnect
+//! above (`pending_read_only`).
 //!
 //! **View.** The editor (`EditorView` with the `SqlLanguageService`) is embedded through
 //! `a11y::embed` (cached while no assistive technology is attached), under the console toolbar;
@@ -36,22 +43,22 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use hacivat_l10n::{NoArgs, Text, ids};
-use hacivat_proto::{AccessLabel, Department, EnvTag, ProfileId};
+use hacivat_proto::{AccessLabel, Department, ProfileId};
 use hacivat_session::LiveState;
 use hacivat_session::session::{
     ClientId, ClosePolicy, SessionHandle, SessionKind, SessionSnapshot, SessionSpec, SessionState,
     effective_read_only,
 };
 use hacivat_sql_editor::SqlLanguageService;
+use hacivat_ui::focus_home::{HomeSlot, focus_home};
 use hacivat_ui::panes::TabId;
-use hacivat_ui::text::{TextSource, paragraph};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{
-    AnyView, App, AppContext as _, Bounds, Context, Entity, Focusable as _, Global,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, point, px,
+    AnyView, App, AppContext as _, Context, Entity, Focusable as _, Global,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
 };
-use hacivat_ui_core::theme::{Theme, popover_surface};
+use hacivat_ui_core::theme::Theme;
 use hacivat_ui_editor::large_file::SizeText;
 use hacivat_ui_editor::{
     CaretBlink, DocContext, DocId, EDITOR_CONTEXT, EditorConfig, EditorEvent, EditorView,
@@ -65,6 +72,8 @@ use crate::console::autosave::{self, Autosave, RESTORE_MAX_BYTES, Restored};
 use crate::console::decor::{console_title, profile_of};
 use crate::console::registry::{ConsoleId, ConsoleState, Consoles};
 use crate::console::status::EditorSegment;
+// ## m3c-t41-chrome
+use crate::console::status::{SegmentCell, SegmentPart};
 use crate::console::toolbar::{self, RunUx, ToolbarActions, ToolbarModel};
 use crate::l10n_global::tr;
 use crate::results::ConsoleResults;
@@ -295,15 +304,10 @@ pub fn size_text(cx: &App, bytes: u64) -> SharedString {
     )
 }
 
-/// The production policy of the app's sessions (R-M3-29), read from the manager.
-fn production_read_only(cx: &App) -> bool {
-    cx.try_global::<ConnectionsModel>()
-        .is_some_and(|m| m.manager().policy().production_read_only)
-}
-
-/// Whether a session of `profile` must be read-only now.
+/// Whether a session of `profile` must be read-only now (## m3b-t26-prod-unlock: the profile's
+/// own read-only flag; its environment no longer decides, R-M3-78).
 fn must_be_read_only(cx: &App, profile: ProfileId) -> bool {
-    profile_of(cx, profile).is_some_and(|p| effective_read_only(&p, production_read_only(cx)))
+    profile_of(cx, profile).is_some_and(|p| effective_read_only(&p))
 }
 
 /// The read-only rule (R-M3-6, ledger T32 note): a console session that is read-write where
@@ -527,6 +531,8 @@ pub struct ConsoleHost {
     clock: Option<(u64, Instant)>,
     clock_task: Option<Task<()>>,
     segment: Option<Entity<EditorSegment>>,
+    // ## m3c-t41-chrome: one status bar cell per part of the segment.
+    segment_cells: Vec<Entity<SegmentCell>>,
     autosave: Option<Autosave>,
     autosave_task: Option<Task<()>>,
     /// The console's session is its own (not the profile's default session): only such a
@@ -540,6 +546,8 @@ pub struct ConsoleHost {
     fixture: Option<FixtureUx>,
     /// The workspace's focused pane when the host last looked.
     pane: Option<hacivat_ui::panes::PaneId>,
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the console is a focus home; its primary is the editor.
+    home: HomeSlot,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -586,6 +594,7 @@ impl ConsoleHost {
             clock: None,
             clock_task: None,
             segment: None,
+            segment_cells: Vec::new(),
             autosave: None,
             autosave_task: None,
             paint_errors: 0,
@@ -593,6 +602,7 @@ impl ConsoleHost {
             pending_ro: false,
             fixture: None,
             pane: None,
+            home: HomeSlot::new(),
             _subscriptions: subscriptions,
         };
         // A binding the hook handed out is for the tab built in this frame; whatever no host
@@ -614,6 +624,10 @@ impl ConsoleHost {
         );
         if let Some(console) = registered {
             this.adopt(console, cx);
+            // ## m3c-t33-find (named exception): the registrant's editor gets its find bar.
+            if let Some(editor) = this.editor().cloned() {
+                crate::console::find_bar::attach(console, &editor, window, cx);
+            }
         } else if let Some(profile) = profile {
             this.set_binding(profile, cx);
             match take_fresh(cx, profile) {
@@ -639,7 +653,7 @@ impl ConsoleHost {
         // Its keys reach the editor's commands like a console of ours.
         let focus = editor.focus_handle(cx);
         register_focus_context(cx, focus, EDITOR_CONTEXT);
-        self.segment = Some(cx.new(|cx| EditorSegment::new(&editor, cx)));
+        self.set_segment(&editor, cx);
         self.mode = Mode::Ready {
             console,
             editor,
@@ -677,6 +691,56 @@ impl ConsoleHost {
     /// The editor status segment.
     pub fn segment(&self) -> Option<&Entity<EditorSegment>> {
         self.segment.as_ref()
+    }
+
+    // ## m3c-t41-chrome
+    /// Gives the console's results the format locale and time zone again when they changed
+    /// from what the attach or the last refresh applied (a settings change refreshes the
+    /// windows).
+    fn follow_display(&mut self, cx: &mut Context<Self>) {
+        let Some(console) = self.console() else {
+            return;
+        };
+        let Some(format) = cx
+            .try_global::<crate::l10n_global::L10nGlobal>()
+            .map(|g| g.l10n.snapshot().format.clone())
+        else {
+            return;
+        };
+        let key = (format.format_locale.clone(), format.time_zone.clone());
+        // ## fix round 1 (m8): against what the attach (or the last refresh) applied, so a
+        // change made before this console's first frame is followed too.
+        match crate::exec_ui::orchestrator::display_applied(console, cx) {
+            Some(applied) if applied != key => {
+                cx.defer(move |cx| crate::exec_ui::orchestrator::refresh_display(console, cx));
+            }
+            _ => {}
+        }
+    }
+
+    // ## m3c-t41-chrome
+    /// The editor's status segment and a status bar cell for each of its parts; and the
+    /// placeholder an empty console shows ("Write SQL here. ⌘↵ runs the statement at the
+    /// caret.", design/m3a-query surface 1, m3b-safe surface 24).
+    fn set_segment(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
+        let placeholder: hacivat_ui::text::TextFn = Rc::new(|cx: &App| {
+            let key =
+                crate::shell::keymap_state::shortcut_label(cx, "editor.run").unwrap_or_default();
+            tr(
+                cx,
+                ids::hv::EDITOR_PLACEHOLDER,
+                ids::hv::HvEditorPlaceholder {
+                    key: hacivat_l10n::Text(key),
+                },
+            )
+        });
+        editor.update(cx, |e, cx| e.set_placeholder(Some(placeholder), cx));
+        let segment = cx.new(|cx| EditorSegment::new(editor, cx));
+        self.segment_cells = SegmentPart::ALL
+            .into_iter()
+            .map(|part| cx.new(|cx| SegmentCell::new(&segment, part, cx)))
+            .collect();
+        self.segment = Some(segment);
     }
 
     /// The autosave file, once the console has one.
@@ -911,6 +975,8 @@ impl ConsoleHost {
             },
         );
         exec_attach(console, &editor, window, cx);
+        // ## m3c-t33-find (named exception): the console's find bar.
+        crate::console::find_bar::attach(console, &editor, window, cx);
         let focus_handle = editor.focus_handle(cx);
         register_focus_context(cx, focus_handle.clone(), EDITOR_CONTEXT);
         let subscriptions = [
@@ -920,7 +986,7 @@ impl ConsoleHost {
             }),
         ];
         self._subscriptions.extend(subscriptions);
-        self.segment = Some(cx.new(|cx| EditorSegment::new(&editor, cx)));
+        self.set_segment(&editor, cx);
         self.autosave = autosave.and_then(|on_disk| {
             let paths = cx.try_global::<AppState>()?.paths.clone();
             Some(Autosave::new(
@@ -1342,18 +1408,6 @@ impl ConsoleHost {
         cx.notify();
     }
 
-    /// The production explanation, under the notice.
-    fn explain(&mut self, at: Option<Bounds<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
-        let anchor = at.map_or_else(|| window.mouse_position(), |b| b.bottom_left());
-        let anchor = point(anchor.x, anchor.y + px(6.0));
-        let view: AnyView = cx.new(ProdPopover::new).into();
-        if let Some(ws) = window.root::<Workspace>().flatten() {
-            ws.update(cx, |ws, cx| {
-                ws.open_anchored("console-prod-popover", anchor, view, window, cx);
-            });
-        }
-    }
-
     // ---- render -----------------------------------------------------------------------------
 
     fn toolbar_model(&self, cx: &App) -> ToolbarModel {
@@ -1380,14 +1434,9 @@ impl ConsoleHost {
 
     fn live_toolbar_model(&self, cx: &App) -> ToolbarModel {
         let profile = self.binding.and_then(|(p, _)| profile_of(cx, p));
-        // The notice claims read-only only over a read-only session (or none yet): during a
-        // pending reconnect the console says what is true instead (C1).
-        let production = production_read_only(cx)
-            && !self.pending_ro
-            && self.ux.is_none_or(|u| u.read_only)
-            && profile
-                .as_ref()
-                .is_some_and(|p| p.environment == Some(EnvTag::Production));
+        // ## m3b-t26-prod-unlock: no production read-only notice (R-M3-6 REVISED ends): a
+        // production console shows its environment (the swatch, the hairline, the capsule) and,
+        // when the session is read-only because the profile is, the lock chip like any other.
         let name = self.title(cx);
         let waiting = match (&self.acquire, self.binding) {
             (Acquire::Waiting { .. }, Some((p, _))) => cx
@@ -1414,7 +1463,7 @@ impl ConsoleHost {
         };
         let read_only = self
             .ux
-            .filter(|ux| ux.read_only && !production && !self.pending_ro)
+            .filter(|ux| ux.read_only && !self.pending_ro)
             .map(|ux| access_label(cx, ux.access));
         let pending_read_only = self.pending_ro.then(|| {
             profile
@@ -1432,14 +1481,13 @@ impl ConsoleHost {
                 .map(|tag| env_kind(Some(tag))),
             waiting,
             read_only,
-            production,
             pending_read_only,
         }
     }
 
     fn actions(&self, cx: &mut Context<Self>) -> ToolbarActions {
         let me = cx.weak_entity();
-        let (a, b, c, d) = (me.clone(), me.clone(), me.clone(), me);
+        let (a, b, c) = (me.clone(), me.clone(), me);
         ToolbarActions {
             run: Rc::new(move |window, cx| {
                 let _ = a.update(cx, |h, cx| h.run(window, cx));
@@ -1449,9 +1497,6 @@ impl ConsoleHost {
             }),
             cancel_wait: Rc::new(move |_, cx| {
                 let _ = c.update(cx, |h, cx| h.cancel_wait(cx));
-            }),
-            explain: Rc::new(move |at, window, cx| {
-                let _ = d.update(cx, |h, cx| h.explain(at, window, cx));
             }),
         }
     }
@@ -1476,6 +1521,12 @@ impl ConsoleHost {
         {
             abort.abort();
         }
+        // ## m3c-t33-find (named exception)
+        crate::console::find_bar::console_closed(console, cx);
+        // ## m3c-t41-chrome: the editor's key context leaves with the console (its handle may
+        // outlive the tab, held by a pending task).
+        let handle = editor.read(cx).focus_handle(cx);
+        crate::shell::unregister_focus_context(cx, &handle);
         if owned {
             // The last edits are written now, on the closing thread (fix round 2, M16): a new
             // console that reuses this number starts after it, and its autosave takes the file
@@ -1521,16 +1572,26 @@ impl Render for ConsoleHost {
         };
         // A registrant may swap the console's session (Task 34's tests do).
         self.watch_session(window, cx);
+        // ## m3c-t41-chrome: a regional format or time zone change reaches the results
+        // (`ConsoleResults::set_display` again; the console's attach applied the first).
+        self.follow_display(cx);
         let model = self.toolbar_model(cx);
         let actions = self.actions(cx);
-        let bar = toolbar::build(&model, &actions, cx);
-        div()
+        // ## m3b-t22-tx-ui (named exception): with the console's transaction items.
+        let bar = toolbar::build_for(&model, &actions, self.console(), cx);
+        let root = div()
             .id(("console", self.tab.0))
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.tokens.colors.panel.to_hsla())
             .child(bar)
+            // ## m3c-t33-find (named exception): the find bar, a row under the toolbar
+            // (design/m3b-safe surface 16, M3c-9).
+            .children(
+                self.console()
+                    .and_then(|c| crate::console::find_bar::render(c, cx)),
+            )
             .child(
                 div()
                     .flex()
@@ -1543,7 +1604,14 @@ impl Render for ConsoleHost {
                         window,
                     )),
             )
-            .into_any_element()
+            // ## m3b-t23-escalation (named exception): the error-policy bar at the foot of the
+            // editor tile, above the seam to the results (design/m3b-safe surface 7).
+            .children(
+                self.console()
+                    .and_then(|c| crate::exec_ui::error_bar::render(c, cx)),
+            );
+        // ## m4-t33d-fr1 (ruling R-T33d-5)
+        focus_home(&self.home, editor.focus_handle(cx), root).into_any_element()
     }
 }
 
@@ -1578,6 +1646,16 @@ fn live_kinds(cx: &App) -> HashMap<ProfileId, LiveKind> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// ## m4-t24-live (named exception): Open data's console (R-M4-13).
+/// The next console tab built for `profile` opens over `text` (as a shots fixture's does:
+/// nothing restored, autosave off), not empty.
+pub(crate) fn queue_text(profile: ProfileId, text: String, cx: &mut App) {
+    cx.default_global::<Hosts>()
+        .fresh
+        .borrow_mut()
+        .push((profile, Some(text)));
 }
 
 /// Whether `console_binding` (or a shots fixture, with its text) just handed `profile` to a
@@ -1694,6 +1772,34 @@ pub fn editor_segment(console: ConsoleId, cx: &App) -> Option<AnyView> {
     host.read(cx).segment.clone().map(Into::into)
 }
 
+// ## m3c-t41-chrome (F2 M8; M3c-35)
+/// The status bar's cells of `console`'s editor segment: one per part it shows now, left to
+/// right ("Reduced mode", "Mixed line endings", the carets, the selected count, Ln/Col).
+pub fn editor_segment_cells(console: ConsoleId, cx: &App) -> Vec<(SegmentPart, AnyView)> {
+    let Some(tab) = Consoles::get(cx, console).map(|s| s.tab) else {
+        return Vec::new();
+    };
+    let Some(host) = cx
+        .try_global::<Hosts>()
+        .and_then(|h| h.by_tab.get(&tab))
+        .and_then(|e| e.host.upgrade())
+    else {
+        return Vec::new();
+    };
+    let host = host.read(cx);
+    let Some(segment) = &host.segment else {
+        return Vec::new();
+    };
+    let shown = segment.read(cx).parts().to_vec();
+    host.segment_cells
+        .iter()
+        .filter_map(|cell| {
+            let part = cell.read(cx).part();
+            shown.contains(&part).then(|| (part, cell.clone().into()))
+        })
+        .collect()
+}
+
 /// The host of console tab `tab` (tests, the shots fixtures).
 pub fn host_of(cx: &App, tab: TabId) -> Option<Entity<ConsoleHost>> {
     cx.try_global::<Hosts>()?.by_tab.get(&tab)?.host.upgrade()
@@ -1777,66 +1883,6 @@ pub mod fixtures {
                 cx.notify();
             });
         }
-    }
-}
-
-// ---- the production explanation -------------------------------------------------------------
-
-/// "Why this console is read-only" (NOTES ruling 6): a 300 px popover with the title, why, and
-/// what still works.
-struct ProdPopover {
-    focus: hacivat_ui_core::gpui_surface::FocusHandle,
-    focused_once: bool,
-}
-
-impl ProdPopover {
-    fn new(cx: &mut Context<Self>) -> Self {
-        ProdPopover {
-            focus: cx.focus_handle(),
-            focused_once: false,
-        }
-    }
-}
-
-impl Render for ProdPopover {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.focused_once {
-            self.focused_once = true;
-            window.focus(&self.focus, cx);
-        }
-        let theme = *Theme::get(cx);
-        let t = theme.tokens;
-        let c = &t.colors;
-        let title = tr(cx, ids::hv::CONSOLE_PROD_POP_TITLE, NoArgs);
-        popover_surface(&theme)
-            .id("console-prod-popover")
-            .track_focus(&self.focus)
-            .w(px(300.0))
-            .p(px(t.spacing.lg))
-            .flex()
-            .flex_col()
-            .gap(px(t.spacing.sm))
-            .child(
-                hacivat_ui::text::Label::new(
-                    title,
-                    TextSource::Fluent,
-                    t.type_ramp.body_strong,
-                    c.text.to_hsla(),
-                )
-                .id("console-prod-pop-title"),
-            )
-            .child(paragraph(
-                tr(cx, ids::hv::CONSOLE_PROD_POP_BODY, NoArgs),
-                TextSource::Fluent,
-                t.type_ramp.body,
-                c.text.to_hsla(),
-            ))
-            .child(paragraph(
-                tr(cx, ids::hv::CONSOLE_PROD_POP_READS, NoArgs),
-                TextSource::Fluent,
-                t.type_ramp.body,
-                c.text_2.to_hsla(),
-            ))
     }
 }
 

@@ -82,21 +82,53 @@ fn explorer_texts(vcx: &VisualTestContext) -> Vec<String> {
         .collect()
 }
 
+// ## m4-t14-explorer (named exception): the list became the explorer tree (R-M4-18); its rows
+// are the tree's, read through `explorer::shown_rows` (the M2a `explorer-row-*` IDs are gone).
+/// The tree's root rows, top down.
+fn root_rows(vcx: &VisualTestContext) -> Vec<explorer::ShownRow> {
+    vcx.run_until_parked();
+    vcx.cx
+        .read(explorer::shown_rows)
+        .into_iter()
+        .filter(|r| r.depth == 0)
+        .collect()
+}
+
+/// Gives profile `name` a loaded catalog (`app.public` with one table), so the filter has
+/// searched everything it holds (fix round 1, I2).
+fn loaded_catalog(vcx: &VisualTestContext, name: &str) {
+    use support::catalogs::{catalog, schema, table};
+    let id = profile_id(vcx, name);
+    let cat = catalog(
+        hacivat_proto::DbmsKind::Postgres,
+        vec![schema(
+            hacivat_proto::DbmsKind::Postgres,
+            &["app", "public"],
+            false,
+            vec![table("items", Some(16_400), &[("id", "integer")])],
+        )],
+    );
+    vcx.cx.update(|cx| {
+        hacivat_app::explorer::adapter::set_catalog(id, Some(cat), None, cx);
+    });
+    vcx.run_until_parked();
+}
+
 /// The group headers with their counts (`PRODUCTION 1`), top down.
 fn group_headers(vcx: &VisualTestContext) -> Vec<String> {
-    (0..)
-        .map_while(|g| {
-            let title = text_of(vcx, &format!("explorer-group-{g}"))?;
-            let count = text_of(vcx, &format!("explorer-group-count-{g}"))?;
-            Some(format!("{title} {count}"))
-        })
+    root_rows(vcx)
+        .into_iter()
+        .filter(|r| r.data.group_header)
+        .map(|r| format!("{} {}", r.data.label, r.data.meta.unwrap_or_default()))
         .collect()
 }
 
 /// The visible rows' names, top down.
 fn row_names(vcx: &VisualTestContext) -> Vec<String> {
-    (0..)
-        .map_while(|i| text_of(vcx, &format!("explorer-row-name-{i}")))
+    root_rows(vcx)
+        .into_iter()
+        .filter(|r| !r.data.group_header)
+        .map(|r| r.data.label.to_string())
         .collect()
 }
 
@@ -343,6 +375,9 @@ fn keyboard_paths(cx: &mut TestAppContext) {
 #[gpui::test]
 fn backspace_in_filter_does_not_delete(cx: &mut TestAppContext) {
     let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    // ## m4-t14-explorer (fix round 1, I2; named exception): a loaded catalog, so "ab"
+    // really matches nothing.
+    loaded_catalog(vcx, "a");
     focus_filter(vcx);
     vcx.simulate_input("ab");
     assert!(row_names(vcx).is_empty());
@@ -380,6 +415,8 @@ fn context_menu_items(cx: &mut TestAppContext) {
             "Duplicate",
             "Copy as URL",
             "—",
+            // ## m4-t32-shots (named exception; PO R-W5-14 b)
+            "Clear query history…",
             "Delete…"
         ]
     );
@@ -472,13 +509,19 @@ fn only_connection_new_is_in_the_menu_bar(cx: &mut TestAppContext) {
 #[gpui::test]
 fn tab_moves_between_the_filter_and_the_list(cx: &mut TestAppContext) {
     let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    // ## m4-t14-explorer (fix round 1, I2): a loaded catalog, so "zz" matches nothing.
+    loaded_catalog(vcx, "a");
     focus_filter(vcx);
+    assert!(!context_stack(vcx).0.contains(&"Explorer"));
+    // ## m4-t14-explorer (named exception): the filter's Turkish-tolerant toggle is a Tab stop
+    // inside the field (design/m4-explorer surface 4), between the field and the tree.
+    vcx.simulate_keystrokes("tab");
     assert!(!context_stack(vcx).0.contains(&"Explorer"));
     vcx.simulate_keystrokes("tab");
     assert_eq!(context_stack(vcx).0.last(), Some(&"Explorer"));
     // Focusing the list selected its first row.
     assert_eq!(selected_id(vcx), Some(profile_id(vcx, "a")));
-    vcx.simulate_keystrokes("shift-tab");
+    vcx.simulate_keystrokes("shift-tab shift-tab");
     assert!(!context_stack(vcx).0.contains(&"Explorer"));
     vcx.simulate_input("zz");
     assert!(row_names(vcx).is_empty(), "the filter has the focus again");
@@ -546,6 +589,11 @@ fn explorer_commands_never_act_on_a_hidden_row(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("enter");
     assert_eq!(connect_calls(vcx), ["orders-dev"]);
     // Nothing visible: nothing selected, and the explorer commands are disabled.
+    // ## m4-t14-explorer (fix round 1, I2; named exception): a profile whose catalog was not
+    // searched is never filtered away as "no match", so both profiles get a loaded catalog.
+    for name in ["orders-prod", "orders-dev"] {
+        loaded_catalog(vcx, name);
+    }
     focus_filter(vcx);
     vcx.simulate_input("zzz");
     assert!(row_names(vcx).is_empty());
@@ -601,8 +649,10 @@ fn a_read_only_store_disables_the_mutating_commands(cx: &mut TestAppContext) {
             .map(|i| i.disabled)
             .collect()
     });
-    // Connect, Edit…, Duplicate, Copy as URL, Delete…
-    assert_eq!(disabled, [false, true, true, false, true]);
+    // Connect, Edit…, Duplicate, Copy as URL, Clear query history… (## m4-t32-shots, named
+    // exception: not a profile write, and it opens the history file itself, fix round 1 M-2),
+    // Delete…
+    assert_eq!(disabled, [false, true, true, false, false, true]);
 }
 
 /// Review minor: the home entry points are real buttons (tab stops) that run their command.
@@ -630,6 +680,64 @@ fn home_entry_points_are_buttons(cx: &mut TestAppContext) {
     assert_eq!(connect_calls(vcx), ["a"]);
 }
 
+// ## m4-t33d (R-T33-1): the home entries are Tab stops in their visual order (the comment at
+// `connections/home.rs` said so; before T33d a Button's own handle was no stop).
+#[gpui::test]
+fn home_entry_points_are_tab_stops_in_order(cx: &mut TestAppContext) {
+    let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    let new = handle_of(vcx, "button-home-new");
+    let paste = handle_of(vcx, "button-home-paste");
+    let palette = handle_of(vcx, "button-home-palette");
+    // Nothing selected: Connect is disabled, so Tab skips it.
+    let order = tab_order(vcx);
+    assert_consecutive(
+        &order,
+        &[
+            ("New connection", &new),
+            ("Paste", &paste),
+            ("Palette", &palette),
+        ],
+    );
+    focus_list(vcx); // selects a: Connect is enabled
+    let connect = handle_of(vcx, "button-home-connect");
+    assert!(
+        layer_ids(vcx).is_empty(),
+        "learning the handles opened nothing"
+    );
+    assert!(connect_calls(vcx).is_empty(), "nor connected");
+    let order = tab_order(vcx);
+    assert_consecutive(
+        &order,
+        &[
+            ("New connection", &new),
+            ("Paste", &paste),
+            ("Connect", &connect),
+            ("Palette", &palette),
+        ],
+    );
+}
+
+// ## m4-t33d-fr1 (ruling R-T33d-5): a focused Connect that turns disabled (the selection
+// cleared) is no longer tracked; the focus lands on the active pane's default, the home's
+// first entry, and Tab goes on from there.
+#[gpui::test]
+fn a_focused_connect_that_turns_disabled_hands_the_focus_to_the_first_entry(
+    cx: &mut TestAppContext,
+) {
+    let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    let new = handle_of(vcx, "button-home-new");
+    let paste = handle_of(vcx, "button-home-paste");
+    focus_list(vcx); // selects a: Connect is enabled
+    let connect = handle_of(vcx, "button-home-connect");
+    assert_focus_on(vcx, "Connect", &connect);
+    vcx.update(|_, cx| ConnectionsModel::select(cx, None));
+    redraw_full(vcx);
+    assert_ne!(focused(vcx), Some(connect), "Connect is disabled");
+    assert_focus_on(vcx, "New connection (the pane's first stop)", &new);
+    in_window(vcx, |window, cx| window.focus_next(cx));
+    assert_focus_on(vcx, "Paste (Tab goes on)", &paste);
+}
+
 // ## m2a-t21-shots
 
 #[gpui::test]
@@ -650,6 +758,8 @@ fn only_delete_is_red_in_the_connection_menu(cx: &mut TestAppContext) {
             ("Edit…".to_string(), false),
             ("Duplicate".to_string(), false),
             ("Copy as URL".to_string(), false),
+            // ## m4-t32-shots (named exception; PO R-W5-14 b)
+            ("Clear query history…".to_string(), false),
             ("Delete…".to_string(), true),
         ]
     );
@@ -688,22 +798,71 @@ fn drawn(vcx: &VisualTestContext, id: &str) -> hacivat_ui::text::RenderedText {
         .unwrap_or_else(|| panic!("{id} drawn"))
 }
 
+// ## m4-t14-explorer (named exception): the root row is the tree's (`hv-tree-label`,
+// `hv-tree-meta`); a connected root's meta is its latency (mock M4 surface 1: no engine), and
+// the tree's give-way order (Task 8) lets the meta go first.
+/// The meta the root row drew, if it drew one.
+fn drawn_meta(vcx: &VisualTestContext) -> Option<hacivat_ui::text::RenderedText> {
+    registry_frame(vcx)
+        .into_iter()
+        .find(|r| r.path.ends_with("#hv-tree-meta"))
+}
+
+/// Fix round 1 (m5): read-only production rows whose names grow one letter at a time, each with
+/// its engine as meta. Where a row first gets crowded its meta gives way while the name stays
+/// whole, and no row ever cuts its name before its meta.
 #[gpui::test]
 fn a_crowded_row_ellipsizes_its_meta_before_its_name(cx: &mut TestAppContext) {
-    let vcx = connected_row(cx, "orders-prod");
-    let name = drawn(vcx, "explorer-row-name-0");
-    assert!(!name.truncated && !name.clipped, "{name:?}");
-    let engine = drawn(vcx, "explorer-row-engine-0");
-    // The row is crowded (a lock, a latency and a versioned engine at 276 px): the engine
-    // gives way while the name stays whole.
-    assert!(engine.truncated && !engine.clipped, "{engine:?}");
+    let vcx = with_profiles(cx, []);
+    for n in 1..=24 {
+        let mut p = test_profile(
+            &format!("orders-{}", "x".repeat(n)),
+            Some(EnvTag::Production),
+            "10.0.4.12",
+        );
+        p.read_only = true;
+        add_profile(vcx, p);
+    }
+    enable_registry(vcx);
+    // The drawn rows, top down: each name, then its meta if it drew one.
+    let mut rows: Vec<(
+        hacivat_ui::text::RenderedText,
+        Option<hacivat_ui::text::RenderedText>,
+    )> = Vec::new();
+    for r in registry_frame(vcx) {
+        if r.path.ends_with("#hv-tree-label") {
+            rows.push((r, None));
+        } else if r.path.ends_with("#hv-tree-meta")
+            && let Some(last) = rows.last_mut()
+        {
+            last.1 = Some(r);
+        }
+    }
+    assert!(rows.len() > 10, "{}", rows.len());
+    let (first, first_meta) = &rows[0];
+    assert!(!first.truncated && first_meta.as_ref().is_some_and(|m| !m.truncated));
+    assert!(
+        rows.iter().any(|(name, meta)| !name.truncated
+            && !name.clipped
+            && meta.as_ref().is_none_or(|m| m.truncated)),
+        "a crowded row gives way at its meta first"
+    );
+    for (name, meta) in &rows {
+        if name.truncated {
+            assert!(
+                meta.as_ref().is_none_or(|m| m.truncated),
+                "{name:?} {meta:?}"
+            );
+        }
+        assert!(!name.clipped, "{name:?}");
+    }
 }
 
 #[gpui::test]
 fn a_long_name_keeps_about_six_characters(cx: &mut TestAppContext) {
     let name = "orders-production-replica-eu-west-1-standby";
     let vcx = connected_row(cx, name);
-    let drawn_name = drawn(vcx, "explorer-row-name-0");
+    let drawn_name = drawn(vcx, "hv-tree-label");
     assert!(
         drawn_name.truncated && !drawn_name.clipped,
         "{drawn_name:?}"
@@ -729,8 +888,8 @@ fn a_long_name_keeps_about_six_characters(cx: &mut TestAppContext) {
         "{} < {six:?}",
         drawn_name.painted_px
     );
-    // The meta gave way first: the engine is ellipsized too.
-    assert!(drawn(vcx, "explorer-row-engine-0").truncated);
+    // The meta gave way first: it is ellipsized, or gone.
+    assert!(drawn_meta(vcx).is_none_or(|m| m.truncated));
 }
 
 // ## m2a-finalfix
@@ -781,10 +940,15 @@ fn an_imported_sslmode_is_what_the_form_shows(cx: &mut TestAppContext) {
 fn double_click_on_a_row_connects_without_reentering_the_view(cx: &mut TestAppContext) {
     let vcx = with_profiles(cx, [("orders-local", None)]);
     vcx.run_until_parked();
+    // ## m4-t14-explorer (named exception): the root row's bounds come from the tree.
     let row = vcx
-        .debug_bounds("explorer-row-0")
+        .cx
+        .read(explorer::profile_rows)
+        .first()
+        .and_then(|(_, b)| *b)
         .expect("the row is drawn");
-    let at = row.center();
+    // On the name (not the chevron, which toggles).
+    let at = gpui::point(row.origin.x + gpui::px(60.0), row.center().y);
     for click_count in [1, 2] {
         vcx.simulate_event(gpui::MouseDownEvent {
             button: gpui::MouseButton::Left,

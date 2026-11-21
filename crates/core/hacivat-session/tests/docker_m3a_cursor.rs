@@ -403,7 +403,17 @@ async fn mysql_release_kills_on_the_side_connection_and_reuses_within_1s() {
             .await
             .unwrap_or_else(|e| panic!("{id}: SELECT 1 after the release: {:?}", e.kind));
         let took = start.elapsed();
-        assert!(took < secs(1), "{id}: the release took {took:?}");
+        // ## m3b-ci (controller ruling): the 1 s release bound is the product figure and is
+        // asserted on the gate's local Docker run. Shared CI runners measured 1.18 s with the
+        // same code path (the 250 ms drain plus the side-connection KILL round trip), so CI
+        // asserts 2 s and still fails a release that hangs or waits for the stream to drain.
+        let bound = if std::env::var_os("CI").is_some() {
+            secs(2)
+        } else {
+            secs(1)
+        };
+        eprintln!("{id}: release took {took:?} (bound {bound:?})");
+        assert!(took < bound, "{id}: the release took {took:?}");
         assert_eq!(
             o.releases(),
             vec![(CloseReason::SessionNeeded, false)],
