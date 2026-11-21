@@ -273,7 +273,7 @@ Task 7 instead removes those entries from an in-memory copy of the index (`State
 
 **Case-only differences (I2, R-T7-1).**
 - On a file system that folds case (`core.ignoreCase`, as gix reads it), an index path that differs from the disk only by case is `Unknown(CaseMismatch)`, keyed by the disk's spelling. It is never dropped.
-- The disk entry is found through the file system's own lookup. On Unix the name is identified by `(dev, ino)` (no casing code). On Windows, which has no stable file id in `std`, it is the unique ASCII case-insensitive NFC match; failing that, the index spelling is kept and the badge is still `Unknown`.
+- The disk entry is found through the file system's own lookup. On Unix the name is identified by `(dev, ino)` (no casing code). On Windows, which has no stable file id in `std`, it is the unique ASCII case-insensitive NFC match; failing that (a non-ASCII case-only rename), the badge is keyed by the index's spelling, which no scanned row has, so in the UI it is in effect dropped (corrected in fix round 2, n3; a recorded Windows residual).
 - A library folder that matches its index spelling only by case marks every path under it `Unknown(CaseMismatch)`.
 - Only changed paths are mapped, so a clean, case-renamed file has no badge (the CLI shows none either).
 - The differential oracle no longer shares the product's listing rule:
@@ -317,3 +317,60 @@ Task 7 instead removes those entries from an in-memory copy of the index (`State
 - **m9.** The doc-hidden `pub mod testing` is product API by necessity. A `testing` feature would need a manifest edit (Task 1a's). It can only add `Unknown(Dataless)` answers and `Unavailable(Dataless)` refusals.
 - **m10.** Ownership is checked again, after the open, on the worktree, git dir and common dir that gix opened.
 - **For the Task 1a owner (m6).** `BackendInPublicApi` counts the `_` of `use … as _` as a backend name, so a private impl header with `'_` reads as public API. This crate names its lifetimes instead; the rule could skip `_` imports.
+
+### Fix round 2 (re-review F1–F3, n1–n6; ruling R-T7-4)
+
+**Control files are capped too (F1, completes R-T7-2).**
+- gix-glob reads a `.gitignore` or `.gitattributes` whole, with no cap, and gix's allocation limit does not cover it. A 300 MiB sparse `.gitignore` used to cost 621 MB of memory.
+- So every `.gitignore`, `.gitattributes` and `.gitmodules` that gix would read, in the library and in each folder from the worktree down to it, must be a regular file of at most 1 MiB:
+  - an oversize file answers `Failed(TooLarge)`;
+  - a FIFO, socket, device or symlink answers `Unavailable(Redirected)` at once. A FIFO `.gitignore` no longer hangs a worker at all.
+- These are `lstat` checks; nothing is read.
+
+**The caller does no file-system work (F2).** Path resolution can block without limit on a stale network mount, so it never runs on the caller.
+- The caller claims the library under the spelling it was given and waits at most the budget.
+- The worker resolves the path, then claims the canonical library too:
+  - if another worker holds it, the answer is `Paused` (m1: an alias reaches the cap once its own worker has resolved it);
+  - both claims are released when the worker ends.
+- The tests stall the worker through the doc-hidden `testing::status_with_stall`, before or after the resolution. That hook can only delay a status.
+
+**Never download, inside `.git` too (F3, R-T7-4).**
+- Before the open, Hacivat `lstat`s the files below. If any is a cloud placeholder, the library answers `Unavailable(Dataless)` and nothing is opened:
+  - `HEAD`, `config`, `config.worktree`, the index, `packed-refs`, `info/exclude` and `info/attributes`;
+  - the `objects/pack` folder and every entry in it;
+  - every loose ref on HEAD's symbolic chain;
+  - a main or nested gitfile;
+  - a nested repository's `HEAD`.
+- **Residual:** loose objects are not checked (that would be thousands of `lstat`s per status).
+
+**The index ceiling is gix's (n1).**
+- Under reduced trust, gix refuses an index whose decoded entries (`entries × size_of::<gix::index::Entry>()`) exceed `gitoxide.objects.allocLimitIfReducedTrust`.
+  - That limit defaults to 16 MiB. The repository cannot raise it: the key is read from trusted sections only, and `GIT_ALLOC_LIMIT` is denied.
+  - Hacivat does not raise it either. A larger budget would let an abandoned worker hold more.
+- `INDEX_MAX` is now the same 16 MiB. A pre-check reads only the index's 12-byte header and refuses above that limit, so a library inside a bigger repository answers the `Unavailable(TooLarge)` diagnostic, never a silent `Failed(Index)`.
+- **Measured** (`index_entry_ceiling_is_measured_at_the_boundary`: a real index, built with `update-index --index-info`, macOS, gix 0.90.0):
+  - `size_of::<Entry>()` is 80 bytes;
+  - **209,715 tracked entries** answer `Ready`;
+  - 209,716 answer `Unavailable(TooLarge)`.
+- That is the ceiling on tracked files in the whole repository, not only in the library. A library's own 20,000-file limit (R-M4b-14) is far below it.
+
+**Case-only rename of the library folder, beyond ASCII (n2).**
+- A leading index folder that names the same directory as the library by `(dev, ino)` (`Çal` in the index, `çal` on disk) is an alias of the library prefix:
+  - its pathspec is added;
+  - its paths are `Unknown(CaseMismatch)`, never `New`.
+- This is Unix only. On Windows it stays the residual described in fix round 1.
+
+**Bounded costs (n4).**
+- The pre-walk counts entries while it lists them, so one huge folder is never buffered whole.
+- The case-only lookup reads each folder's `(dev, ino)` table once, instead of one `lstat` per name per path.
+
+**Dataless folders are listed by nobody (n5, as T4's scanner).** The pre-walk does not enter them. The status:
+- excludes them from gix's walk with `:(exclude,top,literal)`;
+- drops their tracked entries from the in-memory index copy;
+- gives them no badge.
+
+More than 256 dataless folders answer `Unavailable(Dataless)`, which keeps the exclusion list short and its matching linear.
+
+**CI (n6).** The `strace` install retries: three `apt-get update` attempts, `Acquire::Retries=3`, and `--no-install-recommends`.
+
+**Cost.** Measured on macOS, debug build: 147 ms for a 10,000-file status and 339 ms for 20,000 dataless paths, pre-walk and checks included.
