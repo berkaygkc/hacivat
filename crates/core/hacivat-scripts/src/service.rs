@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use hacivat_git::GitState;
+use hacivat_proto::EnvTag;
 use hacivat_settings::paths::LocalPaths;
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
@@ -216,25 +217,38 @@ impl LibraryService {
         Err(RegistryError::NotImplemented)
     }
 
-    /// Reads and decodes a script.
+    /// Reads and decodes a script for a tab under a connection whose environment is `env`.
+    ///
+    /// ## m4b-t05-fileio fix round 2 (named exception; I-fr1-1, ruling R-T5-6): the tab's
+    /// environment is required, as in `fileio::read`, so Task 10 passes it through
+    /// (`None` sees no `@`-scoped file).
     ///
     /// Task 1a stub (fail closed): opens nothing.
-    pub async fn read(&self, id: LibraryId, rel: &RelPath) -> Result<Decoded, ReadError> {
-        let _ = (id, rel);
+    pub async fn read(
+        &self,
+        id: LibraryId,
+        rel: &RelPath,
+        env: Option<EnvTag>,
+    ) -> Result<Decoded, ReadError> {
+        let _ = (id, rel, env);
         Err(ReadError::NotImplemented)
     }
 
-    /// Saves a script (HV-SCRIPT-07), recording the echo before the rename.
+    /// Saves a script (HV-SCRIPT-07) for a tab under `env`, recording the echo before the
+    /// rename.
+    ///
+    /// ## m4b-t05-fileio fix round 2 (named exception; I-fr1-1, R-T5-6): `env` as in `read`.
     ///
     /// Task 1a stub (fail closed): writes nothing.
     pub async fn save(
         &self,
         id: LibraryId,
         rel: &RelPath,
+        env: Option<EnvTag>,
         text: SaveText,
         expect: Option<DiskStamp>,
     ) -> Result<DiskStamp, SaveError> {
-        let _ = (id, rel, text, expect);
+        let _ = (id, rel, env, text, expect);
         Err(SaveError::NotImplemented)
     }
 
@@ -272,15 +286,19 @@ impl LibraryService {
         Err(FileOpError::NotImplemented)
     }
 
-    /// A chunked UTF-8 reader of a script for "Run as script" (Task 12's source).
+    /// A chunked UTF-8 reader of a script for "Run as script" (Task 12's source), for a tab
+    /// under `env`.
+    ///
+    /// ## m4b-t05-fileio fix round 2 (named exception; I-fr1-1, R-T5-6): `env` as in `read`.
     ///
     /// Task 1a stub (fail closed): opens nothing.
     pub fn open_stream(
         &self,
         id: LibraryId,
         rel: &RelPath,
+        env: Option<EnvTag>,
     ) -> Result<Box<dyn ScriptChunks>, ReadError> {
-        let _ = (id, rel);
+        let _ = (id, rel, env);
         Err(ReadError::NotImplemented)
     }
 }
