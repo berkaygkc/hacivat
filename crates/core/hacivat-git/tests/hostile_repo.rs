@@ -649,6 +649,14 @@ fn hostile_repo_runs_no_program() {
         "{}",
         run.result
     );
+    // `core.worktree` was ignored: the walk listed the real worktree's untracked file (a
+    // fully trusted open walks the decoy worktree instead, where no filtered file is hashed).
+    assert_eq!(
+        badge(&run.result, ".gitattributes"),
+        Some("New"),
+        "{}",
+        run.result
+    );
     assert!(!run.result.contains("decoy"), "{}", run.result);
 }
 
@@ -791,6 +799,12 @@ fn trust_is_reduced_even_with_global_safe_directory_star() {
             &h.envdir(),
         );
         assert!(h.markers().is_empty(), "{case}: {:?}", h.markers());
+        assert_eq!(
+            run.spawned.unwrap_or(0),
+            0,
+            "{case}: {} saw a spawn",
+            run.detector
+        );
         assert_eq!(
             badge(&run.result, "a.sql"),
             Some("Unknown(Filtered)"),
