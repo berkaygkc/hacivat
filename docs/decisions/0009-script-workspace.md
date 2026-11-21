@@ -507,3 +507,54 @@ This subsection supersedes the fix-round-1 bullet on the `_scoped` forms.
 - **mf5.** The Windows rename retry is a `retrying(op, retry_on, sleep)` helper. Its unit test (`fileio::dir::tests::rename_retry_waits_and_gives_up`) injects a sharing violation and records the waits: 50 + 100 + 200 ms, four tries, then the error; other errors are not retried.
   - The retry runs inside the shared `Dir::rename`, so it **also applies to Task 3's manifest rename** (`manifest::add_alias`): on Windows, an alias edit over a manifest another program holds open is retried up to about 350 ms before it fails. Nothing else in Task 3's behaviour changed.
   - It retries `ERROR_ACCESS_DENIED` too, so a permanent denial costs about 350 ms; accepted.
+
+## m4b-t09 — watcher
+
+The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debounce,poll,limits,echo}.rs`). The tab half (reload, bars) is Task 14's; the service that owns watchers is Task 10's.
+
+### Sources (D3, R-T0-2)
+- `OsEventSource` is the platform's recommended watcher behind `new_debouncer_opt::<_, RecommendedWatcher, NoCache>(150 ms, None, handler, NoCache, watcher_config())`, `watcher_config()` being `Config::default().with_follow_symlinks(false)`. Nothing is cached, so nothing walks a link. Each debounced event becomes one path hint per path; an event flagged `Flag::Rescan` (FSEvents `MustScanSubDirs`, inotify `IN_Q_OVERFLOW`) becomes a rescan hint; a `MaxFilesWatch` error becomes `Lost`; other errors become a hint on their path, or a rescan when they have none. Event kinds are never used (alg/28 C3). Its `Drop` stops the debouncer and joins its thread.
+- **`PollEventSource` is Hacivat's own, not `notify`'s `PollWatcher` (a deviation from the plan's sketch).** In `notify` 8.2.2 the poll watcher keeps modification times in whole seconds and reports a file only when the time grew (`poll.rs:83`, `:366`, `:410`), so an edit made in the same second as the previous pass is never reported. Task 9's `polling_fallback_sees_a_change` failed with it [Observed]. It also walks `.git` and `node_modules` on every pass. Instead, every 2 s the source hints the root, and the reconciler answers a root hint with one scan (HV-SCRIPT-03: names and `lstat` only, never through a directory link, skipped folders not entered), compared by length and full-precision time. No watcher constructor is called for polling, so the `#[expect(clippy::disallowed_methods)]` exception the carry anticipated is not needed and `clippy.toml` is unchanged. Residual: a same-length edit within one tick of a file system with coarse times (FAT: 2 s; some SMB servers: 1 s) is not seen until the next edit; seeing it would mean reading every file.
+- **Backend choice** (`limits::backend_for`, R-M4b-14): a network file system is polled. A Linux library whose folder count is more than half of the free inotify watches is polled too; the free count is `max_user_watches` minus the `inotify wd:` lines in `/proc/<pid>/fdinfo` of the processes we can read. A source that fails to start, or reports `Lost`, is replaced by the poll source. The watcher then says `BackendLost` and rescans; a loss reported by the fallback itself keeps the fallback.
+- **Network detection is Linux-only ([Unknown] U-09 on macOS and Windows).** Linux reads `/proc/self/mountinfo` (the longest mount point holding the root; NFS, SMB/CIFS, AFS, 9p, Ceph, Gluster, Lustre, GPFS, davfs and the FUSE network mounts). macOS (`statfs` `f_fstypename`) and Windows (`GetDriveTypeW`) need a raw call, which this crate cannot make without `unsafe`. There it answers `FsKind::Unknown`, treated as local, so a library on a share is watched by FSEvents or `ReadDirectoryChangesW`, which see this machine's own writes only. Carry: the PO decides between a manual "poll this library" setting (Task 16) and a `rustix`/`windows-sys` dependency later.
+
+### Reconciliation (alg/28 C3–C6, HV-SCRIPT-08 steps 4–7)
+- A hint is only a path. A known file is looked at with `lstat` through `pathsafe::join_with`, which re-validates every folder on the way, so a folder replaced by a link is never looked through. A folder, a link, the root, a new script name, or a known file that stopped being a plain file is reconciled by one scan of the library, diffed with what is known. Folder moves and deletes arrive as a single hint on the folder; this covers them.
+- **Dropped hints:** paths outside the root; any skipped component (dot names, `node_modules`), so editor temps and Hacivat's own `.<name>.hv-<random>.tmp` never count; other extensions; more than 32 components; non-UTF-8 names. A hint on `.git/{index,HEAD,packed-refs,refs}` is `RepositoryChanged`, once per tick.
+- **Names in another normal form:** a hint whose bytes do not match a known path is matched through its NFC form (macOS keeps NFD names, and an event may carry the other form).
+- **Settle:** a candidate is reported only when two looks one window (150 ms) apart agree, so a half-written file is not reported. After ten looks it is reported as `Unsettled`. A removal settles too: a save seen mid-rename (the file briefly gone) stays one `Changed`.
+- **Bounds:**
+  - more than 1,000 hints in one window, or more than 10,000 queued, is one `Rescan`, and a `Lost` survives an overflow;
+  - a scan that hits a limit, or finds the root gone or moved, is a `Rescan`, never a list of removals;
+  - undelivered events beyond 10,000 collapse into one `Rescan`;
+  - the receiver is a bounded `tokio::sync::mpsc` channel, fed with `try_send`, so the watcher's thread never blocks on it and ends when it is closed.
+
+### Echo and renames (HV-SCRIPT-08 steps 6–7)
+- `EchoTable` keeps up to four stamps per path for 5 s, and at most 1,024 paths. The service records into `Watcher::echo()` from `fileio::save_with_echo`'s callback, under the path the bytes landed at: for a file link, `Joined::target`.
+- A settled file is hashed only when its `(len, mtime)` matches a record, through a handle that does not follow a final link and does not block on a FIFO, reading at most the expected length plus one byte. It is dropped only when the whole stamp matches.
+- Dataless files are never hashed.
+- A settled removal and a settled creation pair as `Renamed` when their lengths and content hashes match. The removed file's hash is known only when a tab read or saved it (`Watcher::remember`) or Hacivat wrote it, so listing never reads a file (R-M4b-15).
+
+### Threads and I/O
+- The reconciler runs on its own named thread (`hv-library-watch`). Dropping the `Watcher` joins it. That thread unwatches and drops the source, which joins the `notify` debouncer thread or the poll thread. `WatcherProbe::released` checks all of this in the tests.
+- **Deviation from the GC "all watcher I/O on the `CoreRuntime`":** this is a long-lived loop, like `notify`'s own threads, not a blocking-pool task. It is never the UI thread. `Watcher::start` blocks while the source registers the tree and the library is scanned once, so Task 10 calls it from the blocking pool.
+- **Idle CPU** (review probe, `idle_cpu_is_recorded`, `HACIVAT_PERF=1`): ten idle watchers cost 20 ms of CPU over 5 s on macOS [Observed]. That is the debouncer's 37.5 ms tick; the reconciler waits on a condition variable.
+
+### Interface changes against the plan's sketch
+- `Watcher::start(root, opts, sink: mpsc::Sender<Vec<WatchEvent>>, source)` as planned, plus `start_with_fallback` (tests inject the fallback) and `open` (it chooses the backend).
+- `WatchEvent` gains `Renamed { from, to }`, `Unsettled(rel)` and `RepositoryChanged`; `BackendLost` carries a `LostReason`.
+- The `Debouncer` answers `Flushed::{Lost, Rescan, Paths}`. The plan's `burst_becomes_one_rescan` therefore expects `vec![Flushed::Rescan]`, and the `[WatchEvent::Rescan]` value is checked end to end in `burst_becomes_one_rescan_end_to_end`.
+- After a `Rescan` the reconciler learns the library afresh without reporting each file; the service rescans and compares snapshots.
+
+### Named exception: `xtask/src/check_deps.rs` (carries-w1 T9 "hardening m1")
+- `WatcherFollowsLinks` also refuses stand-ins for the names it trusts, in the scripts crate's product files:
+  - `FileIdCache` named at all;
+  - any item, binding or rename named `NoCache`;
+  - `watcher_config` bound or renamed, or defined as a `fn` anywhere but `src/watch/mod.rs`.
+- Test: `watcher_cache_and_config_stand_ins_are_flagged`, nine forms with RED captured.
+- At run time, `debouncer_cache_is_nocache_or_never_leaves_root` checks that the `NoCache` in the source is `notify_debouncer_full`'s own.
+
+### [Unknown] → CI
+- U-06 (inotify event shapes, the watch count for a 5,000-folder tree) is settled by `watch_real` on ubuntu and `inotify_watches_for_5000_folders_are_counted`, which prints an `HV-FACT t09 inotify_dirs=…` line.
+- U-07 (`ReadDirectoryChangesW`) is settled by `watch_real` on windows. In `notify` 8.2.2 the completion routine ignores the byte count (`windows.rs:348`), and any error code other than success, abort and access-denied, `ERROR_NOTIFY_ENUM_DIR` (the overflow) included, unwatches the folder with only a log line (`:361-389`). An overflow on Windows can therefore end the watch silently, and nothing reaches the watcher. Recorded residual; carry to the controller: a periodic root hint (for example every 30 s) on Windows, which the poll source's mechanism already provides.
+- U-08 (a real VS Code save) stays with the gate demo.
