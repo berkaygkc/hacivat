@@ -25,7 +25,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use crate::discover::{DotGit, Found};
-use crate::{FailKind, GitError, GitState, UntrustReason};
+use crate::{FailKind, GitError, GitState, TooLargeWhy, UntrustReason};
 
 /// The git dir and common dir the checks accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,14 +103,23 @@ fn resolve(base: &Path, text: &str) -> Option<PathBuf> {
     std::fs::canonicalize(p).ok().filter(|c| c.is_dir())
 }
 
-/// The checks before the open. `Err` is the state to answer.
-pub(crate) fn check_layout(found: &Found, owned: Owner<'_>) -> Result<Layout, GitState> {
+/// The checks before the open. `Err` is the state to answer. Every small file read here (a
+/// gitfile, `commondir`, alternates) is checked for a cloud placeholder first (p1), and so is
+/// every alternate's object folder.
+pub(crate) fn check_layout(
+    found: &Found,
+    owned: Owner<'_>,
+    placeholder: Placeholder<'_>,
+) -> Result<Layout, GitState> {
     require_owned(&found.worktree, owned)?;
     require_owned(&found.dot_git, owned)?;
     let layout = match found.kind {
         DotGit::Symlink => return redirected(),
         DotGit::Dir => {
             let g = std::fs::canonicalize(&found.dot_git).map_err(io_failed)?;
+            if placeholder(&g.join("commondir")) {
+                return dataless();
+            }
             if exists(&g.join("commondir")) {
                 return redirected();
             }
@@ -119,12 +128,65 @@ pub(crate) fn check_layout(found: &Found, owned: Owner<'_>) -> Result<Layout, Gi
                 common_dir: g,
             }
         }
-        DotGit::File => gitfile_layout(found, owned)?,
+        DotGit::File => {
+            if placeholder(&found.dot_git) {
+                return dataless();
+            }
+            gitfile_layout(found, owned, placeholder)?
+        }
     };
     require_owned(&layout.git_dir, owned)?;
     require_owned(&layout.common_dir, owned)?;
-    check_alternates(&layout.common_dir.join("objects"), 0, owned)?;
+    check_alternates(&layout.common_dir.join("objects"), 0, owned, placeholder)?;
     Ok(layout)
+}
+
+/// The most loose objects an object folder may hold for the placeholder check (G2, R-T7-6).
+/// `git gc --auto` keeps them near 6,700; past this the status answers
+/// `TooLarge(LooseObjects)` ("too many loose objects; run git gc").
+const LOOSE_OBJECTS_MAX: usize = 20_000;
+
+/// G2 (R-T7-6), p1: an object folder's packs and loose objects, by `lstat`: the `pack` folder
+/// and its entries, every two-hex-digit fan-out folder and its entries. gix reads loose
+/// objects on every status (the HEAD commit, every tree reachable from it), so a placeholder
+/// among them answers `Unavailable(Dataless)`. More than [`LOOSE_OBJECTS_MAX`] loose entries
+/// answers `Unavailable(TooLarge(LooseObjects))`.
+fn check_objects_dataless(objects: &Path, placeholder: Placeholder<'_>) -> Result<(), GitState> {
+    if placeholder(objects) {
+        return dataless();
+    }
+    let Ok(rd) = std::fs::read_dir(objects) else {
+        return Ok(());
+    };
+    let mut loose = 0usize;
+    for fan in rd.filter_map(Result::ok) {
+        let name = fan.file_name();
+        let Some(n) = name.to_str() else { continue };
+        let is_fan = n.len() == 2 && n.bytes().all(|b| b.is_ascii_hexdigit());
+        if !is_fan && n != "pack" {
+            continue;
+        }
+        if placeholder(&fan.path()) {
+            return dataless();
+        }
+        let Ok(inner) = std::fs::read_dir(fan.path()) else {
+            continue;
+        };
+        for e in inner.filter_map(Result::ok) {
+            if is_fan {
+                loose += 1;
+                if loose > LOOSE_OBJECTS_MAX {
+                    return Err(GitState::Unavailable(GitError::TooLarge(
+                        TooLargeWhy::LooseObjects,
+                    )));
+                }
+            }
+            if placeholder(&e.path()) {
+                return dataless();
+            }
+        }
+    }
+    Ok(())
 }
 
 // ## m4b-t07-git (fix round 1, I3, R-T7-2)
@@ -192,6 +254,17 @@ pub(crate) fn check_repository_files(
 ) -> Result<(), GitState> {
     let (g, c) = (&layout.git_dir, &layout.common_dir);
     check_index_size(&g.join("index"))?;
+    // p1: a split index's shared part is read like the index: a FIFO never hangs.
+    for shared in shared_indexes(g) {
+        regular_capped(&shared, INDEX_MAX)?;
+    }
+    // G1 (R-T7-5): `refs/replace` is never scanned (`core.useReplaceRefs=false`), and a
+    // symlinked one is refused, should anything walk it.
+    if std::fs::symlink_metadata(c.join("refs").join("replace"))
+        .is_ok_and(|m| !m.file_type().is_dir())
+    {
+        return redirected();
+    }
     regular_capped(&c.join("packed-refs"), TEXT_MAX)?;
     regular_capped(&c.join("info").join("exclude"), TEXT_MAX)?;
     regular_capped(&c.join("info").join("attributes"), TEXT_MAX)?;
@@ -205,7 +278,11 @@ pub(crate) fn check_repository_files(
 /// (a diagnostic), never a silent `Failed`: the file over [`INDEX_MAX`], or its header's entry
 /// count times `size_of::<Entry>()` over [`GIX_ALLOC_LIMIT`]. Reads the 12-byte header only.
 fn check_index_size(index: &Path) -> Result<(), GitState> {
-    let too_large = || Err(GitState::Unavailable(GitError::TooLarge));
+    let too_large = || {
+        Err(GitState::Unavailable(GitError::TooLarge(
+            TooLargeWhy::Index,
+        )))
+    };
     match regular_capped(index, INDEX_MAX) {
         Ok(false) => return Ok(()),
         Ok(true) => {}
@@ -249,18 +326,31 @@ pub(crate) fn check_internals_dataless(
     if files.iter().any(|f| placeholder(f)) {
         return dataless();
     }
-    let pack = c.join("objects").join("pack");
-    if placeholder(&pack) {
-        return dataless();
-    }
-    if let Ok(rd) = std::fs::read_dir(&pack) {
-        for e in rd.filter_map(Result::ok) {
-            if placeholder(&e.path()) {
-                return dataless();
-            }
+    // p1: a split index's `sharedindex.<sha>`.
+    for shared in shared_indexes(g) {
+        if placeholder(&shared) {
+            return dataless();
         }
     }
-    Ok(())
+    // G2: packs and loose objects (fix round 3; the fr2 residual was wrong: gix reads loose
+    // objects on every status).
+    check_objects_dataless(&c.join("objects"), placeholder)
+}
+
+/// The git dir's `sharedindex.*` files (a split index).
+fn shared_indexes(git_dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(git_dir)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.starts_with("sharedindex."))
+                })
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A symbolic ref's target (`ref: refs/…`) and its chain: every directory on the way is a real
@@ -497,7 +587,11 @@ fn io_failed(_: std::io::Error) -> GitState {
 
 /// Where a gitfile may lead (n2): a linked worktree's git dir, a submodule's git dir, or a
 /// directory inside the worktree.
-fn gitfile_layout(found: &Found, owned: Owner<'_>) -> Result<Layout, GitState> {
+fn gitfile_layout(
+    found: &Found,
+    owned: Owner<'_>,
+    placeholder: Placeholder<'_>,
+) -> Result<Layout, GitState> {
     let Some(text) = small_text(&found.dot_git) else {
         return redirected();
     };
@@ -515,6 +609,10 @@ fn gitfile_layout(found: &Found, owned: Owner<'_>) -> Result<Layout, GitState> {
     };
     require_owned(&t, owned)?;
     let commondir = t.join("commondir");
+    // p1: the linked worktree's `commondir` (read just below) and `gitdir` back-pointer.
+    if placeholder(&commondir) || placeholder(&t.join("gitdir")) {
+        return dataless();
+    }
     // A linked worktree: `<common>/worktrees/<name>`, whose `commondir` leads back.
     let parent = t.parent();
     if parent
@@ -556,8 +654,16 @@ fn gitfile_layout(found: &Found, owned: Owner<'_>) -> Result<Layout, GitState> {
 /// Every alternate object directory (`objects/info/alternates`, one path per line, relative
 /// to `objects`) is an existing directory the user owns; chains are followed to
 /// [`ALTERNATES_DEPTH_MAX`].
-fn check_alternates(objects: &Path, depth: usize, owned: Owner<'_>) -> Result<(), GitState> {
+fn check_alternates(
+    objects: &Path,
+    depth: usize,
+    owned: Owner<'_>,
+    placeholder: Placeholder<'_>,
+) -> Result<(), GitState> {
     let file = objects.join("info").join("alternates");
+    if placeholder(&file) {
+        return dataless();
+    }
     if !exists(&file) {
         return Ok(());
     }
@@ -576,7 +682,9 @@ fn check_alternates(objects: &Path, depth: usize, owned: Owner<'_>) -> Result<()
             return redirected();
         };
         require_owned(&alt, owned)?;
-        check_alternates(&alt, depth + 1, owned)?;
+        // p1: an alternate's objects are read like ours (same cap, per folder).
+        check_objects_dataless(&alt, placeholder)?;
+        check_alternates(&alt, depth + 1, owned, placeholder)?;
     }
     Ok(())
 }
@@ -679,12 +787,12 @@ mod tests {
         for foreign in [top.join("wt"), top.join("wt/.git")] {
             let owner = |p: &Path| Ok(p != foreign);
             assert_eq!(
-                check_layout(&f, &owner).unwrap_err().into_cmp(),
+                check_layout(&f, &owner, &|_| false).unwrap_err().into_cmp(),
                 GitState::Untrusted(UntrustReason::ForeignOwner).into_cmp(),
                 "{foreign:?}"
             );
         }
-        assert!(check_layout(&f, &all_owned).is_ok());
+        assert!(check_layout(&f, &all_owned, &|_| false).is_ok());
     }
 
     #[test]
@@ -698,11 +806,11 @@ mod tests {
         )
         .unwrap();
         let f = found(&top.join("wt"), DotGit::Dir);
-        assert!(check_layout(&f, &all_owned).is_ok());
+        assert!(check_layout(&f, &all_owned, &|_| false).is_ok());
         let alt = top.join("alt/objects");
         let owner = |p: &Path| Ok(p != alt);
         assert_eq!(
-            check_layout(&f, &owner).unwrap_err().into_cmp(),
+            check_layout(&f, &owner, &|_| false).unwrap_err().into_cmp(),
             GitState::Untrusted(UntrustReason::ForeignOwner).into_cmp()
         );
     }
@@ -714,7 +822,7 @@ mod tests {
         let f = found(&top.join("wt"), DotGit::Dir);
         let owner = |_: &Path| Err(std::io::Error::other("no owner"));
         assert!(matches!(
-            check_layout(&f, &owner),
+            check_layout(&f, &owner, &|_| false),
             Err(GitState::Unavailable(GitError::Failed(_)))
         ));
     }
@@ -735,7 +843,7 @@ mod tests {
         .unwrap();
         let f = found(&top.join("side"), DotGit::File);
         assert_eq!(
-            check_layout(&f, &all_owned).unwrap(),
+            check_layout(&f, &all_owned, &|_| false).unwrap(),
             Layout {
                 git_dir: wtdir.clone(),
                 common_dir: common.clone()
@@ -749,7 +857,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            check_layout(&f, &all_owned).unwrap_err().into_cmp(),
+            check_layout(&f, &all_owned, &|_| false)
+                .unwrap_err()
+                .into_cmp(),
             GitState::Unavailable(GitError::Redirected).into_cmp()
         );
     }
@@ -762,7 +872,10 @@ mod tests {
         std::fs::create_dir_all(top.join("super/sub")).unwrap();
         std::fs::write(top.join("super/sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
         let f = found(&top.join("super/sub"), DotGit::File);
-        assert_eq!(check_layout(&f, &all_owned).unwrap().git_dir, modules);
+        assert_eq!(
+            check_layout(&f, &all_owned, &|_| false).unwrap().git_dir,
+            modules
+        );
         // A gitfile into an unrelated repository: refused.
         std::fs::create_dir_all(top.join("elsewhere/.git")).unwrap();
         std::fs::write(
@@ -771,12 +884,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            check_layout(&f, &all_owned).unwrap_err().into_cmp(),
+            check_layout(&f, &all_owned, &|_| false)
+                .unwrap_err()
+                .into_cmp(),
             GitState::Unavailable(GitError::Redirected).into_cmp()
         );
         // Not a gitfile at all.
         std::fs::write(top.join("super/sub/.git"), "hello\n").unwrap();
-        assert!(check_layout(&f, &all_owned).is_err());
+        assert!(check_layout(&f, &all_owned, &|_| false).is_err());
     }
 
     #[test]
@@ -785,7 +900,9 @@ mod tests {
         std::fs::create_dir_all(top.join("wt")).unwrap();
         let f = found(&top.join("wt"), DotGit::Symlink);
         assert_eq!(
-            check_layout(&f, &all_owned).unwrap_err().into_cmp(),
+            check_layout(&f, &all_owned, &|_| false)
+                .unwrap_err()
+                .into_cmp(),
             GitState::Unavailable(GitError::Redirected).into_cmp()
         );
     }
@@ -803,13 +920,13 @@ mod tests {
             prev = next;
         }
         let f = found(&top.join("wt"), DotGit::Dir);
-        assert!(check_layout(&f, &all_owned).is_err());
+        assert!(check_layout(&f, &all_owned, &|_| false).is_err());
         std::fs::write(
             top.join("wt/.git/objects/info/alternates"),
             "\"quoted\\npath\"\n",
         )
         .unwrap();
-        assert!(check_layout(&f, &all_owned).is_err());
+        assert!(check_layout(&f, &all_owned, &|_| false).is_err());
     }
 
     /// Opening with `isolated()` alone takes trust from ownership: full. The check refuses it

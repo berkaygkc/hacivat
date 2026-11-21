@@ -1261,7 +1261,10 @@ fn index_entry_ceiling_is_measured_at_the_boundary() {
             assert!(matches!(st, GitState::Ready(_)), "{n} entries: {st:?}");
         } else {
             assert!(
-                matches!(st, GitState::Unavailable(GitError::TooLarge)),
+                matches!(
+                    st,
+                    GitState::Unavailable(GitError::TooLarge(hacivat_git::TooLargeWhy::Index))
+                ),
                 "{n} entries: {st:?}"
             );
         }
@@ -1506,3 +1509,166 @@ fn status_with_20k_excludes_under_1s() {
     assert_eq!(n, 20_000);
     assert!(ms < 1000, "{ms} ms");
 }
+
+// ## m4b-t07-git (fix round 3)
+
+fn dataless_state(repo: &Repo, flagged: &str) -> GitState {
+    hacivat_git::testing::status_treating_as_dataless(
+        &repo.library(),
+        &GitLimits::default(),
+        &[flagged],
+    )
+}
+
+fn is_dataless(st: &GitState) -> bool {
+    matches!(st, GitState::Unavailable(GitError::Dataless))
+}
+
+/// P11 (G1, R-T7-5): gix's open scans `refs/replace/**` with an uncapped read and follows a
+/// symlinked `refs/replace` out of the repository. The status opens with
+/// `core.useReplaceRefs=false`, so the folder is never read:
+/// - a functional proof: `git replace HEAD <side>` would make a status that honours replace
+///   refs see the side commit's tree (`a.sql` staged as modified); ours stays clean, as the CLI
+///   does under `GIT_NO_REPLACE_OBJECTS=1`. A 200 MiB file sits next to the replace ref;
+/// - a symlinked `refs/replace` is refused before the open.
+#[cfg(unix)]
+#[test]
+fn replace_refs_are_never_scanned() {
+    let repo = build_fixture("clean");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("a.sql", b"select 'replaced';\n");
+    repo.commit_all();
+    repo.git(&["checkout", "-q", "main"]);
+    let main_head = String::from_utf8(repo.git(&["rev-parse", "main"])).unwrap();
+    repo.git(&["replace", main_head.trim(), "side"]);
+    let replace = repo.root().join(".git/refs/replace");
+    assert!(replace.join(main_head.trim()).is_file());
+    let big = std::fs::File::create(replace.join("1".repeat(40))).unwrap();
+    big.set_len(200 << 20).unwrap();
+    drop(big);
+    let got = ours(&repo.status());
+    assert!(got.is_empty(), "replace refs were honoured: {got:?}");
+    let cli = repo
+        .cmd_in(
+            &repo.root(),
+            &["--no-optional-locks", "status", "--porcelain=v2"],
+        )
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .output()
+        .unwrap();
+    assert!(cli.stdout.is_empty(), "the CLI without replace refs agrees");
+    // `refs/replace` a symlink to a folder outside the repository: refused.
+    let repo = build_fixture("worktree-modified");
+    let outside = canonical(repo.env.path()).join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let big = std::fs::File::create(outside.join("4".repeat(40))).unwrap();
+    big.set_len(200 << 20).unwrap();
+    drop(big);
+    std::os::unix::fs::symlink(&outside, repo.root().join(".git/refs/replace")).unwrap();
+    let st = repo.status();
+    assert!(
+        matches!(st, GitState::Unavailable(GitError::Redirected)),
+        "symlinked refs/replace: {st:?}"
+    );
+}
+
+/// P10 (G2, R-T7-6): loose objects are read on every status (the HEAD commit and every tree
+/// reachable from it), so a placeholder among them is never opened: `Unavailable(Dataless)`.
+/// The fan-out folder itself counts too.
+#[test]
+fn dataless_loose_object_is_unavailable() {
+    let repo = build_fixture("clean");
+    let head = String::from_utf8(repo.git(&["rev-parse", "HEAD"])).unwrap();
+    let head = head.trim();
+    let tree = String::from_utf8(repo.git(&["rev-parse", "HEAD^{tree}"])).unwrap();
+    let tree = tree.trim();
+    assert!(matches!(repo.status(), GitState::Ready(_)), "control");
+    for (case, flagged) in [
+        (
+            "commit",
+            format!(".git/objects/{}/{}", &head[..2], &head[2..]),
+        ),
+        (
+            "tree",
+            format!(".git/objects/{}/{}", &tree[..2], &tree[2..]),
+        ),
+        ("fan-out folder", format!(".git/objects/{}", &tree[..2])),
+    ] {
+        let st = dataless_state(&repo, &flagged);
+        assert!(is_dataless(&st), "{case}: {st:?}");
+    }
+}
+
+/// G2: more loose objects than can be checked before a status answers the diagnostic "too
+/// many loose objects; run git gc" (`TooLarge(LooseObjects)`), never a status that might
+/// open a placeholder.
+#[test]
+fn too_many_loose_objects_is_unavailable() {
+    let repo = build_fixture("clean");
+    let fan = repo.root().join(".git/objects/00");
+    std::fs::create_dir_all(&fan).unwrap();
+    for i in 0..20_001 {
+        std::fs::write(fan.join(format!("{i:038}")), b"").unwrap();
+    }
+    let st = repo.status();
+    assert!(
+        matches!(
+            st,
+            GitState::Unavailable(GitError::TooLarge(hacivat_git::TooLargeWhy::LooseObjects))
+        ),
+        "{st:?}"
+    );
+}
+
+/// p1: the small files our own checks read before the open, and the split index, are never
+/// opened as placeholders: a linked worktree's `commondir` and `gitdir`, the alternates file
+/// and an alternate's loose object, `sharedindex.*`. A FIFO `sharedindex.*` never hangs.
+#[test]
+fn dataless_layout_files_and_split_index_are_unavailable() {
+    // Linked worktree: its git dir's `commondir` and `gitdir`.
+    let main = build_fixture("linked-worktree");
+    let wt_git = canonical(main.root().join(".git/worktrees/wt").as_path());
+    for f in ["commondir", "gitdir"] {
+        let st = dataless_state(&main, wt_git.join(f).to_str().unwrap());
+        assert!(is_dataless(&st), "linked worktree {f}: {st:?}");
+    }
+    // A shared clone: its alternates file, and a loose object in the alternate.
+    let clone = build_fixture("shared-clone");
+    let st = dataless_state(&clone, ".git/objects/info/alternates");
+    assert!(is_dataless(&st), "alternates: {st:?}");
+    let head = String::from_utf8(clone.git(&["rev-parse", "HEAD"])).unwrap();
+    let head = head.trim().to_owned();
+    let in_alternate = clone
+        .root()
+        .join(".git/objects")
+        .join(&head[..2])
+        .join(&head[2..]);
+    assert!(
+        in_alternate.is_file(),
+        "the source repository holds HEAD loose"
+    );
+    let st = dataless_state(&clone, in_alternate.to_str().unwrap());
+    assert!(is_dataless(&st), "alternate's loose object: {st:?}");
+    // A split index: `sharedindex.<sha>`.
+    let repo = build_fixture("worktree-modified");
+    repo.git(&["update-index", "--split-index"]);
+    let shared = std::fs::read_dir(repo.root().join(".git"))
+        .unwrap()
+        .filter_map(|e| e.unwrap().file_name().into_string().ok())
+        .find(|n| n.starts_with("sharedindex."))
+        .expect("a shared index after --split-index");
+    let st = dataless_state(&repo, &format!(".git/{shared}"));
+    assert!(is_dataless(&st), "sharedindex: {st:?}");
+    #[cfg(unix)]
+    {
+        let p = repo.root().join(".git").join(&shared);
+        std::fs::remove_file(&p).unwrap();
+        assert!(Command::new("mkfifo").arg(&p).status().unwrap().success());
+        let st = repo.status();
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Redirected)),
+            "FIFO sharedindex: {st:?}"
+        );
+    }
+}
+// ## m4b-t07-git

@@ -186,11 +186,9 @@ fn pipeline(
     let placeholder = |p: &Path| {
         hooked.contains(p) || std::fs::symlink_metadata(p).is_ok_and(|m| map::is_dataless(&m))
     };
-    // A gitfile is read by `check_layout`; it must not be a placeholder.
-    if found.kind == discover::DotGit::File && placeholder(&found.dot_git) {
-        return GitState::Unavailable(GitError::Dataless);
-    }
-    let layout = match trust::check_layout(&found, &trust::current_user_owns) {
+    // p1: `check_layout` checks every file it reads (gitfile, `commondir`, alternates) for
+    // placeholders before reading it.
+    let layout = match trust::check_layout(&found, &trust::current_user_owns, &placeholder) {
         Ok(l) => l,
         Err(st) => return st,
     };
@@ -212,7 +210,12 @@ fn pipeline(
     if interrupt.load(Ordering::SeqCst) {
         return GitState::Unavailable(GitError::Timeout);
     }
-    let options = gix::open::Options::isolated().with(gix::sec::Trust::Reduced);
+    // G1 (R-T7-5): never scan `refs/replace` (gix reads every replace ref whole, and walks a
+    // symlinked `refs/replace` out of the repository). An API override is not a repository
+    // section, so the trust invariants still hold. Cost: no CLI parity for `git replace`.
+    let options = gix::open::Options::isolated()
+        .with(gix::sec::Trust::Reduced)
+        .config_overrides(["core.useReplaceRefs=false"]);
     let repo = match gix::open_opts(&found.worktree, options) {
         Ok(r) => r,
         Err(_) => return failed(FailKind::Open),

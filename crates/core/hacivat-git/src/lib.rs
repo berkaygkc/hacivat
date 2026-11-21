@@ -78,16 +78,28 @@ pub enum GitError {
     /// second one starts while it runs, so the library answers this until the read returns
     /// or the app restarts (m2). The call that hit the budget first answers `Timeout`.
     Paused,
-    /// The diagnostic "the repository is too large for the status": its index holds more
-    /// entries than gix decodes under reduced trust (16 MiB of decoded entries; the ceiling is
-    /// measured in `index_entry_ceiling_is_measured_at_the_boundary`). A library inside such a
-    /// repository has no badges (fix round 2, n1).
-    TooLarge,
+    /// The repository is too large for the status; the reason names the diagnostic. A library
+    /// inside such a repository has no badges.
+    TooLarge(TooLargeWhy),
     // ## m4b-t07-git
     /// The repository could not be read. The kind is fixed text of ours; no message from
     /// `gix` (which can quote config bytes) is kept (m3).
     Failed(FailKind),
 }
+
+// ## m4b-t07-git (fix round 3, G2)
+/// Why a repository is too large for the status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TooLargeWhy {
+    /// "The repository is too large for the status": its index holds more entries than gix
+    /// decodes under reduced trust (16 MiB of decoded entries, 209,715 entries; measured in
+    /// `index_entry_ceiling_is_measured_at_the_boundary`; fix round 2, n1).
+    Index,
+    /// "Too many loose objects; run git gc": more than 20,000 entries in an `objects/??/`
+    /// folder set, too many to check for cloud placeholders before the status (R-T7-6).
+    LooseObjects,
+}
+// ## m4b-t07-git
 
 // ## m4b-t07-git (fix round 1, m3)
 /// What failed, as a fixed kind (never a library's text).
