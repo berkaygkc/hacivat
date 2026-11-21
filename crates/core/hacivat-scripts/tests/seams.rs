@@ -2,36 +2,22 @@
 //! shown, bound, read, written, watched or passed: a stub that answered "visible", "bound",
 //! "saved" or "no secret" would be a silent weakening.
 
-use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 
 use hacivat_proto::{EnvTag, ProfileId};
 use hacivat_scripts::testing::FakeEventSource;
+// ## m4b-t04-scanner (named exception): `envscope`, `pathsafe` and `visible` are Task 4's now.
 use hacivat_scripts::{
-    AttachError, DatabaseName, DbNode, EntryKind, EnvScope, EventSource, FileOpError, LibraryId,
-    LibraryRoot, LibraryService, LibraryState, LinkState, LocalMapping, PathError, RawHint,
-    ReadError, RegistryError, RelPath, SaveError, SaveText, ScriptEntry, SecretKind, SpanKind,
-    UnavailableReason, WatchError, binding, envscope, fileio, manifest, pathsafe, scan_secrets,
-    visible,
+    AttachError, DatabaseName, DbNode, EntryKind, EventSource, FileOpError, LibraryId, LibraryRoot,
+    LibraryService, LibraryState, LocalMapping, PathError, RawHint, ReadError, RegistryError,
+    RelPath, SaveError, SaveText, SecretKind, SpanKind, UnavailableReason, WatchError, binding,
+    fileio, manifest, scan_secrets,
 };
 use hacivat_settings::LocalPaths;
 
 fn rel(s: &str) -> RelPath {
     RelPath::parse(s).unwrap()
-}
-
-fn entry(s: &str) -> ScriptEntry {
-    ScriptEntry {
-        rel: rel(s),
-        kind: EntryKind::Sql,
-        scope: EnvScope::Any,
-        link: LinkState::Plain,
-        dataless: false,
-        len: 8,
-        mtime: SystemTime::UNIX_EPOCH,
-    }
 }
 
 fn text(s: &str) -> SaveText {
@@ -73,18 +59,8 @@ fn service_with_library() -> (LibraryService, tempfile::TempDir, tempfile::TempD
     (s, app, lib)
 }
 
-#[test]
-fn visible_stub_hides_everything() {
-    assert!(!visible(&entry("a.sql"), Some(EnvTag::Dev)));
-    assert!(!visible(&entry("a.sql"), None));
-    for tag in EnvTag::ALL {
-        assert!(!visible(&entry("a.sql"), Some(tag)), "{tag:?}");
-    }
-    assert!(matches!(
-        envscope::scope_of(&rel("a.sql")),
-        EnvScope::Hidden(_)
-    ));
-}
+// ## m4b-t04-scanner (named exception): `visible_stub_hides_everything` is gone; Task 4 wrote
+// the rules (`tests/envscope.rs`).
 
 #[test]
 fn resolve_stub_binds_nothing() {
@@ -172,21 +148,8 @@ fn manifest_and_pathsafe_stubs_read_and_accept_nothing() {
         assert!(r.aliases.is_empty());
         assert_eq!(r.diags, [manifest::Diag::NotImplemented]);
     }
-    for name in ["a.sql", "ok", "rapor.sql"] {
-        assert_eq!(
-            pathsafe::component(OsStr::new(name)),
-            Err(PathError::NotImplemented)
-        );
-    }
-    let root = LibraryRoot {
-        id: LibraryId::new(),
-        path: dir.path().into(),
-        canonical: dir.path().canonicalize().unwrap(),
-    };
-    assert_eq!(
-        pathsafe::join(&root, &rel("a.sql")),
-        Err(PathError::NotImplemented)
-    );
+    // ## m4b-t04-scanner (named exception): the `pathsafe` stub assertions are gone; Task 4
+    // wrote the rules (`tests/pathsafe.rs`).
 }
 
 #[test]

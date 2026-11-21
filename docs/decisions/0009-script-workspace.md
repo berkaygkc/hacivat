@@ -206,3 +206,84 @@ The controller accepted all deviations (R-T1a-2); their carries go to Tasks 7, 1
 - **Public API (M1).** Type aliases of backend types (transitively) and renames of a backend crate (`use notify as n; pub use n::Config`) count as backend names; a backend trait implemented for a type this file declares private (`impl DebounceEventHandler for Sink` with `struct Sink;`) is allowed.
 - **Sets (M2).** `ScriptsBelowExec` also refuses `hacivat-net`, `hacivat-secrets` and `rustls`, and walks build edges as well as normal ones. `BACKENDS` gains `notify-types`, `file-id`, `inotify`, `inotify-sys`, `kqueue`, `kqueue-sys` and `fsevent-sys` (owner `hacivat-scripts`); the public-API list gains them too.
 - **Types (M3–M5).** `EnvSet`'s bit is an exhaustive `match`. `LibraryId` has no `Default`. `LogicalDb` derives no `PartialEq`/`Eq`/`Hash`/`Ord` (nor do `DbNode` and `ManifestRead`, which hold one); binding uses `LogicalDb::same_db`/`names::same_db` (HV-SCRIPT-02 step 4), a stub answering `false` until Task 3. `LocalPaths::script_recovery_dir` returns `Option<PathBuf>`, `None` unless `lib` is one plain name.
+
+## m4b-t04 — scan and scope
+
+Task 4 fills `pathsafe`, `scan`, `envscope`, `tree` and `dataless` (HV-SCRIPT-03, -04; R-M4b-6, -12..15, -23; Q3 option (a), Q15; alg/28 C11).
+
+### Names (`pathsafe::component`)
+
+- Refused on every host: empty, `.`, `..`, `/` or `\`, NUL, any control character (C0, DEL, C1), more than 255 bytes, not UTF-8. Bidi and invisible characters are allowed as names. Display escapes them.
+- Refused on Windows only: `<>:"|?*` (the plan named `:`; the other six cannot be created through Win32 either), a trailing dot or space, and the device names with any extension. The device names are the plan's list plus `COM0`, `LPT0`, the superscript `COM¹²³`/`LPT¹²³`, `CONIN$` and `CONOUT$`. The stem before the first `.` is compared with its trailing spaces dropped, so `con .sql` counts.
+  - On Unix these names stay ordinary. A macOS teammate's `con.sql` lists on macOS.
+  - `component_on(name, Host)` runs the Windows rules on every CI runner.
+- Signature: the seam's `Result<&str, PathError>` is kept. The plan's `NameProblem` is `PathError::Name(NameProblem)`, and its `PathProblem` is the other `PathError` variants. Task 1a's `PathError::NotImplemented` is gone, so a stale caller fails to compile instead of silently matching nothing.
+
+### Joining (`pathsafe::join`)
+
+- Every component is re-validated. The skipped ones (a leading `.`, `node_modules`) are refused (`Name(Skipped)`), so nothing opens `.git/` or `.hacivat/` through a library path. Task 3's manifest writer has its own fd-relative code.
+- The root must still resolve, both as chosen (`path`) and as stored (`canonical`), to `canonical`. Otherwise the answer is `RootChanged`.
+- Folders on the way are checked with `symlink_metadata`. A link or junction is `LinkOnPath`, even one that stays inside, and a file on the way is `NotAFolder`. Then the parent's `realpath` must lie under the root.
+- The last component:
+  - absent: the path is answered (new script);
+  - a FIFO, socket or device: `NotAFile`;
+  - a file or folder: its `realpath` must lie under the root;
+  - a file link: answers its canonical target only when the scan would list that target itself (a regular `.sql`/`.md` file inside the root, in no skipped folder). Otherwise `OutsideRoot`, which covers out, dangling, a loop, a folder, `.git/config`, `notes.txt` and the root itself.
+- Containment is a component-wise byte prefix of canonical paths, never a case fold. On a case-insensitive volume, `realpath` returns the stored case on both sides.
+- `join` is a check, as fresh as the call. Task 5 still opens relative to a directory handle with `O_NOFOLLOW` (HV-SCRIPT-03 step 8, carries n8).
+
+### The scan (`scan::scan`)
+
+- Through the `Fs` seam, which has `read_dir` (names), `symlink_metadata`, `canonicalize` and `resolve`. It has no read method, so a scan cannot read contents by construction.
+  - `resolve` is new beside the plan's sketch. `ErrorKind::FilesystemLoop` is unstable, so loops are told apart by `ELOOP`, or 1921 on Windows.
+  - Tests inject an in-memory `Fs`.
+- The walk is iterative, with an explicit stack. Names are visited in byte order, so a stop is deterministic. The output is in tree order (`tree::order`): an ancestor before its contents, folders before files among siblings, then the name's bytes.
+- Not listed:
+  - dot names (folders and files, C11) and `node_modules` (ASCII case-insensitive), skipped silently;
+  - names that fail `component`, each with a `Diag::BadName` that holds the display form;
+  - FIFOs, sockets and devices;
+  - folders without a listed file below them.
+- File links are resolved once:
+  - `InsideLink` takes the target's metadata. Its scope is the intersection of the link's scope and the target's (`envscope::combine`). Without that, a plain `a.sql` pointing at `@staging/drop_all.sql` would show a staging-only script on production.
+  - A target outside the root is never `lstat`ed.
+  - A link to a folder is never followed. One named like a script is listed as `OutsideLink`; any other is not listed.
+- Limits are R-M4b-14 plus two the plan did not name:
+  - 20,000 files;
+  - depth 32: a listed entry has at most 32 components;
+  - 200,000 visited names: a library full of `.txt` files also stops;
+  - 256 diagnostics, with the environment diagnostics first and the rest counted in `suppressed`.
+  - Any of the first three stops the whole scan where it is, with `stopped` set and what was found kept.
+- `ScanResult.root` reports a root that could not be scanned: `Missing`, `Changed` (repointed, or a stored path that is not canonical) or `Unreadable`. Then nothing is listed.
+- Identity is the OS bytes. `RelPath` holds exactly what `read_dir` returned (NFD on macOS included); display is `RelPath::display_text`, which is NFC plus the `<U+XXXX>` escapes.
+  - **Carry for Tasks 7 and 10:** `GitPath` keys must equal these bytes.
+- Dataless files: macOS `SF_DATALESS` is defined here as `1 << 30`, because `libc` 0.2.191 lacks it. On Windows, `RECALL_ON_DATA_ACCESS`, `RECALL_ON_OPEN` and `OFFLINE` all count.
+  - Fail closed: a file wrongly called dataless only loses its badge, while a file wrongly called local would be hashed and so downloaded.
+  - The flag comes from the scan's own `lstat`. Other systems answer `false`.
+- **Carry for Task 10:** `LibraryDiag` (service, Task 10's file) has no scan arm yet. Task 10 adds `LibraryDiag::Scan(scan::Diag)` and maps `ScanResult.root` to `Unavailable(Missing | RootChanged)`.
+
+### Environment scoping (`envscope`)
+
+- Only the five tags scope, ASCII case-insensitive (`@PRODUCTION`). No locale casing anywhere, so `@productİon` and `@productıon` are unknown under `tr_TR` too. The tests also run under `LC_ALL=tr_TR.UTF-8`.
+- Unknown, and so hidden everywhere with a diagnostic:
+  - any other `@name`;
+  - a folder that reads as an environment folder but is not a plain `@` followed by visible text: a full-width `＠` or small `﹫` commercial at, or an invisible formatting character anywhere in it (`\u{200B}@production`, `@production\u{200B}`, a bidi override).
+  - Treating those as ordinary folders would fail open.
+- "Did you mean" (`EnvFolder::Unknown { suggestion }`) is computed over the visible text, ASCII-folded, in this order:
+  1. an exact tag;
+  2. the closest tag by optimal string alignment distance, at most 3 and at most half the tag's length, ties going to the more severe tag;
+  3. a tag the text starts, given at least 3 characters (`@prod`);
+  4. a tag that starts the text (`@develop`).
+  - So `@x` and `@` suggest nothing, and `@stg` suggests nothing.
+- Folder components only (`@production.sql` scopes nothing).
+  - A folder entry is scoped by its own name too (`folder_scope`), so the `@production` row itself is hidden on staging.
+  - `visible` recomputes the scope from the entry's path and also requires the stored scope, so an entry built with `EnvScope::Any` cannot widen it, and a link keeps its target's narrower scope.
+- Diagnostics: one `UnknownEnvFolder { name, suggestion }` per distinct unknown name among the listed folders, and one `EnvContradiction { folder }` where a chain first becomes empty. The text comes from the UI's FTL, never from here.
+
+### Measurements and verification
+
+- Scan time on macOS (APFS, debug build), three runs: 10,000 files in 46 ms, 20,000 files in 91–95 ms. These are the `#[ignore = "perf"]` tests, gated on `HACIVAT_PERF`.
+- The `pathsafe` fuzz target ran for 60 s on nightly-2026-11-01: 10.2 M runs, no crash.
+
+### Named exception
+
+`tests/seams.rs` (Task 1a's file): the stub assertions for `visible`, `pathsafe::component` and `pathsafe::join` are removed, with fenced `// ## m4b-t04-scanner` notes in their place. Their real rules are tested in `tests/{envscope,pathsafe,scan}.rs`.
