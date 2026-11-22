@@ -63,6 +63,7 @@ pub struct Debouncer {
     paths: BTreeSet<PathBuf>,
     rescan: bool,
     lost: bool,
+    pending_at: Option<Instant>,
 }
 
 /// How long an overflowed burst that keeps going waits for its rescan at most.
@@ -90,40 +91,72 @@ impl Debouncer {
             paths: BTreeSet::new(),
             rescan: false,
             lost: false,
+            pending_at: None,
         }
     }
 
-    /// Takes one hint that arrived at `at`.
+    /// Takes one hint that arrived at `at` (a path counts toward a burst).
     pub fn push(&mut self, hint: RawHint, at: Instant) {
         match hint {
-            RawHint::Lost => self.lost = true,
+            RawHint::Lost => {
+                self.lost = true;
+                self.mark(at);
+            }
             RawHint::Rescan(_) => {
                 self.rescan = true;
                 self.paths.clear();
+                self.mark(at);
             }
-            RawHint::Path(path) => {
-                if self.last_at.is_none_or(|l| at >= l + self.window) {
-                    // A new burst; an overflowed one that was not flushed yet is due now.
-                    if self.overflowed.take().is_some() {
-                        self.rescan = true;
-                        self.paths.clear();
-                    }
-                    self.burst.clear();
-                    self.began = Some(at);
-                }
-                self.last_at = Some(at);
-                if self.overflowed.is_some() {
-                    return;
-                }
-                self.burst.insert(path.clone());
-                self.paths.insert(path);
-                if self.burst.len() > self.max_hints {
-                    self.overflowed = Some(at);
-                    self.burst.clear();
-                    self.paths.clear();
-                }
-            }
+            RawHint::Path(path) => self.push_path(path, at, true),
         }
+    }
+
+    /// Takes one path hint that arrived at `at`.
+    ///
+    /// ## m4b-t09-watcher fix round 2 (N1): only a `counted` hint (one that passed the
+    /// watcher's name filter as a possible script or folder) counts toward a burst and extends
+    /// it; an uncounted one (another extension: build output) is only passed on, unless a
+    /// burst has overflowed.
+    pub fn push_path(&mut self, path: PathBuf, at: Instant, counted: bool) {
+        if !counted {
+            if self.overflowed.is_none() {
+                self.paths.insert(path);
+                self.mark(at);
+            }
+            return;
+        }
+        if self.last_at.is_none_or(|l| at >= l + self.window) {
+            // A new burst; an overflowed one that was not flushed yet is due now.
+            if self.overflowed.take().is_some() {
+                self.rescan = true;
+                self.paths.clear();
+                self.mark(at);
+            }
+            self.burst.clear();
+            self.began = Some(at);
+        }
+        self.last_at = Some(at);
+        if self.overflowed.is_some() {
+            return;
+        }
+        self.burst.insert(path.clone());
+        self.paths.insert(path);
+        self.mark(at);
+        if self.burst.len() > self.max_hints {
+            self.overflowed = Some(at);
+            self.burst.clear();
+            self.paths.clear();
+        }
+    }
+
+    fn mark(&mut self, at: Instant) {
+        self.pending_at.get_or_insert(at);
+    }
+
+    /// Since when something waits to be flushed (so a hint pushed by the watcher itself, not
+    /// by a source, still wakes it).
+    pub fn pending_at(&self) -> Option<Instant> {
+        self.pending_at
     }
 
     /// Until when reports wait because hints are still arriving: one window after the latest
@@ -158,9 +191,10 @@ impl Debouncer {
             && now >= due
         {
             self.rescan = true;
-            let going = self.last_at.is_some_and(|l| now < l + self.window);
-            // Still going: swallow on, and hand on another rescan later.
-            self.overflowed = going.then_some(now);
+            // Fix round 2 (N1): counting starts afresh after each handed-on rescan, so a long
+            // run of moderate churn is never one ever-growing burst.
+            self.overflowed = None;
+            self.burst.clear();
         }
         if std::mem::take(&mut self.rescan) {
             self.paths.clear();
@@ -170,6 +204,7 @@ impl Debouncer {
                 std::mem::take(&mut self.paths).into_iter().collect(),
             ));
         }
+        self.pending_at = None;
         out
     }
 

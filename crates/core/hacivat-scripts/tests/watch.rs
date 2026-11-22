@@ -254,7 +254,9 @@ fn an_endless_burst_still_rescans_every_two_seconds() {
             rescans.push(step);
         }
     }
-    assert_eq!(rescans, vec![20, 40]);
+    // Fix round 2 (N1): counting starts afresh after each rescan, so the next overflow (one
+    // step later) waits its own 2 s.
+    assert_eq!(rescans, vec![20, 41]);
     assert_eq!(d.flush(t0() + ms(4_900 + 150)), vec![Flushed::Rescan]);
 }
 
@@ -1623,9 +1625,10 @@ fn watch_dirs_are_real_folders_only() {
         counting.asked_under(&lib.path("a/root")),
         Vec::<PathBuf>::new()
     );
+    // Only `.git/logs` itself is looked at (fix round 2, m-fr1-1), never anything inside.
     assert_eq!(
         counting.asked_under(&lib.path(".git")),
-        Vec::<PathBuf>::new()
+        vec![lib.path(".git/logs")]
     );
     let small = lib.rec_with(WatchOpts {
         max_dirs: 3,
@@ -1634,11 +1637,18 @@ fn watch_dirs_are_real_folders_only() {
     assert_eq!(small.watch_dirs(), Err(4));
 }
 
+/// What a [`PerDir`] does with each folder a sync adds.
+type OnAdd = Arc<dyn Fn(&Path) + Send + Sync>;
+
 /// A source that watches per folder and records what it was told.
 #[derive(Clone, Default)]
 struct PerDir {
     synced: Arc<Mutex<Vec<BTreeSet<PathBuf>>>>,
     refuse: bool,
+    /// Called for every folder a sync adds (fix round 2, N2: a file written there before its
+    /// watch exists, so no event will ever name it).
+    on_add: Option<OnAdd>,
+    seen: Arc<Mutex<BTreeSet<PathBuf>>>,
 }
 
 impl EventSource for PerDir {
@@ -1649,12 +1659,25 @@ impl EventSource for PerDir {
     fn per_dir(&self) -> bool {
         true
     }
-    fn sync_dirs(&mut self, _root: &Path, dirs: &BTreeSet<PathBuf>) -> Result<(), WatchError> {
-        self.synced.lock().unwrap().push(dirs.clone());
+    fn sync_dirs(&mut self, _root: &Path, dirs: &BTreeSet<PathBuf>) -> Result<usize, WatchError> {
+        let mut synced = self.synced.lock().unwrap();
+        let added = match synced.last() {
+            Some(before) => dirs.difference(before).count(),
+            None => dirs.len(),
+        };
+        synced.push(dirs.clone());
+        drop(synced);
         if self.refuse {
             return Err(WatchError::Backend("watch limit".into()));
         }
-        Ok(())
+        if let Some(on_add) = &self.on_add {
+            let before = self.seen.lock().unwrap().clone();
+            for d in dirs.difference(&before) {
+                on_add(d);
+            }
+        }
+        self.seen.lock().unwrap().extend(dirs.iter().cloned());
+        Ok(added)
     }
 }
 
@@ -1681,7 +1704,11 @@ fn per_folder_watches_follow_new_and_removed_folders() {
         fn per_dir(&self) -> bool {
             true
         }
-        fn sync_dirs(&mut self, root: &Path, dirs: &BTreeSet<PathBuf>) -> Result<(), WatchError> {
+        fn sync_dirs(
+            &mut self,
+            root: &Path,
+            dirs: &BTreeSet<PathBuf>,
+        ) -> Result<usize, WatchError> {
             self.0.sync_dirs(root, dirs)
         }
     }
@@ -1966,4 +1993,335 @@ fn vm_shared_folders_are_polled() {
             "{p}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m4b-t09-watcher fix round 2 (re-review N1, N2, m-fr1-1..6).
+
+/// Ticks a reconciler every 100 ms for `steps` steps, pushing `hints(k)` before each tick, and
+/// collects `(ms, event)`.
+fn every_100ms(
+    r: &mut Reconciler,
+    start: Instant,
+    steps: u64,
+    mut hints: impl FnMut(u64) -> Vec<RawHint>,
+) -> Vec<(u64, WatchEvent)> {
+    let mut out = Vec::new();
+    for k in 0..steps {
+        let at = start + ms(100 * k);
+        for h in hints(k) {
+            r.push(h, at);
+        }
+        out.extend(r.tick(at).into_iter().map(|e| (100 * k, e)));
+    }
+    out
+}
+
+/// P8 (re-review probe): 10 ignored paths (`node_modules`) every 100 ms for 30 s, and a real
+/// edit of `a.sql` at 12 s. Ignored names never count toward a burst, so the edit is reported
+/// on its own, within 2 s plus the debounce, and nothing is rescanned.
+#[test]
+fn noise_churn_starves_a_real_edit() {
+    let lib = Lib::new(&[("a.sql", "SELECT 1;")]);
+    let mut r = lib.rec();
+    let start = Instant::now();
+    let out = every_100ms(&mut r, start, 300, |k| {
+        let mut hints: Vec<RawHint> = (0..10)
+            .map(|j| lib.hint(&format!("node_modules/p{}.js", k * 10 + j)))
+            .collect();
+        if k == 120 {
+            lib.write("a.sql", "SELECT 1; SELECT 2;");
+            hints.push(lib.hint("a.sql"));
+        }
+        hints
+    });
+    let changed: Vec<u64> = out
+        .iter()
+        .filter(|(_, e)| *e == WatchEvent::Changed(rel("a.sql")))
+        .map(|(t, _)| *t)
+        .collect();
+    assert_eq!(changed.len(), 1, "{out:?}");
+    assert!(changed[0] <= 12_000 + 2_000 + 150, "{changed:?}");
+    assert!(
+        !out.iter().any(|(_, e)| *e == WatchEvent::Rescan),
+        "{out:?}"
+    );
+}
+
+/// The same with churn that does count (names that may be folders: build output without an
+/// extension), past the burst limit: rescans happen, and an open file's edit is still
+/// settled and reported on its own, never learned silently by a rescan.
+#[test]
+fn counted_churn_past_the_limit_still_reports_an_open_files_edit() {
+    let lib = Lib::new(&[("a.sql", "SELECT 1;"), ("b.sql", "SELECT 2;")]);
+    let mut r = lib.rec();
+    r.remember(&rel("a.sql"), &lib.read_stamp("a.sql"));
+    let start = Instant::now();
+    let out = every_100ms(&mut r, start, 200, |k| {
+        let mut hints: Vec<RawHint> = (0..20)
+            .map(|j| lib.hint(&format!("gen/f{}", k * 20 + j)))
+            .collect();
+        // Inside the second overflow (it begins near 12.1 s): the hints are swallowed.
+        if k == 130 {
+            lib.write("a.sql", "SELECT 1; SELECT 11;");
+            lib.write("b.sql", "SELECT 2; SELECT 22;");
+            hints.push(lib.hint("a.sql"));
+            hints.push(lib.hint("b.sql"));
+        }
+        hints
+    });
+    let mut out = out;
+    out.extend(
+        drain(&mut r, start + ms(20_000))
+            .into_iter()
+            .map(|e| (20_000, e)),
+    );
+    let rescans = out.iter().filter(|(_, e)| *e == WatchEvent::Rescan).count();
+    assert!(rescans >= 2, "{out:?}");
+    let changed: Vec<u64> = out
+        .iter()
+        .filter(|(_, e)| *e == WatchEvent::Changed(rel("a.sql")))
+        .map(|(t, _)| *t)
+        .collect();
+    assert_eq!(changed.len(), 1, "{out:?}");
+    assert!(changed[0] <= 13_000 + 2_000 + 2 * 150 + 100, "{changed:?}");
+    // b.sql nobody has open: covered by the rescans (the service rescans the tree).
+    assert!(
+        !out.iter()
+            .any(|(_, e)| *e == WatchEvent::Changed(rel("b.sql")))
+    );
+}
+
+#[test]
+fn ignored_names_never_count_toward_a_burst() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let mut r = lib.rec();
+    let mut hints: Vec<RawHint> = Vec::new();
+    for i in 0..1_500 {
+        hints.push(lib.hint(&format!("node_modules/m/{i}.js")));
+        hints.push(lib.hint(&format!(".git/objects/{i:02x}/obj")));
+        hints.push(lib.hint(&format!(".next/cache/{i}.json")));
+        hints.push(lib.hint(&format!("target/debug/{i}.o")));
+    }
+    assert_eq!(run(&mut r, hints, t0()), vec![]);
+    // Names that may be folders or scripts still count.
+    let hints: Vec<RawHint> = (0..1_001).map(|i| lib.hint(&format!("f{i}.sql"))).collect();
+    assert_eq!(
+        run(&mut r, hints, t0() + ms(1_000)),
+        vec![WatchEvent::Rescan]
+    );
+}
+
+#[test]
+fn uncounted_hints_do_not_extend_or_start_a_burst() {
+    let mut d = Debouncer::new(ms(150));
+    for i in 0..5_000 {
+        d.push_path(format!("/lib/b/{i}.o").into(), t0(), false);
+    }
+    assert_eq!(d.hold_until(), None);
+    let out = d.flush(t0() + ms(1));
+    assert!(
+        matches!(&out[..], [Flushed::Paths(p)] if p.len() == 5_000),
+        "{out:?}"
+    );
+}
+
+/// N2: a folder added by a sync may already hold files written before its watch existed; no
+/// event will name them, so the watcher looks at the root once more.
+#[test]
+fn files_made_before_a_new_folders_watch_are_found() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let root = lib.root.canonical.clone();
+    let src = PerDir {
+        on_add: Some(Arc::new(move |d: &Path| {
+            if d.ends_with("n") {
+                // Written between the walk that listed `n` and its watch: never an event.
+                fs::write(d.join("late.sql"), "SELECT 9;").unwrap();
+            }
+        })),
+        ..PerDir::default()
+    };
+    let (fake, handle) = FakeEventSource::new();
+    struct Both(PerDir, FakeEventSource);
+    impl EventSource for Both {
+        fn watch(
+            &mut self,
+            root: &Path,
+            sink: hacivat_scripts::HintSink,
+        ) -> Result<(), WatchError> {
+            self.1.watch(root, sink)
+        }
+        fn unwatch(&mut self, root: &Path) {
+            self.1.unwatch(root)
+        }
+        fn per_dir(&self) -> bool {
+            true
+        }
+        fn sync_dirs(
+            &mut self,
+            root: &Path,
+            dirs: &BTreeSet<PathBuf>,
+        ) -> Result<usize, WatchError> {
+            self.0.sync_dirs(root, dirs)
+        }
+    }
+    let (tx, mut ev) = Events::new();
+    let _w = Watcher::start(
+        lib.root.clone(),
+        WatchOpts::default(),
+        tx,
+        Box::new(Both(src, fake)),
+    )
+    .unwrap();
+    // An empty folder: its scan finds nothing, so no look is pending when its watch is added.
+    fs::create_dir(lib.path("n")).unwrap();
+    handle.emit(&root, vec![lib.hint("n")]);
+    ev.wait_for("late file", |e| {
+        e.contains(&WatchEvent::Created(rel("n/late.sql")))
+    });
+}
+
+/// A root hint the watcher pushes itself (after the first sync, after a sync that added
+/// folders) wakes it; it never waits for an unrelated event.
+#[test]
+fn a_hint_pushed_by_the_watcher_itself_is_due_at_once() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let mut r = lib.rec();
+    assert_eq!(r.next_due(), None);
+    r.push(lib.hint(""), t0());
+    assert_eq!(r.next_due(), Some(t0()));
+    let _ = r.tick(t0());
+    assert_eq!(r.next_due(), None);
+}
+
+// m-fr1-1: ref-only repository moves.
+
+#[test]
+fn a_ref_only_move_is_a_repository_change() {
+    let lib = Lib::new(&[("a.sql", "x"), (".git/logs/HEAD", "0 1 t\n")]);
+    let mut r = lib.rec();
+    assert_eq!(
+        run(&mut r, vec![lib.hint(".git/logs/HEAD")], t0()),
+        vec![WatchEvent::RepositoryChanged]
+    );
+    let dirs = r.watch_dirs().unwrap();
+    assert!(dirs.contains(&lib.path(".git/logs")), "{dirs:?}");
+    assert!(!dirs.contains(&lib.path(".git/logs/refs")));
+}
+
+#[test]
+fn the_poll_source_sees_a_ref_only_move() {
+    use hacivat_scripts::watch::PollEventSource;
+    let lib = Lib::new(&[("a.sql", "x"), (".git/HEAD", "ref: refs/heads/main\n")]);
+    lib.write(".git/logs/HEAD", "0 1 t\n");
+    let src = PollEventSource::with_interval(ms(20)).unwrap();
+    let (tx, mut ev) = Events::new();
+    let _w = Watcher::start(lib.root.clone(), WatchOpts::default(), tx, Box::new(src)).unwrap();
+    lib.write("sentinel.sql", "s");
+    ev.wait_for("sentinel", |e| {
+        e.contains(&WatchEvent::Created(rel("sentinel.sql")))
+    });
+    // `reset --soft` moves the branch: only `logs/HEAD` (and the ref) change.
+    lib.write(".git/logs/HEAD", "0 1 t\n1 2 t\n");
+    ev.wait_for("logs", |e| e.contains(&WatchEvent::RepositoryChanged));
+}
+
+// m-fr1-2: a future date is racy only near the look.
+
+#[test]
+fn a_file_dated_far_ahead_is_not_racy_forever() {
+    let lib = Lib::new(&[("far.sql", "x"), ("near.sql", "y")]);
+    set_mtime(
+        &lib.path("far.sql"),
+        SystemTime::now() + Duration::from_secs(3_600),
+    );
+    set_mtime(&lib.path("near.sql"), SystemTime::now() + ms(900));
+    let mut r = lib.rec();
+    assert_eq!(
+        run(
+            &mut r,
+            vec![lib.hint("far.sql"), lib.hint("near.sql")],
+            t0()
+        ),
+        vec![WatchEvent::PossiblyChanged(rel("near.sql"))]
+    );
+}
+
+// m-fr1-4: a hint through a folder swapped for a link.
+
+#[cfg(unix)]
+#[test]
+fn a_hint_through_a_linked_folder_triggers_a_scan_and_so_a_sync() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), lib.path("swapped")).unwrap();
+    let mut r = lib.rec();
+    r.push(lib.hint("swapped/notes.txt"), t0());
+    assert_eq!(r.tick(t0()), vec![]);
+    assert!(
+        r.last_tick().scanned,
+        "the folder watches are re-synced after a scan"
+    );
+}
+
+// m-fr1-5: the backstop re-arms a silently stopped source.
+
+#[test]
+fn a_backstop_look_finding_an_unannounced_change_asks_for_a_rearm() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let mut r = lib.rec_with(WatchOpts {
+        backstop: Some(Duration::from_secs(30)),
+        ..WatchOpts::default()
+    });
+    r.start_backstop(t0());
+    lib.write("a.sql", "xyz");
+    let at = t0() + Duration::from_secs(30);
+    let _ = r.tick(at);
+    assert!(r.last_tick().rearm);
+    // A change that a hint announced is not a reason to re-arm.
+    lib.write("a.sql", "xyzw");
+    r.push(lib.hint("a.sql"), at + ms(500));
+    let _ = r.tick(at + ms(500));
+    let at = at + Duration::from_secs(30);
+    let _ = r.tick(at);
+    assert!(!r.last_tick().rearm);
+}
+
+#[test]
+fn the_watcher_rearms_a_source_that_stopped_silently() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let watches = Arc::new(Mutex::new(0usize));
+    struct Counted(FakeEventSource, Arc<Mutex<usize>>);
+    impl EventSource for Counted {
+        fn watch(
+            &mut self,
+            root: &Path,
+            sink: hacivat_scripts::HintSink,
+        ) -> Result<(), WatchError> {
+            *self.1.lock().unwrap() += 1;
+            self.0.watch(root, sink)
+        }
+        fn unwatch(&mut self, root: &Path) {
+            self.0.unwatch(root)
+        }
+    }
+    let (fake, _handle) = FakeEventSource::new();
+    let (tx, mut ev) = Events::new();
+    let _w = Watcher::start(
+        lib.root.clone(),
+        WatchOpts {
+            backstop: Some(ms(50)),
+            ..WatchOpts::default()
+        },
+        tx,
+        Box::new(Counted(fake, watches.clone())),
+    )
+    .unwrap();
+    // The source never reports this write.
+    lib.write("b.sql", "y");
+    ev.wait_for("rearmed", |e| e.contains(&WatchEvent::BackendRearmed));
+    ev.wait_for("created", |e| {
+        e.contains(&WatchEvent::Created(rel("b.sql")))
+    });
+    assert!(*watches.lock().unwrap() >= 2);
 }

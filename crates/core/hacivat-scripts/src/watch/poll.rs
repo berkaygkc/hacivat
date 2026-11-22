@@ -45,7 +45,11 @@ pub const MAX_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The repository files whose stamps a pass compares (Task 7 reads them; the pass only
 /// `lstat`s them).
-const REPOSITORY_FILES: [&str; 3] = ["HEAD", "index", "packed-refs"];
+///
+/// ## m4b-t09-watcher fix round 2 (m-fr1-1): `logs/HEAD` too, appended on every move of
+/// `HEAD`'s branch, so a ref-only change (`reset --soft`, `update-ref`) is seen. Its folder
+/// `logs` must be a real folder.
+const REPOSITORY_FILES: [&str; 4] = ["HEAD", "index", "packed-refs", "logs/HEAD"];
 
 /// The next interval after a pass: back to `base` on a change, doubled (up to `max`) when
 /// nothing changed, and never less than five times what the pass cost.
@@ -68,13 +72,17 @@ type GitStamp = Option<(u64, SystemTime, bool)>;
 
 /// The `(len, mtime, dataless)` of the repository files, from `lstat` only; `None` when the
 /// root has no real `.git` folder.
-fn repository_stamps(root: &Path) -> Option<[GitStamp; 3]> {
+fn repository_stamps(root: &Path) -> Option<[GitStamp; 4]> {
     let git = root.join(".git");
-    let meta = std::fs::symlink_metadata(&git).ok()?;
-    if !meta.file_type().is_dir() {
+    let real_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir());
+    if !real_dir(&git) {
         return None;
     }
+    let logs = real_dir(&git.join("logs"));
     Some(REPOSITORY_FILES.map(|name| {
+        if name.contains('/') && !logs {
+            return None;
+        }
         let m = std::fs::symlink_metadata(git.join(name)).ok()?;
         m.file_type().is_file().then(|| {
             (
@@ -93,7 +101,7 @@ struct Root {
     last_pass: Instant,
     next: Instant,
     /// `None` before the first pass.
-    git: Option<Option<[GitStamp; 3]>>,
+    git: Option<Option<[GitStamp; 4]>>,
 }
 
 struct State {

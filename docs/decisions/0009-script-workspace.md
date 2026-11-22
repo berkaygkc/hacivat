@@ -811,3 +811,33 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
   - **m8:** `watches_in_use` counts only processes owned by the user of `/proc/self`.
   - **m9:** residual, recorded. The echo and rename hash opens the path `join_with` validated, with `O_NOFOLLOW` on the last component only. A folder swapped for a link between the two could make it read at most the expected length plus one byte of a regular file elsewhere, only to compare a hash. Reusing T5's directory-handle opens is carried to Task 20.
   - **m10:** a path goes to every watched root that holds it (nested libraries sharing a source).
+
+### Fix round 2 (re-review N1, N2, m-fr1-1 to m-fr1-6)
+
+- **N1: only names that matter count toward a burst.**
+  - `Reconciler::push` runs the string-only half of `classify` (`name_filter`) first.
+    - Dropped before the burst counter: a path outside the root, under a skipped folder (`node_modules`, `.git/objects`, `.next`, any dot folder), deeper than 32, or not UTF-8.
+    - Passed on but uncounted: a name with another extension (build output such as `*.o`, `*.js`). Such a name may still be a folder. It neither starts nor extends a burst.
+    - Counted: script names, extensionless names, known files, the root and the repository names.
+  - Counting starts afresh after each handed-on `Rescan`, so a long run of moderate churn is not one ever-growing burst.
+  - A rescan no longer learns an open file's change silently. A file with a known hash (a tab has it, or Hacivat wrote it) that changed or vanished keeps its old stamp and becomes a candidate (at most 256 per rescan). It settles and is reported as `Changed` or `Removed`, however many rescans a burst causes.
+  - Files nobody has open are covered by the `Rescan` (the service rescans the tree). That keeps `git_checkout_2000_is_one_rescan` at `per_file_events=0`.
+  - Tests:
+    - `noise_churn_starves_a_real_edit` (P8: 10 `node_modules` paths per 100 ms for 30 s; the edit at 12 s is `Changed` at 12.2 s, and there is no `Rescan`);
+    - `counted_churn_past_the_limit_still_reports_an_open_files_edit`;
+    - `ignored_names_never_count_toward_a_burst`;
+    - `uncounted_hints_do_not_extend_or_start_a_burst`.
+- **N2: a root look after a sync adds folders.** `EventSource::sync_dirs` answers how many folders it added. When that is more than zero, the watcher pushes one root hint, as `start` does. That finds files written in a folder before its watch existed, and folders listed too late; it converges once no folder is new.
+  - The same round fixed a latent wake-up gap. A hint the watcher pushes itself (this one, and `start`'s) now makes the reconciler due at once (`Debouncer::pending_at`). Before, it waited for an unrelated event.
+  - Tests: `files_made_before_a_new_folders_watch_are_found` (a fake source whose sync writes into the new, empty folder), `a_hint_pushed_by_the_watcher_itself_is_due_at_once`.
+- **m-fr1-1: ref-only moves.** `logs` is a repository name. On Linux, `.git/logs` is watched non-recursively when it is a real folder. The poll pass stamps `.git/logs/HEAD` too, only when `logs` is a real folder. So `reset --soft` and `update-ref` refresh the badges. Tests: `a_ref_only_move_is_a_repository_change`, `the_poll_source_sees_a_ref_only_move`.
+- **m-fr1-2: a future date is capped.** A time after the look is racy only while it is within the racy window of the look. A file dated far ahead (skew, an extracted archive) is not re-verified on every pass. Test: `a_file_dated_far_ahead_is_not_racy_forever`.
+- **m-fr1-3: notify-debouncer-full's root list (recorded residual).**
+  - Its roots are a `Vec`: `add_root` scans it per watch, `remove_root` runs `retain(starts_with)` per unwatch, and `recursive_mode()` scans it per event.
+  - A folder that vanished is unwatched by the kernel; our `unwatch` then fails before `remove_root`, so its entry stays for the source's life. That cannot be fixed from outside the crate.
+  - Measured with notify's `NullWatcher` (no OS work, debug build): adding 5,000 roots costs 1,031 ms, and unwatching them one by one 485 ms (`debouncer_root_bookkeeping_for_5000_folders_is_recorded`, `HACIVAT_PERF=1`).
+  - Mitigation: unwatching a per-folder source's last root stops the whole debouncer instead (no per-folder `remove_root`). This is what every drop and fallback does.
+  - Left: the start cost, which is on the blocking pool, linear-per-event lookups, and the leak of vanished folders' entries (one `PathBuf` each).
+- **m-fr1-4:** a hint through a folder that became a link (`join_with` answers `LinkOnPath`) is reconciled by a scan. After the scan, the per-folder watches are re-synced, which removes a stray watch on the link's target. Test: `a_hint_through_a_linked_folder_triggers_a_scan_and_so_a_sync`.
+- **m-fr1-5: the backstop re-arms.** A backstop look that finds a difference no hint announced since the previous one (`TickInfo::rearm`) makes the watcher unwatch and re-watch the root of an OS source, and say `WatchEvent::BackendRearmed`. If the re-watch fails, the library falls back to polling. A per-folder source is not re-armed this way (it is Linux's, and has no backstop). Tests: `a_backstop_look_finding_an_unannounced_change_asks_for_a_rearm`, `the_watcher_rearms_a_source_that_stopped_silently`.
+- **m-fr1-6: residual of R-T9-3.** A tool that restores an old modification time (`rsync -t`, `cp -p`, `touch -r`, `tar x`) on a file last seen well after that time keeps `(len, mtime)` equal and outside the racy window, so the edit is not seen until the next one. These are git's racy-clean semantics. A same-length edit restored this way is reported only if a tab re-reads the file. Seeing it would mean hashing every file on every look.

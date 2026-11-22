@@ -141,13 +141,32 @@ impl Real {
         }
     }
 
-    /// The events seen, without the sentinels.
+    /// The events seen, without the sentinels, and without a `PossiblyChanged` that repeats a
+    /// file already reported.
+    ///
+    /// Fix round 2 (root cause of a 1-in-60 failure of `external_in_place_write_is_seen`):
+    /// FSEvents can deliver one write in two debounced batches (the write, then `sync_all`,
+    /// more than a window apart under load). The second hint arrives after the first change
+    /// settled, while the file's time is still within R-T9-3's 2 s window and no tab has it
+    /// open, so the ruled answer is `PossiblyChanged`. It names a file the test already saw
+    /// reported; it is not a second change.
     fn reported(&self) -> Vec<WatchEvent> {
-        self.seen
-            .iter()
-            .filter(|e| !matches!(e, WatchEvent::Created(r) | WatchEvent::Changed(r) | WatchEvent::Unsettled(r) if r.as_str().starts_with("zz-sentinel-")))
-            .cloned()
-            .collect()
+        let mut out: Vec<WatchEvent> = Vec::new();
+        for e in &self.seen {
+            if matches!(e, WatchEvent::Created(r) | WatchEvent::Changed(r) | WatchEvent::Unsettled(r) | WatchEvent::PossiblyChanged(r) if r.as_str().starts_with("zz-sentinel-"))
+            {
+                continue;
+            }
+            if let WatchEvent::PossiblyChanged(r) = e
+                && out
+                    .iter()
+                    .any(|x| matches!(x, WatchEvent::Created(y) | WatchEvent::Changed(y) if y == r))
+            {
+                continue;
+            }
+            out.push(e.clone());
+        }
+        out
     }
 }
 
@@ -678,4 +697,42 @@ fn short_name_event_is_reconciled() {
         }
     }
     assert_eq!(out, vec![WatchEvent::Changed(rel("longname_script.sql"))]);
+}
+
+/// Fix round 2 (m-fr1-3, recorded residual): the cost of `notify-debouncer-full`'s own root
+/// list for 5,000 per-folder watches, isolated with notify's `NullWatcher` (no OS work).
+#[test]
+#[ignore = "perf"]
+fn debouncer_root_bookkeeping_for_5000_folders_is_recorded() {
+    if std::env::var("HACIVAT_PERF").as_deref() != Ok("1") {
+        return;
+    }
+    use notify::RecursiveMode;
+    use notify_debouncer_full::{DebounceEventResult, NoCache, new_debouncer_opt};
+    let dirs: Vec<PathBuf> = (0..5_000)
+        .map(|i| PathBuf::from(format!("/lib/d{:02}/f{i:04}", i % 50)))
+        .collect();
+    let mut d = new_debouncer_opt::<_, notify::NullWatcher, NoCache>(
+        Duration::from_millis(150),
+        None,
+        |_: DebounceEventResult| {},
+        NoCache,
+        notify::Config::default().with_follow_symlinks(false),
+    )
+    .unwrap();
+    let t = Instant::now();
+    for p in &dirs {
+        d.watch(p, RecursiveMode::NonRecursive).unwrap();
+    }
+    let add = t.elapsed();
+    let t = Instant::now();
+    for p in &dirs {
+        let _ = d.unwatch(p);
+    }
+    let remove = t.elapsed();
+    println!(
+        "HV-FACT t09 debouncer_roots=5000 add_ms={} unwatch_each_ms={}",
+        add.as_millis(),
+        remove.as_millis()
+    );
 }
