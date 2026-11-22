@@ -425,6 +425,10 @@ pub enum Sources {
 }
 // ## m4b-t10-service
 
+// ## m4b-t13-explorer fix round 1
+/// What the file operations check against: the root, the listing and its diagnostics.
+type Listing = (LibraryRoot, Arc<[ScriptEntry]>, Arc<[LibraryDiag]>);
+
 /// Why creating, renaming or trashing a file was refused; the library is unchanged.
 ///
 /// ## m4b-t13-explorer (named exception): the Task 1a stub's `NotImplemented` is gone; these are
@@ -454,6 +458,19 @@ pub enum FileOpError {
     /// The operating system's trash refused it.
     Trash(io::ErrorKind),
     Io(io::ErrorKind),
+    // ## m4b-t13-explorer fix round 1
+    /// The rename would change which connections see the entry or anything inside it
+    /// (R-T13-2: renaming `@staging` to `common`, say).
+    ScopeChange,
+    /// The folder's subtree was not listed in full (a scan limit, an unreadable or dataless
+    /// folder, a refused name), so it cannot be checked for files the connection does not show
+    /// (review I1): "too large to check".
+    NotFullyListed,
+    /// The file system cannot rename without risking a replace (no hard links): refused
+    /// (R-T13-1).
+    NoSafeRename,
+    /// The trash took it, but a folder on the way changed meanwhile (review m13).
+    TrashedButChanged,
 }
 
 /// A script read from disk in UTF-8 chunks, each cut at a character boundary (Task 12's
@@ -777,10 +794,10 @@ impl LibraryService {
         to: &RelPath,
         env: Option<EnvTag>,
     ) -> Result<(), FileOpError> {
-        let (root, entries) = self.listing_of(id).ok_or(FileOpError::Unavailable)?;
+        let (root, entries, diags) = self.listing_of(id).ok_or(FileOpError::Unavailable)?;
         let (from2, to2) = (from.clone(), to.clone());
         let out = self
-            .blocking(move || fileops::rename(&root, &entries, &from2, &to2, env))
+            .blocking(move || fileops::rename(&root, &entries, &diags, &from2, &to2, env))
             .await
             .unwrap_or(Err(FileOpError::Io(io::ErrorKind::Interrupted)));
         self.after_op(id, &out).await;
@@ -794,10 +811,10 @@ impl LibraryService {
         rel: &RelPath,
         env: Option<EnvTag>,
     ) -> Result<(), FileOpError> {
-        let (root, entries) = self.listing_of(id).ok_or(FileOpError::Unavailable)?;
+        let (root, entries, diags) = self.listing_of(id).ok_or(FileOpError::Unavailable)?;
         let (rel2, trasher) = (rel.clone(), self.trasher.clone());
         let out = self
-            .blocking(move || fileops::trash(&root, &entries, &rel2, env, trasher.as_ref()))
+            .blocking(move || fileops::trash(&root, &entries, &diags, &rel2, env, trasher.as_ref()))
             .await
             .unwrap_or(Err(FileOpError::Io(io::ErrorKind::Interrupted)));
         self.after_op(id, &out).await;
@@ -811,16 +828,22 @@ impl LibraryService {
 
     /// After a file operation that changed something: a rescan.
     async fn after_op(&self, id: LibraryId, out: &Result<(), FileOpError>) {
-        if out.is_ok() {
+        if matches!(out, Ok(()) | Err(FileOpError::TrashedButChanged)) {
             self.refresh(id).await;
         }
     }
 
-    /// The root and every listed entry of an available library.
-    fn listing_of(&self, id: LibraryId) -> Option<(LibraryRoot, Arc<[ScriptEntry]>)> {
+    /// The root, every listed entry and the diagnostics of an available library.
+    fn listing_of(&self, id: LibraryId) -> Option<Listing> {
         let snap = self.snapshot.load();
         let lib = snap.library(id)?;
-        servable(&lib.state).then(|| (lib.root.clone(), lib.entries.clone()))
+        servable(&lib.state).then(|| {
+            (
+                lib.root.clone(),
+                lib.entries.clone(),
+                lib.diagnostics.clone(),
+            )
+        })
     }
     // ## m4b-t13-explorer
 

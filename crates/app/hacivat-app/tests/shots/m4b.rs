@@ -46,18 +46,32 @@ pub(super) enum M4b {
     // 11 · Library diagnostics popover
     /// The problems row's popover: an unknown `@prod` folder, said in plain words.
     ScriptsDiagnostics,
+    // ## m4b-t13-explorer fix round 1 (review m7)
+    /// The name field over a file row, with a refused name and its reason under it.
+    ScriptsNameField,
+    /// A Scripts row's tooltip (count, "shared") over a tree with a link pointing outside.
+    ScriptsTooltip,
+    /// MySQL (under the non-default database `kampanya`) and SQLite (above `main`).
+    ScriptsEngines,
+    /// The "Moved to Trash" toast.
+    ScriptsTrashed,
     // ## m4b-t13-explorer
 }
 
 /// Every M4b state, in shot order.
 // ## m4b-t13-explorer: Task 13's four after Task 11's two.
-pub(super) const M4B_STATES: [M4b; 6] = [
+// ## m4b-t13-explorer fix round 1 (review m7): and its four more.
+pub(super) const M4B_STATES: [M4b; 10] = [
     M4b::T2Preview,
     M4b::PasteConfirm,
     M4b::ScriptsProd,
     M4b::ScriptsStaging,
     M4b::ScriptsFileMenu,
     M4b::ScriptsDiagnostics,
+    M4b::ScriptsNameField,
+    M4b::ScriptsTooltip,
+    M4b::ScriptsEngines,
+    M4b::ScriptsTrashed,
 ];
 
 /// The preview's file: 148 MB (the mock's).
@@ -79,6 +93,11 @@ impl M4b {
             M4b::ScriptsStaging => "m4b-scripts-tree-staging",
             M4b::ScriptsFileMenu => "m4b-scripts-file-menu",
             M4b::ScriptsDiagnostics => "m4b-scripts-diagnostics",
+            // ## m4b-t13-explorer fix round 1
+            M4b::ScriptsNameField => "m4b-scripts-name-field",
+            M4b::ScriptsTooltip => "m4b-scripts-row-tooltip",
+            M4b::ScriptsEngines => "m4b-scripts-mysql-sqlite",
+            M4b::ScriptsTrashed => "m4b-scripts-trashed",
         }
     }
 
@@ -91,6 +110,11 @@ impl M4b {
             M4b::ScriptsProd => (ROW, Some("drop_old.sql")),
             M4b::ScriptsStaging | M4b::ScriptsFileMenu => (ROW, Some("haftalık_rapor.sql")),
             M4b::ScriptsDiagnostics => ("hacivat-ui/src/explain.rs:", None),
+            // ## m4b-t13-explorer fix round 1
+            M4b::ScriptsNameField => ("hacivat-app/src/scripts/file_ops.rs:", None),
+            M4b::ScriptsTooltip => ("hacivat-ui/src/popover.rs:", None),
+            M4b::ScriptsEngines => (ROW, Some("kampanya_raporu.sql")),
+            M4b::ScriptsTrashed => ("hacivat-ui/src/toast.rs:", None),
         }
     }
 
@@ -102,14 +126,21 @@ impl M4b {
             // ## m4b-t13-explorer
             M4b::ScriptsFileMenu => &["#menu-item-label"],
             M4b::ScriptsProd | M4b::ScriptsStaging | M4b::ScriptsDiagnostics => &[],
+            M4b::ScriptsNameField
+            | M4b::ScriptsTooltip
+            | M4b::ScriptsEngines
+            | M4b::ScriptsTrashed => &[],
         }
     }
 
     /// Brings the state's fixtures on screen in a freshly started shell.
     pub(super) fn open(self, window: &mut Window, cx: &mut App) {
         // ## m4b-t13-explorer
+        if self == M4b::ScriptsEngines {
+            return scripts::open_engines(window, cx);
+        }
         if let Some(under) = self.scripts_under() {
-            return scripts::open(under, self == M4b::ScriptsDiagnostics, window, cx);
+            return scripts::open(self, under, window, cx);
         }
         save(cx, pg(DEV, EnvTag::Dev));
     }
@@ -118,8 +149,12 @@ impl M4b {
     /// The connection a Scripts state shows its library under.
     fn scripts_under(self) -> Option<&'static str> {
         match self {
-            M4b::ScriptsProd | M4b::ScriptsDiagnostics => Some(scripts::PROD),
-            M4b::ScriptsStaging | M4b::ScriptsFileMenu => Some(scripts::STAGING),
+            M4b::ScriptsProd | M4b::ScriptsDiagnostics | M4b::ScriptsTooltip => Some(scripts::PROD),
+            M4b::ScriptsStaging
+            | M4b::ScriptsFileMenu
+            | M4b::ScriptsNameField
+            | M4b::ScriptsTrashed => Some(scripts::STAGING),
+            M4b::ScriptsEngines => Some(scripts::ENGINES),
             M4b::T2Preview | M4b::PasteConfirm => None,
         }
     }
@@ -127,6 +162,9 @@ impl M4b {
     /// The steps after [`M4b::open`].
     pub(super) fn steps(self) -> Vec<Step> {
         // ## m4b-t13-explorer
+        if self == M4b::ScriptsEngines {
+            return scripts::engine_steps();
+        }
         if let Some(under) = self.scripts_under() {
             return scripts::steps(self, under);
         }
@@ -211,7 +249,11 @@ impl M4b {
             M4b::ScriptsProd
             | M4b::ScriptsStaging
             | M4b::ScriptsFileMenu
-            | M4b::ScriptsDiagnostics => Vec::new(),
+            | M4b::ScriptsDiagnostics
+            | M4b::ScriptsNameField
+            | M4b::ScriptsTooltip
+            | M4b::ScriptsEngines
+            | M4b::ScriptsTrashed => Vec::new(),
         }
     }
 }
@@ -279,11 +321,12 @@ mod scripts {
 
     use hacivat_app::connections::explorer;
     use hacivat_app::explorer::adapter;
-    use hacivat_app::scripts::projection;
+    use hacivat_app::scripts::{file_ops, projection};
     use hacivat_proto::{DbmsKind, EnvTag};
-    use hacivat_scripts::service::{LibraryService, ServiceOptions};
+    use hacivat_scripts::service::{FolderTrash, LibraryService, ServiceOptions};
     use hacivat_scripts::testing::FakeHandle;
     use hacivat_scripts::{GitSummary, LibraryState};
+    use hacivat_ui::actions::ActionRegistry;
     use hacivat_ui_core::gpui_surface::{App, Window};
 
     use super::super::m3a::{Step, step};
@@ -292,6 +335,8 @@ mod scripts {
 
     pub(super) const PROD: &str = "orders-prod";
     pub(super) const STAGING: &str = "orders-staging";
+    /// The MySQL and SQLite state's marker for `scripts_under`.
+    pub(super) const ENGINES: &str = "api-dev";
 
     /// The git CLI on the fixture repository this file made (never in product code).
     fn git(dir: &Path, args: &[&str]) -> bool {
@@ -321,7 +366,7 @@ mod scripts {
     }
 
     /// The library folder: committed, then a file edited, two added, one in conflict.
-    fn fixture(diagnostics: bool) -> std::path::PathBuf {
+    fn fixture(diagnostics: bool, outside: bool) -> std::path::PathBuf {
         let dir = super::super::support::temp_root().join("orders");
         std::fs::create_dir_all(&dir).expect("the library folder");
         for f in [
@@ -349,11 +394,22 @@ mod scripts {
         if diagnostics {
             write(&dir, "@prod/typo.sql", "SELECT 7;\n");
         }
+        // ## m4b-t13-explorer fix round 1: a link pointing outside the library (listed dim).
+        #[cfg(unix)]
+        if outside {
+            let away = super::super::support::temp_root().join("secret.sql");
+            std::fs::write(&away, "SELECT 8;\n").expect("the outside file");
+            std::os::unix::fs::symlink(&away, dir.join("outside.sql")).expect("the link");
+        }
+        #[cfg(not(unix))]
+        let _ = outside;
         std::fs::canonicalize(&dir).expect("canonical")
     }
 
     /// Saves both connections with their cached catalogs and starts the library service.
-    pub(super) fn open(under: &'static str, diagnostics: bool, window: &mut Window, cx: &mut App) {
+    pub(super) fn open(state: M4b, under: &'static str, window: &mut Window, cx: &mut App) {
+        let diagnostics = state == M4b::ScriptsDiagnostics;
+        let outside = state == M4b::ScriptsTooltip;
         let cat = catalog(
             DbmsKind::Postgres,
             vec![schema(
@@ -367,11 +423,21 @@ mod scripts {
             let id = save(cx, pg(name, env));
             adapter::set_catalog(id, Some(cat.clone()), None, cx);
         }
-        let dir = fixture(diagnostics);
+        let dir = fixture(diagnostics, outside);
+        start_service(vec![dir], cx);
+        let id = profile_named(cx, under);
+        hacivat_app::connections::ConnectionsModel::select(cx, id);
+        explorer::focus_list(window, cx);
+    }
+
+    /// Starts a library service over fake event sources (and a test trash, so Move to Trash
+    /// never reaches the user's) and attaches `dirs`.
+    fn start_service(dirs: Vec<std::path::PathBuf>, cx: &mut App) {
         let paths = cx.global::<hacivat_app::AppState>().paths.clone();
         let rt = cx
             .global::<hacivat_app::connections::ConnectionsModel>()
             .runtime();
+        let trash = super::super::support::temp_root();
         let svc = Arc::new(LibraryService::open_with(
             &paths,
             &rt,
@@ -379,17 +445,17 @@ mod scripts {
             ServiceOptions {
                 git_debounce: std::time::Duration::from_millis(40),
                 home: None,
+                trasher: Arc::new(FolderTrash(trash)),
                 ..ServiceOptions::default()
             },
         ));
         projection::set_service(svc.clone(), cx);
         cx.spawn(async move |_| {
-            let _ = svc.attach(dir, None, false).await;
+            for dir in dirs {
+                let _ = svc.attach(dir, None, false).await;
+            }
         })
         .detach();
-        let id = profile_named(cx, under);
-        hacivat_app::connections::ConnectionsModel::select(cx, id);
-        explorer::focus_list(window, cx);
     }
 
     /// The library is listed with its repository status.
@@ -504,9 +570,188 @@ mod scripts {
                     )
                 },
             )),
-            M4b::ScriptsProd | M4b::ScriptsStaging | M4b::T2Preview | M4b::PasteConfirm => {}
+            // ## m4b-t13-explorer fix round 1 (review m7)
+            M4b::ScriptsNameField => {
+                out.push(step(
+                    |window, cx| {
+                        select(cx, "orders_report.sql");
+                        ActionRegistry::run("scripts.rename", window, cx);
+                    },
+                    |window, cx| file_ops::open_field(window, cx).is_some(),
+                ));
+                out.push(step(
+                    |window, cx| {
+                        if let Some(f) = file_ops::open_field(window, cx) {
+                            f.update(cx, |f, cx| f.type_for_tests("../orders_report.sql", cx));
+                        }
+                    },
+                    |window, cx| {
+                        file_ops::open_field(window, cx)
+                            .is_some_and(|f| f.read(cx).error().is_some())
+                    },
+                ));
+            }
+            M4b::ScriptsTooltip => out.push(step(
+                |window, cx| {
+                    let Some(k) = scripts_node(cx, PROD) else {
+                        return;
+                    };
+                    let Some(b) = explorer::tree(cx).and_then(|t| t.read(cx).row_bounds(k)) else {
+                        return;
+                    };
+                    use gpui::InputEvent as _;
+                    window.dispatch_event(
+                        gpui::MouseMoveEvent {
+                            // Over the row's icon: away from the name, whose own tooltip (a cut
+                            // name's full text) would take the hover in a long locale.
+                            position: gpui::point(b.left() + gpui::px(58.0), b.center().y),
+                            pressed_button: None,
+                            modifiers: gpui::Modifiers::none(),
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                },
+                |_, cx| {
+                    cx.try_global::<hacivat_ui::text::TextRegistry>()
+                        .is_some_and(|r| {
+                            r.frame
+                                .iter()
+                                .any(|t| t.path.contains("hacivat-ui/src/popover.rs:"))
+                        })
+                },
+            )),
+            M4b::ScriptsTrashed => out.push(step(
+                |window, cx| {
+                    select(cx, "orders_report.sql");
+                    ActionRegistry::run("scripts.trash", window, cx);
+                },
+                |_, cx| !hacivat_ui::toast::ToastQueue::visible_ids(cx).is_empty(),
+            )),
+            M4b::ScriptsProd
+            | M4b::ScriptsStaging
+            | M4b::ScriptsEngines
+            | M4b::T2Preview
+            | M4b::PasteConfirm => {}
         }
         out
+    }
+
+    /// Puts the tree's cursor on the row labelled `label`.
+    fn select(cx: &mut App, label: &str) {
+        if let (Some(k), Some(tree)) = (key(cx, label), explorer::tree(cx)) {
+            tree.update(cx, |t, cx| t.select(k, cx));
+        }
+    }
+
+    /// MySQL `api-dev` (databases `api` and `kampanya`; a library bound to `kampanya`) and
+    /// SQLite `local-file` (`/x/orders.db`; a library bound to `orders`).
+    pub(super) fn open_engines(window: &mut Window, cx: &mut App) {
+        let mut my = pg(ENGINES, EnvTag::Dev);
+        my.engine = DbmsKind::MySql;
+        my.database = Some("api".into());
+        let my_id = save(cx, my);
+        adapter::set_catalog(
+            my_id,
+            Some(catalog(
+                DbmsKind::MySql,
+                ["api", "kampanya"]
+                    .iter()
+                    .map(|db| {
+                        schema(
+                            DbmsKind::MySql,
+                            &[db],
+                            false,
+                            vec![table("t", None, &[("id", "int")])],
+                        )
+                    })
+                    .collect(),
+            )),
+            None,
+            cx,
+        );
+        let mut lite = pg("local-file", EnvTag::Local);
+        lite.engine = DbmsKind::Sqlite;
+        lite.database = None;
+        lite.endpoint = hacivat_session::profile::ProfileEndpoint::File {
+            path: "/x/orders.db".into(),
+            create_if_missing: false,
+        };
+        let lite_id = save(cx, lite);
+        adapter::set_catalog(
+            lite_id,
+            Some(catalog(
+                DbmsKind::Sqlite,
+                vec![schema(
+                    DbmsKind::Sqlite,
+                    &["main"],
+                    false,
+                    vec![table("t", None, &[("id", "integer")])],
+                )],
+            )),
+            None,
+            cx,
+        );
+        let root = super::super::support::temp_root();
+        let mut dirs = Vec::new();
+        for (name, file) in [
+            ("kampanya", "kampanya_raporu.sql"),
+            ("orders", "günlük.sql"),
+        ] {
+            let dir = root.join(name);
+            write(&dir, file, "SELECT 1;\n");
+            dirs.push(std::fs::canonicalize(&dir).expect("canonical"));
+        }
+        start_service(dirs, cx);
+        hacivat_app::connections::ConnectionsModel::select(cx, Some(my_id));
+        explorer::focus_list(window, cx);
+    }
+
+    /// Both libraries listed.
+    fn both_listed(cx: &App) -> bool {
+        projection::service(cx).is_some_and(|s| {
+            let snap = s.snapshot();
+            snap.libraries.len() == 2
+                && snap.libraries.iter().all(|l| {
+                    snap.view(None).library(l.id).is_some_and(|v| {
+                        v.library().state == LibraryState::Watching
+                            && v.git() != GitSummary::Pending
+                    })
+                })
+        })
+    }
+
+    /// The Scripts node of `profile`'s `database`, when shown.
+    fn node_of(cx: &App, profile: &str, database: &str) -> Option<hacivat_ui::tree::TreeKey> {
+        let id = profile_named(cx, profile)?;
+        let k = projection::key_for(id, database, None, None);
+        explorer::shown_rows(cx)
+            .into_iter()
+            .any(|r| r.key == k)
+            .then_some(k)
+    }
+
+    pub(super) fn engine_steps() -> Vec<Step> {
+        vec![
+            step(|_, _| {}, |_, cx| both_listed(cx)),
+            expand(ENGINES, "kampanya"),
+            expand_key(
+                |cx| key(cx, "kampanya"),
+                |cx| node_of(cx, ENGINES, "kampanya").is_some(),
+            ),
+            expand_key(
+                |cx| node_of(cx, ENGINES, "kampanya"),
+                |cx| key(cx, "kampanya_raporu.sql").is_some(),
+            ),
+            expand_key(
+                |cx| key(cx, "local-file"),
+                |cx| node_of(cx, "local-file", "main").is_some(),
+            ),
+            expand_key(
+                |cx| node_of(cx, "local-file", "main"),
+                |cx| key(cx, "günlük.sql").is_some(),
+            ),
+        ]
     }
 }
 // ## m4b-t13-explorer

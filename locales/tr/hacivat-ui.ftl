@@ -4756,11 +4756,15 @@ hv-scripts-op-failed-title =
     }
 # Surface 2 (Context menus). The toast's body: why, in plain words; nothing was changed.
 # Variables:
-#   $reason (String) - selector: the reason; one of exists, gone, hidden, io, listed, name, path, trash, unavailable (anything else: the default).
+#   $reason (String) - selector: the reason; one of changed, exists, gone, hidden, io, large, listed, name, nohardlinks, path, scope, trash, unavailable (anything else: the default).
 # Review: PO
 hv-scripts-op-failed =
     { $reason ->
         [exists] Bu klasörde aynı adı taşıyan bir şey zaten var. Hiçbir şey değişmedi.
+        [scope] Bu, dosyaları hangi bağlantıların gördüğünü değiştirirdi. Hiçbir şey değişmedi; istiyorsanız dosya yöneticinizde yeniden adlandırın.
+        [large] Bu klasör denetlenemeyecek kadar büyük; dosya yöneticinizde kaldırın.
+        [nohardlinks] Bu sürücü, aynı adlı bir dosyayı tehlikeye atmadan yeniden adlandıramıyor. Hiçbir şey değişmedi; dosya yöneticinizde yeniden adlandırın.
+        [changed] Çöp kutusuna taşındı ama yoldaki bir klasör bu arada değişti. Çöp kutusunu denetleyin.
         [gone] Artık kitaplıkta değil. Hiçbir şey değişmedi.
         [listed] Bu bağlantı o klasörü göstermiyor; Hacivat onu buradan değiştirmez.
         [hidden] Klasörde bu bağlantının göstermediği dosyalar var; Hacivat onları buradan taşımaz.
@@ -4797,3 +4801,18 @@ hv-cmd-scripts-copy-relative-path = Betiğin göreli yolunu kopyala
 # Surface 2 (Context menus). Palette title.
 # Review: PO
 hv-cmd-scripts-refresh = Betik kitaplığını yenile
+# Surface 2 (Context menus). Under the name field when the name holds invisible or bidi characters, shown escaped.
+# Variables:
+#   $name (String) - the name with invisible characters written as <U+XXXX> (data), e.g. "a<U+202E>lqs.sql".
+# Review: PO
+hv-scripts-name-hidden-chars = Bu ad gizli karakterler içeriyor: { $name }
+# Surface 2 (Context menus). Moved to Trash, but a folder on the way changed meanwhile.
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+#   $name (String) - the file or folder name (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-trashed-changed =
+    { $os ->
+        [windows] { $name } Geri Dönüşüm Kutusu'na taşındı ama yoldaki bir klasör bu arada değişti. Geri Dönüşüm Kutusu'nu denetleyin.
+       *[other] { $name } Çöp Sepeti'ne taşındı ama yoldaki bir klasör bu arada değişti. Çöp Sepeti'ni denetleyin.
+    }

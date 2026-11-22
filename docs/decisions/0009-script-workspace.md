@@ -1186,3 +1186,31 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
   - The diagnostics popover is the shipped `ExplainPopover` (300 px). Its "Script library settings…" footer is Task 16's.
   - "Open under another connection…" (Task 15) and "Script library settings…" (Task 16) are shown disabled. `database_menu_items` stays Task 16's (its doc says so).
   - The problems row counts the view's diagnostics plus polling and an untrusted repository.
+
+### Fix round 1 (review C1, I1, m1–m13; rulings R-T13-1, R-T13-2)
+
+- **No rename ever replaces an entry, on any system (C1, R-T13-1).**
+  - A file (or file link) is renamed only by `hard_link(old, new)` then `remove_file(old)`. `link` fails when `new` exists. Without hard links (FAT, exFAT, some shares) the rename is refused (`NoSafeRename`); there is no fallback to `rename`.
+    - Windows `std::fs::rename` is `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` and replaces a file, so it is never used on a file.
+  - **A name already taken** is `Exists` on every system: the exact name, or another entry equal to it in ASCII case. A library is shared with case-insensitive volumes, so `b.sql → C.sql` next to `c.sql` is refused on Linux too. The same check runs before a create (`chain_to_parent` plus a listing).
+  - **A case-only change of the entry itself** is proved by a known identity (Unix) or by its name being the only ASCII-case match. `Identity(0, 0)`, every file off Unix, is "unknown" and never proves "same file". The change goes in two steps through a random temp name with a leading dot (the scan skips it), each step after an absence check; a failed second step moves the entry back.
+  - **A folder** is renamed after an absence check of its new name.
+  - **Residual:** a folder created at that name in between could be replaced on Unix (`rename` onto an empty folder), and on Windows a file created between the check and a case-only step. Std has no no-replace rename and the crate takes no `unsafe`.
+- **A folder moves or goes only when it is known (I1).** A folder rename or Move to Trash is refused (`NotFullyListed`, "too large to check; remove it in your file manager") when:
+  - the scan did not list its whole subtree: a `ScanStopped` or `Suppressed` diagnostic anywhere (they name no place), or an `Unreadable`, `BadName` or `LinkScope` diagnostic at or under it, or a dataless folder at or under it;
+  - a names-only, no-follow walk of the folder at operation time hits 20,000 names, depth 32, an unreadable or non-UTF-8 name, or a dataless folder.
+
+  The same walk refuses `HoldsHidden` when it finds an environment folder `env` does not show, even one the scan never lists because it holds no script (`reports/@production/data.csv`). The walk reads names and metadata only, never a file.
+- **R-T13-2:** a rename never changes the environment scope of the entry or anything inside it (`ScopeChange`). Examples: `@staging → common`, or `common → @staging`. The same tag in another case is allowed. Moving between folders was never offered (`OtherFolder`).
+- **m1:** `clippy.toml` also bans `trash::TrashContext::new` and `::default`. The one constructor, `os_trash_context` (with `NsFileManager`), carries an `#[expect(clippy::disallowed_methods)]`, which also proves the ban applies (an unfulfilled `expect` fails the build).
+  - **Residual:** the crate's `DEFAULT_TRASH_CTX` constant cannot be banned by clippy (it is not a method). T20's hostile suite can add a token rule.
+- **m13:** a trash whose after-check fails is `TrashedButChanged`: "moved, but a folder on the way changed meanwhile; check the trash". It is never "nothing changed".
+- **App side:**
+  - **m2:** an `Alias` refusal, which is another spelling of a name on disk, shows as "already has that name", and the field stays open.
+  - **m3:** a name holding invisible or bidi characters is shown escaped under the field.
+  - **m9:** the boot looks for `libraries.toml` on the core runtime, never with a stat on the UI thread. Without the file it sweeps orphan recovery folders there.
+  - **m10:** "Open under another connection…" uses the chooser's candidate rule: the explorer's places plus each profile's configured database (R-M4b-31).
+  - **m11:** file rows of a shared library say "shared" to assistive technology.
+  - **m12:** the name field is re-anchored to its row on every frame.
+  - The contributor's generation also moves when a catalog lands (shared-ness can change).
+  - The row tooltip is one line, its facts joined by ` · `. A newline in it panicked GPUI's text layout on hover; the m7 hover shot found it.

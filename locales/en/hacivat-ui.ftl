@@ -4933,10 +4933,14 @@ hv-scripts-op-failed-title =
     }
 # Surface 2 (Context menus). The toast's body: why, in plain words; nothing was changed.
 # Variables:
-#   $reason (String) - selector: the reason; one of exists, gone, hidden, io, listed, name, path, trash, unavailable (anything else: the default).
+#   $reason (String) - selector: the reason; one of changed, exists, gone, hidden, io, large, listed, name, nohardlinks, path, scope, trash, unavailable (anything else: the default).
 hv-scripts-op-failed =
     { $reason ->
         [exists] Something in this folder already has that name. Nothing was changed.
+        [scope] This would change which connections see these files. Nothing was changed; rename it in your file manager if that is what you want.
+        [large] This folder is too large to check; remove it in your file manager.
+        [nohardlinks] This drive can't rename without risking a file of the same name. Nothing was changed; rename it in your file manager.
+        [changed] It went to the trash, but a folder on the way changed meanwhile. Check the trash.
         [gone] It isn't in the library any more. Nothing was changed.
         [listed] This connection doesn't show that folder, so Hacivat won't change it from here.
         [hidden] The folder holds files this connection doesn't show, so Hacivat won't move them from here.
@@ -4966,3 +4970,16 @@ hv-cmd-scripts-copy-path = Copy script path
 hv-cmd-scripts-copy-relative-path = Copy script relative path
 # Surface 2 (Context menus). Palette title.
 hv-cmd-scripts-refresh = Refresh script library
+# Surface 2 (Context menus). Under the name field when the name holds invisible or bidi characters, shown escaped.
+# Variables:
+#   $name (String) - the name with invisible characters written as <U+XXXX> (data), e.g. "a<U+202E>lqs.sql".
+hv-scripts-name-hidden-chars = This name holds hidden characters: { $name }
+# Surface 2 (Context menus). Moved to Trash, but a folder on the way changed meanwhile.
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+#   $name (String) - the file or folder name (data), e.g. "orders_report.sql".
+hv-scripts-trashed-changed =
+    { $os ->
+        [windows] Moved { $name } to the Recycle Bin, but a folder on the way changed meanwhile. Check the Recycle Bin.
+       *[other] Moved { $name } to the Trash, but a folder on the way changed meanwhile. Check the Trash.
+    }

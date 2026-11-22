@@ -30,7 +30,7 @@ use std::rc::Rc;
 
 use hacivat_l10n::ArgValue;
 use hacivat_scripts::pathsafe::NameProblem;
-use hacivat_scripts::{EntryKind, FileOpError, LibraryId, LinkState};
+use hacivat_scripts::{EntryKind, FileOpError, LibraryId, LinkState, PathError};
 use hacivat_ui::actions::{ActionDef, ActionFn, ActionRegistry};
 use hacivat_ui::input::{InputEvent, TextInput};
 use hacivat_ui::menu::MenuItemSpec;
@@ -258,27 +258,14 @@ fn later(label: &'static str, action: &'static str, hint: Option<&'static str>) 
 }
 
 /// Whether another connection lists the file a row shows ("Open under another connection…").
+// ## m4b-t13-explorer fix round 1 (review m10): the chooser's candidate rule.
 fn listed_elsewhere(place: &Place, cx: &App) -> bool {
-    let Some(library) = place.library() else {
-        return false;
-    };
-    let Some(rel) = place.entry().map(|e| e.rel.clone()) else {
-        return false;
-    };
-    let Some(m) = cx.try_global::<crate::connections::ConnectionsModel>() else {
-        return false;
-    };
-    let Some(svc) = projection::service(cx) else {
-        return false;
-    };
-    let snap = svc.snapshot();
-    m.profiles().iter().any(|p| {
-        p.id != place.profile
-            && snap
-                .view(p.environment)
-                .library(library)
-                .is_some_and(|l| l.entry(&rel).is_some())
-    })
+    match (place.library(), place.entry()) {
+        (Some(library), Some(entry)) => {
+            projection::shown_under_another_connection(place, library, &entry.rel, cx)
+        }
+        _ => false,
+    }
 }
 
 /// The context menu of a Scripts row (the cursor is moved onto it before it opens).
@@ -402,7 +389,12 @@ pub(crate) fn name_problem(
     if kind != EntryKind::Folder && hacivat_scripts::scan::script_kind(name).is_none() {
         return Some((ERR, "ext"));
     }
-    if current != Some(name) && siblings.iter().any(|s| s == name) {
+    // ## m4b-t13-explorer fix round 1 (R-T13-1): any ASCII case is the same name on a shared
+    // library (the core refuses it on every system); the row's own name may change case.
+    let taken = siblings
+        .iter()
+        .any(|s| Some(s.as_str()) != current && (s == name || s.eq_ignore_ascii_case(name)));
+    if current != Some(name) && taken {
         return Some((ERR, "exists"));
     }
     None
@@ -429,6 +421,12 @@ pub struct NameField {
     mode: Mode,
     error: Option<(&'static str, &'static str)>,
     anchor: Bounds<Pixels>,
+    // ## m4b-t13-explorer fix round 1 (review m12, m3)
+    /// The row the field sits over: re-anchored on every frame, so a library change that
+    /// moves the rows never leaves it over another row.
+    key: TreeKey,
+    /// The name as shown when it holds invisible or bidi characters (`<U+XXXX>`).
+    hidden: Option<String>,
     indent: f32,
     busy: bool,
     _subscriptions: Vec<Subscription>,
@@ -457,6 +455,16 @@ impl NameField {
     /// The reason shown under the field (tests): `(message id, reason)`.
     pub fn error(&self) -> Option<(&'static str, &'static str)> {
         self.error
+    }
+
+    /// Puts `text` in the field and checks it, as typing would (the screenshot harness).
+    #[cfg(feature = "test-support")]
+    pub fn type_for_tests(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |i, cx| {
+            i.set_value(text.to_string());
+            cx.notify();
+        });
+        self.check(cx);
     }
 
     fn check(&mut self, cx: &mut Context<Self>) {
@@ -510,8 +518,9 @@ impl NameField {
                 this.busy = false;
                 match out {
                     Ok(()) => close_field(window, cx),
-                    // A name already taken shows in the field, as the live check does.
-                    Err(FileOpError::Exists) => {
+                    // A name already taken shows in the field, as the live check does; so does
+                    // another spelling of a name on disk (review m2).
+                    Err(FileOpError::Exists | FileOpError::Path(PathError::Alias)) => {
                         this.error = Some(("hv-scripts-name-err", "exists"));
                         cx.notify();
                     }
@@ -530,6 +539,11 @@ impl Render for NameField {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::get(cx).tokens;
         let c = t.colors;
+        if let Some(now) = crate::connections::explorer::tree(cx)
+            .and_then(|tree| tree.read(cx).row_bounds(self.key))
+        {
+            self.anchor = now;
+        }
         let b = self.anchor;
         let left = f32::from(b.left()) + self.indent;
         let width = (f32::from(b.size.width) - self.indent - t.spacing.md).max(120.0);
@@ -542,6 +556,17 @@ impl Render for NameField {
             .flex()
             .flex_col()
             .child(self.input.clone());
+        let mut notes: Vec<(&'static str, SharedString)> = Vec::new();
+        if let Some(shown) = &self.hidden {
+            notes.push((
+                "scripts-name-hidden",
+                text(
+                    cx,
+                    "hv-scripts-name-hidden-chars",
+                    vec![("name", ArgValue::Text(shown.clone()))],
+                ),
+            ));
+        }
         if let Some((id, reason)) = self.error {
             let message = text(
                 cx,
@@ -554,10 +579,13 @@ impl Render for NameField {
                     ),
                 ],
             );
-            // The tooltip anatomy, pinned under the field, with its text-2 ink (Raised Ink).
+            notes.push(("scripts-name-error", message));
+        }
+        for (id, message) in notes {
+            // The tooltip anatomy, pinned under the field, with its text ink (Raised Ink).
             card = card.child(
                 div()
-                    .id("scripts-name-error")
+                    .id(id)
                     .mt(px(t.spacing.xs))
                     .px(px(t.spacing.sm))
                     .py(px(t.spacing.xs))
@@ -643,7 +671,7 @@ fn open_name_field(
         let input = cx.new(|cx| {
             let mut i = TextInput::new(cx, text_fn_id("hv-scripts-new-name"));
             i.set_mono(true);
-            i.set_value(initial);
+            i.set_value(initial.clone());
             i.select_all();
             i
         });
@@ -663,6 +691,11 @@ fn open_name_field(
             mode,
             error: None,
             anchor,
+            key,
+            hidden: {
+                let shown = hacivat_scripts::pathsafe::display_name(&initial);
+                (shown != initial).then_some(shown)
+            },
             indent,
             busy: false,
             _subscriptions: subscriptions,
@@ -792,16 +825,24 @@ fn trash_command(window: &mut Window, cx: &mut App) {
     window
         .spawn(cx, async move |cx| {
             let out = svc.trash(library, &rel, env).await;
+            let changed = matches!(out, Err(FileOpError::TrashedButChanged));
             let _ = cx.update(|_, cx| match out {
-                Ok(()) => {
+                // ## m4b-t13-explorer fix round 1 (review m13): taken, but a folder changed
+                // meanwhile: said so, never "nothing changed".
+                Ok(()) | Err(FileOpError::TrashedButChanged) => {
                     if let (Some(next), Some(tree)) = (next, crate::connections::explorer::tree(cx))
                     {
                         tree.update(cx, |t, cx| t.select(next, cx));
                     }
+                    let id = if changed {
+                        "hv-scripts-trashed-changed"
+                    } else {
+                        "hv-scripts-trashed"
+                    };
                     let label: TextFn = Rc::new(move |cx: &App| {
                         text(
                             cx,
-                            "hv-scripts-trashed",
+                            id,
                             vec![
                                 ("os", ArgValue::Text(host_os().into())),
                                 ("name", ArgValue::Text(name.clone())),
@@ -820,7 +861,13 @@ fn trash_command(window: &mut Window, cx: &mut App) {
 /// its data line.
 fn failed(op: &'static str, name: &str, e: &FileOpError, cx: &mut App) {
     let reason = match e {
-        FileOpError::Exists => "exists",
+        // ## m4b-t13-explorer fix round 1: another spelling of a name on disk (review m2), and
+        // the new refusals.
+        FileOpError::Exists | FileOpError::Path(PathError::Alias) => "exists",
+        FileOpError::ScopeChange => "scope",
+        FileOpError::NotFullyListed => "large",
+        FileOpError::NoSafeRename => "nohardlinks",
+        FileOpError::TrashedButChanged => "changed",
         FileOpError::NotFound => "gone",
         FileOpError::NotListed => "listed",
         FileOpError::HoldsHidden => "hidden",

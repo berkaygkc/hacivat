@@ -762,6 +762,9 @@ fn shared_badge_only_when_projected_twice(cx: &mut TestAppContext) {
     assert_eq!(a.badge_glyph, None, "outlined, glyph-less (ruling b)");
     let tip = strip(a.tooltip.as_deref().unwrap_or_default());
     assert!(tip.contains("orders-staging"), "{tip}");
+    // ## m4b-t13-explorer fix round 1: the tree's tooltip is one line (a newline panics the
+    // text layout when it is hovered).
+    assert!(!tip.contains('\n'), "{tip:?}");
     assert!(!tip.contains("orders-prod"), "{tip}");
     assert!(strip(b.tooltip.as_deref().unwrap_or_default()).contains("orders-prod"));
     r.finish();
@@ -1202,7 +1205,7 @@ fn rename_refuses_a_traversal_name(cx: &mut TestAppContext) {
         ("b.sql", "exists"),
         ("x.txt", "ext"),
     ] {
-        r.vcx.simulate_keystrokes("cmd-a");
+        r.vcx.simulate_keystrokes(&select_all());
         r.vcx.simulate_input(typed);
         r.vcx.run_until_parked();
         assert_eq!(
@@ -1230,7 +1233,7 @@ fn rename_refuses_a_traversal_name(cx: &mut TestAppContext) {
     assert_focus_on(r.vcx, "the tree", &tree_focus);
     // A valid name renames it.
     press_key(r.vcx, "f2");
-    r.vcx.simulate_keystrokes("cmd-a");
+    r.vcx.simulate_keystrokes(&select_all());
     r.vcx.simulate_input("müşteri.sql");
     press_key(r.vcx, "enter");
     wait_until(r.vcx, "the renamed file", |_| {
@@ -1240,6 +1243,42 @@ fn rename_refuses_a_traversal_name(cx: &mut TestAppContext) {
     wait_until(r.vcx, "the renamed row", |vcx| {
         scripts_rows(vcx, id, "orders") == ["b.sql", "müşteri.sql"]
     });
+    // ## m4b-t13-explorer fix round 1 (review m12): a committed rename gives the focus back to
+    // the tree, as Escape does.
+    assert!(!layer_ids(r.vcx).contains(&file_ops::NAME_FIELD_LAYER));
+    assert_focus_on(r.vcx, "the tree after a rename", &tree_focus);
+    // A case variant of a sibling is taken (on every system, R-T13-1); its own name in another
+    // case is not.
+    let b = below(r.vcx, node.key, "b.sql").key;
+    put_cursor(r.vcx, b);
+    press_key(r.vcx, "f2");
+    let field = name_field(r.vcx).expect("the name field");
+    r.vcx.simulate_keystrokes(&select_all());
+    r.vcx.simulate_input("MÜŞTERİ.SQL");
+    r.vcx.run_until_parked();
+    assert_eq!(
+        r.vcx.cx.read(|cx| field.read(cx).error()).map(|e| e.1),
+        None,
+        "not an ASCII case variant"
+    );
+    r.vcx.simulate_keystrokes(&select_all());
+    r.vcx.simulate_input("B.SQL");
+    r.vcx.run_until_parked();
+    assert_eq!(
+        r.vcx.cx.read(|cx| field.read(cx).error()).map(|e| e.1),
+        None,
+        "its own name in another case"
+    );
+    press_key(r.vcx, "escape");
+    // New script from the Scripts node: created, listed, and the focus back on the tree.
+    put_cursor(r.vcx, node.key);
+    assert!(run(r.vcx, "scripts.new_script"));
+    r.vcx.simulate_keystrokes(&select_all());
+    r.vcx.simulate_input("yeni.sql");
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "the new script", |_| dir.join("yeni.sql").exists());
+    assert!(!layer_ids(r.vcx).contains(&file_ops::NAME_FIELD_LAYER));
+    assert_focus_on(r.vcx, "the tree after a create", &tree_focus);
     r.finish();
 }
 
@@ -1279,7 +1318,7 @@ fn trashing_the_focused_row_keeps_the_focus_in_the_explorer(cx: &mut TestAppCont
     assert!(
         toast_texts(r.vcx)
             .iter()
-            .any(|t| t.contains("a.sql") && t.contains("Trash") || t.contains("Recycle Bin")),
+            .any(|t| t.contains("a.sql") && (t.contains("Trash") || t.contains("Recycle Bin"))),
         "{:?}",
         toast_texts(r.vcx)
     );
@@ -1615,5 +1654,181 @@ fn a_child_key_keeps_its_first_owner(cx: &mut TestAppContext) {
         "the first owner keeps its child"
     );
     assert!(b.activated.borrow().is_empty());
+}
+// ## m4b-t13-explorer
+
+// ## m4b-t13-explorer fix round 1
+
+/// The platform's select-all chord (review I2: never a macOS literal).
+fn select_all() -> String {
+    if cfg!(target_os = "macos") {
+        "cmd-a".to_string()
+    } else {
+        "ctrl-a".to_string()
+    }
+}
+
+/// Review H4: a profile retagged from production to staging while the cursor is on a
+/// `@production` file: the rows go, nothing drawn names the file, its commands are off, and
+/// nothing opens or moves it.
+#[gpui::test]
+fn a_retag_under_the_cursor_hides_and_disarms_the_production_row(cx: &mut TestAppContext) {
+    let r = rig(
+        cx,
+        vec![prof("orders-x", Some(EnvTag::Production), "orders")],
+    );
+    let id = profile_id(r.vcx, "orders-x");
+    show(r.vcx, id, pg_catalog(&["orders"]));
+    let (_, dir) = r.library("orders", &["a.sql", "@production/drop_old.sql"]);
+    assert_eq!(
+        scripts_rows(r.vcx, id, "orders"),
+        ["@production", "  drop_old.sql", "a.sql"]
+    );
+    let node = scripts_node(r.vcx, id, "orders", DbmsKind::Postgres).unwrap();
+    let hidden = below(r.vcx, node.key, "drop_old.sql").key;
+    in_window(r.vcx, |window, _| window.activate_window());
+    in_window(r.vcx, conn_explorer::focus_list);
+    put_cursor(r.vcx, hidden);
+    let p = r.vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .get(id)
+            .unwrap()
+    });
+    let mut edited = (*p).clone();
+    edited.environment = Some(EnvTag::Staging);
+    save_draft(r.vcx, ProfileDraft::edit(edited));
+    wait_until(r.vcx, "the production rows to go", |vcx| {
+        scripts_rows(vcx, id, "orders") == ["a.sql"]
+    });
+    assert!(
+        r.vcx
+            .cx
+            .read(|cx| projection::describe_key(hidden, cx))
+            .is_none()
+    );
+    put_cursor(r.vcx, hidden);
+    for cmd in [
+        "scripts.open",
+        "scripts.rename",
+        "scripts.trash",
+        "scripts.copy_relative_path",
+    ] {
+        assert!(!run(r.vcx, cmd), "{cmd} is off");
+    }
+    assert!(r.vcx.cx.read(projection::opens_asked).is_empty());
+    enable_registry(r.vcx);
+    redraw_full(r.vcx);
+    let drawn: Vec<String> = full_frame(r.vcx).iter().map(|t| strip(&t.text)).collect();
+    assert!(
+        !drawn
+            .iter()
+            .any(|t| t.contains("drop_old") || t.contains("@production")),
+        "{drawn:?}"
+    );
+    for row in rows(r.vcx) {
+        let all = format!(
+            "{} {:?} {:?} {:?}",
+            row.data.label, row.data.tooltip, row.data.a11y_description, row.data.meta
+        );
+        assert!(
+            !all.contains("drop_old") && !all.contains("@production"),
+            "{all}"
+        );
+    }
+    assert!(dir.join("@production/drop_old.sql").exists());
+    r.finish();
+}
+
+/// Review m8 (R-T1a-2 carry): a modified file whose name is NFD on disk shows its badge.
+#[gpui::test]
+fn an_nfd_named_modified_file_shows_its_badge(cx: &mut TestAppContext) {
+    let r = rig(cx, vec![prof("orders-dev", Some(EnvTag::Dev), "orders")]);
+    let id = profile_id(r.vcx, "orders-dev");
+    show(r.vcx, id, pg_catalog(&["orders"]));
+    // "müşteri.sql" decomposed: u + U+0308, s + U+0327.
+    let nfd = "mu\u{0308}s\u{0327}teri.sql";
+    let (lib, dir) = r.library("orders", &["a.sql"]);
+    std::fs::write(dir.join(nfd), b"SELECT 1;").unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "fixture"]);
+    std::fs::write(dir.join(nfd), b"SELECT 2;").unwrap();
+    write_files(&dir, &["b.sql"]);
+    r.hint(&dir, &[nfd, "b.sql"]);
+    git_ready(&r, lib);
+    let svc = r.svc.clone();
+    wait_until(r.vcx, "the NFD file's status", |_| {
+        let snap = svc.snapshot();
+        let view = snap.view(None);
+        view.library(lib).is_some_and(|l| {
+            l.entries().iter().any(|e| {
+                e.rel.as_str().ends_with("teri.sql")
+                    && l.git_status(&e.rel) == Some(hacivat_git::FileStatus::Modified)
+            })
+        })
+    });
+    scripts_rows(r.vcx, id, "orders");
+    let node = scripts_node(r.vcx, id, "orders", DbmsKind::Postgres).unwrap();
+    let row = subtree(r.vcx, node.key)
+        .into_iter()
+        .find(|row| row.data.label.contains("teri.sql"))
+        .expect("the NFD row");
+    let st = row.data.status.expect("its badge");
+    assert_eq!((st.kind, st.glyph.as_ref()), (StatusKind::Modified, "M"));
+    r.finish();
+}
+
+/// Review m11 and m10: a shared library's file rows say "shared" to assistive technology, and
+/// "Open under another connection…" says when no other connection shows the file.
+#[gpui::test]
+fn shared_file_rows_and_the_open_under_hint(cx: &mut TestAppContext) {
+    let r = rig(
+        cx,
+        vec![
+            prof("orders-prod", Some(EnvTag::Production), "orders"),
+            prof("orders-staging", Some(EnvTag::Staging), "orders"),
+        ],
+    );
+    let (prod, staging) = (
+        profile_id(r.vcx, "orders-prod"),
+        profile_id(r.vcx, "orders-staging"),
+    );
+    show(r.vcx, prod, pg_catalog(&["orders"]));
+    r.library("orders", &["a.sql", "@production/p.sql"]);
+    scripts_rows(r.vcx, prod, "orders");
+    let node = scripts_node(r.vcx, prod, "orders", DbmsKind::Postgres).unwrap();
+    let hint = |key: TreeKey| -> bool {
+        put_cursor(r.vcx, key);
+        r.vcx
+            .cx
+            .read(|cx| node_menu(key, cx))
+            .unwrap()
+            .iter()
+            .find(|i| i.action == "scripts.open_under")
+            .is_some_and(|i| i.hint.is_some())
+    };
+    let a = below(r.vcx, node.key, "a.sql");
+    assert_eq!(
+        a.data.a11y_description, None,
+        "the tree lists one place only"
+    );
+    // The chooser's candidates include staging's configured database even before its catalog
+    // loads (R-M4b-31): a.sql has another connection, the @production file none.
+    assert!(!hint(a.key), "staging's configured database shows it");
+    let p = below(r.vcx, node.key, "p.sql");
+    assert!(hint(p.key), "no other connection shows a @production file");
+    // Staging's catalog lands: a.sql is shared; p.sql still shows nowhere else.
+    show(r.vcx, staging, pg_catalog(&["orders"]));
+    scripts_rows(r.vcx, prod, "orders");
+    let node = scripts_node(r.vcx, prod, "orders", DbmsKind::Postgres).unwrap();
+    let a = below(r.vcx, node.key, "a.sql");
+    assert_eq!(
+        a.data.a11y_description.as_deref().map(strip).as_deref(),
+        Some("shared")
+    );
+    assert!(!hint(a.key), "staging shows it");
+    let p = below(r.vcx, node.key, "p.sql");
+    assert!(hint(p.key), "staging never shows a @production file");
+    r.finish();
 }
 // ## m4b-t13-explorer

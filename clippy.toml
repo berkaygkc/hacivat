@@ -23,6 +23,10 @@ disallowed-methods = [
     # `hacivat_scripts::service::OsTrash` (a `TrashContext` with `DeleteMethod::NsFileManager`).
     { path = "trash::delete", reason = "T1a m3: use hacivat_scripts::service::OsTrash (TrashContext with NsFileManager on macOS)", allow-invalid = true },
     { path = "trash::delete_all", reason = "T1a m3: use hacivat_scripts::service::OsTrash (TrashContext with NsFileManager on macOS)", allow-invalid = true },
+    # ## m4b-t13-explorer fix round 1 (review m1): and the default context itself; the one
+    # blessed constructor (`os_trash_context`, NsFileManager) carries an `#[expect]`.
+    { path = "trash::TrashContext::new", reason = "T1a m3: the default context runs osascript on macOS; use hacivat_scripts::service::OsTrash", allow-invalid = true },
+    { path = "trash::TrashContext::default", reason = "T1a m3: the default context runs osascript on macOS; use hacivat_scripts::service::OsTrash", allow-invalid = true },
 ]
 
 # ## m4b-t01a-seams (R-T0-2): the debouncer caches that walk through directory links.

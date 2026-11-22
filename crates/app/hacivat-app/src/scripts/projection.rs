@@ -122,13 +122,34 @@ pub fn service(cx: &App) -> Option<Arc<LibraryService>> {
 
 /// Opens the library service on the core runtime when a library was ever attached (its
 /// registry exists); nothing otherwise (`connections::boot`, after the model is set).
+///
+/// ## m4b-t13-explorer fix round 1 (review m9): the registry is looked for on the core
+/// runtime (never a stat on the UI thread), and without one the recovery folders of libraries
+/// no registry names are swept there (T10's launch hygiene, which the service would otherwise
+/// do; copies of a live instance are spared).
 pub fn install_service(cx: &mut App) {
     let Some(paths) = cx.try_global::<AppState>().map(|s| s.paths.clone()) else {
         return;
     };
-    if paths.libraries_toml().exists() {
-        ensure_service(cx);
-    }
+    let Some(rt) = cx.try_global::<ConnectionsModel>().map(|m| m.runtime()) else {
+        return;
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    rt.spawn_blocking(move || {
+        let attached = paths.libraries_toml().exists();
+        if !attached {
+            hacivat_scripts::recovery::sweep_unregistered(&paths, &|_| false);
+        }
+        let _ = tx.send(attached);
+    });
+    cx.spawn(async move |cx| {
+        if rx.await == Ok(true) {
+            cx.update(|cx| {
+                ensure_service(cx);
+            });
+        }
+    })
+    .detach();
 }
 
 /// The library service, opened now if it is not open yet (Task 16's attach calls this before
@@ -194,6 +215,21 @@ fn follow_environments(inner: &Rc<Inner>, cx: &mut App) {
         }
     })
     .detach();
+    // ## m4b-t13-explorer fix round 1 (review m11): a catalog that lands or changes can add or
+    // drop a place a library shows under, so the loaded rows' "shared" is asked again.
+    let weak = Rc::downgrade(inner);
+    let seen = Cell::new(crate::explorer::adapter::catalogs_generation(cx));
+    cx.observe_global::<crate::explorer::adapter::ExplorerCatalogs>(move |cx| {
+        let Some(inner) = weak.upgrade() else {
+            return;
+        };
+        let now = crate::explorer::adapter::catalogs_generation(cx);
+        if seen.replace(now) != now {
+            inner.env_gen.set(inner.env_gen.get() + 1);
+            contributors_changed(cx);
+        }
+    })
+    .detach();
 }
 
 /// Records the profiles' environments; whether they changed.
@@ -233,6 +269,8 @@ pub(crate) enum Node {
         entry: ScriptEntry,
         status: Option<FileStatus>,
         contains_changes: bool,
+        // ## m4b-t13-explorer fix round 1 (review m11): the library shows elsewhere too.
+        shared: bool,
     },
     /// A library's problems row (surface 11).
     Problems { library: LibraryId, count: usize },
@@ -588,13 +626,15 @@ fn count_text(cx: &App, n: usize) -> SharedString {
     text(cx, "hv-explorer-count", vec![("n", count(n))])
 }
 
+/// The row tooltip's facts, in one line: the tree's tooltip is a single-line label (a newline
+/// in it panics GPUI's text layout; found by the m7 hover shot, fix round 1).
 fn join_lines(lines: &[SharedString]) -> Option<SharedString> {
     (!lines.is_empty()).then(|| {
         lines
             .iter()
             .map(|l| l.as_ref())
             .collect::<Vec<_>>()
-            .join("\n")
+            .join(" · ")
             .into()
     })
 }
@@ -633,11 +673,14 @@ fn scripts_row(files: usize, others: &[String], cx: &App) -> TreeRowData {
     if !others.is_empty() {
         // Outlined, lowercase, glyph-less (controller ruling b); never red, never filled.
         row.badge = Some(tr_id(cx, "hv-scripts-node-shared"));
-        tip.push(text(
+        // ## m4b-t13-explorer fix round 1: the tree's tooltip is one line (`Tip`), so a shared
+        // node's tooltip is the shared sentence alone (the count is the row's meta and its
+        // accessible description); both sentences together ran past a 960 px window.
+        tip = vec![text(
             cx,
             "hv-scripts-node-shared-tip",
             vec![("conns", ArgValue::List(others.to_vec()))],
-        ));
+        )];
         words.push(tr_id(cx, "hv-scripts-node-shared"));
     }
     row.tooltip = join_lines(&tip);
@@ -702,6 +745,7 @@ fn entry_row(
     entry: &ScriptEntry,
     status: Option<FileStatus>,
     contains_changes: bool,
+    shared: bool,
     cx: &App,
 ) -> TreeRowData {
     let name = display_name(entry.rel.name());
@@ -762,6 +806,10 @@ fn entry_row(
                 words.push(tr_id(cx, "hv-scripts-a11y-dataless"));
             }
         }
+    }
+    // ## m4b-t13-explorer fix round 1 (review m11): "orders_report.sql, modified, shared".
+    if shared && entry.kind != EntryKind::Folder {
+        words.push(tr_id(cx, "hv-scripts-node-shared"));
     }
     row.tooltip = join_lines(&tip);
     row.a11y_description = join_words(&words);
@@ -875,12 +923,14 @@ fn children_of(inner: &Inner, key: TreeKey, cx: &App) -> ChildState {
             let Some(idx) = inner.lib_index(&snap, *library, env, cx) else {
                 return ChildState::Leaf;
             };
+            let shared = is_shared(inner, &place, *library, &snap, cx);
             ChildState::Loaded(Arc::from(entries_under(
                 inner,
                 &place,
                 *library,
                 &idx,
                 entry.rel.as_str(),
+                shared,
             )))
         }
         Node::Entry { .. } | Node::Problems { .. } => ChildState::Leaf,
@@ -926,8 +976,28 @@ fn library_children(
         );
         keys.push(k);
     }
-    keys.extend(entries_under(inner, place, id, &idx, ""));
+    let shared = is_shared(inner, place, id, snap, cx);
+    keys.extend(entries_under(inner, place, id, &idx, "", shared));
     ChildState::Loaded(Arc::from(keys))
+}
+
+// ## m4b-t13-explorer fix round 1 (review m11)
+/// Whether `library` also shows under a connection other than `place`'s ("shared").
+fn is_shared(
+    inner: &Inner,
+    place: &Place,
+    library: LibraryId,
+    snap: &WorkspaceSnapshot,
+    cx: &App,
+) -> bool {
+    !shown_elsewhere(
+        inner,
+        &[library],
+        (place.profile, &place.database),
+        snap,
+        cx,
+    )
+    .is_empty()
 }
 
 fn entries_under(
@@ -936,6 +1006,7 @@ fn entries_under(
     library: LibraryId,
     idx: &LibIndex,
     folder: &str,
+    shared: bool,
 ) -> Vec<TreeKey> {
     let Some(list) = idx.children.get(folder) else {
         return Vec::new();
@@ -953,6 +1024,7 @@ fn entries_under(
                         entry: e.clone(),
                         status: idx.status.get(e.rel.as_str()).copied(),
                         contains_changes: idx.contains.contains(e.rel.as_str()),
+                        shared,
                     },
                 },
             );
@@ -1030,12 +1102,13 @@ impl ExplorerContributor for ScriptsContributor {
                 entry,
                 status,
                 contains_changes,
+                shared,
                 ..
             } => {
                 let folder = entry.kind == EntryKind::Folder;
                 ContributedNode {
                     key,
-                    row: entry_row(entry, *status, *contains_changes, cx),
+                    row: entry_row(entry, *status, *contains_changes, *shared, cx),
                     children: if folder {
                         lazy(key)
                     } else {
@@ -1121,6 +1194,48 @@ pub(crate) fn cursor_place(cx: &App) -> Option<(TreeKey, Place)> {
     let tree = crate::connections::explorer::tree(cx)?;
     let key = tree.read(cx).cursor()?;
     Some((key, place_of(key, cx)?))
+}
+
+// ## m4b-t13-explorer fix round 1 (review m10)
+/// Whether a connection other than `place`'s shows file `rel` of `library`, by the chooser's
+/// candidate rule (R-M4b-9, R-M4b-31): a place the explorer lists or a profile's configured
+/// database, where the library is bound and the profile's environment shows the file.
+pub(crate) fn shown_under_another_connection(
+    place: &Place,
+    library: LibraryId,
+    rel: &hacivat_scripts::RelPath,
+    cx: &App,
+) -> bool {
+    let Some(inner) = host(cx) else {
+        return false;
+    };
+    let Some(snap) = inner.snapshot() else {
+        return false;
+    };
+    let profiles: Vec<Arc<Profile>> = cx
+        .try_global::<ConnectionsModel>()
+        .map(|m| m.profiles().to_vec())
+        .unwrap_or_default();
+    profiles.iter().any(|q| {
+        let mut dbs = asked_databases(q, cx);
+        let configured = match database_level(q.engine) {
+            DbLevel::File => Some("main".to_string()),
+            _ => q.database.clone(),
+        };
+        if let Some(db) = configured
+            && !dbs.contains(&db)
+        {
+            dbs.push(db);
+        }
+        dbs.iter().any(|db| {
+            (q.id, db.as_str()) != (place.profile, place.database.as_str())
+                && libraries_at(&inner, q, db, &snap, cx).contains(&library)
+                && snap
+                    .view(q.environment)
+                    .library(library)
+                    .is_some_and(|l| l.entry(rel).is_some())
+        })
+    })
 }
 
 /// The environment a place's connection has now.
