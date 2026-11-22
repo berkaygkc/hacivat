@@ -401,6 +401,22 @@ pub fn save_with_echo(
     expect: Option<DiskStamp>,
     echo: &mut dyn FnMut(&DiskStamp),
 ) -> Result<DiskStamp, SaveError> {
+    save_echoing_landing(root, rel, env, text, expect, &mut |_, stamp| echo(stamp))
+}
+
+// ## m4b-t10-service fix round 3 (m-f; a Task 5 named exception)
+/// [`save_with_echo`], whose callback also gets the path the bytes land at, relative to the
+/// root: for a file link, its target inside the library (the `join` this save made, not an
+/// older listing's), else `rel`. The service records the echo under it, which is where the
+/// watcher sees the write.
+pub fn save_echoing_landing(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    text: SaveText,
+    expect: Option<DiskStamp>,
+    echo: &mut dyn FnMut(&RelPath, &DiskStamp),
+) -> Result<DiskStamp, SaveError> {
     // fr2 I-fr1-2: a preview's meta travels with whatever text the tab builds; never saved.
     if text.meta.partial {
         return Err(SaveError::PreviewOnly);
@@ -408,7 +424,8 @@ pub fn save_with_echo(
     let bytes = encoding::encode_exact(text.meta.encoding, text.meta.bom, &text.text)
         .map_err(|first_offset| SaveError::Unencodable { first_offset })?;
     drop(text);
-    let target = locate(root, rel, env).map_err(Refusal::for_save)?;
+    let (target, landing) = locate_landing(root, rel, env).map_err(Refusal::for_save)?;
+    let echo = &mut |stamp: &DiskStamp| echo(&landing, stamp);
     let dir = target.dir();
     dir.sweep_stale_temps(&is_temp_name);
     match target {
@@ -897,6 +914,16 @@ impl Target {
 /// the path it answered is walked with no-follow folder handles, and anything that is a link
 /// now is refused.
 fn locate(root: &LibraryRoot, rel: &RelPath, env: Option<EnvTag>) -> Result<Target, Refusal> {
+    locate_landing(root, rel, env).map(|(target, _)| target)
+}
+
+/// [`locate`], with the path it opens relative to the root (a file link's target, else
+/// `rel`). ## m4b-t10-service fix round 3 (m-f)
+fn locate_landing(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+) -> Result<(Target, RelPath), Refusal> {
     let joined = pathsafe::join(root, rel)?;
     {
         let kind = match joined.kind {
@@ -929,7 +956,7 @@ fn locate(root: &LibraryRoot, rel: &RelPath, env: Option<EnvTag>) -> Result<Targ
             if joined.target.is_some() {
                 return Err(Refusal::Path(PathError::Changed));
             }
-            return Ok(Target::Missing { dir, name });
+            return Ok((Target::Missing { dir, name }, open.clone()));
         }
         Err(e) => return Err(e.into()),
     };
@@ -939,7 +966,7 @@ fn locate(root: &LibraryRoot, rel: &RelPath, env: Option<EnvTag>) -> Result<Targ
     if !lstat.is_file() {
         return Err(Refusal::Fs(FsError::NotFile));
     }
-    Ok(Target::Existing { dir, name, lstat })
+    Ok((Target::Existing { dir, name, lstat }, open.clone()))
 }
 
 // ---- reading -------------------------------------------------------------------------------

@@ -351,6 +351,8 @@ pub(super) struct Listing {
     pub changes: Changes,
     /// A probe found the disk other than the watcher reported (fix: the H4 stress race).
     pub disagreed: bool,
+    /// Fix round 3 (m-g): how long a full scan took (zero for a patch).
+    pub cost: std::time::Duration,
 }
 
 pub(super) struct Scanned {
@@ -508,12 +510,14 @@ impl RefreshJob {
                 scanned: None,
                 changes,
                 disagreed,
+                cost: std::time::Duration::ZERO,
             }),
             disagreed,
         ))
     }
 
     fn full_scan(&self) -> RefreshOut {
+        let started = std::time::Instant::now();
         let fs = self.fs.as_ref();
         let valid = match validate(fs, &self.reg, &self.session, &self.others, &self.rules) {
             Ok(v) => v,
@@ -553,6 +557,7 @@ impl RefreshJob {
             }),
             changes,
             disagreed: false,
+            cost: started.elapsed(),
         }))
     }
 }
@@ -591,6 +596,97 @@ impl StampJob {
         }
     }
 }
+
+// ## m4b-t10-service fix round 3 (G1, G2)
+
+/// The most candidate files one pairing reads (only files of a held removal's length).
+pub(super) const MAX_PAIR_READS: usize = 16;
+
+/// A removal of a file open in a tab, held by the actor (the file may have moved).
+#[derive(Debug, Clone)]
+pub(super) struct HeldRemoval {
+    pub from: RelPath,
+    pub len: u64,
+    /// The content hash the tab knows.
+    pub hash: u128,
+}
+
+/// G1: pairs held removals of open files with files that appeared meanwhile, by length and
+/// content hash (alg/28 C4), as Task 9's watcher pairs the renames it sees. Only candidates of
+/// a held file's length are read (I4: their bytes are hashed by `fileio` and dropped), at most
+/// [`MAX_PAIR_READS`] of them.
+pub(super) struct PairJob {
+    pub root: LibraryRoot,
+    pub held: Vec<HeldRemoval>,
+    /// The listed entries of the files that appeared since the first hold.
+    pub candidates: Vec<ScriptEntry>,
+    pub fs: SharedFs,
+    pub stamps: Arc<AtomicU64>,
+}
+
+impl PairJob {
+    /// Each held path with the file it moved to, if one matched.
+    pub fn run(self) -> Vec<(RelPath, Option<RelPath>)> {
+        let mut reads = 0usize;
+        let mut hashes: HashMap<RelPath, Option<u128>> = HashMap::new();
+        let mut taken: Vec<RelPath> = Vec::new();
+        let mut out = Vec::new();
+        for held in &self.held {
+            let mut found = None;
+            for c in &self.candidates {
+                if c.len != held.len || c.dataless || taken.contains(&c.rel) {
+                    continue;
+                }
+                let hash = match hashes.get(&c.rel) {
+                    Some(h) => *h,
+                    None => {
+                        if reads >= MAX_PAIR_READS {
+                            continue;
+                        }
+                        reads += 1;
+                        // Still the file the scan listed, and still a plain file.
+                        let h = match probe(self.fs.as_ref(), &self.root, &c.rel) {
+                            Probe::File(meta) if meta.len == c.len => {
+                                stamp(&self.root, c, &self.stamps).map(|s| s.hash)
+                            }
+                            _ => None,
+                        };
+                        hashes.insert(c.rel.clone(), h);
+                        h
+                    }
+                };
+                if hash == Some(held.hash) {
+                    found = Some(c.rel.clone());
+                    break;
+                }
+            }
+            if let Some(to) = &found {
+                taken.push(to.clone());
+            }
+            out.push((held.from.clone(), found));
+        }
+        out
+    }
+}
+
+/// G2 (R-T10-6): a manifest-only read after the watcher reported `.hacivat/workspace.toml`
+/// (or at the status backstop): no scan. `None` when the root is no longer the folder this
+/// session knows (the actor rescans, which refuses it).
+pub(super) struct ManifestJob {
+    pub root: LibraryRoot,
+    pub identity: Option<(u64, u64)>,
+}
+
+impl ManifestJob {
+    pub fn run(self) -> Option<ManifestOut> {
+        if self.identity.is_some() && fileio::folder_identity(&self.root.canonical) != self.identity
+        {
+            return None;
+        }
+        Some(read_manifest(&self.root))
+    }
+}
+// ## m4b-t10-service
 
 /// The attach's first step, off the actor (I6): the chosen path must be a real folder, not a
 /// link (I3: a link root would be refused at the next launch).

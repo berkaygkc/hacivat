@@ -28,6 +28,11 @@
 //!   never reading or following anything, and a dataless one never opened (Task 7's rule).
 //!   When one of their `(len, mtime, dataless)` moved, the pass also hints `.git/index`, which
 //!   the reconciler reports as `RepositoryChanged`.
+//!
+//! ## m4b-t10-service fix round 3 (G2, R-T10-6; a Task 9 named exception)
+//! Each pass also `lstat`s `<root>/.hacivat/workspace.toml` (`.hacivat` must be a real folder;
+//! nothing is read or followed); when its `(len, mtime, dataless)` moved, or it came or went,
+//! the pass also hints that path, which the reconciler reports as `ManifestChanged`.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -94,6 +99,23 @@ fn repository_stamps(root: &Path) -> Option<[GitStamp; 4]> {
     }))
 }
 
+/// ## m4b-t10-service fix round 3 (G2): the manifest's `(len, mtime, dataless)` from `lstat`
+/// only; `None` when `.hacivat` is not a real folder or the file is not a plain file.
+fn manifest_stamp(root: &Path) -> GitStamp {
+    let dir = root.join(".hacivat");
+    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_dir()) {
+        return None;
+    }
+    let m = std::fs::symlink_metadata(dir.join("workspace.toml")).ok()?;
+    m.file_type().is_file().then(|| {
+        (
+            m.len(),
+            m.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            crate::dataless::is_dataless(&m),
+        )
+    })
+}
+
 struct Root {
     path: PathBuf,
     sink: HintSink,
@@ -102,6 +124,8 @@ struct Root {
     next: Instant,
     /// `None` before the first pass.
     git: Option<Option<[GitStamp; 4]>>,
+    /// Fix round 3 (G2): `None` before the first pass.
+    manifest: Option<GitStamp>,
 }
 
 struct State {
@@ -194,6 +218,13 @@ fn run(shared: &Shared) {
                 batch.push(RawHint::Path(root.path.join(".git").join("index")));
             }
             root.git = Some(git);
+            let manifest = manifest_stamp(&root.path);
+            if root.manifest.is_some_and(|before| before != manifest) {
+                batch.push(RawHint::Path(
+                    root.path.join(".hacivat").join("workspace.toml"),
+                ));
+            }
+            root.manifest = Some(manifest);
             (root.sink)(batch);
             root.last_pass = Instant::now();
             root.next = root.last_pass + root.interval;
@@ -222,6 +253,7 @@ impl EventSource for PollEventSource {
             last_pass: now,
             next: now + self.base,
             git: None,
+            manifest: None,
         });
         drop(st);
         self.shared.wake.notify_all();

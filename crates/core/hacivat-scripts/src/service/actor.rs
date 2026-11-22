@@ -30,7 +30,10 @@ use hacivat_settings::paths::LocalPaths;
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use super::work::{self, RefreshJob, RefreshOut, Rules, Session, StampJob, StampOut};
+use super::work::{
+    self, HeldRemoval, ManifestJob, ManifestOut, PairJob, RefreshJob, RefreshOut, Rules, Session,
+    StampJob, StampOut,
+};
 use super::{
     AttachError, LibraryDiag, LibrarySnapshot, LibraryState, MapError, ServiceOptions, Sources,
     UnavailableReason, WorkspaceSnapshot, servable,
@@ -63,6 +66,15 @@ const BURST_PATHS: usize = 1_000;
 const RECENT_DELETES: usize = 1_024;
 /// Batches a watcher may queue towards the actor before it waits.
 const WATCH_CHANNEL: usize = 64;
+/// Fix round 3 (m-g): the confirming scans of one chain at the base pace; each one past them
+/// waits twice as long as the one before (up to [`MAX_CHAIN_WAIT`]).
+const MAX_CONFIRMS: u8 = 3;
+/// Fix round 3 (m-g): the longest wait between two confirming scans of one chain.
+const MAX_CHAIN_WAIT: Duration = Duration::from_secs(30);
+/// Fix round 3 (G1): the most recently appeared files kept as rename candidates.
+const MAX_ARRIVED: usize = 64;
+/// Fix round 3 (G1): how long an appeared file stays a rename candidate.
+const ARRIVAL_SPAN: Duration = Duration::from_secs(10);
 
 /// A source that refuses: a factory that could not build one (the watcher falls back).
 struct Refusing(WatchError);
@@ -176,6 +188,19 @@ pub(super) enum Msg {
         job: u64,
         result: Result<Watcher, WatchError>,
     },
+    /// Fix round 3 (G2): a manifest-only read came back (`None`: the root is not the folder
+    /// this session knows).
+    ManifestRead {
+        id: LibraryId,
+        job: u64,
+        out: Option<ManifestOut>,
+    },
+    /// Fix round 3 (G1): a pairing of held removals came back.
+    Paired {
+        id: LibraryId,
+        job: u64,
+        out: Vec<(RelPath, Option<RelPath>)>,
+    },
     /// Fix round 2 (F2, R-T10-5): a job ran past `ServiceOptions::job_deadline`.
     JobOverdue {
         job: u64,
@@ -200,6 +225,14 @@ pub(super) enum Msg {
     #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     Settled {
         reply: oneshot::Sender<()>,
+    },
+    /// Fix round 3 (H16, test support): a watch batch as the current watcher (or, `stale`, the
+    /// previous one) would send it.
+    #[cfg(any(test, feature = "test-support"))]
+    InjectWatch {
+        id: LibraryId,
+        stale: bool,
+        batch: WatchBatch,
     },
     Shutdown,
 }
@@ -286,12 +319,33 @@ struct Want {
     watch: bool,
     scan: bool,
     probes: Vec<(RelPath, work::Expect)>,
+    /// Fix round 3 (G2): re-read the manifest only.
+    manifest: bool,
+    /// Fix round 3 (G1): pair the held removals with the files that appeared.
+    pair: bool,
 }
 
 impl Want {
     fn is_empty(&self) -> bool {
-        !self.validate && !self.watch && !self.scan && self.probes.is_empty()
+        !self.validate
+            && !self.watch
+            && !self.scan
+            && self.probes.is_empty()
+            && !self.manifest
+            && !self.pair
     }
+}
+
+/// A scan's removal of a file open in a tab, held (it may have moved).
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    len: u64,
+    /// The watcher reported it removed (or a probe of its report found it gone): a pairing
+    /// that finds no match makes it a delete, polled or not.
+    reported: bool,
+    /// A pairing found no match while the library was polled: it waits for the poller's report
+    /// (or the backstop).
+    unpaired: bool,
 }
 
 /// One registered library, as the actor keeps it.
@@ -324,10 +378,21 @@ struct Lib {
     want: Want,
     /// A resync rescan is scheduled.
     resync_due: bool,
-    /// Open files a scan found gone, waiting for the watcher's word (rename or delete).
-    held: HashSet<RelPath>,
+    /// Open files a scan found gone, waiting for the watcher's word (rename or delete) or a
+    /// pairing (fix round 3, G1).
+    held: HashMap<RelPath, Held>,
+    /// Fix round 3 (G1): files that appeared lately, with when (rename candidates; at most
+    /// `MAX_ARRIVED`, for `ARRIVAL_SPAN`).
+    arrived: VecDeque<(RelPath, Instant)>,
+    /// Fix round 3 (G1): renames announced by a pairing, so the watcher's own later word for
+    /// the same move is not announced twice.
+    renamed: HashMap<RelPath, RelPath>,
     /// The scan queued now is a resync's confirming scan.
     confirming: bool,
+    /// Fix round 3 (m-g): confirming scans so far in this chain.
+    confirms: u8,
+    /// Fix round 3 (m-g): how long its last full scan took.
+    scan_cost: Duration,
     /// When its watcher last reported anything.
     last_event: Option<Instant>,
     /// Files open in a tab whose new stamp is due (de-duplicated).
@@ -382,8 +447,12 @@ impl Lib {
             job: None,
             want: Want::default(),
             resync_due: false,
-            held: HashSet::new(),
+            held: HashMap::new(),
+            arrived: VecDeque::new(),
+            renamed: HashMap::new(),
             confirming: false,
+            confirms: 0,
+            scan_cost: Duration::ZERO,
             last_event: None,
             stamp_due: VecDeque::new(),
             remembered: HashMap::new(),
@@ -485,6 +554,8 @@ enum Job {
     Refresh(Box<RefreshJob>),
     Stamp(RelPath, Box<StampJob>),
     Watch(Box<WatchJob>),
+    Manifest(Box<ManifestJob>),
+    Pair(Box<PairJob>),
 }
 
 /// Starts a library's watcher (it watches, then scans the library once: blocking).
@@ -683,6 +754,23 @@ impl Actor {
                     }
                 }
             },
+            Msg::ManifestRead { id, job, out } => {
+                if let Some(i) = self.job_done(id, job) {
+                    match out {
+                        Some(m) => {
+                            if self.apply_manifest(i, m) {
+                                self.dirty.insert(id);
+                            }
+                        }
+                        None => self.libs[i].want.scan = true,
+                    }
+                }
+            }
+            Msg::Paired { id, job, out } => {
+                if let Some(i) = self.job_done(id, job) {
+                    self.paired(i, out);
+                }
+            }
             Msg::JobOverdue { job } => self.job_overdue(job),
             Msg::Resync { id, generation } => {
                 if let Some(i) = self.index(id) {
@@ -702,6 +790,18 @@ impl Actor {
                 }
             }
             Msg::Settled { reply } => self.waiters.push(reply),
+            #[cfg(any(test, feature = "test-support"))]
+            Msg::InjectWatch { id, stale, batch } => {
+                if let Some(i) = self.index(id) {
+                    let current = self.libs[i].watch_gen;
+                    let generation = if stale {
+                        current.wrapping_sub(1)
+                    } else {
+                        current
+                    };
+                    self.watch_batch(id, generation, batch);
+                }
+            }
             Msg::Shutdown => {}
         }
     }
@@ -1084,6 +1184,8 @@ impl Actor {
             } else if scan {
                 lib.want.scan = false;
                 lib.want.probes.clear();
+                // The scan reads the manifest too.
+                lib.want.manifest = false;
             }
             let job = RefreshJob {
                 reg: lib.reg.clone(),
@@ -1100,6 +1202,18 @@ impl Actor {
             };
             return Some(Job::Refresh(Box::new(job)));
         }
+        if std::mem::take(&mut lib.want.manifest)
+            && let Some(root) = lib.root()
+        {
+            let identity = lib.session.identity;
+            return Some(Job::Manifest(Box::new(ManifestJob { root, identity })));
+        }
+        if std::mem::take(&mut lib.want.pair)
+            && let Some(job) = self.pair_job(i)
+        {
+            return Some(Job::Pair(Box::new(job)));
+        }
+        let lib = &mut self.libs[i];
         while let Some(rel) = lib.stamp_due.pop_front() {
             let (Some(root), Some(entry)) = (
                 lib.root(),
@@ -1144,6 +1258,16 @@ impl Actor {
                     id,
                     job: job_id,
                     result: job.run(),
+                },
+                Job::Manifest(job) => Msg::ManifestRead {
+                    id,
+                    job: job_id,
+                    out: job.run(),
+                },
+                Job::Pair(job) => Msg::Paired {
+                    id,
+                    job: job_id,
+                    out: job.run(),
                 },
             };
             let _ = tx.blocking_send(msg);
@@ -1214,10 +1338,23 @@ impl Actor {
                 // disk, so no event says so. The scan is confirmed by another one after a quiet
                 // span, and again until a confirming scan finds nothing changed: the disk has
                 // stopped moving. A library at rest costs one extra scan per full scan.
+                //
+                // Fix round 3 (m-g): the chain is paced (`chain_wait`): never sooner than four
+                // times what the last full scan took (a large polled library is never rescanned
+                // back to back), and past `MAX_CONFIRMS` confirming scans each wait doubles.
                 let lib = &mut self.libs[i];
                 let scanned = listing.scanned.is_some();
+                if scanned {
+                    lib.scan_cost = listing.cost;
+                }
                 let was_confirming = scanned && std::mem::take(&mut lib.confirming);
+                if was_confirming {
+                    lib.confirms = lib.confirms.saturating_add(1);
+                }
                 let stable = was_confirming && listing.changes.is_empty();
+                if stable {
+                    lib.confirms = 0;
+                }
                 let confirm = scanned && !stable;
                 if listing.disagreed || confirm {
                     self.resync_later(i);
@@ -1234,20 +1371,11 @@ impl Actor {
                     lib.entries = Arc::from(listing.entries);
                     changed = true;
                 }
+                let mut manifest = None;
                 if let Some(s) = listing.scanned {
-                    let text = |n: &[LogicalDb]| {
-                        n.iter().map(|x| x.as_str().to_owned()).collect::<Vec<_>>()
-                    };
-                    if lib.db.as_str() != s.manifest.db.as_str()
-                        || text(&lib.aliases) != text(&s.manifest.aliases)
-                        || lib.manifest_diags != s.manifest.diags
-                        || lib.scan_diags != s.diags
-                    {
+                    if lib.scan_diags != s.diags {
                         changed = true;
                     }
-                    lib.db = s.manifest.db;
-                    lib.aliases = Arc::from(s.manifest.aliases);
-                    lib.manifest_diags = s.manifest.diags;
                     lib.scan_diags = s.diags;
                     lib.stopped = s.stopped;
                     lib.has_git_dir = s.has_git_dir;
@@ -1255,6 +1383,10 @@ impl Actor {
                         lib.state = lib.watched_state();
                         changed = true;
                     }
+                    manifest = Some(s.manifest);
+                }
+                if let Some(m) = manifest {
+                    changed |= self.apply_manifest(i, m);
                 }
                 if changed {
                     self.dirty.insert(id);
@@ -1277,41 +1409,66 @@ impl Actor {
         }
     }
 
+    /// Takes a manifest read (a scan's, or fix round 3's manifest-only read): the library's
+    /// database name, aliases and manifest diagnostics. Whether anything changed.
+    fn apply_manifest(&mut self, i: usize, m: ManifestOut) -> bool {
+        let lib = &mut self.libs[i];
+        let text = |n: &[LogicalDb]| n.iter().map(|x| x.as_str().to_owned()).collect::<Vec<_>>();
+        let changed = lib.db.as_str() != m.db.as_str()
+            || text(&lib.aliases) != text(&m.aliases)
+            || lib.manifest_diags != m.diags;
+        lib.db = m.db;
+        lib.aliases = Arc::from(m.aliases);
+        lib.manifest_diags = m.diags;
+        changed
+    }
+
     /// Turns listing changes into events, and queues the files open in a tab to be stamped
     /// (I4: no other file is read). A removal the watcher reported as a rename is not a delete.
     ///
     /// A *scan's* removal of a file open in a tab is held: the watcher may still report it as
     /// a rename (its events lag the disk). It is announced when the watcher says `Removed`
-    /// (`FileDeleted`) or `Renamed` (`FileRenamed`), or when a stable confirming scan shows the
-    /// file is gone.
+    /// (`FileDeleted`) or `Renamed` (`FileRenamed`), or once a stable confirming scan shows the
+    /// file is gone. Fix round 3 (G1): then it is first paired with the files that appeared
+    /// meanwhile, by length and content hash (a `Rescan` from the watcher, as for a `git
+    /// checkout`, carries no rename): a match is `FileRenamed`, else `FileDeleted`.
     fn announce(&mut self, i: usize, changes: work::Changes, scanned: bool, stable: bool) {
         let lib = &mut self.libs[i];
         let id = lib.id();
-        for (rel, _) in changes.removed {
+        let now = Instant::now();
+        for rel in &changes.created {
+            lib.held.remove(rel);
+            lib.arrived
+                .retain(|(r, at)| r != rel && now.duration_since(*at) < ARRIVAL_SPAN);
+            if lib.arrived.len() >= MAX_ARRIVED {
+                lib.arrived.pop_front();
+            }
+            lib.arrived.push_back((rel.clone(), now));
+        }
+        for (rel, len) in changes.removed {
             if lib.moved.contains_key(&rel) {
                 continue;
             }
-            if scanned && lib.remembered.contains_key(&rel) {
-                lib.held.insert(rel);
+            if lib.remembered.contains_key(&rel) {
+                // A scan's removal waits for the watcher's word or a stable scan; a patched
+                // one (the watcher's report) is paired now.
+                lib.held.insert(
+                    rel,
+                    Held {
+                        len,
+                        reported: !scanned,
+                        unpaired: false,
+                    },
+                );
+                if !scanned {
+                    lib.want.pair = true;
+                }
                 continue;
             }
-            if lib.deleted.len() >= RECENT_DELETES {
-                lib.deleted.clear();
-            }
-            lib.deleted.insert(rel.clone());
-            self.pending.push(LibraryEvent::FileDeleted { id, rel });
+            Self::announce_deleted(&mut self.pending, lib, rel);
         }
-        for rel in &changes.created {
-            lib.held.remove(rel);
-        }
-        if stable {
-            let gone: Vec<RelPath> = lib.held.drain().collect();
-            for rel in gone {
-                if !lib.entries.iter().any(|e| e.rel == rel) {
-                    lib.deleted.insert(rel.clone());
-                    self.pending.push(LibraryEvent::FileDeleted { id, rel });
-                }
-            }
+        if stable && !lib.held.is_empty() {
+            lib.want.pair = true;
         }
         // The renames whose old path the listing has dropped now.
         let gone: Vec<RelPath> = lib
@@ -1340,6 +1497,111 @@ impl Actor {
         );
         for rel in due {
             self.queue_stamp(i, rel);
+        }
+    }
+
+    fn announce_deleted(pending: &mut Vec<LibraryEvent>, lib: &mut Lib, rel: RelPath) {
+        if lib.deleted.len() >= RECENT_DELETES {
+            lib.deleted.clear();
+        }
+        lib.deleted.insert(rel.clone());
+        pending.push(LibraryEvent::FileDeleted { id: lib.id(), rel });
+    }
+
+    /// Fix round 3 (G1): the pairing of library `i`'s held removals, or `None` when no read is
+    /// needed (each held file with a known content hash, against the listed files that
+    /// appeared since and have its length; the others are answered at once).
+    fn pair_job(&mut self, i: usize) -> Option<PairJob> {
+        let lib = &mut self.libs[i];
+        let root = lib.root()?;
+        let mut held = Vec::new();
+        let mut answered: Vec<(RelPath, Option<RelPath>)> = Vec::new();
+        for (from, h) in &lib.held {
+            match lib.remembered.get(from).copied().flatten() {
+                Some(stamp) => held.push(HeldRemoval {
+                    from: from.clone(),
+                    len: h.len,
+                    hash: stamp.hash,
+                }),
+                None => answered.push((from.clone(), None)),
+            }
+        }
+        held.sort_by(|a, b| a.from.cmp(&b.from));
+        let lens: HashSet<u64> = held.iter().map(|h| h.len).collect();
+        let now = Instant::now();
+        let candidates: Vec<ScriptEntry> = lib
+            .arrived
+            .iter()
+            .filter(|(_, at)| now.duration_since(*at) < ARRIVAL_SPAN)
+            .filter_map(|(rel, _)| lib.entries.iter().find(|e| &e.rel == rel))
+            .filter(|e| lens.contains(&e.len) && !lib.remembered.contains_key(&e.rel))
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            answered.extend(held.drain(..).map(|h| (h.from, None)));
+        }
+        if !answered.is_empty() {
+            self.paired(i, answered);
+        }
+        if held.is_empty() {
+            return None;
+        }
+        Some(PairJob {
+            root,
+            held,
+            candidates,
+            fs: self.opts.fs.clone(),
+            stamps: self.stamps.clone(),
+        })
+    }
+
+    /// Fix round 3 (G1): a pairing's answer. A held file that matched a file still listed moved
+    /// there (`FileRenamed`); one that matched nothing is deleted, except while the library is
+    /// polled: then it waits for the poller's report, a later pairing or the backstop.
+    fn paired(&mut self, i: usize, out: Vec<(RelPath, Option<RelPath>)>) {
+        let mut moved = Vec::new();
+        let lib = &mut self.libs[i];
+        let id = lib.id();
+        let polled = matches!(lib.state, LibraryState::Polling(_));
+        for (from, to) in out {
+            if !lib.held.contains_key(&from) {
+                // The watcher's word came first.
+                continue;
+            }
+            if lib.entries.iter().any(|e| e.rel == from) {
+                // It came back.
+                lib.held.remove(&from);
+                continue;
+            }
+            match to.filter(|to| lib.entries.iter().any(|e| &e.rel == to)) {
+                Some(to) => {
+                    lib.held.remove(&from);
+                    lib.arrived.retain(|(r, _)| *r != to);
+                    // The tab's stamp moves with it (the watcher hears it too, so it pairs a
+                    // later move of the new name).
+                    if let Some(known) = lib.remembered.remove(&from) {
+                        moved.push((to.clone(), known));
+                    }
+                    if lib.renamed.len() >= RECENT_DELETES {
+                        lib.renamed.clear();
+                    }
+                    lib.renamed.insert(from.clone(), to.clone());
+                    self.pending
+                        .push(LibraryEvent::FileRenamed { id, from, to });
+                }
+                None if polled && lib.held.get(&from).is_some_and(|h| !h.reported) => {
+                    if let Some(h) = lib.held.get_mut(&from) {
+                        h.unpaired = true;
+                    }
+                }
+                None => {
+                    lib.held.remove(&from);
+                    Self::announce_deleted(&mut self.pending, lib, from);
+                }
+            }
+        }
+        for (to, known) in moved {
+            self.remember(i, to, known);
         }
     }
 
@@ -1450,13 +1712,12 @@ impl Actor {
                 }
                 WatchEvent::Created(rel) => lib.want.probes.push((rel, work::Expect::Present)),
                 WatchEvent::Removed(rel) => {
-                    // A scan dropped it already, held for this word from the watcher.
-                    if lib.held.remove(&rel) {
-                        lib.deleted.insert(rel.clone());
-                        self.pending.push(LibraryEvent::FileDeleted {
-                            id,
-                            rel: rel.clone(),
-                        });
+                    // A scan dropped it already, held for this word from the watcher. Fix
+                    // round 3 (G1): after a rescan the watcher may not know where it went (it
+                    // learned the new name silently), so it is paired first.
+                    if let Some(h) = lib.held.get_mut(&rel) {
+                        h.reported = true;
+                        lib.want.pair = true;
                     }
                     lib.want.probes.push((rel, work::Expect::Absent));
                 }
@@ -1464,13 +1725,18 @@ impl Actor {
                 // the look finds the same stamp nobody hears of it (T9 carry).
                 WatchEvent::PossiblyChanged(rel) => stamp.push(rel),
                 WatchEvent::Renamed { from, to } => {
+                    lib.want.probes.push((from.clone(), work::Expect::Either));
+                    lib.want.probes.push((to.clone(), work::Expect::Either));
+                    // Fix round 3 (G1): a pairing announced this move already.
+                    if lib.renamed.get(&from) == Some(&to) {
+                        lib.renamed.remove(&from);
+                        continue;
+                    }
                     if let Some(known) = lib.remembered.remove(&from) {
                         lib.remembered.insert(to.clone(), known);
                     }
-                    lib.want.probes.push((from.clone(), work::Expect::Either));
-                    lib.want.probes.push((to.clone(), work::Expect::Either));
                     let dropped = !lib.entries.iter().any(|e| e.rel == from);
-                    if lib.held.remove(&from) || dropped {
+                    if lib.held.remove(&from).is_some() || dropped {
                         // A scan already dropped the old path: the rename is news now.
                         self.pending
                             .push(LibraryEvent::FileRenamed { id, from, to });
@@ -1480,6 +1746,9 @@ impl Actor {
                 }
                 WatchEvent::Rescan => lib.want.scan = true,
                 WatchEvent::RepositoryChanged => git = true,
+                // Fix round 3 (G2, R-T10-6): `.hacivat/workspace.toml` changed: a manifest-only
+                // read re-binds the library (no scan).
+                WatchEvent::ManifestChanged => lib.want.manifest = true,
                 // The backend changed (lost, re-armed, nothing left): shown below; a re-armed
                 // watch found a change nothing announced, so look again.
                 WatchEvent::BackendLost(_) => {}
@@ -1502,14 +1771,28 @@ impl Actor {
     /// The same holds for a full scan made while the watcher was still reporting: it may have
     /// caught an intermediate state the watcher never reports back from.
     fn resync_later(&mut self, i: usize) {
-        let quiet = self.quiet_for();
+        let wait = self.chain_wait(i);
         let lib = &mut self.libs[i];
         if lib.resync_due {
             return;
         }
         lib.resync_due = true;
         let (id, generation) = (lib.id(), lib.watch_gen);
-        self.after(quiet, Msg::Resync { id, generation });
+        self.after(wait, Msg::Resync { id, generation });
+    }
+
+    /// Fix round 3 (m-g): the wait before library `i`'s next confirming scan: the quiet span,
+    /// or four times its last full scan's cost if longer; doubled for each confirming scan of
+    /// this chain past [`MAX_CONFIRMS`], up to [`MAX_CHAIN_WAIT`].
+    ///
+    /// The chain is not cut off after `MAX_CONFIRMS`: a hard stop left deleted files listed in
+    /// 36 of 80 loaded H4 runs, since the chain is what brings the listing to what the watcher
+    /// never reports (a file that came and went before it settled).
+    fn chain_wait(&self, i: usize) -> Duration {
+        let lib = &self.libs[i];
+        let base = self.quiet_for().max(lib.scan_cost.saturating_mul(4));
+        let past = u32::from(lib.confirms.saturating_sub(MAX_CONFIRMS - 1)).min(8);
+        base.saturating_mul(1 << past).min(MAX_CHAIN_WAIT.max(base))
     }
 
     /// How long a library must have had no watch event before a resync scan is trusted.
@@ -1534,6 +1817,10 @@ impl Actor {
         lib.stamp_due.clear();
         lib.moved.clear();
         lib.held.clear();
+        lib.arrived.clear();
+        lib.renamed.clear();
+        lib.confirms = 0;
+        lib.confirming = false;
         if self.git.remove(&id).is_some() {
             self.workspace_dirty = true;
         }
@@ -1589,8 +1876,26 @@ impl Actor {
     /// m7: polled or unwatched libraries, and libraries whose repository's `.git` is above
     /// their root, get a status refresh every `git_backstop` (a commit there changes nothing in
     /// the library).
+    ///
+    /// Fix round 3: every library that is up also re-reads its manifest (G2's belt and braces),
+    /// and a held removal a pairing could not match on a polled library is announced deleted
+    /// (G1: its poller had a whole backstop period to report it).
     fn backstop(&mut self) {
         for i in 0..self.libs.len() {
+            let lib = &mut self.libs[i];
+            if lib.up() {
+                lib.want.manifest = true;
+            }
+            let unpaired: Vec<RelPath> = lib
+                .held
+                .iter()
+                .filter(|(_, h)| h.unpaired)
+                .map(|(r, _)| r.clone())
+                .collect();
+            for rel in unpaired {
+                lib.held.remove(&rel);
+                Self::announce_deleted(&mut self.pending, lib, rel);
+            }
             let lib = &self.libs[i];
             let not_watched = matches!(
                 lib.state,

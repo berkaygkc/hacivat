@@ -1120,7 +1120,7 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
   - the raw-hint classification and the inbox-overflow flag (the watcher bounds its own queue and turns an overflow into `Rescan`).
   - The unavailable-library recheck stays: it is not watching.
 - **Deviation:** `LibraryService::open_with` takes `Sources` instead of one `Box<dyn EventSource>`.
-- **Residuals:**
+- **Residuals** (both closed in fix round 3, below):
   - `.hacivat/workspace.toml` edits are dot-folder names, which the watcher drops. A teammate's manifest change binds at the next rescan, not at once.
   - No test forces a stale batch from a dropped watcher (the generation check is direct code).
 - **Confirming scans** (found by the H4 stress test once the watcher was wired: 64 of 200 loaded runs left deleted files listed):
@@ -1133,3 +1133,30 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
     - Cost: one extra lstat scan per full scan when the library is at rest; probes from single saves need none.
   - **Held removals.** A confirming scan can see a rename's old path gone before the watcher reports `Renamed`. So a *scan's* removal of a file open in a tab is held until the watcher says `Removed` (`FileDeleted`) or `Renamed` (`FileRenamed`), or until a stable confirming scan shows it gone. A tab therefore never hears "deleted" before "renamed".
   - **Result:** 200 runs of the whole `service` binary, four in parallel, alternating en_US and tr_TR, at load average 20–36: 0 failures, H2 and H4 included.
+
+### Fix round 3 (re-review fr2: G1, G2, m-f, m-g, m-i, F3; ruling R-T10-6)
+
+- **G1: a held removal is paired before it is announced.**
+  - The problem: after a `Rescan` (Task 9 sends one for a burst, an overflow or a limit, which is what a `git checkout` or `pull` looks like) the watcher learns the new name silently and never says `Renamed`. It may still say `Removed` for the open file. A stable confirming scan or that `Removed` then made a rename a delete (H14b: 20 of 20 rounds).
+  - The rule now:
+    - A removal of a file open in a tab is held, whether a scan or a patch found it. A scan's removal waits for the watcher's word or a stable confirming scan; a patched one, and a held one the watcher reports `Removed`, is paired at once.
+    - Pairing (`work::PairJob`, on a worker) compares the held file's length and the content hash the tab knows with the files that appeared in the last 10 s (at most 64 kept) and are still listed. Only candidates of a held file's length are read, through `fileio::stamp_of`, at most 16 per pairing (I4: never a file nobody has open, except as a rename candidate of one).
+    - A match is `FileRenamed`, and the tab's remembered stamp moves to the new name. When the watcher later reports the same move, it is not announced twice. No match is `FileDeleted`.
+    - While the library is polled, a held removal that matched nothing and that the poller has not yet reported keeps waiting: for the poller's `Removed`, a later pairing, or at most the next 60 s backstop, which announces it deleted.
+  - When a pairing finds a move, the tab's stamp moves to the new name, and the watcher is told (`remember`), so it can pair a later move of the new name itself.
+  - Tests: H14 (the watcher's word after the chain settled) and H14b (a `Rescan` in the same moment; and its control without one), 20 rounds each, never "deleted" and always one rename. With pairing switched off, H14 fails in round 0 and H14b in round 1.
+  - H14 renames before it sends the `Rescan`. In the probe's order (`Rescan`, then rename), a test thread descheduled between the two let the whole chain end before the rename, with no word from the watcher ever after: a property of the probe, not of the service (seen in 21 of 80 loaded runs, traced).
+- **G2 (R-T10-6): the manifest is watched.** A Task 9 named exception in `watch/**`:
+  - The name filter passes `.hacivat/workspace.toml` and emits the new `WatchEvent::ManifestChanged`. A hint on `.hacivat` itself does so too, and re-learns the folders. Nothing else under `.hacivat/` is reported.
+  - Every backend sees it: a recursive OS watch already does; a per-folder source (Linux) watches `.hacivat/` non-recursively, a real folder only (`Reconciler::watch_dirs`); the poll source `lstat`s the file on each pass and hints it when its `(len, mtime, dataless)` moved.
+  - The service answers with a manifest-only read on a worker (`work::ManifestJob`; refused when the root's identity changed, which asks for a rescan instead), not a full scan, and publishes the new database name, aliases and diagnostics.
+  - Backstop: every 60 s status backstop also re-reads the manifest of every library that is up.
+  - Tests: H15 through the fake source (re-binds `orders` → `billing` with no full scan) and through the poll source, the backstop with no hint at all, and four Task 9 tests (the filter, the folder hint, the per-folder set, the poll pass).
+- **m-f.** The echo's landing path comes from the save's own `join`: the new `fileio::save_echoing_landing` (a Task 5 named exception; `save_with_echo` calls it) hands its callback the path it opened, a file link's target or the name itself. A link retargeted since the last scan no longer records the echo under the old target.
+- **m-g: the chain is paced, not cut off.**
+  - The wait before a confirming scan is the quiet span, or four times what the library's last full scan took if that is longer, so a large polled library is never rescanned back to back. Past 3 confirming scans in one chain, each wait doubles, up to 30 s.
+  - Deviation from the suggested hard cap: a chain that stopped after 3 confirming scans left deleted files listed in 36 of 80 loaded H4 runs. The chain is what brings the listing to the disk when the watcher never reports back (a file that came and went before it settled), so it still runs until a confirming scan finds nothing changed, at a falling rate.
+- **m-i.** `LibraryService::settled()` documents that it does not wait for the watcher's own pending settle. Tests wait on a condition first.
+- **F3.** The relaunch loop prints `HV-FACT t10 h2 sweep_relaunches=N`.
+- **H16** is a test now, through the test-support hook `LibraryService::inject_watch_batch`: a batch tagged with the previous watcher's generation is ignored; the same batch at the current generation is acted on.
+- **m-h** is carried to Task 16 (a confirmed "Use this folder" that clears the persisted `canonical`/`inode`). Caveat: a file system whose inode numbers are not stable across mounts (FUSE such as sshfs without `use_ino`, some network mounts) shows such a library `RootChanged` at every launch until then.

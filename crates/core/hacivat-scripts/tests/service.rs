@@ -14,21 +14,23 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use hacivat_git::FileStatus;
 use hacivat_proto::{EnvTag, ProfileId};
 use hacivat_scripts::ScriptChunks as _;
 use hacivat_scripts::fileio::{self, ReadLimits};
-use hacivat_scripts::scan::{Diag, LimitHit, Limits};
+use hacivat_scripts::scan::{Diag, Fs, LimitHit, Limits, Meta, RealFs};
 use hacivat_scripts::service::{
-    AttachError, LibraryDiag, LibraryService, MapError, ServiceOptions, WorkspaceSnapshot,
+    AttachError, LibraryDiag, LibraryService, MapError, ServiceOptions, Sources, WorkspaceSnapshot,
 };
 use hacivat_scripts::testing::FakeHandle;
+use hacivat_scripts::watch::{PollEventSource, WatchEvent};
 use hacivat_scripts::{
-    DatabaseName, GitSummary, LibraryEvent, LibraryId, LibraryState, LocalMapping, PollReason,
-    RawHint, ReadError, RelPath, RootRefusal, SaveError, SaveText, ScriptEntry, Subscription,
-    TextEncoding, UnavailableReason, WatchError,
+    DatabaseName, EventSource, GitSummary, LibraryEvent, LibraryId, LibraryState, LocalMapping,
+    PollReason, RawHint, ReadError, RelPath, RootRefusal, SaveError, SaveText, ScriptEntry,
+    Subscription, TextEncoding, UnavailableReason, WatchError,
 };
 use hacivat_settings::LocalPaths;
 use tokio::sync::broadcast;
@@ -1411,6 +1413,8 @@ async fn h2_sweep_spares_a_live_instances_copies() {
         ready(&r).await;
         launches += 1;
     }
+    // Fix round 3 (F3): so CI shows whether the relaunches creep up.
+    print_fact(&format!("t10 h2 sweep_relaunches={launches}"));
 }
 
 /// H3: a full inbox drops hint batches; the overflow flag rescans, so a file whose only hint
@@ -2349,4 +2353,338 @@ async fn a_hint_that_changed_nothing_reaches_nobody() {
     assert_eq!(changed, 1, "{seen:?}");
     let read = r.svc.stamps_read() - before;
     assert!(read <= 2, "{read} content reads");
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m4b-t10-service fix round 3: the re-review's H14, H14b, H15 and H16, adopted
+// ---------------------------------------------------------------------------------------------
+
+/// Every event in the subscription's queue but the snapshot and status notices.
+fn file_events(rx: &mut Subscription) -> Vec<LibraryEvent> {
+    let mut seen = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        if !matches!(
+            e,
+            LibraryEvent::Changed { .. } | LibraryEvent::GitChanged { .. }
+        ) {
+            seen.push(e);
+        }
+    }
+    seen
+}
+
+fn is_deleted(e: &LibraryEvent, r: &RelPath) -> bool {
+    matches!(e, LibraryEvent::FileDeleted { rel, .. } if rel == r)
+}
+
+fn is_renamed(e: &LibraryEvent, f: &RelPath, t: &RelPath) -> bool {
+    matches!(e, LibraryEvent::FileRenamed { from, to, .. } if from == f && to == t)
+}
+
+/// H14 (G1): an open file renamed while a rescan's confirming chain runs, with the watcher's
+/// word for it arriving only after the chain settled (a polled or busy backend). The tab
+/// never hears "deleted"; it hears the rename. 20 rounds.
+#[tokio::test(flavor = "multi_thread")]
+async fn h14_rename_racing_a_confirming_scan_is_never_a_delete() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.sql"), "SELECT 'mine';").unwrap();
+    std::fs::write(d.path().join("other.sql"), "x").unwrap();
+    let mut r = rig_with(app.path(), opts());
+    ready(&r).await;
+    let id = attach(&r, d.path()).await;
+    let root = canonical(d.path());
+    r.svc.read(id, &rel("a.sql"), None).await.unwrap();
+    // Open too: its edits are the marker that a round's late hints were handled.
+    r.svc.read(id, &rel("other.sql"), None).await.unwrap();
+    r.svc.settled().await;
+    file_events(&mut r.rx);
+    for round in 0..20 {
+        let (from, to) = if round % 2 == 0 {
+            ("a.sql", "b.sql")
+        } else {
+            ("b.sql", "a.sql")
+        };
+        // The rename lands, and a rescan's chain sees it before the watcher says anything
+        // about it. (Renamed first: a test thread descheduled between a `Rescan` and the
+        // rename could let the whole chain end before the rename, with no word ever after.)
+        std::fs::rename(d.path().join(from), d.path().join(to)).unwrap();
+        assert!(r.fake.emit(&root, vec![RawHint::Rescan(root.clone())]));
+        // The chain runs to its end (`settled()` alone does not wait for the watcher's own
+        // settle, m-i).
+        wait_until("the listing to show the new name", || {
+            r.rels(id) == [to, "other.sql"]
+        })
+        .await;
+        r.svc.settled().await;
+        // Only then the watcher's word for it, and a marker change after it.
+        r.hint(&root, &[from, to]);
+        std::fs::write(d.path().join("other.sql"), format!("marker {round}")).unwrap();
+        r.hint(&root, &["other.sql"]);
+        let mut seen = Vec::new();
+        wait_event(
+            &mut r.rx,
+            &mut seen,
+            "the marker",
+            file_changed(id, "other.sql"),
+        )
+        .await;
+        r.svc.settled().await;
+        seen.extend(file_events(&mut r.rx));
+        let (f, t) = (rel(from), rel(to));
+        assert!(
+            !seen.iter().any(|e| is_deleted(e, &f)),
+            "round {round}: the tab heard deleted: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|e| is_renamed(e, &f, &t)),
+            "round {round}: no rename heard: {seen:?}"
+        );
+        assert_eq!(r.rels(id), [to, "other.sql"]);
+    }
+}
+
+/// Renames an open file back and forth 20 times, each with the watcher's hints in time; with
+/// `rescan`, a `Rescan` comes in the same moment (what Task 9 sends for a burst, an overflow or
+/// a limit: a `git checkout` or `pull`), so the watcher itself never pairs it.
+async fn rename_rounds(rescan: bool) -> (usize, usize, Vec<LibraryEvent>) {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.sql"), "SELECT 'mine';").unwrap();
+    let mut r = rig_with(app.path(), opts());
+    ready(&r).await;
+    let id = attach(&r, d.path()).await;
+    let root = canonical(d.path());
+    r.svc.read(id, &rel("a.sql"), None).await.unwrap();
+    r.svc.settled().await;
+    file_events(&mut r.rx);
+    let mut seen = Vec::new();
+    for round in 0..20 {
+        let (from, to) = if round % 2 == 0 {
+            ("a.sql", "b.sql")
+        } else {
+            ("b.sql", "a.sql")
+        };
+        if rescan {
+            assert!(r.fake.emit(&root, vec![RawHint::Rescan(root.clone())]));
+        }
+        std::fs::rename(d.path().join(from), d.path().join(to)).unwrap();
+        r.hint(&root, &[from, to]);
+        wait_until("the listing to show the new name", || r.rels(id) == [to]).await;
+        r.svc.settled().await;
+        let round_events = file_events(&mut r.rx);
+        let (f, t) = (rel(from), rel(to));
+        let deleted_at = round_events.iter().position(|e| is_deleted(e, &f));
+        let renamed_at = round_events.iter().position(|e| is_renamed(e, &f, &t));
+        assert!(
+            deleted_at.is_none_or(|d| renamed_at.is_some_and(|x| x < d)),
+            "round {round}: deleted before renamed: {round_events:?}"
+        );
+        seen.extend(round_events);
+    }
+    let deletes = seen
+        .iter()
+        .filter(|e| matches!(e, LibraryEvent::FileDeleted { .. }))
+        .count();
+    let renames = seen
+        .iter()
+        .filter(|e| matches!(e, LibraryEvent::FileRenamed { .. }))
+        .count();
+    (renames, deletes, seen)
+}
+
+/// H14b (G1): a rename with a `Rescan` in the same moment is one rename, 20 rounds of 20.
+#[tokio::test(flavor = "multi_thread")]
+async fn h14b_rename_during_a_rescan_is_one_rename() {
+    let (renames, deletes, seen) = rename_rounds(true).await;
+    print_fact(&format!(
+        "t10-fr3 h14b rescan=true renames={renames} deletes={deletes}"
+    ));
+    assert_eq!((renames, deletes), (20, 0), "{seen:?}");
+}
+
+/// H14b's control: without the rescan, the watcher's own pairing gives 20 renames.
+#[tokio::test(flavor = "multi_thread")]
+async fn h14b_rename_reported_in_time_is_one_rename() {
+    let (renames, deletes, seen) = rename_rounds(false).await;
+    print_fact(&format!(
+        "t10-fr3 h14b rescan=false renames={renames} deletes={deletes}"
+    ));
+    assert_eq!((renames, deletes), (20, 0), "{seen:?}");
+}
+
+/// A library whose `.hacivat/workspace.toml` says `database = "orders"`.
+fn bound_library() -> tempfile::TempDir {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir(d.path().join(".hacivat")).unwrap();
+    std::fs::write(
+        d.path().join(".hacivat/workspace.toml"),
+        "format = 1\ndatabase = \"orders\"\n",
+    )
+    .unwrap();
+    std::fs::write(d.path().join("a.sql"), "x").unwrap();
+    d
+}
+
+fn rebind_to_billing(d: &Path) {
+    std::fs::write(
+        d.join(".hacivat/workspace.toml"),
+        "format = 1\ndatabase = \"billing\"\n",
+    )
+    .unwrap();
+}
+
+fn db_of(r: &Rig, id: LibraryId) -> Option<String> {
+    r.snap().library(id).map(|l| l.db.as_str().to_owned())
+}
+
+/// Counts root listings (a full scan lists the root once).
+struct CountingFs {
+    root: PathBuf,
+    lists: Arc<AtomicUsize>,
+}
+
+impl Fs for CountingFs {
+    fn read_dir(&self, dir: &Path, cap: usize) -> std::io::Result<Vec<std::ffi::OsString>> {
+        if dir == self.root {
+            self.lists.fetch_add(1, Ordering::SeqCst);
+        }
+        RealFs.read_dir(dir, cap)
+    }
+    fn symlink_metadata(&self, path: &Path) -> std::io::Result<Meta> {
+        RealFs.symlink_metadata(path)
+    }
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        RealFs.canonicalize(path)
+    }
+    fn read_link(&self, link: &Path) -> std::io::Result<PathBuf> {
+        RealFs.read_link(link)
+    }
+}
+
+/// H15 (G2, R-T10-6): a teammate's pull rewrites `.hacivat/workspace.toml` (`orders` →
+/// `billing`); the watcher's word on that path re-binds the library after the debounce, with
+/// a manifest-only read (no full scan).
+#[tokio::test(flavor = "multi_thread")]
+async fn h15_manifest_change_rebinds_without_a_rescan() {
+    let app = tempfile::tempdir().unwrap();
+    let d = bound_library();
+    let root = canonical(d.path());
+    let lists = Arc::new(AtomicUsize::new(0));
+    let o = ServiceOptions {
+        fs: Arc::new(CountingFs {
+            root: root.clone(),
+            lists: lists.clone(),
+        }),
+        ..opts()
+    };
+    let r = rig_with(app.path(), o);
+    ready(&r).await;
+    let id = attach(&r, d.path()).await;
+    assert_eq!(db_of(&r, id).as_deref(), Some("orders"));
+    let scans = lists.load(Ordering::SeqCst);
+    rebind_to_billing(d.path());
+    r.hint(&root, &[".hacivat/workspace.toml"]);
+    wait_until("the new binding", || {
+        db_of(&r, id).as_deref() == Some("billing")
+    })
+    .await;
+    r.svc.settled().await;
+    let more = lists.load(Ordering::SeqCst) - scans;
+    print_fact(&format!(
+        "t10-fr3 h15 source=fake db=billing full_scans={more}"
+    ));
+    assert_eq!(more, 0, "the manifest change caused a full scan");
+}
+
+/// H15 through the poll source: the manifest is in its stat set.
+#[tokio::test(flavor = "multi_thread")]
+async fn h15_manifest_change_rebinds_on_a_polled_library() {
+    let app = tempfile::tempdir().unwrap();
+    let d = bound_library();
+    let paths = LocalPaths::under(app.path());
+    let sources = Sources::Custom(Arc::new(|| {
+        PollEventSource::with_interval(Duration::from_millis(30))
+            .map(|s| Box::new(s) as Box<dyn EventSource>)
+    }));
+    let svc =
+        LibraryService::open_with(&paths, &tokio::runtime::Handle::current(), sources, opts());
+    wait_until("the service to load", || {
+        svc.snapshot().state == LibraryState::Watching
+    })
+    .await;
+    let id = svc.attach(d.path().into(), None, false).await.unwrap();
+    let db = |svc: &LibraryService| svc.snapshot().library(id).map(|l| l.db.as_str().to_owned());
+    wait_until("the first binding", || {
+        db(&svc).as_deref() == Some("orders")
+    })
+    .await;
+    // Let a pass or two record the manifest's stamp first.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    rebind_to_billing(d.path());
+    wait_until("the new binding", || db(&svc).as_deref() == Some("billing")).await;
+    print_fact("t10-fr3 h15 source=poll db=billing");
+}
+
+/// G2's backstop: with no word from the watcher at all, the status refresh's backstop (60 s,
+/// here short) re-reads the manifest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manifest_change_nobody_reported_is_seen_at_the_backstop() {
+    let app = tempfile::tempdir().unwrap();
+    let d = bound_library();
+    let r = rig_with(
+        app.path(),
+        ServiceOptions {
+            git_backstop: Duration::from_millis(200),
+            ..opts()
+        },
+    );
+    ready(&r).await;
+    let id = attach(&r, d.path()).await;
+    assert_eq!(db_of(&r, id).as_deref(), Some("orders"));
+    rebind_to_billing(d.path());
+    wait_until("the new binding", || {
+        db_of(&r, id).as_deref() == Some("billing")
+    })
+    .await;
+}
+
+/// H16: a batch tagged with an older watcher's generation is ignored; the same batch with the
+/// current generation is acted on (positive control).
+#[tokio::test(flavor = "multi_thread")]
+async fn h16_a_stale_watchers_batch_is_ignored() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.sql"), "SELECT 1;").unwrap();
+    std::fs::write(d.path().join("b.sql"), "SELECT 2;").unwrap();
+    let mut r = rig_with(app.path(), opts());
+    ready(&r).await;
+    let id = attach(&r, d.path()).await;
+    let root = canonical(d.path());
+    let (a, b) = (rel("a.sql"), rel("b.sql"));
+    r.svc.read(id, &a, None).await.unwrap();
+    // a.sql is really deleted, and announced.
+    std::fs::remove_file(d.path().join("a.sql")).unwrap();
+    r.hint(&root, &["a.sql"]);
+    r.svc.settled().await;
+    file_events(&mut r.rx);
+    let renamed = vec![WatchEvent::Renamed {
+        from: a.clone(),
+        to: b.clone(),
+    }];
+    // A stale watcher's late word: "a.sql was renamed to b.sql".
+    r.svc.inject_watch_batch(id, true, renamed.clone()).await;
+    r.svc.settled().await;
+    let stale = file_events(&mut r.rx);
+    r.svc.inject_watch_batch(id, false, renamed).await;
+    r.svc.settled().await;
+    let current = file_events(&mut r.rx);
+    assert!(
+        !stale.iter().any(|e| is_renamed(e, &a, &b)),
+        "a stale batch was acted on: {stale:?}"
+    );
+    assert!(
+        current.iter().any(|e| is_renamed(e, &a, &b)),
+        "positive control: {current:?}"
+    );
 }

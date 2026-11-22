@@ -656,9 +656,9 @@ impl LibraryService {
     /// ## m4b-t05-fileio fix round 2 (named exception; I-fr1-1, R-T5-6): `env` as in `read`.
     ///
     /// ## m4b-t10-service
-    /// `fileio::save_with_echo` on the blocking pool; the echo is recorded before the new file
-    /// replaces the old one, so the watcher's report of it announces nothing. The file is
-    /// remembered as open, and its listing entry refreshed.
+    /// `fileio::save_echoing_landing` on the blocking pool; the echo is recorded before the
+    /// new file replaces the old one, so the watcher's report of it announces nothing. The
+    /// file is remembered as open, and its listing entry refreshed.
     pub async fn save(
         &self,
         id: LibraryId,
@@ -670,22 +670,23 @@ impl LibraryService {
         let root = self
             .root_of(id)
             .ok_or(SaveError::Io(io::ErrorKind::NotFound))?;
-        // The echo goes under the path the bytes land at: a file link's target (R-C0-7).
-        let landing = self
-            .snapshot
-            .load()
-            .library(id)
-            .and_then(|l| l.entries.iter().find(|e| &e.rel == rel))
-            .and_then(|e| e.target.clone())
-            .unwrap_or_else(|| rel.clone());
+        // The echo goes under the path the bytes land at: a file link's target (R-C0-7). Fix
+        // round 3 (m-f): the one this save's own `join` resolved, never an older listing's.
         let (path, echo) = (rel.clone(), self.echoes.get(id));
         let saved = self
             .blocking(move || {
-                fileio::save_with_echo(&root, &path, env, text, expect, &mut |stamp| {
-                    if let Some(echo) = &echo {
-                        echo.record(landing.clone(), *stamp);
-                    }
-                })
+                fileio::save_echoing_landing(
+                    &root,
+                    &path,
+                    env,
+                    text,
+                    expect,
+                    &mut |landing, stamp| {
+                        if let Some(echo) = &echo {
+                            echo.record(landing.clone(), *stamp);
+                        }
+                    },
+                )
             })
             .await
             .unwrap_or(Err(SaveError::Io(io::ErrorKind::Interrupted)));
@@ -773,12 +774,32 @@ impl LibraryService {
     }
 
     // ## m4b-t10-service
-    /// Resolves once the service is quiet: no job running or queued, no changed file waiting
-    /// to settle (for tests: every event the hints so far will cause has been sent).
+    /// Resolves once the service is quiet: no job running or queued, no open file waiting for
+    /// its stamp, no confirming scan due, no attach under way.
+    ///
+    /// Fix round 3 (m-i): it does **not** wait for the Task 9 watcher's own pending settle. A
+    /// hint handed to a watcher is reported only after the watcher's window (`settle`), so
+    /// `emit(...); settled().await` can resolve before that report arrives and see a listing
+    /// that has not caught up yet. Tests wait on a condition (the listing, an event) first,
+    /// and call `settled()` after it for the service's own follow-up work.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub async fn settled(&self) {
         let _ = self.ask(|reply| Msg::Settled { reply }).await;
+    }
+
+    /// Fix round 3 (H16): hands library `id` a watch batch as its watcher would, tagged with
+    /// the current watcher's generation, or with `stale`, the previous one (a dropped watcher's
+    /// late batch).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn inject_watch_batch(
+        &self,
+        id: LibraryId,
+        stale: bool,
+        batch: crate::watch::WatchBatch,
+    ) {
+        self.tell(Msg::InjectWatch { id, stale, batch }).await;
     }
 
     /// How many times a script's content was read for a stamp (fix round 1, I4: only files
