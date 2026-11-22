@@ -1217,3 +1217,17 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
 - **Found while stress-testing; not caused by this change, and not fixed (carries).** Interleaved A/B runs of the binary before and after, under a busy machine, fail at the same rate:
   - **`git_checkout_2000_is_one_rescan`:** 6/80 before and 5/80 after. When FSEvents pauses for a window during the checkout, the first few hundred files form their own burst below the 1,000-path limit, so each is reported `Changed` before the rest overflow into the `Rescan`. The events are true, but the "one rescan" promise of the burst rule is broken. This is the burst rule's quiet-window heuristic.
   - **`folder_move_is_seen_as_renames_for_known_contents`:** when run alone or in a small group (`watch_real folder`), it fails about 9 times in 10, before and after, with an extra `PossiblyChanged(reports/d.sql)`. The whole binary passes. The move happens within R-T9-3's 2 s racy window of the fixture's writes, and a late FSEvents history hint on `d.sql` makes the ruled `PossiblyChanged`, so the test's expectation depends on how long the other tests take.
+
+## m4b-cifix-2 — Windows: n2's library-folder alias, and the dataless hook's spelling
+
+- **n2 on Windows (product).**
+  - `non_ascii_case_only_library_rename_is_case_mismatch` answered `New` on Windows. The badge claimed that a tracked, modified file was untracked.
+  - `map::same_file` was Unix-only (`(dev, ino)`), since `std` has no stable file id on Windows.
+  - It now compares the final paths the system reports for open handles (`canonicalize`). Those spell every component as the disk does, so `Çal` and `çal` resolve alike under case folding. A link or junction on either side is never equal (like `lstat` on Unix).
+  - It opens a handle on each candidate folder and reads no file. It runs once per distinct leading index folder that does not already match the library ASCII-case-insensitively.
+  - The file-level case-only residual (n3) is unchanged.
+- **The dataless hook (test).**
+  - `dataless_layout_files_and_split_index_are_unavailable` answered `Ready` for the linked worktree's `commondir` on Windows. The status resolves a gitfile's target and the alternates with `canonicalize`, which gives the verbatim `\\?\C:\…` form, and the testing hook matches paths exactly.
+  - The test built its absolute entries from its own `canonical`, which strips `\\?\`.
+  - The product's placeholder test reads file attributes and never compares spellings, so this was a test bug.
+  - The test now spells absolute entries with `std::fs::canonicalize`. The hook's doc says so.

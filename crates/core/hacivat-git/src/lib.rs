@@ -236,7 +236,10 @@ pub mod testing {
 
     /// [`status`](super::status), with `dataless` (library-relative, `/`-separated) treated as
     /// cloud placeholders in addition to the ones the file flags name. Entries may name files
-    /// inside the repository's `.git` when the library is the worktree (`.git/HEAD`). The hook
+    /// inside the repository's `.git` when the library is the worktree (`.git/HEAD`). An
+    /// absolute entry (a path outside the library) is matched exactly, so it must be spelled
+    /// as the status resolves it: `std::fs::canonicalize`, verbatim `\\?\` on Windows
+    /// (m4b-cifix-2). The hook
     /// can only add `Unknown(Dataless)` answers, index-copy removals and the
     /// `Unavailable(Dataless)` refusal; it cannot remove one, so it cannot weaken the status.
     pub fn status_treating_as_dataless(

@@ -142,8 +142,15 @@ pub(crate) fn lib_relative(
     }
 }
 
-/// Whether two paths are the same file system entry: `(dev, ino)` from `lstat` on Unix. Elsewhere
-/// `std` has no stable file id, so never (n2's alias match is Unix-only).
+/// Whether two paths are the same file system entry: `(dev, ino)` from `lstat` on Unix.
+///
+/// ## m4b-cifix-2-windows-alias: `std` has no stable file id on Windows, so there the entry is
+/// identified by the final path the system reports for an open handle (`canonicalize`,
+/// `GetFinalPathNameByHandleW`), which spells every component as the disk does. Two spellings
+/// of one folder (`Çal` and `çal` under case folding) resolve alike. Neither may be a link or
+/// junction, as on Unix where `lstat` does not follow the last component. It opens a handle on
+/// each folder and reads no file. Before this, n2's alias match was Unix-only and a non-ASCII
+/// case-only rename of the library folder showed its files as `New` (CI 44990057141).
 pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -155,8 +162,13 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = (a, b);
-        false
+        let real = |p: &Path| {
+            std::fs::symlink_metadata(p)
+                .ok()
+                .filter(|m| !m.file_type().is_symlink())
+                .and_then(|_| std::fs::canonicalize(p).ok())
+        };
+        matches!((real(a), real(b)), (Some(x), Some(y)) if x == y)
     }
 }
 
@@ -446,4 +458,30 @@ mod tests {
         std::fs::write(&p, b"select 1;\n").unwrap();
         assert!(!is_dataless(&std::fs::symlink_metadata(&p).unwrap()));
     }
+
+    // ## m4b-cifix-2-windows-alias
+    /// n2's identity on every platform: the same folder under two spellings that only the file
+    /// system's case folding equates (`Çal`, `çal`) is the same entry; another folder is not;
+    /// a link to the folder is not (the last component is never followed).
+    #[test]
+    fn same_file_equates_spellings_of_one_folder_only() {
+        let t = tempfile::tempdir().unwrap();
+        let upper = t.path().join("\u{c7}al");
+        std::fs::create_dir(&upper).unwrap();
+        let lower = t.path().join("\u{e7}al");
+        let folds = std::fs::symlink_metadata(&lower).is_ok();
+        assert_eq!(same_file(&upper, &lower), folds, "folds case: {folds}");
+        assert!(same_file(&upper, &upper));
+        let other = t.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        assert!(!same_file(&upper, &other));
+        assert!(!same_file(&upper, &t.path().join("missing")));
+        #[cfg(unix)]
+        {
+            let link = t.path().join("link");
+            std::os::unix::fs::symlink(&upper, &link).unwrap();
+            assert!(!same_file(&link, &upper));
+        }
+    }
+    // ## m4b-cifix-2-windows-alias
 }
