@@ -237,6 +237,11 @@ fn refuse(refusal: Refusal, rel: &RelPath, conn: String, database: String, cx: &
 /// drawn. Answers the console of a tab that was already open and loaded, else `None` (a new
 /// tab's console is registered when its file is read). A script that may not run where asked
 /// (R-M4b-25) opens nothing and a notice says why.
+///
+/// ## m4b-t14-tabs fix round 2 (m-fr1-6): a SQLite script always answers `None`, already open
+/// or not: its tab opens once the profile's file identity is read on the blocking pool (C2,
+/// R-T14-1). A caller that needs the tab (Task 15's Go to script) finds it by its binding
+/// (`tabs::doc_of_script`) after the open, never from this answer.
 pub fn open_script(
     cx: &mut App,
     library: LibraryId,

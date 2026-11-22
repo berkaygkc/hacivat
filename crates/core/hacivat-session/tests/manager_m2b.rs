@@ -2100,3 +2100,76 @@ async fn a_real_mysql_session_with_autocommit_off_is_lost_never_silently_reconne
     assert!(matches!(m.state(profile.id), LiveState::Lost { .. }));
     m.shutdown().await;
 }
+
+// ## m4b-t14-tabs (fix round 2, I-fr1-1): the schema probe after a reconnect's replay is part of
+// the replay: bounded by the connect timeout, ended at once by a close; one that reads nothing
+// leaves the database unknown and keeps the last schema for the next replay.
+
+#[tokio::test(start_paused = true)]
+async fn a_close_during_the_probe_after_the_replay_ends_it_at_once() {
+    let (m, f) = manager(ok_pg().exec(vec![slow("SELECT current_database()", secs(600))]));
+    connect_and_wait(&m).await;
+    drop_connections(&m, &f);
+    until("the probe after the replay", || {
+        f.executed()
+            .iter()
+            .any(|x| x.starts_with("SELECT current_database()"))
+    })
+    .await;
+    tokio::time::advance(secs(1)).await;
+    let t = tokio::time::Instant::now();
+    m.disconnect(p().id);
+    assert_eq!(m.state(p().id), LiveState::Disconnected);
+    until("every connection closed", || f.open_connections() == 0).await;
+    assert!(t.elapsed() < secs(2), "{:?}", t.elapsed());
+    let calls = f.connect_calls();
+    tokio::time::sleep(secs(40)).await;
+    assert_eq!(f.connect_calls(), calls);
+    assert_eq!(m.state(p().id), LiveState::Disconnected);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_probe_that_hangs_after_the_replay_times_out_and_the_next_attempt_follows() {
+    let (m, f) = manager(ok_pg().exec(vec![slow("SELECT current_database()", secs(600))]));
+    connect_and_wait(&m).await;
+    let lost_at = tokio::time::Instant::now();
+    lose_connection(&m, &f).await;
+    // The capsule leaves Reconnecting: the hung probe counts as a timed-out replay.
+    wait_connected(&m, p().id).await;
+    let took = lost_at.elapsed();
+    assert!(took >= secs(15) && took < secs(30), "{took:?}");
+    assert_eq!(f.connect_calls(), 3, "connect, timed-out probe, reconnect");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_probe_that_fails_after_the_replay_leaves_the_database_unknown_and_keeps_the_use() {
+    let mut refused = db("42501");
+    if let Some(server) = refused.server.as_mut() {
+        server.severity = Some("ERROR".into());
+    }
+    let failing = FakeExec {
+        prefix: "SELECT current_database()",
+        result: Err(refused),
+        delay: Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    };
+    let (m, f) = manager(ok_pg().exec(vec![probe_answers_app(), failing]));
+    connect_and_wait(&m).await;
+    set_schema(&m, "app").await;
+    let schema_of = |m: &ConnectionManager| snap(&default_session(m)).schema.and_then(|s| s.schema);
+    assert_eq!(schema_of(&m).as_deref(), Some("app"));
+    lose_connection(&m, &f).await;
+    wait_connected(&m, p().id).await;
+    until("the database shown unknown", || schema_of(&m).is_none()).await;
+    // The next reconnect still restores the console's schema (M3).
+    let mark = f.executed().len();
+    lose_connection(&m, &f).await;
+    wait_connected(&m, p().id).await;
+    let after = executed_since(&f, mark);
+    assert!(
+        after.contains(&"SET search_path TO \"app\"".to_string()),
+        "{after:?}"
+    );
+}
+// ## m4b-t14-tabs

@@ -2014,8 +2014,9 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
     // only under the context generation its database check read; anything that moved the
     // session in between (a reconnect, a replay, a queued `USE`) refuses, and Run checks again.
     let console_id = job.console;
+    let session_id = job.session.id();
     if !cx.update(|cx: &mut App| {
-        crate::scripts::tabs::generation_holds(console_id, generation, cx)
+        crate::scripts::tabs::generation_holds(console_id, session_id, generation, cx)
     }) {
         cx.update(|cx: &mut App| {
             refuse(
