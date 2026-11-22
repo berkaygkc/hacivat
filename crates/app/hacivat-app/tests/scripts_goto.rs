@@ -1087,3 +1087,87 @@ fn enter_checks_the_live_snapshot_before_opening(cx: &mut TestAppContext) {
     );
     r.finish();
 }
+
+// ## m4b-t15-goto (controller note: `open_script` answers `None` for SQLite and opens the tab
+// once the file's identity is read, R-T14-1)
+
+/// A SQLite profile `name` over the file `path` (`main`, bound by the file's stem).
+fn sqlite(name: &str, env: Option<EnvTag>, path: &Path) -> Profile {
+    let mut p = test_profile(name, env, "127.0.0.1");
+    p.engine = DbmsKind::Sqlite;
+    p.database = None;
+    p.endpoint = hacivat_session::profile::ProfileEndpoint::File {
+        path: path.to_path_buf(),
+        create_if_missing: false,
+    };
+    p
+}
+
+#[gpui::test]
+fn sqlite_candidates_open_from_go_to_script_and_from_a_tab(cx: &mut TestAppContext) {
+    let dir = temp_root();
+    let file = dir.join("orders.db");
+    std::fs::write(&file, b"").unwrap();
+    let r = rig(
+        cx,
+        vec![
+            prof("orders-staging", Some(EnvTag::Staging), "orders"),
+            sqlite("local-orders", Some(EnvTag::Local), &file),
+        ],
+    );
+    let (staging, local) = (
+        profile_id(r.vcx, "orders-staging"),
+        profile_id(r.vcx, "local-orders"),
+    );
+    let lib = r.library("orders", &["a.sql", "@local/l.sql"]);
+    // A file only the SQLite connection shows: one non-production candidate, opened directly
+    // (the tab opens once the file's identity is read).
+    goto_query(r.vcx, "l.sql", "@local/l.sql · orders");
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "l.sql opens under the SQLite connection", |vcx| {
+        active_spec(vcx).is_some_and(|(s, ready)| {
+            ready && s.profile == Some(local) && s.database == Some(DatabaseName::new("main"))
+        })
+    });
+    assert!(!is_open(r.vcx));
+    // From a staging tab, "Open under another connection…" offers the SQLite one.
+    r.open(lib, "a.sql", Some(staging), "orders");
+    let spec = active_spec(r.vcx).unwrap().0;
+    let before = tab_count(r.vcx);
+    r.vcx.cx.update(|cx| open_under_another(&spec, cx));
+    let rows = chooser(r.vcx).expect("the chooser");
+    assert_eq!(rows.0, [("local-orders".to_string(), "main".to_string())]);
+    assert_eq!(active_name(&rows), Some("local-orders"));
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "a.sql opens under the SQLite connection", |vcx| {
+        active_spec(vcx).is_some_and(|(s, ready)| {
+            ready && s.rel.as_str() == "a.sql" && s.profile == Some(local)
+        })
+    });
+    assert_eq!(tab_count(r.vcx), before + 1);
+    r.finish();
+}
+
+#[gpui::test]
+fn a_sqlite_file_that_cannot_be_read_opens_nothing_and_says_why(cx: &mut TestAppContext) {
+    let dir = temp_root();
+    // The profile points at a file that is not there.
+    let r = rig(
+        cx,
+        vec![sqlite(
+            "local-orders",
+            Some(EnvTag::Local),
+            &dir.join("orders.db"),
+        )],
+    );
+    r.library("orders", &["a.sql"]);
+    let before = tab_count(r.vcx);
+    goto_query(r.vcx, "a", "a.sql · orders");
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "the refusal", |vcx| {
+        toast_texts(vcx).iter().any(|t| t.contains("wasn't opened"))
+    });
+    assert!(!is_open(r.vcx), "the layer closed");
+    assert_eq!(tab_count(r.vcx), before, "no tab");
+    r.finish();
+}
