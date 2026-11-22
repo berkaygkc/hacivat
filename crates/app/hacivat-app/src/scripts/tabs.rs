@@ -37,6 +37,7 @@ use std::future::Future;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::shell::hooks::TabDecor;
 use hacivat_l10n::ArgValue;
 use hacivat_proto::{EnvTag, ProfileId};
 use hacivat_scripts::fileio::{DiskStamp, FileMeta, ReadError, SizeTier, TextEncoding};
@@ -44,7 +45,6 @@ use hacivat_scripts::recovery::{self, CopyMeta, RecoveryEntry, RecoveryKey};
 use hacivat_scripts::{EntryKind, LibraryEvent};
 use hacivat_session::session::{Request, SessionHandle};
 use hacivat_ui::panes::TabId;
-use crate::shell::hooks::TabDecor;
 use hacivat_ui_core::gpui_surface::{
     App, Context, Entity, EventEmitter, Global, SharedString, Task, WeakEntity,
 };
@@ -182,6 +182,16 @@ const SCRIPT_CLIENT_BASE: u32 = 1 << 30;
 /// The app-wide parts of script tabs (`scripts::install`): the save commands.
 pub(crate) fn install(cx: &mut App) {
     crate::scripts::save::register_commands(cx);
+    cx.set_global(open::RecoveryInstance::default());
+    // The library service stops with the app, so the core runtime's shutdown never waits for
+    // its actor.
+    cx.on_app_quit(|cx| {
+        if let Some(service) = open::service(cx) {
+            service.shutdown();
+        }
+        async {}
+    })
+    .detach();
 }
 
 /// Runs `fut` on the core runtime and answers its output on the calling executor (`None`
@@ -191,9 +201,9 @@ pub(crate) fn on_core<T: Send + 'static>(
     fut: impl Future<Output = T> + Send + 'static,
 ) -> impl Future<Output = Option<T>> + 'static {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    match cx.try_global::<open::ScriptsRuntime>() {
-        Some(rt) => {
-            rt.handle.spawn(async move {
+    match cx.try_global::<ConnectionsModel>() {
+        Some(m) => {
+            m.runtime().spawn(async move {
                 let _ = tx.send(fut.await);
             });
         }
@@ -210,7 +220,9 @@ pub enum Load {
     /// Being read ("Opening…").
     Opening,
     /// Not UTF-8 and no BOM: the user names the encoding (NOTES surface 10).
-    NeedsEncoding { guess: Option<TextEncoding> },
+    NeedsEncoding {
+        guess: Option<TextEncoding>,
+    },
     /// Not opened; the reason selects `hv-scripts-open-failed-body`.
     Failed(&'static str),
     /// The tab may not run where it is bound (a restored tab; R-M4b-25).
@@ -248,10 +260,14 @@ pub enum Notice {
     Changed,
     Deleted,
     Unlisted(Unlisted),
-    Moved { path: String },
+    Moved {
+        path: String,
+    },
     RunRefused(RunRefused),
     /// The MySQL switch made at open did not land.
-    SwitchFailed { database: String },
+    SwitchFailed {
+        database: String,
+    },
     /// The tab's profile no longer exists (R-M4b-30).
     Removed,
     /// Unsaved text recovered from an earlier run.
@@ -287,7 +303,7 @@ pub enum Switch {
 #[derive(Debug, Clone)]
 pub enum ScriptDocEvent {
     /// The file was read: the host opens the editor over `text`.
-    Read(Opened),
+    Read(Box<Opened>),
     /// Something the host draws changed (a notice, the Run state).
     Changed,
 }
@@ -629,7 +645,9 @@ impl ScriptDoc {
             }
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let read = read.await.unwrap_or(Err(ReadError::Io(std::io::ErrorKind::Interrupted)));
+            let read = read
+                .await
+                .unwrap_or(Err(ReadError::Io(std::io::ErrorKind::Interrupted)));
             let _ = this.update(cx, |d, cx| d.read_done(read, cx));
         }));
         cx.notify();
@@ -649,14 +667,14 @@ impl ScriptDoc {
             Ok(decoded) => {
                 let total = decoded.stamp.len;
                 self.load = Load::Ready;
-                cx.emit(ScriptDocEvent::Read(Opened {
+                cx.emit(ScriptDocEvent::Read(Box::new(Opened {
                     text: decoded.text,
                     meta: decoded.meta,
                     stamp: Some(decoded.stamp),
                     tier: decoded.tier,
                     total,
                     recovered,
-                }));
+                })));
             }
             Err(ReadError::NeedsEncoding { guess }) => {
                 if let Some(r) = recovered {
@@ -684,14 +702,14 @@ impl ScriptDoc {
                     Some(r) if matches!(reason, "missing" | "library") => {
                         self.load = Load::Ready;
                         self.deleted = true;
-                        cx.emit(ScriptDocEvent::Read(Opened {
+                        cx.emit(ScriptDocEvent::Read(Box::new(Opened {
                             text: String::new(),
                             meta: r.copy.meta,
                             stamp: None,
                             tier: SizeTier::Full,
                             total: 0,
                             recovered: Some(r),
-                        }));
+                        })));
                     }
                     other => {
                         if let Some(r) = other {
@@ -787,7 +805,7 @@ impl ScriptDoc {
             return;
         }
         let (Some(rt), Some(key), Some(editor)) = (
-            cx.try_global::<open::ScriptsRuntime>().cloned(),
+            open::current(cx),
             self.recovery_key(cx),
             self.editor.clone(),
         ) else {
@@ -844,10 +862,7 @@ impl ScriptDoc {
 
     /// Removes this tab's own recovery copy (clean again, saved, "Don't save").
     pub(crate) fn discard_copy(&mut self, cx: &mut Context<Self>) {
-        let (Some(rt), Some(key)) = (
-            cx.try_global::<open::ScriptsRuntime>().cloned(),
-            self.recovery_key(cx),
-        ) else {
+        let (Some(rt), Some(key)) = (open::current(cx), self.recovery_key(cx)) else {
             return;
         };
         let task = on_core(cx, async move {
@@ -869,7 +884,7 @@ impl ScriptDoc {
         let Some(entry) = self.recovered.take() else {
             return;
         };
-        let Some(rt) = cx.try_global::<open::ScriptsRuntime>().cloned() else {
+        let Some(rt) = open::current(cx) else {
             return;
         };
         let task = on_core(cx, async move {
@@ -898,7 +913,12 @@ impl ScriptDoc {
             self.discard_copy(cx);
         }
         self.hide(
-            |n| matches!(n, Notice::Changed | Notice::Deleted | Notice::Recovered { .. }),
+            |n| {
+                matches!(
+                    n,
+                    Notice::Changed | Notice::Deleted | Notice::Recovered { .. }
+                )
+            },
             cx,
         );
         cx.emit(ScriptDocEvent::Changed);
@@ -1172,11 +1192,7 @@ impl ScriptDoc {
             let _ = this.update(cx, |d, cx| {
                 let landed = replied.is_ok_and(|r| r.is_ok())
                     && session_database(&session).as_deref() == Some(db.as_str());
-                d.switch = if landed {
-                    Switch::Done
-                } else {
-                    Switch::Failed
-                };
+                d.switch = if landed { Switch::Done } else { Switch::Failed };
                 if landed {
                     d.hide(|n| matches!(n, Notice::SwitchFailed { .. }), cx);
                 } else {
@@ -1207,7 +1223,11 @@ impl ScriptDoc {
                 .iter()
                 .filter(|(t, _)| **t != me)
                 .filter_map(|(_, w)| w.upgrade())
-                .any(|d| d.read(cx).spec(cx).is_some_and(|s| s.library == tab.library && s.rel == tab.rel));
+                .any(|d| {
+                    d.read(cx)
+                        .spec(cx)
+                        .is_some_and(|s| s.library == tab.library && s.rel == tab.rel)
+                });
             if !others && let Some(service) = open::service(cx) {
                 let rel = tab.rel.clone();
                 let forget = on_core(cx, async move { service.forget(tab.library, &rel).await });
@@ -1265,11 +1285,7 @@ pub(crate) fn session_database(session: &SessionHandle) -> Option<String> {
 /// submit point): `true` lets the run go on. A refused Run shows its notice and sends nothing;
 /// a MySQL tab whose session is on another database switches it back once and runs `rerun`
 /// after the switch, which checks again.
-pub(crate) fn run_gate(
-    console: ConsoleId,
-    rerun: Box<dyn FnOnce(&mut App)>,
-    cx: &mut App,
-) -> bool {
+pub(crate) fn run_gate(console: ConsoleId, rerun: Box<dyn FnOnce(&mut App)>, cx: &mut App) -> bool {
     let Some(doc) = doc_of_console(console, cx) else {
         return !is_script_console(console, cx);
     };
@@ -1278,10 +1294,7 @@ pub(crate) fn run_gate(
 
 /// Whether `console` is a script tab's (registered with its source), whatever its doc.
 fn is_script_console(console: ConsoleId, cx: &App) -> bool {
-    matches!(
-        Consoles::source(cx, console),
-        ConsoleSource::Script { .. }
-    )
+    matches!(Consoles::source(cx, console), ConsoleSource::Script { .. })
 }
 
 impl ScriptDoc {
@@ -1465,6 +1478,20 @@ pub(crate) fn conn_label(doc: &ScriptDoc, cx: &App) -> String {
         .and_then(|p| open::profile_of(p, cx))
         .map(|p| display_name(&p.name))
         .unwrap_or_default()
+}
+
+/// Shots fixtures (feature `shots`): a notice on a script tab without the disk or session
+/// event behind it (NOTES surfaces 5, 6, 12).
+#[cfg(any(feature = "shots", feature = "test-support"))]
+pub mod fixtures {
+    use super::*;
+
+    /// Shows `notice` on script tab `tab`.
+    pub fn show(tab: TabId, notice: Notice, cx: &mut App) {
+        if let Some(doc) = doc_of_tab(tab, cx) {
+            doc.update(cx, |d, cx| d.show(notice, cx));
+        }
+    }
 }
 
 #[cfg(test)]

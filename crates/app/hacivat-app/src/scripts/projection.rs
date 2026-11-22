@@ -49,3 +49,44 @@ impl ExplorerContributor for ScriptsContributor {
         0
     }
 }
+
+// ## m4b-t14-tabs (named exception, controller note): a thin accessor behind Task 13's names
+// (`service`, `ensure_service`, `set_service`), so the script tabs use the app's one library
+// service; Task 13's own bodies replace these at the merge.
+
+/// The app's one library service.
+#[derive(Clone)]
+struct ServiceSlot(std::sync::Arc<hacivat_scripts::service::LibraryService>);
+
+impl hacivat_ui_core::gpui_surface::Global for ServiceSlot {}
+
+/// The library service, when one is open.
+pub fn service(cx: &App) -> Option<std::sync::Arc<hacivat_scripts::service::LibraryService>> {
+    cx.try_global::<ServiceSlot>().map(|s| s.0.clone())
+}
+
+/// The library service, opened now if it is not open yet. `None` without settings or a
+/// connections model.
+pub fn ensure_service(
+    cx: &mut App,
+) -> Option<std::sync::Arc<hacivat_scripts::service::LibraryService>> {
+    if let Some(s) = service(cx) {
+        return Some(s);
+    }
+    let paths = cx.try_global::<crate::shell::AppState>()?.paths.clone();
+    let rt = cx
+        .try_global::<crate::connections::ConnectionsModel>()?
+        .runtime();
+    let svc = std::sync::Arc::new(hacivat_scripts::service::LibraryService::open(&paths, &rt));
+    set_service(svc.clone(), cx);
+    Some(svc)
+}
+
+/// Makes `service` the app's library service (tests pass one over fake event sources).
+pub fn set_service(
+    service: std::sync::Arc<hacivat_scripts::service::LibraryService>,
+    cx: &mut App,
+) {
+    cx.set_global(ServiceSlot(service));
+}
+// ## m4b-t14-tabs

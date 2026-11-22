@@ -143,29 +143,25 @@ pub fn save(doc: &Entity<ScriptDoc>, window: &mut Window, cx: &mut App, then: Op
     }
     let text = editor.read(cx).snapshot().buffer.to_string();
     // The secret check (R-M4b-17): the history redactor's spans, mapped (R-M4b-28).
-    let spans: Vec<(std::ops::Range<usize>, SpanKind)> =
-        hacivat_exec::history::secret_spans(&text)
-            .into_iter()
-            .map(|(r, k)| {
-                let kind = match k {
-                    hacivat_exec::history::SecretSpanKind::Value => SpanKind::Password,
-                    hacivat_exec::history::SecretSpanKind::ConnectionValue => {
-                        SpanKind::ConnectionString
-                    }
-                    hacivat_exec::history::SecretSpanKind::Armed => SpanKind::Other,
-                };
-                (r, kind)
-            })
-            .collect();
+    let spans: Vec<(std::ops::Range<usize>, SpanKind)> = hacivat_exec::history::secret_spans(&text)
+        .into_iter()
+        .map(|(r, k)| {
+            let kind = match k {
+                hacivat_exec::history::SecretSpanKind::Value => SpanKind::Password,
+                hacivat_exec::history::SecretSpanKind::ConnectionValue => {
+                    SpanKind::ConnectionString
+                }
+                hacivat_exec::history::SecretSpanKind::Armed => SpanKind::Other,
+            };
+            (r, kind)
+        })
+        .collect();
     let findings = scan_secrets(&text, &spans);
     let prints: Vec<u64> = findings
         .iter()
         .map(|f| fingerprint(&text[f.range.clone()], f.line))
         .collect();
-    let asked = !prints.is_empty()
-        && !prints
-            .iter()
-            .all(|p| doc.read(cx).secret_ok.contains(p));
+    let asked = !prints.is_empty() && !prints.iter().all(|p| doc.read(cx).secret_ok.contains(p));
     let version = editor.read(cx).snapshot().version;
     let expect = {
         let d = doc.read(cx);

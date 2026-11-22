@@ -19,8 +19,8 @@ use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::focus_home::{HomeSlot, first_stop_home};
 use hacivat_ui::notice::{InlineNotice, NoticeIcon};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Entity, IntoElement, ParentElement as _, SharedString, Styled as _,
-    Window, div, px,
+    AnyElement, App, Entity, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
+    div, px,
 };
 use hacivat_ui_core::theme::Theme;
 
@@ -33,10 +33,7 @@ use crate::scripts::tabs::{
 /// The notices of script tab `doc`, under its toolbar (`None`: none).
 pub(crate) fn render(doc: &Entity<ScriptDoc>, cx: &mut App) -> Option<AnyElement> {
     let notices = doc.read(cx).notices.clone();
-    let shown: Vec<AnyElement> = notices
-        .iter()
-        .filter_map(|n| notice(doc, n, cx))
-        .collect();
+    let shown: Vec<AnyElement> = notices.iter().filter_map(|n| notice(doc, n, cx)).collect();
     if shown.is_empty() {
         return None;
     }
@@ -54,7 +51,11 @@ pub(crate) fn render(doc: &Entity<ScriptDoc>, cx: &mut App) -> Option<AnyElement
 }
 
 /// The state of a tab whose text is not shown yet (or will not be), in its own home.
-pub(crate) fn render_unloaded(doc: &Entity<ScriptDoc>, home: &HomeSlot, cx: &mut App) -> AnyElement {
+pub(crate) fn render_unloaded(
+    doc: &Entity<ScriptDoc>,
+    home: &HomeSlot,
+    cx: &mut App,
+) -> AnyElement {
     let load = doc.read(cx).load.clone();
     let file = tabs::file_label(doc.read(cx), cx);
     let conn = tabs::conn_label(doc.read(cx), cx);
@@ -95,7 +96,7 @@ pub(crate) fn render_unloaded(doc: &Entity<ScriptDoc>, home: &HomeSlot, cx: &mut
                 let label: &'static str = label;
                 n = n.action(
                     Button::new(
-                        SharedString::from(format!("script-enc-{tab}-{i}")),
+                        ("script-enc", tab as usize * 8 + i),
                         msg(
                             cx,
                             "hv-scripts-enc-open-as",
@@ -136,7 +137,7 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
     let file = tabs::file_label(doc.read(cx), cx);
     let conn = tabs::conn_label(doc.read(cx), cx);
     let tab = doc.read(cx).tab.0;
-    let id = |name: &str| SharedString::from(format!("script-{name}-{tab}"));
+    let id = |name: &'static str| (name, tab as usize);
     let weak = doc.downgrade();
     let card = match n {
         Notice::Changed => {
@@ -149,22 +150,27 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                 ))
                 .secondary(msg(cx, "hv-scripts-disk-changed-body", Vec::new()))
                 .action(
-                    Button::new(id("reload"), msg(cx, "hv-scripts-disk-reload", Vec::new()))
-                        .on_click(move |_, window, cx| {
-                            if let Some(doc) = a.upgrade() {
-                                confirm_reload(&doc, window, cx);
-                            }
-                        }),
+                    Button::new(
+                        id("script-reload"),
+                        msg(cx, "hv-scripts-disk-reload", Vec::new()),
+                    )
+                    .on_click(move |_, window, cx| {
+                        if let Some(doc) = a.upgrade() {
+                            confirm_reload(&doc, window, cx);
+                        }
+                    }),
                 )
                 .action(
-                    Button::new(id("keep"), msg(cx, "hv-scripts-disk-keep", Vec::new())).on_click(
-                        move |_, _, cx| {
-                            let _ = b.update(cx, |d, cx| {
-                                d.keep_mine = true;
-                                d.hide(|n| matches!(n, Notice::Changed), cx);
-                            });
-                        },
-                    ),
+                    Button::new(
+                        id("script-keep"),
+                        msg(cx, "hv-scripts-disk-keep", Vec::new()),
+                    )
+                    .on_click(move |_, _, cx| {
+                        let _ = b.update(cx, |d, cx| {
+                            d.keep_mine = true;
+                            d.hide(|n| matches!(n, Notice::Changed), cx);
+                        });
+                    }),
                 )
         }
         Notice::Deleted => {
@@ -177,22 +183,28 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                 ))
                 .secondary(msg(cx, "hv-scripts-disk-deleted-body", Vec::new()))
                 .action(
-                    Button::new(id("recreate"), msg(cx, "hv-scripts-tab-save", Vec::new()))
-                        .on_click(move |_, window, cx| {
-                            if let Some(doc) = a.upgrade() {
-                                save::save(&doc, window, cx, None);
-                            }
-                        }),
+                    Button::new(
+                        id("script-recreate"),
+                        msg(cx, "hv-scripts-tab-save", Vec::new()),
+                    )
+                    .on_click(move |_, window, cx| {
+                        if let Some(doc) = a.upgrade() {
+                            save::save(&doc, window, cx, None);
+                        }
+                    }),
                 )
                 .action(
-                    Button::new(id("close"), msg(cx, "hv-scripts-disk-close", Vec::new()))
-                        .on_click(move |_, window, cx| {
-                            if b.upgrade().is_some()
-                                && let Some(ws) = window.root::<crate::shell::Workspace>().flatten()
-                            {
-                                crate::shell::Workspace::request_close_active_tab(&ws, window, cx);
-                            }
-                        }),
+                    Button::new(
+                        id("script-close"),
+                        msg(cx, "hv-scripts-disk-close", Vec::new()),
+                    )
+                    .on_click(move |_, window, cx| {
+                        if b.upgrade().is_some()
+                            && let Some(ws) = window.root::<crate::shell::Workspace>().flatten()
+                        {
+                            crate::shell::Workspace::request_close_active_tab(&ws, window, cx);
+                        }
+                    }),
                 )
         }
         Notice::Unlisted(why) => {
@@ -239,7 +251,7 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                 ))
                 .action(
                     Button::new(
-                        id("moved-ok"),
+                        id("script-moved-ok"),
                         msg(cx, "hv-scripts-recover-dismiss", Vec::new()),
                     )
                     .on_click(move |_, _, cx| {
@@ -289,12 +301,14 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                     )
                 }
             };
-            let mut n = InlineNotice::new(NoticeIcon::Info).line(line).secondary(body);
+            let mut n = InlineNotice::new(NoticeIcon::Info)
+                .line(line)
+                .secondary(body);
             if let RunRefused::Mysql { bound, .. } = why {
                 let a = weak.clone();
                 n = n.action(
                     Button::new(
-                        id("retry"),
+                        id("script-retry"),
                         msg(
                             cx,
                             "hv-scripts-run-refused-retry",
@@ -344,7 +358,10 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                 .line(msg(
                     cx,
                     "hv-scripts-recover-tab",
-                    vec![("date", ArgValue::When(hacivat_l10n::WhenValue::Instant { unix_ms }))],
+                    vec![(
+                        "date",
+                        ArgValue::When(hacivat_l10n::WhenValue::Instant { unix_ms }),
+                    )],
                 ))
                 .secondary(msg(cx, "hv-scripts-recover-tab-body", Vec::new()));
             if *unknown {
@@ -352,17 +369,19 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
             }
             let (a, b) = (weak.clone(), weak.clone());
             n.action(
-                Button::new(id("rec-save"), msg(cx, "hv-scripts-tab-save", Vec::new())).on_click(
-                    move |_, window, cx| {
-                        if let Some(doc) = a.upgrade() {
-                            save::save(&doc, window, cx, None);
-                        }
-                    },
-                ),
+                Button::new(
+                    id("script-rec-save"),
+                    msg(cx, "hv-scripts-tab-save", Vec::new()),
+                )
+                .on_click(move |_, window, cx| {
+                    if let Some(doc) = a.upgrade() {
+                        save::save(&doc, window, cx, None);
+                    }
+                }),
             )
             .action(
                 Button::new(
-                    id("rec-discard"),
+                    id("script-rec-discard"),
                     msg(cx, "hv-scripts-recover-discard", Vec::new()),
                 )
                 .on_click(move |_, window, cx| {
@@ -393,7 +412,7 @@ fn with_open_under(n: InlineNotice, doc: &Entity<ScriptDoc>, cx: &mut App) -> In
         return n
             .action(
                 Button::new(
-                    SharedString::from(format!("script-open-under-{tab}")),
+                    ("script-open-under", tab as usize),
                     msg(cx, "hv-scripts-menu-open-under", Vec::new()),
                 )
                 .disabled(true),
@@ -402,7 +421,7 @@ fn with_open_under(n: InlineNotice, doc: &Entity<ScriptDoc>, cx: &mut App) -> In
     }
     n.action(
         Button::new(
-            SharedString::from(format!("script-open-under-{tab}")),
+            ("script-open-under", tab as usize),
             msg(cx, "hv-scripts-menu-open-under", Vec::new()),
         )
         .on_click(move |_, _, cx| open::open_under_another(&spec, cx)),

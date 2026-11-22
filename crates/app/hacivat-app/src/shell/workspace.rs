@@ -1120,7 +1120,9 @@ fn intern_script_tab(kind: &mut SavedKind, cx: &mut App) {
     };
     // ## m4b-t14-tabs (named exception): the fields are optional (read leniently).
     let (Some(library), Some(Ok(rel))) = (
-        library.as_deref().and_then(crate::scripts::parse_library_id),
+        library
+            .as_deref()
+            .and_then(crate::scripts::parse_library_id),
         rel_path.as_deref().map(crate::scripts::RelPath::parse),
     ) else {
         return;

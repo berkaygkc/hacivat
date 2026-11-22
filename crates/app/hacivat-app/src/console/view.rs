@@ -584,12 +584,7 @@ pub fn build(
 
 // ## m4b-t14-tabs (named exception)
 /// The view of script tab `tab`, bound for its life as handle `script` names, built once.
-pub fn build_script(
-    tab: TabId,
-    script: ScriptTabId,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyView {
+pub fn build_script(tab: TabId, script: ScriptTabId, window: &mut Window, cx: &mut App) -> AnyView {
     let n = crate::scripts::tabs::client_number(script);
     cx.new(|cx| ConsoleHost::new(tab, n, None, Some(script), window, cx))
         .into()
@@ -745,10 +740,9 @@ impl ConsoleHost {
                 if !matches!(self.mode, Mode::Loading) {
                     return;
                 }
-                let opened = opened.clone();
+                let opened = (**opened).clone();
                 self.open_editor(opened.text.clone(), None, true, window, cx);
-                let (Some(console), Some(editor)) = (self.console(), self.editor().cloned())
-                else {
+                let (Some(console), Some(editor)) = (self.console(), self.editor().cloned()) else {
                     return;
                 };
                 if opened.tier == hacivat_scripts::fileio::SizeTier::Preview {
@@ -760,8 +754,7 @@ impl ConsoleHost {
                 }
                 doc.update(cx, |d, cx| d.attach(console, editor, opened, cx));
                 // A session taken before the doc knew its console.
-                if let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone())
-                {
+                if let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone()) {
                     doc.update(cx, |d, cx| d.session_taken(session, cx));
                 }
                 cx.notify();
@@ -1640,7 +1633,10 @@ impl ConsoleHost {
                 .unwrap_or_default()
         });
         // ## m4b-t14-tabs (named exception): a script tab runs only where it may.
-        let script_runs = self.script.as_ref().is_none_or(|d| d.read(cx).run_enabled(cx));
+        let script_runs = self
+            .script
+            .as_ref()
+            .is_none_or(|d| d.read(cx).run_enabled(cx));
         ToolbarModel {
             run,
             run_enabled: !matches!(self.acquire, Acquire::Waiting { .. }) && script_runs,

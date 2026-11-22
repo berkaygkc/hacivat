@@ -1316,6 +1316,11 @@ pub const TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(
 /// finish, leaves no worker to race the teardown; the quit handler's own stop is then a no-op.
 /// One body for both entry points (P20).
 fn stop_core_runtime_in(cx: &mut App) {
+    // ## m4b-t14-tabs (named exception): the script library service stops first, so the
+    // runtime's stop never waits for its actor.
+    if let Some(service) = hacivat_app::scripts::open::service(cx) {
+        service.shutdown();
+    }
     if let Some(m) = cx.try_global::<hacivat_app::connections::ConnectionsModel>() {
         m.core_runtime().shutdown(TEARDOWN_BUDGET);
     }
@@ -2199,6 +2204,20 @@ pub mod live {
 }
 
 // ## m4b-t14-tabs
+/// One route of [`shell_with_routes`]: (engine, host, fake).
+pub type Route = (
+    hacivat_proto::DbmsKind,
+    &'static str,
+    hacivat_driver::fake::FakeDriver,
+);
+/// The routed fakes, in route order.
+pub type RoutedFakes = Vec<std::sync::Arc<hacivat_driver::fake::FakeDriver>>;
+/// The fakes of one engine, by host.
+type RoutedHosts = Vec<(
+    &'static str,
+    std::sync::Arc<hacivat_driver::fake::FakeDriver>,
+)>;
+
 /// A connections shell whose drivers send each connect to the `FakeDriver` of its target host
 /// (one fake per connection, so a test can tell which connection a statement reached). Every
 /// router dials itself (no socket, no DNS: hosts are IP literals). `routes` are (engine, host,
@@ -2206,15 +2225,8 @@ pub mod live {
 pub fn shell_with_routes(
     cx: &mut TestAppContext,
     lang: &str,
-    routes: Vec<(
-        hacivat_proto::DbmsKind,
-        &'static str,
-        hacivat_driver::fake::FakeDriver,
-    )>,
-) -> (
-    &'static mut VisualTestContext,
-    Vec<std::sync::Arc<hacivat_driver::fake::FakeDriver>>,
-) {
+    routes: Vec<Route>,
+) -> (&'static mut VisualTestContext, RoutedFakes) {
     shell_with_routes_prepared(cx, lang, routes, |_| {})
 }
 
@@ -2222,16 +2234,29 @@ pub fn shell_with_routes(
 pub fn shell_with_routes_prepared(
     cx: &mut TestAppContext,
     lang: &str,
-    routes: Vec<(
-        hacivat_proto::DbmsKind,
-        &'static str,
-        hacivat_driver::fake::FakeDriver,
-    )>,
+    routes: Vec<Route>,
     prepare: impl FnOnce(&LocalPaths),
-) -> (
-    &'static mut VisualTestContext,
-    Vec<std::sync::Arc<hacivat_driver::fake::FakeDriver>>,
-) {
+) -> (&'static mut VisualTestContext, RoutedFakes) {
+    routed_shell(cx, temp_root(), lang, routes, prepare)
+}
+
+/// [`shell_with_routes`] over `root` (a second launch over the first one's files).
+pub fn shell_with_routes_at(
+    cx: &mut TestAppContext,
+    root: &Path,
+    lang: &str,
+    routes: Vec<Route>,
+) -> (&'static mut VisualTestContext, RoutedFakes) {
+    routed_shell(cx, root.to_path_buf(), lang, routes, |_| {})
+}
+
+fn routed_shell(
+    cx: &mut TestAppContext,
+    path: std::path::PathBuf,
+    lang: &str,
+    routes: Vec<Route>,
+    prepare: impl FnOnce(&LocalPaths),
+) -> (&'static mut VisualTestContext, RoutedFakes) {
     use hacivat_driver::fake::FakeDriver;
     use hacivat_driver::{Driver as _, DriverRegistry};
     use hacivat_proto::DbmsKind;
@@ -2239,7 +2264,7 @@ pub fn shell_with_routes_prepared(
     /// Routes a connect by its target host.
     struct Routed {
         descriptor: hacivat_driver::DriverDescriptor,
-        hosts: Vec<(&'static str, std::sync::Arc<FakeDriver>)>,
+        hosts: RoutedHosts,
     }
 
     impl hacivat_driver::Driver for Routed {
@@ -2267,13 +2292,11 @@ pub fn shell_with_routes_prepared(
         }
     }
 
-    let path = temp_root();
     let paths = LocalPaths::under(&path);
     paths.ensure_dirs().expect("test dirs");
     prepare(&paths);
     let mut fakes = Vec::new();
-    let mut by_kind: Vec<(DbmsKind, Vec<(&'static str, std::sync::Arc<FakeDriver>)>)> =
-        Vec::new();
+    let mut by_kind: Vec<(DbmsKind, RoutedHosts)> = Vec::new();
     for (kind, host, fake) in routes {
         let fake = std::sync::Arc::new(fake);
         fakes.push(fake.clone());

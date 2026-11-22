@@ -43,52 +43,50 @@ use crate::shell::AppState;
 
 // ---- the service -------------------------------------------------------------------------------
 
-/// The script workspace's app-wide parts: the library service and this instance's recovery
-/// lock (taken on the core runtime's blocking pool the first time a copy is written).
+/// What the script tabs use of the app: the one library service (Task 13's,
+/// `scripts::projection::service`; never a second one), the app's paths, the core runtime
+/// every file and service call runs on, and this instance's recovery lock (taken on the
+/// blocking pool the first time a copy is written).
 #[derive(Clone)]
 pub struct ScriptsRuntime {
     pub service: Arc<LibraryService>,
     pub paths: LocalPaths,
-    /// The core runtime every file and service call runs on.
     pub handle: tokio::runtime::Handle,
     pub instance: Arc<OnceLock<Option<Instance>>>,
 }
 
-impl Global for ScriptsRuntime {}
+/// This app instance's recovery lock, once taken (set by `scripts::install`).
+#[derive(Default)]
+pub(crate) struct RecoveryInstance(Arc<OnceLock<Option<Instance>>>);
 
-/// Installs `service` as the app's library service, its calls on `handle` (tests; the product
-/// starts its own).
-pub fn install_service(
-    service: Arc<LibraryService>,
-    paths: LocalPaths,
-    handle: tokio::runtime::Handle,
-    cx: &mut App,
-) {
-    cx.set_global(ScriptsRuntime {
-        service,
-        paths,
-        handle,
-        instance: Arc::new(OnceLock::new()),
-    });
+impl Global for RecoveryInstance {}
+
+/// Makes `service` the app's library service (tests and the shots pass one over fake event
+/// sources): Task 13's `projection::set_service`.
+pub fn install_service(service: Arc<LibraryService>, cx: &mut App) {
+    crate::scripts::projection::set_service(service, cx);
 }
 
-/// The app's script runtime, started on first use over the app's paths and the core runtime;
-/// `None` before the connections are set up (no core runtime yet).
+/// The script runtime, with the library service opened now if it is not open yet (Task 13's
+/// `projection::ensure_service`); `None` before the connections are set up.
 pub fn runtime(cx: &mut App) -> Option<ScriptsRuntime> {
-    if let Some(rt) = cx.try_global::<ScriptsRuntime>() {
-        return Some(rt.clone());
-    }
-    let paths = cx.try_global::<AppState>()?.paths.clone();
-    let handle = cx.try_global::<ConnectionsModel>()?.runtime();
-    // `open` returns at once: the registry is read on the actor (no I/O here).
-    let service = Arc::new(LibraryService::open(&paths, &handle));
-    install_service(service, paths, handle, cx);
-    cx.try_global::<ScriptsRuntime>().cloned()
+    crate::scripts::projection::ensure_service(cx)?;
+    current(cx)
 }
 
-/// The app's library service, when it is running (never starts it).
+/// The script runtime while the library service is open (never opens it).
+pub fn current(cx: &App) -> Option<ScriptsRuntime> {
+    Some(ScriptsRuntime {
+        service: service(cx)?,
+        paths: cx.try_global::<AppState>()?.paths.clone(),
+        handle: cx.try_global::<ConnectionsModel>()?.runtime(),
+        instance: cx.try_global::<RecoveryInstance>()?.0.clone(),
+    })
+}
+
+/// The app's library service, when it is open (never opens it).
 pub fn service(cx: &App) -> Option<Arc<LibraryService>> {
-    cx.try_global::<ScriptsRuntime>().map(|r| r.service.clone())
+    crate::scripts::projection::service(cx)
 }
 
 /// The environment file calls take for a tab bound to `profile`, read now (R-T5-6): `None` for
@@ -247,10 +245,10 @@ pub fn open_script(
     profile: Option<ProfileId>,
     database: Option<DatabaseName>,
 ) -> Option<ConsoleId> {
-    let rt = runtime(cx);
     // A library the service does not list opens nothing (a stale row, a detached library):
-    // every caller found the file in a snapshot first (the tree, Go to script).
-    if rt.is_none_or(|rt| rt.service.snapshot().library(library).is_none()) {
+    // every caller found the file in a snapshot first (the tree, Go to script), so the service
+    // is running already and is never started here.
+    if service(cx).is_none_or(|s| s.snapshot().library(library).is_none()) {
         tracing::info!(%library, "scripts: not opened: the library is not attached");
         return None;
     }
@@ -383,9 +381,8 @@ pub fn open_under_another(tab: &ScriptTab, cx: &mut App) {
         (hook.0)(tab, places, cx);
         return;
     }
-    let production = |p: &ProfileId| {
-        profile_of(*p, cx).and_then(|p| p.environment) == Some(EnvTag::Production)
-    };
+    let production =
+        |p: &ProfileId| profile_of(*p, cx).and_then(|p| p.environment) == Some(EnvTag::Production);
     if let [(profile, db)] = places.as_slice()
         && !production(profile)
     {

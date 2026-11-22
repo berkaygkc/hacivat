@@ -689,6 +689,13 @@ impl LibraryService {
         .await;
     }
 
+    /// Stops the service now, as dropping it does (the app at quit: the core runtime's shutdown
+    /// then never waits for the actor). Every later call answers as a stopped service does.
+    pub fn shutdown(&self) {
+        self.closed.store(true, Ordering::Release);
+        let _ = self.tx.try_send(Msg::Shutdown);
+    }
+
     /// Whether `rel` is remembered as open in a tab (tests of the last-tab rule).
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]

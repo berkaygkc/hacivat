@@ -67,7 +67,10 @@ pub fn recover_at_launch(cx: &mut App) {
     let Some(m) = cx.try_global::<crate::connections::ConnectionsModel>() else {
         return;
     };
-    let Some(paths) = cx.try_global::<crate::shell::AppState>().map(|s| s.paths.clone()) else {
+    let Some(paths) = cx
+        .try_global::<crate::shell::AppState>()
+        .map(|s| s.paths.clone())
+    else {
         return;
     };
     let handle = m.runtime();
@@ -96,8 +99,13 @@ pub fn recover_at_launch(cx: &mut App) {
                     std::thread::sleep(REGISTRY_POLL);
                     waited += REGISTRY_POLL;
                 }
-                let ids: Vec<hacivat_scripts::LibraryId> =
-                    rt.service.snapshot().libraries.iter().map(|l| l.id).collect();
+                let ids: Vec<hacivat_scripts::LibraryId> = rt
+                    .service
+                    .snapshot()
+                    .libraries
+                    .iter()
+                    .map(|l| l.id)
+                    .collect();
                 let Some(instance) = rt.instance.get_or_init(|| {
                     recovery::Instance::start(&rt.paths)
                         .inspect_err(|e| tracing::warn!(?e, "scripts: no recovery instance"))
@@ -178,7 +186,11 @@ fn offer(found: Vec<RecoveryEntry>, cx: &mut App) {
         crate::l10n_global::text_fn_id("hv-scripts-recover-body"),
     );
     toast.title = Some(Rc::new(move |cx: &App| {
-        msg(cx, "hv-scripts-recover-title", vec![("n", ArgValue::Count(n))])
+        msg(
+            cx,
+            "hv-scripts-recover-title",
+            vec![("n", ArgValue::Count(n))],
+        )
     }));
     toast.bullets = bullets;
     toast.sticky = true;
