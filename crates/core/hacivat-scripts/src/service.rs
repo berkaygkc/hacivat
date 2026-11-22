@@ -292,7 +292,8 @@ pub enum RootRefusal {
     NotAFolder,
     /// It resolves to another canonical path than when it was first resolved this session.
     Moved,
-    /// It is another folder than the one first resolved this session (device, inode).
+    /// It is another folder than the one first resolved this session (device, inode, and
+    /// birth time where reported).
     IdentityChanged,
     FilesystemRoot,
     HomeFolder,

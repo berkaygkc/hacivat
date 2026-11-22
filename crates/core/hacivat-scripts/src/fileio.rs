@@ -617,14 +617,36 @@ pub fn open_stream_checked(
     }))
 }
 
-/// The device and inode of a folder (Unix), the identity a library root keeps for a session
-/// (I3); `None` where it cannot be read or the platform has none in stable `std`.
-pub(crate) fn folder_identity(path: &std::path::Path) -> Option<(u64, u64)> {
+/// The identity a library root keeps for a session (I3): its device and inode, and its birth
+/// time where the file system reports one.
+///
+/// ## m4b-cifix-2: device and inode alone do not tell a folder from one made again at the same
+/// path. Linux's ext4 hands a freed inode to the next `mkdir` in the same block group, so a
+/// root deleted and made again often keeps its number (CI 44990057141); APFS never reuses one.
+/// The birth time (`statx` `btime` on Linux, `st_birthtime` on macOS, read through `std`'s
+/// `Metadata::created`) is new for the new folder and survives a rename, so a root that went
+/// away and came back under another name stays the same folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FolderIdentity {
+    pub dev: u64,
+    pub ino: u64,
+    /// `None` where the file system or platform reports no birth time; both sides of a
+    /// comparison are read on the same file system, so `None` matches only `None`.
+    pub born: Option<std::time::SystemTime>,
+}
+
+/// The [`FolderIdentity`] of a folder (Unix); `None` where it cannot be read or the platform
+/// has none in stable `std`.
+pub(crate) fn folder_identity(path: &std::path::Path) -> Option<FolderIdentity> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::symlink_metadata(path).ok()?;
-        meta.is_dir().then(|| (meta.dev(), meta.ino()))
+        meta.is_dir().then(|| FolderIdentity {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            born: meta.created().ok(),
+        })
     }
     #[cfg(not(unix))]
     {
@@ -1776,5 +1798,59 @@ mod tests {
         assert_eq!(got[1], Err(ChunkError::Changed));
     }
     // ## m4b-t10-service
+
+    // ## m4b-cifix-2-root-birth
+    /// Device and inode alone are not a folder's identity: ext4 gives a freed inode to the
+    /// next folder made in the same place (CI 44990057141). The birth time tells them apart,
+    /// and a rename keeps it.
+    #[test]
+    fn folder_identity_tells_a_folder_made_again_from_a_renamed_one() {
+        use std::time::{Duration, SystemTime};
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reused = |born| FolderIdentity {
+            dev: 1,
+            ino: 7,
+            born,
+        };
+        assert_eq!(reused(Some(t)), reused(Some(t)));
+        assert_ne!(reused(Some(t)), reused(Some(t + Duration::from_nanos(1))));
+        assert_ne!(reused(Some(t)), reused(None));
+        #[cfg(unix)]
+        {
+            let d = tempfile::tempdir().unwrap();
+            let root = d.path().join("scripts");
+            std::fs::create_dir(&root).unwrap();
+            let first = folder_identity(&root).unwrap();
+            let born = first
+                .born
+                .expect("the test file system reports no birth time");
+            let away = d.path().join("away");
+            std::fs::rename(&root, &away).unwrap();
+            assert_eq!(folder_identity(&away), Some(first));
+            std::fs::rename(&away, &root).unwrap();
+            assert_eq!(folder_identity(&root), Some(first));
+            std::fs::remove_dir(&root).unwrap();
+            // Linux stamps a new inode from the coarse clock: wait (on a condition) until a
+            // new file is born after the old folder, so the next one is too.
+            let probe = d.path().join("probe");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                std::fs::write(&probe, b"").unwrap();
+                let later = std::fs::metadata(&probe).unwrap().created().unwrap() > born;
+                std::fs::remove_file(&probe).unwrap();
+                if later {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the birth clock stood still"
+                );
+                std::thread::yield_now();
+            }
+            std::fs::create_dir(&root).unwrap();
+            assert_ne!(folder_identity(&root), Some(first));
+        }
+    }
+    // ## m4b-cifix-2-root-birth
 }
 // ## m4b-t01a-seams

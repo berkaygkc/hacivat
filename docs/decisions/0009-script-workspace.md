@@ -1160,3 +1160,33 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
 - **F3.** The relaunch loop prints `HV-FACT t10 h2 sweep_relaunches=N`.
 - **H16** is a test now, through the test-support hook `LibraryService::inject_watch_batch`: a batch tagged with the previous watcher's generation is ignored; the same batch at the current generation is acted on.
 - **m-h** is carried to Task 16 (a confirmed "Use this folder" that clears the persisted `canonical`/`inode`). Caveat: a file system whose inode numbers are not stable across mounts (FUSE such as sshfs without `use_ino`, some network mounts) shows such a library `RootChanged` at every launch until then.
+
+## m4b-cifix-2 — a root's identity includes its birth time
+
+- **Finding (CI 44990057141, Linux only).**
+  - `a_root_with_a_new_identity_is_refused` timed out waiting for `RootChanged` on `ubuntu-24.04` and in `turkey-test`.
+  - The test hints the root itself through the fake source, so no OS event was missing. The service re-validated the root and found the same identity.
+  - ext4 gives a freed inode to the next `mkdir` in the same block group. So a root deleted and made again at the same path usually keeps its inode, and its device.
+  - The in-session I3 check compared only `(dev, ino)`, and adopted the new folder. APFS never reuses an inode number, which is why macOS passed.
+- **Decision.**
+  - The session identity, `fileio::FolderIdentity`, is now the device, the inode and the birth time.
+  - The birth time comes from `Metadata::created()`: `statx` `btime` on Linux, `st_birthtime` on macOS. It goes through `std`, so there is no `unsafe` and no new dependency.
+  - A rename keeps the birth time. A root that goes missing and comes back by a rename is still the same library.
+  - A folder made again is born later. It is `RootChanged`, with `RootRefused(IdentityChanged)`.
+  - Where the file system reports no birth time, `born` is `None` on both sides, and the check is the old `(dev, ino)`.
+- **The Linux event path is sound; no watch was added.**
+  - Each folder has its own non-recursive watch (R-T9-4). notify adds `IN_DELETE_SELF` and `IN_MOVE_SELF` to every non-recursive watch.
+  - A replaced root therefore yields one hint on the root itself: notify's `Remove(Folder)` or `Modify(Name(From))` on the watched path. The debouncer drops the child events queued under a removed path.
+  - That hint makes the watcher scan. The service's patch, manifest and full-scan paths each re-check the identity.
+  - If the hint is handled while the folder is gone, the library is `Missing`. The folder made again sends nothing, since no watch is left. The 2 s re-check of an unavailable root then refuses it.
+  - No recursive watch and no parent watch were added.
+- **Residuals.**
+  - **Same clock tick.** Linux stamps a new inode's birth time from the coarse clock, one tick of 1 to 4 ms. A delete and a `mkdir` inside one tick, on an inode the allocator hands back, keep the same identity.
+    - The inode generation (`FS_IOC_GETVERSION`) would close this gap. It needs an `ioctl`, which means `unsafe` outside `hacivat-ui-core/src/platform/**`.
+    - Accepted: such a folder sits at the registered path, is a real folder and not a link, and passes the same checks as at attach. It is not a path outside the library.
+  - **Across sessions.** `libraries.toml` still keeps only the inode (`m-a`). On ext4, a root deleted and made again between sessions can be adopted at the next launch. Persisting the birth time is a T3 schema change, so it is carried.
+- **Tests.**
+  - `a_root_with_a_new_identity_is_refused` now waits, on a condition, until the birth clock has passed the old root's.
+  - `a_root_made_again_unheard_after_its_removal_is_refused`: the hint arrives while the root is gone, and the new folder sends nothing.
+  - `fileio::tests::folder_identity_tells_a_folder_made_again_from_a_renamed_one`.
+  - `watch::tests::the_roots_own_removal_and_move_are_hints_on_the_root`.

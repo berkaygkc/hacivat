@@ -89,14 +89,14 @@ fn canonical_lenient(fs: &dyn Fs, path: &Path) -> PathBuf {
 #[derive(Debug, Clone, Default)]
 pub(super) struct Session {
     pub canonical: Option<PathBuf>,
-    pub identity: Option<(u64, u64)>,
+    pub identity: Option<fileio::FolderIdentity>,
 }
 
 /// A root that passed validation.
 #[derive(Debug, Clone)]
 pub(super) struct Valid {
     pub root: LibraryRoot,
-    pub identity: Option<(u64, u64)>,
+    pub identity: Option<fileio::FolderIdentity>,
 }
 
 /// Why a root is not served.
@@ -129,9 +129,10 @@ impl Refused {
 /// Fix round 1, I3: the root is checked at every open and every rescan, as at attach plus
 /// more. The registered path itself must be a real folder, never a link or junction (so a
 /// folder replaced by a link between sessions is refused, not adopted). It must still resolve
-/// to the canonical path and folder identity (device, inode) it had when first resolved this
-/// session. It must not be a filesystem root, the home folder, an app folder, or inside or
-/// around another library, and must not sit in an environment folder.
+/// to the canonical path and folder identity (device, inode and birth time,
+/// `fileio::FolderIdentity`; m4b-cifix-2) it had when first resolved this session. It must not
+/// be a filesystem root, the home folder, an app folder, or inside or around another library,
+/// and must not sit in an environment folder.
 pub(super) fn validate(
     fs: &dyn Fs,
     reg: &RegisteredLibrary,
@@ -170,7 +171,7 @@ pub(super) fn validate(
         return Err(Refused::changed(RootRefusal::IdentityChanged));
     }
     // Across sessions only the inode is compared: a device number can change with a reboot.
-    if let (Some(inode), Some((_, now))) = (reg.inode, identity)
+    if let (Some(inode), Some(now)) = (reg.inode, identity.map(|i| i.ino))
         && inode != now
     {
         return Err(Refused::changed(RootRefusal::IdentityChanged));
@@ -674,7 +675,7 @@ impl PairJob {
 /// session knows (the actor rescans, which refuses it).
 pub(super) struct ManifestJob {
     pub root: LibraryRoot,
-    pub identity: Option<(u64, u64)>,
+    pub identity: Option<fileio::FolderIdentity>,
 }
 
 impl ManifestJob {

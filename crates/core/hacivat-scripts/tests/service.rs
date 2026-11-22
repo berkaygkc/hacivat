@@ -1548,6 +1548,12 @@ async fn h6_root_replaced_by_a_link_between_sessions_is_not_adopted() {
 
 /// I3: within a session, a folder deleted and recreated at the same path (another identity)
 /// is not adopted either.
+///
+/// ## m4b-cifix-2: the root hint is the only one Linux gives. Each folder has its own
+/// non-recursive inotify watch (R-T9-4) and the parent is not watched, so nothing is heard from
+/// the new folder; the old root's watch reports `IN_DELETE_SELF` on the root, and the debouncer
+/// drops the child events queued under a removed path. On ext4 the new folder usually gets the
+/// old inode back (CI 44990057141), so only the birth time tells the two apart.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_root_with_a_new_identity_is_refused() {
@@ -1559,7 +1565,9 @@ async fn a_root_with_a_new_identity_is_refused() {
     ready(&r).await;
     let id = attach(&r, &lib).await;
     let root = canonical(&lib);
+    let born = birth_of(&root);
     std::fs::remove_dir_all(&lib).unwrap();
+    birth_clock_passes(d.path(), born).await;
     write_files(&lib, &["planted.sql"]);
     r.hint(&root, &[""]);
     wait_until("RootChanged", || {
@@ -1574,6 +1582,74 @@ async fn a_root_with_a_new_identity_is_refused() {
             .contains(&LibraryDiag::RootRefused(RootRefusal::IdentityChanged))
     );
 }
+
+// ## m4b-cifix-2-root-birth
+/// The birth time of the folder or file at `p` (`statx` `btime` on Linux, `st_birthtime` on
+/// macOS).
+#[cfg(unix)]
+fn birth_of(p: &Path) -> SystemTime {
+    std::fs::symlink_metadata(p)
+        .unwrap()
+        .created()
+        .expect("the test file system reports no birth time")
+}
+
+/// Waits until a file made now in `dir` is born after `than`, so a folder made next cannot
+/// share a birth time with one born at `than`: Linux stamps a new inode from the coarse clock
+/// (a tick of 1 to 4 ms), and nothing in a fast run need span a tick. A condition, not a sleep.
+#[cfg(unix)]
+async fn birth_clock_passes(dir: &Path, than: SystemTime) {
+    let probe = dir.join(".hv-birth-probe");
+    wait_until("the birth clock to pass the old root's", || {
+        std::fs::write(&probe, b"").unwrap();
+        let born = birth_of(&probe);
+        std::fs::remove_file(&probe).unwrap();
+        born > than
+    })
+    .await;
+}
+
+/// The Linux sequence when the root's self event is handled while the folder is gone. The root
+/// watch's `IN_DELETE_SELF` is the only hint (the parent is not watched, R-T9-4); the folder
+/// made again at the same path, on ext4 often with the old inode, sends nothing at all. The
+/// re-check of the missing root refuses it and never brings it back as the same library.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_root_made_again_unheard_after_its_removal_is_refused() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("scripts");
+    write_files(&lib, &["a.sql"]);
+    let r = rig_with(app.path(), opts());
+    ready(&r).await;
+    let id = attach(&r, &lib).await;
+    let root = canonical(&lib);
+    let born = birth_of(&root);
+    std::fs::remove_dir_all(&lib).unwrap();
+    // The root watch's self event, and nothing from inside the old root.
+    r.hint(&root, &[""]);
+    wait_until("Unavailable(Missing)", || {
+        r.snap()
+            .library(id)
+            .is_some_and(|l| l.state == LibraryState::Unavailable(UnavailableReason::Missing))
+    })
+    .await;
+    birth_clock_passes(d.path(), born).await;
+    // Made again with no hint: inotify has no watch left that could see it.
+    write_files(&lib, &["planted.sql"]);
+    wait_until("RootChanged", || {
+        r.snap()
+            .library(id)
+            .is_some_and(|l| l.state == LibraryState::Unavailable(UnavailableReason::RootChanged))
+    })
+    .await;
+    assert!(r.rels(id).is_empty());
+    assert!(
+        diags_in(&r.snap(), id, None)
+            .contains(&LibraryDiag::RootRefused(RootRefusal::IdentityChanged))
+    );
+}
+// ## m4b-cifix-2-root-birth
 
 /// H7 (I1, R-T10-2): a file a staging tab opened, moved from `@staging/` into `@production/`,
 /// reaches the staging subscriber as "no longer listed under this connection", never with the

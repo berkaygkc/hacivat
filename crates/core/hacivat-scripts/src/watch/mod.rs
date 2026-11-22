@@ -2106,6 +2106,33 @@ mod tests {
         );
     }
 
+    // ## m4b-cifix-2-root-birth
+    /// A per-folder inotify watch reports its own folder's removal and move
+    /// (`IN_DELETE_SELF`, `IN_MOVE_SELF`, notify `inotify.rs:268`, `:305`) with the watched
+    /// path itself. On the root that is a hint on the root: the watcher scans, and the service
+    /// re-validates the root's identity. It is the only hint Linux gives for a replaced root.
+    #[test]
+    fn the_roots_own_removal_and_move_are_hints_on_the_root() {
+        use notify::event::{ModifyKind, RemoveKind, RenameMode};
+        let root = Path::new("/lib");
+        let (sinks, got) = sinks_for(root);
+        let deleted = Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(root.into());
+        let moved =
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From))).add_path(root.into());
+        route(
+            &sinks,
+            Ok(vec![
+                DebouncedEvent::new(deleted, Instant::now()),
+                DebouncedEvent::new(moved, Instant::now()),
+            ]),
+        );
+        assert_eq!(
+            *lock(&got),
+            vec![vec![RawHint::Path(root.into()), RawHint::Path(root.into())]]
+        );
+    }
+    // ## m4b-cifix-2-root-birth
+
     #[test]
     fn os_source_delivers_and_stops_on_drop() {
         let dir = tempfile::tempdir().unwrap();
