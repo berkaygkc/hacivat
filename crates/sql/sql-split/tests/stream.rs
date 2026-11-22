@@ -226,7 +226,7 @@ fn statement_over_64_mib_is_too_long() {
 
 use sql_dialect::ServerVersion;
 use sql_split::AmbiguityReason;
-use sql_split::stream::{STREAM_HELD_MAX, StreamPolicy, has_stop};
+use sql_split::stream::{STREAM_HELD_ITEMS_MAX, STREAM_HELD_MAX, StreamPolicy, any_refuses};
 use sql_testkit::lex::corpus_path;
 use sql_testkit::split::{corpus_file, fixture, load, profile_fixture_file};
 
@@ -637,7 +637,7 @@ fn check_eager(
     if eager != one_chunk {
         return fail("depends on the chunking");
     }
-    if !(has_stop(&eager) || eager == want) || has_stop(&eager) != has_stop(&want) {
+    if !(any_refuses(&eager) || eager == want) || any_refuses(&eager) != any_refuses(&want) {
         return fail("neither a stop nor the whole split");
     }
     if !is_mysql_family(ctx.id) || !has_unknown_block(&want) {
@@ -830,12 +830,12 @@ fn pass_one_refuses(text: &str, ctx: DialectCtx, flavor: ClientFlavor, lens: &[u
         while !text.is_char_boundary(end) {
             end += 1;
         }
-        refused |= has_stop(&s.feed(&text[at..end]));
+        refused |= any_refuses(&s.feed(&text[at..end]));
         assert!(!s.stopped() || refused, "a stop is always given out");
         at = end;
         k += 1;
     }
-    refused | has_stop(&s.finish())
+    refused | any_refuses(&s.finish())
 }
 
 #[test]
@@ -885,12 +885,12 @@ fn a_misread_block_is_a_stop_or_the_whole_split() {
         for l in &lens {
             let eager = streamed_with(StreamPolicy::Eager, text, *ctx, ClientFlavor::MySqlCli, l);
             assert!(
-                has_stop(&eager) || eager == want,
+                any_refuses(&eager) || eager == want,
                 "{id} in chunks of {l:?}: {eager:?}\nwhole {want:?}"
             );
             assert_eq!(
                 pass_one_refuses(text, *ctx, ClientFlavor::MySqlCli, l),
-                has_stop(&want),
+                any_refuses(&want),
                 "{id} in chunks of {l:?}"
             );
             check_eager(text, *ctx, ClientFlavor::MySqlCli, l)
@@ -900,7 +900,7 @@ fn a_misread_block_is_a_stop_or_the_whole_split() {
     // M3 refuses the stray-`END` case: so does the first pass, though the eager stream gives
     // out `DELETE FROM t` before its stop.
     let r1 = &cases[0].1;
-    assert!(has_stop(&expected(r1, &mysql(), ClientFlavor::MySqlCli)));
+    assert!(any_refuses(&expected(r1, &mysql(), ClientFlavor::MySqlCli)));
     assert!(pass_one_refuses(r1, mysql(), ClientFlavor::MySqlCli, &[1]));
     // A script with matching blocks passes the first pass and streams as the whole split.
     let clean =
@@ -935,22 +935,21 @@ fn refusing_items() {
     assert!(unknown_block(0).refuses());
     assert!(StreamItem::TooLong { offset: 0 }.refuses());
     assert!(StreamItem::NoBoundary { offset: 0 }.refuses());
-    assert!(!has_stop(&[st(exact)]));
+    assert!(!any_refuses(&[st(exact)]));
 }
 
 /// What `feed_lines` saw: the items other than `Exact` statements, the number of those, and
 /// the peak `held_len()` after a feed.
+#[derive(Debug, PartialEq)]
 struct Fed {
     other: Vec<StreamItem>,
     statements: usize,
     peak: usize,
 }
 
-/// Feeds `total` bytes made by `line(i)` in 64 KiB chunks under `Eager` (MySQL), until the end
-/// or a stop.
-fn feed_lines(total: usize, mut line: impl FnMut(u64) -> String) -> Fed {
+/// Feeds `s` `total` bytes made by `line(i)`, in chunks of 64 KiB, until the end or a stop.
+fn feed_lines(mut s: StreamSplitter, total: usize, mut line: impl FnMut(u64) -> String) -> Fed {
     const CHUNK: usize = 64 << 10;
-    let mut s = eager();
     let mut fed = Fed {
         other: Vec::new(),
         statements: 0,
@@ -993,57 +992,126 @@ fn feed_lines(total: usize, mut line: impl FnMut(u64) -> String) -> Fed {
     fed
 }
 
-/// Past the cap: more than `STREAM_HELD_MAX` bytes.
-const PAST_CAP: usize = STREAM_HELD_MAX + (2 << 20);
+/// The byte cap the shape tests use (`with_caps`), so they stay small; the item cap is the
+/// real one. `rss_shapes` runs the same shapes at the real caps.
+const TEST_CAP: usize = 4 << 20;
 
-/// The most held after a feed when the cap stops the stream: the cap plus one chunk.
-const CAP_AND_CHUNK: usize = STREAM_HELD_MAX + (64 << 10);
+/// The most held after a feed: the cap, an eighth of it (the span an anchor may run and the
+/// split interval past the cap, a sixteenth each), a token margin and one chunk.
+fn held_bound(cap: usize) -> usize {
+    cap + cap / 8 + 16 + (64 << 10)
+}
 
-#[test]
-fn held_text_is_capped_on_one_line() {
-    // Statements with no line start between them never settle: one `NoBoundary` at the
-    // stream's start and nothing else, once `STREAM_HELD_ITEMS_MAX` of them are held (about
-    // 1 MB here, split again when the held text doubles), long before the byte cap.
-    let fed = feed_lines(PAST_CAP, |i| format!("SELECT {i}; "));
-    assert_eq!(fed.other, [StreamItem::NoBoundary { offset: 0 }]);
-    assert_eq!(fed.statements, 0);
-    assert!(fed.peak <= 4 << 20, "held {}", fed.peak);
-    let short = fed.peak;
-    // Few long statements on one line reach the byte cap instead.
-    let long = "x".repeat(4_000);
-    let fed = feed_lines(PAST_CAP, |i| format!("SELECT {i}, '{long}'; "));
-    assert_eq!(fed.other, [StreamItem::NoBoundary { offset: 0 }]);
-    assert!(fed.peak <= CAP_AND_CHUNK, "held {}", fed.peak);
-    println!(
-        "HV-FACT m4b-t08 cap_one_line_peak_held short={short} long={}",
-        fed.peak
-    );
+type LineFn = Box<dyn FnMut(u64) -> String>;
+
+/// The memory shapes (T8 review I2, re-review fr1), each with its context and its lines.
+fn memory_shape(name: &str) -> (DialectCtx, LineFn) {
+    let pg = DialectCtx::new(DialectId::Postgres, None);
+    let mut first = true;
+    let mut lead = move |head: &str, rest: String| {
+        if std::mem::take(&mut first) {
+            format!("{head}{rest}")
+        } else {
+            rest
+        }
+    };
+    let f: LineFn = match name {
+        "one-line-short" | "one-line-short-pg" => Box::new(|i| format!("SELECT {i}; ")),
+        "one-line-4k" => {
+            let pad = "x".repeat(4_000);
+            Box::new(move |i| format!("SELECT {i}, '{pad}'; "))
+        }
+        "cr-only" => Box::new(|i| format!("INSERT INTO t VALUES ({i});\r")),
+        "long-lines" => Box::new(|i| {
+            let mut l: String = (0..1_000).map(|k| format!("SELECT {k}; ")).collect();
+            l.push_str(&format!("-- {i}\n"));
+            l
+        }),
+        "open-comment" => Box::new(move |_| lead("SELECT 1;\n/*", "a comment line;\n".into())),
+        "comments-lf" => Box::new(|i| format!("-- comment {i}\n")),
+        "comments-cr" => Box::new(|i| format!("-- comment {i}\r")),
+        "open-string" => Box::new(move |_| lead("SELECT 1;\nSELECT '", "x".repeat(1_000))),
+        "open-insert" => Box::new(move |i| {
+            lead(
+                "INSERT INTO t VALUES (0, 'a')",
+                format!(", ({i}, '{}')", "a".repeat(100)),
+            )
+        }),
+        "blank-lines" => Box::new(|_| "\n".into()),
+        "bare-semicolons" => Box::new(|_| ";".into()),
+        "cr-only-dump" => Box::new(|i| {
+            let head = format!("INSERT INTO t VALUES ({i}, '");
+            format!("{head}{}');\r", "y".repeat(1_024 - head.len() - 4))
+        }),
+        other => panic!("unknown shape {other}"),
+    };
+    let ctx = if name.ends_with("-pg") { pg } else { mysql() };
+    (ctx, f)
+}
+
+/// What a shape gives: `None` when it settles (no refusal), or its one stop item.
+fn shape_outcome(name: &str) -> Option<StreamItem> {
+    match name {
+        "cr-only" | "long-lines" | "cr-only-dump" => None,
+        "open-string" => Some(StreamItem::NoBoundary { offset: 10 }),
+        _ => Some(StreamItem::NoBoundary { offset: 0 }),
+    }
+}
+
+const SHAPES: [&str; 13] = [
+    "one-line-short",
+    "one-line-short-pg",
+    "one-line-4k",
+    "cr-only",
+    "long-lines",
+    "open-comment",
+    "comments-lf",
+    "comments-cr",
+    "open-string",
+    "open-insert",
+    "blank-lines",
+    "bare-semicolons",
+    "cr-only-dump",
+];
+
+/// Feeds shape `name` past `cap` (the item cap is the real one) and checks its outcome and
+/// its peak held text.
+fn run_shape(name: &str, cap: usize) -> Fed {
+    let (ctx, line) = memory_shape(name);
+    let s = StreamSplitter::with_policy(ctx, ClientFlavor::MySqlCli, StreamPolicy::Eager)
+        .with_caps(cap, STREAM_HELD_ITEMS_MAX);
+    let fed = feed_lines(s, cap + (2 << 20), line);
+    match shape_outcome(name) {
+        None => assert_eq!(fed.other, [], "{name}"),
+        Some(stop) => assert_eq!(fed.other, [stop], "{name}"),
+    }
+    assert!(fed.peak <= held_bound(cap), "{name}: held {}", fed.peak);
+    fed
 }
 
 #[test]
-fn held_text_settles_on_long_lines_of_short_statements() {
-    // A thousand statements per line: every line start is found, however many items stand on
-    // the line before it, so only about one line is held.
-    let fed = feed_lines(PAST_CAP, |i| {
-        let mut l: String = (0..1_000).map(|k| format!("SELECT {k}; ")).collect();
-        l.push_str(&format!("-- {i}\n"));
-        l
-    });
-    assert_eq!(fed.other, []);
-    assert!(fed.statements > 1_000_000, "{}", fed.statements);
-    assert!(fed.peak <= 12_000 + (64 << 10), "held {}", fed.peak);
-    println!("HV-FACT m4b-t08 cap_long_lines_peak_held={}", fed.peak);
+fn every_memory_shape_is_bounded() {
+    for name in SHAPES {
+        let fed = run_shape(name, TEST_CAP);
+        println!(
+            "HV-FACT m4b-t08 shape={name} cap={TEST_CAP} peak_held={} statements={}",
+            fed.peak, fed.statements
+        );
+        match name {
+            // The item cap stops these long before the byte cap.
+            "one-line-short" | "one-line-short-pg" | "bare-semicolons" => {
+                assert!(fed.peak <= 2 << 20, "{name}: held {}", fed.peak);
+            }
+            "cr-only" | "cr-only-dump" => assert!(fed.peak <= 2_048 + (64 << 10)),
+            "long-lines" => assert!(fed.peak <= 12_000 + (64 << 10)),
+            "open-string" => assert_eq!(fed.statements, 1),
+            _ => {}
+        }
+    }
 }
 
 #[test]
-fn held_text_settles_on_lone_cr_line_ends() {
-    // Classic Mac line ends: a lone `\r` starts a line for the anchor (checked against the
-    // whole pass), so the stream settles and equals the whole split.
-    let fed = feed_lines(PAST_CAP, |i| format!("INSERT INTO t VALUES ({i});\r"));
-    assert_eq!(fed.other, []);
-    assert!(fed.statements > 500_000, "{}", fed.statements);
-    assert!(fed.peak <= 1_024 + (64 << 10), "held {}", fed.peak);
-    println!("HV-FACT m4b-t08 cap_cr_only_peak_held={}", fed.peak);
+fn lone_cr_line_ends_settle_and_equal_the_whole_split() {
     let small: String = (0..2_000)
         .map(|i| format!("/* n {i} */\rINSERT INTO t VALUES ({i});\r"))
         .collect();
@@ -1060,53 +1128,288 @@ fn held_text_settles_on_lone_cr_line_ends() {
 }
 
 #[test]
-fn held_text_is_capped_in_an_open_comment() {
-    // An unterminated `/*` after a statement: no later line start is an item's, the cap stops
-    // the stream, and the end of the file is never waited for.
-    let mut first = true;
-    let fed = feed_lines(PAST_CAP, |_| {
-        if std::mem::take(&mut first) {
-            "SELECT 1;\n/*".into()
-        } else {
-            "a comment line;\n".into()
-        }
-    });
-    assert_eq!(fed.other, [StreamItem::NoBoundary { offset: 0 }]);
-    assert!(fed.peak <= CAP_AND_CHUNK, "held {}", fed.peak);
-    println!("HV-FACT m4b-t08 cap_open_comment_peak_held={}", fed.peak);
-}
-
-#[test]
-fn held_text_is_capped_in_comments_only() {
-    let fed = feed_lines(PAST_CAP, |i| format!("-- comment {i}\n"));
-    assert_eq!(fed.other, [StreamItem::NoBoundary { offset: 0 }]);
-    assert_eq!(fed.statements, 0);
-    assert!(fed.peak <= CAP_AND_CHUNK, "held {}", fed.peak);
-    println!("HV-FACT m4b-t08 cap_comments_only_peak_held={}", fed.peak);
-}
-
-#[test]
-fn a_statement_past_the_cap_is_too_long() {
-    // One open statement past `STREAM_HELD_MAX` (not only past `STREAM_STATEMENT_MAX`): what
-    // precedes it is given out, then `TooLong` at its start, and nothing more.
-    let mut first = true;
-    let fed = feed_lines(PAST_CAP, |_| {
-        if std::mem::take(&mut first) {
-            "SELECT 1;\nINSERT INTO t VALUES ('".into()
-        } else {
-            "x".repeat(1_000)
-        }
-    });
-    assert_eq!(fed.other, [StreamItem::TooLong { offset: 10 }]);
-    assert_eq!(fed.statements, 1);
-    assert!(fed.peak <= CAP_AND_CHUNK, "held {}", fed.peak);
-    // A complete statement past the cap fed at once is `TooLong` too, and stops the stream.
-    let mut s = eager();
-    let big = format!(
-        "SELECT '{}';\nSELECT 2;\nSELECT 3;\n",
-        "y".repeat(STREAM_HELD_MAX)
-    );
+fn a_statement_past_the_cap_has_no_boundary() {
+    // A statement longer than the cap is a gap longer than the cap: `NoBoundary` at its
+    // anchor, whether or not it is complete when the stream sees it.
+    let mut s = eager().with_caps(TEST_CAP, STREAM_HELD_ITEMS_MAX);
+    let big = format!("SELECT '{}';\nSELECT 2;\nSELECT 3;\n", "y".repeat(TEST_CAP));
     let mut got = s.feed(&big);
     got.extend(s.finish());
-    assert_eq!(got, [StreamItem::TooLong { offset: 0 }]);
+    assert_eq!(got, [StreamItem::NoBoundary { offset: 0 }]);
+    // At the end of the text too, the last gap counts.
+    let mut s = eager().with_caps(TEST_CAP, STREAM_HELD_ITEMS_MAX);
+    let tail = format!("SELECT 1;\nSELECT '{}';", "y".repeat(TEST_CAP));
+    let mut got = s.feed(&tail);
+    got.extend(s.finish());
+    assert_eq!(
+        got,
+        [stmt("SELECT 1", 0), StreamItem::NoBoundary { offset: 10 }]
+    );
+}
+
+/// Chunk lengths from a fixed seed, 1 to 200,000 bytes.
+fn random_lens(n: usize) -> Vec<usize> {
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            usize::try_from(x % 200_000).unwrap() + 1
+        })
+        .collect()
+}
+
+#[test]
+fn the_cap_refusal_does_not_depend_on_the_chunking() {
+    // The re-review's repro (I-fr1-1): `SELECT 1;`, one line of 4 KB statements totalling the
+    // cap and 20 KB, then `SELECT 2;`. The two anchors around the long line are more than the
+    // cap apart, so every chunking gives out `SELECT 1` and stops there, whether or not a
+    // chunk reaches `SELECT 2` when the cap is passed. Six chunkings at the test cap; at the
+    // real cap, the two chunkings that ran the file whole before this fix.
+    let repro = |cap: usize| {
+        let pad = "x".repeat(4_000);
+        let mut text = String::from("SELECT 1;\n");
+        let mut i = 0;
+        while text.len() < 10 + cap + 20_000 {
+            text.push_str(&format!("INSERT INTO t VALUES ({i}, '{pad}'); "));
+            i += 1;
+        }
+        text.push_str("\nSELECT 2;\n");
+        text
+    };
+    let want = [stmt("SELECT 1", 0), StreamItem::NoBoundary { offset: 10 }];
+    let run = |text: &str, cap: usize, lens: &[usize]| {
+        let mut s = eager().with_caps(cap, STREAM_HELD_ITEMS_MAX);
+        let mut out = Vec::new();
+        let (mut at, mut k) = (0, 0);
+        while at < text.len() {
+            let end = (at + lens[k % lens.len()]).min(text.len());
+            out.extend(s.feed(&text[at..end]));
+            at = end;
+            k += 1;
+        }
+        out.extend(s.finish());
+        out
+    };
+    let small = repro(TEST_CAP);
+    let random = random_lens(4_096);
+    let chunkings: [&[usize]; 6] = [
+        &[1],
+        &[4 << 10],
+        &[64 << 10],
+        &[1 << 20],
+        &[64 << 10, 4 << 10],
+        &random,
+    ];
+    for lens in chunkings {
+        let got = run(&small, TEST_CAP, lens);
+        assert_eq!(got, want, "chunks of {:?}", &lens[..lens.len().min(4)]);
+    }
+    let real = repro(STREAM_HELD_MAX);
+    for lens in [&[64usize << 10][..], &[1 << 20]] {
+        assert_eq!(
+            run(&real, STREAM_HELD_MAX, lens),
+            want,
+            "real cap, chunks of {lens:?}"
+        );
+    }
+}
+
+/// Small caps for the property (bytes, items).
+fn small_caps() -> impl Strategy<Value = (usize, usize)> {
+    (8usize..400, 1usize..12)
+}
+
+/// Long lines and comment runs, so that small caps are reached.
+const CAP_PIECES: &[&str] = &[
+    "SELECT 1; SELECT 2; SELECT 3; SELECT 4; ",
+    "SELECT 'a long string literal on one line'; ",
+    "-- a comment line\n",
+    "/* a block comment that runs on */",
+    "\n",
+    "\r",
+    "  ",
+    "SELECT 1;\n",
+];
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
+
+    /// R-T8-1: the cap decision reads the text alone. With small caps, any chunking gives the
+    /// same items as one chunk and as one-byte chunks: the same refusal, at the same place,
+    /// after the same items. And the stream still gives out a refusing item or equals the
+    /// whole split; before a cap stop, its boundaries are the whole split's.
+    #[test]
+    fn the_cap_decision_does_not_depend_on_the_chunking(
+        doc in prop::collection::vec(
+            prop_oneof![
+                2 => prop::sample::select(CAP_PIECES),
+                1 => prop::sample::select(MY_PIECES),
+                1 => prop::sample::select(PIECES),
+            ],
+            0..48,
+        ).prop_map(|v| v.concat()),
+        cuts in chunking(),
+        (ctx, flavor) in eager_setups(),
+        (bytes, items) in small_caps(),
+    ) {
+        let run = |lens: &[usize]| {
+            let mut s = StreamSplitter::with_policy(ctx, flavor, StreamPolicy::Eager)
+                .with_caps(bytes, items);
+            let mut out = Vec::new();
+            let (mut at, mut k) = (0, 0);
+            while at < doc.len() {
+                let mut end = (at + lens[k % lens.len()]).min(doc.len());
+                while !doc.is_char_boundary(end) {
+                    end += 1;
+                }
+                out.extend(s.feed(&doc[at..end]));
+                at = end;
+                k += 1;
+            }
+            out.extend(s.finish());
+            out
+        };
+        let one = run(&[1 << 16]);
+        prop_assert_eq!(&run(&cuts), &one);
+        prop_assert_eq!(&run(&[1]), &one);
+        let want = expected(&doc, &ctx, flavor);
+        prop_assert!(any_refuses(&one) || one == want, "{:?}\nwhole {:?}", one, want);
+        if let Some(StreamItem::NoBoundary { .. } | StreamItem::TooLong { .. }) = one.last() {
+            let given = boundaries(&one);
+            prop_assert!(boundaries(&want).starts_with(&given), "{:?}\nwhole {:?}", one, want);
+        }
+    }
+}
+
+#[test]
+fn a_refusal_mid_file_does_not_stop_the_stream() {
+    // n1: a missing `;` mid-file is an `Ambiguous` boundary and a `Heuristic` statement; the
+    // stream goes on, so `stopped()` stays false, and only `any_refuses` on every batch tells
+    // the first pass to refuse the file.
+    let text = "SELECT 1;\nSELECT 2\nSELECT 3;\nSELECT 4;\n";
+    for lens in [&[1usize][..], &[1 << 16]] {
+        let mut s = eager();
+        let mut refused = false;
+        let mut at = 0;
+        while at < text.len() {
+            let end = (at + lens[0]).min(text.len());
+            refused |= any_refuses(&s.feed(&text[at..end]));
+            at = end;
+        }
+        assert!(!s.stopped(), "chunks of {lens:?}");
+        let rest = s.finish();
+        refused |= any_refuses(&rest);
+        assert!(refused, "chunks of {lens:?}");
+    }
+    assert!(any_refuses(&expected(
+        text,
+        &mysql(),
+        ClientFlavor::MySqlCli
+    )));
+    assert!(pass_one_refuses(
+        text,
+        mysql(),
+        ClientFlavor::MySqlCli,
+        &[3]
+    ));
+}
+
+/// Peak RSS of one memory shape at the real caps, measured from outside (`/usr/bin/time -l` on
+/// this test binary): `HV_T08_SHAPE=<name> <bin> --ignored --exact rss_shapes`.
+#[test]
+#[ignore = "perf"]
+fn rss_shapes() {
+    let name = std::env::var("HV_T08_SHAPE").unwrap_or_else(|_| "one-line-4k".into());
+    let fed = run_shape(&name, STREAM_HELD_MAX);
+    println!(
+        "HV-FACT m4b-t08 rss_shape={name} cap={STREAM_HELD_MAX} peak_held={} statements={} stop={:?}",
+        fed.peak, fed.statements, fed.other
+    );
+}
+
+/// `doc` fed in chunks of `lens` under `Eager` with the caps `bytes` and `items`.
+fn eager_capped(
+    doc: &str,
+    ctx: DialectCtx,
+    flavor: ClientFlavor,
+    (bytes, items): (usize, usize),
+    lens: &[usize],
+) -> Vec<StreamItem> {
+    let mut s =
+        StreamSplitter::with_policy(ctx, flavor, StreamPolicy::Eager).with_caps(bytes, items);
+    let mut out = Vec::new();
+    let (mut at, mut k) = (0, 0);
+    while at < doc.len() {
+        let mut end = (at + lens[k % lens.len()]).min(doc.len());
+        while !doc.is_char_boundary(end) {
+            end += 1;
+        }
+        out.extend(s.feed(&doc[at..end]));
+        at = end;
+        k += 1;
+    }
+    out.extend(s.finish());
+    out
+}
+
+#[test]
+fn the_cap_decision_regressions() {
+    // The inputs the property shrank to while the rule was being made chunk-independent
+    // (fix round 2): leading comments that make a line an anchor only once the statement
+    // after them comes; a lone `\r` before a statement longer than the span; a `DELIMITER`
+    // command that runs over a lone `\r`; a statement whose comment tail is not part of its
+    // strict text; a `COPY` whose data a window ending at its `;` does not hold; a lone `;`
+    // after a lone `\r`. Each over a grid of small caps, in five chunkings.
+    let docs = [
+        "SELECT 1;\n/* a block comment that runs on *//* a block comment that runs on */-- a \
+         comment line\nSELECT 1; SELECT 2; SELECT 3; SELECT 4; ",
+        "SELECT 1;\rCREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT \
+         2; END;\nSELECT 1; SELECT 2; SELECT 3; SELECT 4; ",
+        "-- a comment line\nDELIMITER //\rSELECT 1; SELECT 2; SELECT 3; SELECT 4; SELECT 1; \
+         SELECT 2; SELECT 3; SELECT 4; INSERT INTO t VALUES (1);\nSELECT 1; SELECT 2; SELECT \
+         3; SELECT 4; ",
+        "\\if :x\n/*CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT \
+         2; END;\nSELECT 1; SELECT 2; SELECT 3; SELECT 4; SELECT 1; SELECT 2; SELECT 3; \
+         SELECT 4; SELECT 'a long string literal on one line'; /*!50000 SELECT 1 */;\n",
+        "SELECT 1; SELECT 2; SELECT 3; SELECT 4; SELECT 'a long string literal on one line'; \
+         SELECT 'a long string literal on one line'; \rCOPY t FROM STDIN; SELECT 1;\nCREATE \
+         PROCEDURE p() BEGIN SELECT 1; END//\nCREATE PROCEDURE q() BEGIN IF x THEN SELECT 1; \
+         END IF; END;\nSELECT 1; SELECT 2; SELECT 3; SELECT 4; COPY t FROM STDIN;\n1\tdon't\n\
+         \\.\n",
+        "CREATE PROCEDURE p() BEGIN SELECT 1; END//\nCREATE PROCEDURE q() BEGIN IF x THEN \
+         SELECT 1; END IF; END;\n\r;-- a comment line\n/*SELECT 1; SELECT 2; SELECT 3; SELECT \
+         4; SELECT 1; SELECT 2; SELECT 3; SELECT 4; SELECT 1; SELECT 2; SELECT 3; SELECT 4; \
+         /*!50000 SELECT 1 */;\n",
+    ];
+    let mut oracle = mysql();
+    oracle.modes.mariadb_oracle_mode = true;
+    let pg = DialectCtx::new(DialectId::Postgres, None);
+    let setups = [
+        (mysql(), ClientFlavor::MySqlCli),
+        (oracle, ClientFlavor::None),
+        (pg, ClientFlavor::Psql),
+        (pg, ClientFlavor::None),
+    ];
+    let mut stops = 0;
+    for doc in docs {
+        for (ctx, flavor) in setups {
+            for bytes in [8, 10, 16, 32, 64, 106, 128, 200, 288, 400] {
+                for items in [1, 2, 3, 6, 11] {
+                    let caps = (bytes, items);
+                    let one = eager_capped(doc, ctx, flavor, caps, &[1 << 16]);
+                    for lens in [&[1usize][..], &[2], &[3], &[7, 1]] {
+                        assert_eq!(
+                            eager_capped(doc, ctx, flavor, caps, lens),
+                            one,
+                            "{doc:?} {ctx:?} {flavor:?} caps {caps:?} chunks {lens:?}"
+                        );
+                    }
+                    stops += usize::from(matches!(one.last(), Some(StreamItem::NoBoundary { .. })));
+                }
+            }
+        }
+    }
+    assert!(stops > 100, "{stops}");
 }
