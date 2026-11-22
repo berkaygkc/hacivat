@@ -121,6 +121,27 @@ jobs:
       - name: Build
         run: cargo build --workspace --release --locked
 
+      # ## m4b-t07-git: `hacivat-git`'s differential test needs the CLI at >= 2.30 (it builds
+      # fixtures and the oracle; the product never runs it). Its `HV-FACT t07 git_version=…`
+      # line, and the `HV-FACT t07 hostile … detector=…` line of the spawn detector (U-01, U-02),
+      # are checked against this version on each OS.
+      - name: CLI version for the repository status tests (M4b T7)
+        run: git --version
+      # Fix round 1 (review I5, controller ruling; named exception): the Linux leg's execve
+      # detector. With `CI` set, `hostile_repo.rs` fails when no spawn detector runs, so the
+      # Linux no-spawn proof is never markers-only.
+      - name: strace for the repository status spawn tests (M4b T7, Linux)
+        if: runner.os == 'Linux'
+        # Fix round 2 (n6): retried, since `apt-get update` depends on the network.
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=3 update -q && break
+            echo "apt-get update failed (attempt $i), retrying"; sleep 10
+          done
+          sudo apt-get -o Acquire::Retries=3 install -y -q --no-install-recommends strace
+          strace -V
+      # ## m4b-t07-git
+
       # Full test set, lines 1-4 (F2). Line 5 is the nightly release-tests job.
       - name: Test (1/4) workspace
         run: cargo test --workspace --locked

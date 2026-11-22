@@ -508,6 +508,213 @@ This subsection supersedes the fix-round-1 bullet on the `_scoped` forms.
   - The retry runs inside the shared `Dir::rename`, so it **also applies to Task 3's manifest rename** (`manifest::add_alias`): on Windows, an alias edit over a manifest another program holds open is retried up to about 350 ms before it fails. Nothing else in Task 3's behaviour changed.
   - It retries `ERROR_ACCESS_DENIED` too, so a permanent denial costs about 350 ms; accepted.
 
+## m4b-t07 — git status
+
+HV-SCRIPT-11, `crates/core/hacivat-git` (`discover`, `trust`, `status`, `map`). Showing a badge never runs a program: the hostile and FIFO tests under `crates/core/hacivat-git/tests/` run the real call path under a spawn detector on every OS.
+
+### The pipeline (all on one timed worker)
+
+- **One worker per call.** Discovery, the layout reads, the open, both status halves, the attribute probe and the mapping all run on a dedicated thread (n4). The caller waits at most `GitLimits::timeout` (5 s). At the deadline it answers `Unavailable(Timeout)`, sets the interrupt flag and returns without joining the worker: an untracked FIFO named `.gitignore` blocks gix's open forever (`alg/28` §0.8, m3). While that worker lives, a new call for the same library root answers `Unavailable(Timeout)` at once and starts nothing. So at most one stuck worker exists per library, keyed by the root as the caller passes it (Task 10 passes a stable path).
+- **Discovery** walks up from the canonical library root to the first `.git` entry, metadata only. It never considers the home directory or anything above it, and stops where `st_dev` changes. On Windows, where `std` has no device id, the path prefix stands in. A FIFO, socket or device named `.git` is not a marker. `gix::discover` is not used, because it honours environment overrides.
+- **Before the open** (`trust::check_layout`):
+  - Ownership (Unix, via `gix::sec::identity`): the worktree, `.git`, the resolved git dir and common dir, and every alternate must be the user's, else `Untrusted(ForeignOwner)`.
+  - A symlinked `.git` is refused, and so is a plain `.git` directory with a `commondir`: `Unavailable(Redirected)`.
+  - A gitfile is followed only to:
+    - a linked worktree's git dir `<common>/worktrees/<name>`, whose `commondir` must lead back to `<common>`;
+    - a submodule git dir under an enclosing `.git/modules/`;
+    - a directory inside the worktree.
+  - Alternates are followed when each line names an existing directory the user owns, chained at most four deep; the quoted form is not followed.
+  - So linked worktrees and `clone --shared` repositories are read, under the same isolated, reduced-trust open (n2), and anything else is `Redirected`.
+  - `extensions.objectFormat` other than `sha1`, and `extensions.refStorage` other than `files`, are read raw from the common dir's config and answer `Unavailable(Unsupported)` (m2).
+- **The open:** `gix::open_opts(worktree, Options::isolated().with(Trust::Reduced))`. Afterwards (C1, I1):
+  - `git_dir_trust() == Reduced`, and no section of source kind `Repository` has full trust, else `Unavailable(TrustPromoted)`.
+  - The git dir, common dir and workdir gix resolved must equal what `check_layout` accepted, else `Unavailable(Redirected)`. This also makes a fully trusted open that honoured `core.worktree` fail closed (mutation M1 of the report).
+- **The status (C12, n3):**
+  - `index_worktree_status` with `FastEq`, our `NoopSubmodules` (records the gitlink, answers "no change", opens nothing) and `EmissionMode::Matching`.
+  - Then `tree_index_status` with `TrackRenames::Disabled`, so no similarity work runs and no budget comes from repository config. A staged rename's destination is an Addition, so it is New, as before.
+  - Never `Repository::status()`. Swapping gix's `BuiltinSubmoduleStatus` back in made the nested default-options open read a system-config FIFO, and `submodule_entry_reads_no_global_config_and_spawns_nothing` failed (mutation M4).
+  - The pathspec is `:(top,literal)<prefix>`.
+  - `NeedsUpdate` and deletions give no badge. `Outcome::write_changes` is never called, so the index bytes are unchanged (`index_is_never_written`).
+  - More than `max_entries` paths answers `Unavailable(Failed(…))`, never a partial map: a missing badge would read as clean.
+- **Unknown overrides** win over every other badge. `Unknown` is ranked Submodule > Dataless > Filtered, then Conflicted > New > Modified.
+  - **Filtered (C2):** our own probe, `attributes_only` plus `selected_attribute_matches(["filter"])`, runs over every tracked path and every changed one. `filter` set or valued gives `Unknown(Filtered)`, even when the path is clean, since an LFS pointer's bytes are not what the index compares. `-filter` does not count. A failed lookup counts as filtered.
+  - **Submodule:** every gitlink under the prefix, what the no-op handler saw, and an untracked nested repository.
+  - **Dataless:** `SF_DATALESS` (macOS), `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | …_RECALL_ON_OPEN` (Windows), from `lstat`.
+- **Keys** are library-relative and spelled as the disk spells them, byte for byte, so they equal the scanner's `RelPath` (R-T1a-2). Each component is matched against its directory's listing, exactly first and then by NFC equality (`gix::utils::str::precompose`): macOS keeps an NFD name while the index holds NFC (`nfd_named_modified_file_has_badge`). A path not on the disk has no badge, nor has a name that is not UTF-8.
+- Error texts say "repository", never the bare word (R-T1a-1). Nothing is logged.
+
+### Deviation: dataless paths leave the index copy, not the pathspec
+
+`alg/28` HV-SCRIPT-11 step 6 named `:(exclude,top,literal)` pathspecs. With 20,000 of them the walk became quadratic and ran past the 5 s budget (`status_with_20k_excludes_under_1s`, U-05).
+
+Task 7 instead removes those entries from an in-memory copy of the index (`State::remove_entries`, plus the cache-tree extension), which is never written. gix then neither compares nor hashes them. The walk sees an untracked name (an `lstat`, no open), and the precedence turns that back into `Unknown(Dataless)`.
+
+- Measured on macOS, debug build: 297 ms for 20,000 dataless paths, 131 ms for a 10,000-file status with 100 changes.
+- [Observed]: such a path is never read (`excluded_path_is_never_opened_by_status`: a file that must be hashed is unreadable; not flagged, the call fails with `Unavailable(Failed)`; flagged, it is `Ready` with `Unknown(Dataless)`; a mode-000 file on Unix, a share-nothing handle on Windows, n7).
+- [Inferred]: that this keeps the OS from downloading the file (n6).
+- `GitError` has no `Io` variant. A whole-call I/O failure is `Failed(<message>)`, and the message never holds file contents.
+
+### Test seam
+
+`hacivat_git::testing::status_treating_as_dataless` (doc-hidden) adds library-relative paths to the dataless set. It can only add `Unknown(Dataless)` answers and index removals, so it cannot weaken a status. It exists because no test can make a real cloud placeholder.
+
+### Rejected
+
+- `:(exclude)` pathspecs for dataless paths: quadratic, as above.
+- Running `git status` with protective flags: Q4, ADR D2.
+- `parallel`: R-T0-1 holds; 10,000 files take 131 ms without it.
+
+### Fix round 1 (review I1–I5, m1–m10; rulings R-T7-1..3)
+
+**One normal form for comparing (I1).**
+- The library prefix and the index paths are compared component by component in NFC.
+- macOS keeps an NFD folder name; under `core.precomposeUnicode` the index holds NFC. Before this fix, a Turkish `çalışma/` library answered an empty, confident "clean".
+- The pathspec carries the prefix in the disk's spelling, in NFC and in NFD (their union), so it matches the index's spelling whichever it is.
+- Keys are still the disk's bytes.
+
+**Case-only differences (I2, R-T7-1).**
+- On a file system that folds case (`core.ignoreCase`, as gix reads it), an index path that differs from the disk only by case is `Unknown(CaseMismatch)`, keyed by the disk's spelling. It is never dropped.
+- The disk entry is found through the file system's own lookup. On Unix the name is identified by `(dev, ino)` (no casing code). On Windows, which has no stable file id in `std`, it is the unique ASCII case-insensitive NFC match; failing that (a non-ASCII case-only rename), the badge is keyed by the index's spelling, which no scanned row has, so in the UI it is in effect dropped (corrected in fix round 2, n3; a recorded Windows residual).
+- A library folder that matches its index spelling only by case marks every path under it `Unknown(CaseMismatch)`.
+- Only changed paths are mapped, so a clean, case-renamed file has no badge (the CLI shows none either).
+- The differential oracle no longer shares the product's listing rule:
+  - it keeps the CLI's own spelling;
+  - it drops a path only when the OS's `lstat` cannot find it;
+  - it compares through NFC plus an explicit case-only rule;
+  - a separate assertion checks that every key is the disk's spelling.
+
+**Bounded reads, so an abandoned worker stays cheap (I3, R-T7-2).** gix's `ref_contents` follows a symlink and reads with no limit. Before the open, these files must be regular files (not a symlink, FIFO or device) under their caps; otherwise `Unavailable(Redirected)`, or `Failed(TooLarge)` when over the cap:
+
+| File | Cap |
+|---|---|
+| `HEAD` | 4 KiB |
+| every loose ref on its symbolic chain, under the git dir and the common dir (folders on the way must be real directories; names must stay under `refs/` with no `..`; at most 5 hops) | 4 KiB |
+| `packed-refs`, `info/exclude`, `info/attributes` | 1 MiB |
+| the index | 256 MiB (it can legitimately pass 1 MiB; the cap only bounds a hostile one) |
+
+- **Nested repositories** inside the library: gix's classification reads their `HEAD` with no limit. Hacivat's own pre-walk of the library (names and `lstat` only) therefore requires each nested `.git` to be one of:
+  - a real directory with a regular `HEAD` under 4 KiB;
+  - a regular gitfile under 4 KiB whose target's `HEAD` is the same.
+  A symlinked `.git` is refused.
+- The pre-walk enters no symlinked folder, no `.git` and no nested repository. More than 200,000 entries, or a folder deeper than 64, answers `Failed(TooLarge)`.
+- These checks run after the format check, because a reftable repository keeps a file at `refs/heads`.
+- **Residual:** a swap between the check and gix's read (a concurrent writer inside the user's own repository) is not closed.
+- Measured on macOS, debug build: 135 ms for 10,000 files and 325 ms for 20,000 dataless paths, including the pre-walk.
+
+**Placeholders among the files gix reads (I4, R-T7-3).**
+- If a `.gitignore`, `.gitattributes` or `.gitmodules` in the library, in a folder between the worktree and the library, or in `info/exclude`/`info/attributes` is a cloud placeholder, it is not opened, since opening downloads it.
+- The library answers `Unavailable(Dataless)`, the diagnostic for that case. Tracked and untracked files are covered alike, because the pre-walk sees both.
+
+**No-spawn proof on Linux (I5).** The `build-test` job installs `strace` on Linux (`# ## m4b-t07-git`, named exception). With `CI` set, the hostile and positive-control tests fail when no spawn detector ran. The positive control asserts whenever a detector runs.
+
+**Minor items:**
+- **m1.** The one-stuck-worker cap is keyed by the canonical library root. The caller's spelling (a symlink alias, `..`) no longer matters.
+- **m2.** A call while a stuck worker lives answers `Unavailable(Paused)`: "status is paused: a file in the repository does not respond". The call that hit the budget answers `Timeout`. The pause lasts until the blocked read returns or the app restarts, because the worker is never joined. Task 13 shows the notice text from FTL.
+- **m3.** `Failed` carries a fixed `FailKind`: `LibraryUnreadable`, `PathNotUtf8`, `OwnerUnreadable`, `Open`, `Index`, `Worktree`, `Head`, `Setup`, `TooManyEntries`, `TooLarge` or `Worker`. No gix text is kept, since a config parse error can quote config bytes.
+- **m4.** A repository config that cannot be read (missing, not regular, over 1 MiB, unparseable, or the same for `config.worktree`) is `Unsupported`, fail closed.
+- **m5.** An untracked FIFO, socket or device is `Unknown(NotAFile)`. gix emits none of them, so the pre-walk records them.
+- **m7.** The FIFO-based global-config tests are Unix-only, because Windows has no FIFOs. On Windows the submodule and global-config vectors are covered by `hostile_repo_runs_no_program`: it holds a submodule and a hostile `HOME` and runs inside the Job Object, which counts any started process.
+- **m8.** The hostile fixture holds a live filter vector: a same-length `b.sql` with a touched mtime, so gix must hash it through the pipeline. It answers `Unknown(Filtered)`, and no marker appears.
+- **m9.** The doc-hidden `pub mod testing` is product API by necessity. A `testing` feature would need a manifest edit (Task 1a's). It can only add `Unknown(Dataless)` answers and `Unavailable(Dataless)` refusals.
+- **m10.** Ownership is checked again, after the open, on the worktree, git dir and common dir that gix opened.
+- **For the Task 1a owner (m6).** `BackendInPublicApi` counts the `_` of `use … as _` as a backend name, so a private impl header with `'_` reads as public API. This crate names its lifetimes instead; the rule could skip `_` imports.
+
+### Fix round 2 (re-review F1–F3, n1–n6; ruling R-T7-4)
+
+**Control files are capped too (F1, completes R-T7-2).**
+- gix-glob reads a `.gitignore` or `.gitattributes` whole, with no cap, and gix's allocation limit does not cover it. A 300 MiB sparse `.gitignore` used to cost 621 MB of memory.
+- So every `.gitignore`, `.gitattributes` and `.gitmodules` that gix would read, in the library and in each folder from the worktree down to it, must be a regular file of at most 1 MiB:
+  - an oversize file answers `Failed(TooLarge)`;
+  - a FIFO, socket, device or symlink answers `Unavailable(Redirected)` at once. A FIFO `.gitignore` no longer hangs a worker at all.
+- These are `lstat` checks; nothing is read.
+
+**The caller does no file-system work (F2).** Path resolution can block without limit on a stale network mount, so it never runs on the caller.
+- The caller claims the library under the spelling it was given and waits at most the budget.
+- The worker resolves the path, then claims the canonical library too:
+  - if another worker holds it, the answer is `Paused` (m1: an alias reaches the cap once its own worker has resolved it);
+  - both claims are released when the worker ends.
+- The tests stall the worker through the doc-hidden `testing::status_with_stall`, before or after the resolution. That hook can only delay a status.
+
+**Never download, inside `.git` too (F3, R-T7-4).**
+- Before the open, Hacivat `lstat`s the files below. If any is a cloud placeholder, the library answers `Unavailable(Dataless)` and nothing is opened:
+  - `HEAD`, `config`, `config.worktree`, the index, `packed-refs`, `info/exclude` and `info/attributes`;
+  - the `objects/pack` folder and every entry in it;
+  - every loose ref on HEAD's symbolic chain;
+  - a main or nested gitfile;
+  - a nested repository's `HEAD`.
+- ~~**Residual:** loose objects are not checked (that would be thousands of `lstat`s per status).~~ Corrected in fix round 3 (G2): the premise was wrong. gix reads loose objects on every status (the HEAD commit and every tree reachable from it), so they are now checked; see `### Fix round 3`.
+
+**The index ceiling is gix's (n1).**
+- Under reduced trust, gix refuses an index whose decoded entries (`entries × size_of::<gix::index::Entry>()`) exceed `gitoxide.objects.allocLimitIfReducedTrust`.
+  - That limit defaults to 16 MiB. The repository cannot raise it: the key is read from trusted sections only, and `GIT_ALLOC_LIMIT` is denied.
+  - Hacivat does not raise it either. A larger budget would let an abandoned worker hold more.
+- `INDEX_MAX` is now the same 16 MiB. A pre-check reads only the index's 12-byte header and refuses above that limit, so a library inside a bigger repository answers the `Unavailable(TooLarge)` diagnostic, never a silent `Failed(Index)`.
+- **Measured** (`index_entry_ceiling_is_measured_at_the_boundary`: a real index, built with `update-index --index-info`, macOS, gix 0.90.0):
+  - `size_of::<Entry>()` is 80 bytes;
+  - **209,715 tracked entries** answer `Ready`;
+  - 209,716 answer `Unavailable(TooLarge)`.
+- That is the ceiling on tracked files in the whole repository, not only in the library. A library's own 20,000-file limit (R-M4b-14) is far below it.
+
+**Case-only rename of the library folder, beyond ASCII (n2).**
+- A leading index folder that names the same directory as the library by `(dev, ino)` (`Çal` in the index, `çal` on disk) is an alias of the library prefix:
+  - its pathspec is added;
+  - its paths are `Unknown(CaseMismatch)`, never `New`.
+- This is Unix only. On Windows it stays the residual described in fix round 1.
+
+**Bounded costs (n4).**
+- The pre-walk counts entries while it lists them, so one huge folder is never buffered whole.
+- The case-only lookup reads each folder's `(dev, ino)` table once, instead of one `lstat` per name per path.
+
+**Dataless folders are listed by nobody (n5, as T4's scanner).** The pre-walk does not enter them. The status:
+- excludes them from gix's walk with `:(exclude,top,literal)`;
+- drops their tracked entries from the in-memory index copy;
+- gives them no badge.
+
+More than 256 dataless folders answer `Unavailable(Dataless)`, which keeps the exclusion list short and its matching linear.
+
+**CI (n6).** The `strace` install retries: three `apt-get update` attempts, `Acquire::Retries=3`, and `--no-install-recommends`.
+
+**Cost.** Measured on macOS, debug build: 147 ms for a 10,000-file status and 339 ms for 20,000 dataless paths, pre-walk and checks included.
+
+### Fix round 3 (re-review G1, G2, p1–p3; rulings R-T7-5, R-T7-6)
+
+**No replace-ref scan (G1, R-T7-5).**
+- Under reduced trust, gix's open still scans `refs/replace/**`: `core.useReplaceRefs` defaults to on and can come only from trusted sections.
+  - It reads every entry whole, with no cap.
+  - It walks a symlinked `refs/replace` root out of the repository. A link to `~` would read, and download, the whole home folder.
+- The status now opens with `config_overrides(["core.useReplaceRefs=false"])`. That is an API source of kind `Override`, which gix trusts, and which is not a repository section, so both trust invariants still hold. The scan never runs.
+- A `refs/replace` that exists but is not a real folder (a symlink, a file) answers `Unavailable(Redirected)` before the open.
+- **Cost:** no CLI parity for `git replace`. A replaced commit is seen as the original, as the CLI shows it under `GIT_NO_REPLACE_OBJECTS=1`.
+- Test `replace_refs_are_never_scanned` (P11) proves it functionally: `git replace HEAD side` would make a status that honours replace refs see `a.sql` as staged-modified, and ours stays clean. A 200 MiB file sits beside the ref, and a symlinked `refs/replace` is refused.
+
+**Loose objects are checked (G2, R-T7-6).**
+- gix reads loose objects on every status: the HEAD commit, every tree reachable from it, and index blobs for a deleted `.gitattributes` or `.gitignore`.
+- Before the open, Hacivat `lstat`s these in the repository's object folder and in each alternate's:
+  - the `pack` folder and its entries;
+  - every two-hex-digit fan-out folder and its entries.
+- A placeholder answers `Unavailable(Dataless)`.
+- More than **20,000** loose entries per object folder answers `Unavailable(TooLarge(LooseObjects))`, with the diagnostic "too many loose objects; run git gc".
+  - `git gc --auto`, run by `git commit`, keeps loose objects near 6,700, so the cap is rarely met.
+  - A repository that has auto gc turned off and many unpacked commits is refused rather than half-checked.
+- `GitError::TooLarge` now carries `TooLargeWhy::{Index, LooseObjects}`.
+- Tests: `dataless_loose_object_is_unavailable` (P10: the HEAD commit, the root tree, a fan-out folder) and `too_many_loose_objects_is_unavailable`.
+
+**Layout files before they are read (p1).**
+- The main gitfile, a plain `.git`'s `commondir`, a linked worktree's `commondir` and `gitdir`, `objects/info/alternates`, and each alternate's objects (packs and loose, same cap) are checked for placeholders in `check_layout`, before it reads them.
+- A split index's `sharedindex.*` must be a regular file under the index cap: a FIFO answers `Redirected` and never hangs a worker. It is also checked for placeholders.
+- Test `dataless_layout_files_and_split_index_are_unavailable`.
+
+**Index file cap (p2).**
+- `INDEX_MAX`, the file size, equals gix's 16 MiB allocation limit.
+- The measured 209,715-entry ceiling holds for short paths (`d<n>/f<n>`). An index whose paths are long reaches 16 MiB on disk with fewer entries, so it is refused below 209,715. That is conservative: gix's own path-storage estimate would refuse it too.
+
+**Test hooks fenced (p3).**
+- A `check-deps` rule `GitTestingHookOutsideTests` refuses `hacivat_git::testing` in any file outside `crates/core/hacivat-git/tests/`, through renames, groups and globs. It is a named exception in `xtask/src/check_deps.rs`, inside `// ## m4b-t07-git` blocks.
+- Test `git_testing_hooks_outside_its_tests_are_flagged` covers six forms, plus a clean file and the crate's own `tests/`.
+- So the doc-hidden hooks stay test-only, whoever depends on the crate.
+
+**Cost.** Measured on macOS, debug build: 170 ms for a 10,000-file status (its 10,100 loose objects are checked) and 345 ms for 20,000 dataless paths.
+
 ## m4b-t09 — watcher
 
 The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debounce,poll,limits,echo}.rs`). The tab half (reload, bars) is Task 14's; the service that owns watchers is Task 10's.

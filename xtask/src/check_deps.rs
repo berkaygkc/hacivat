@@ -155,6 +155,12 @@ pub enum Rule {
     /// `fsevent-sys`, `encoding_rs`, `trash`; `gix`, `gix-*`). See [`backend_in_public_api`].
     BackendInPublicApi,
     // ## m4b-t01a-seams
+    // ## m4b-t07-git (named exception, fix round 3, p3)
+    /// A file outside `hacivat-git`'s own `tests/` names `hacivat_git::testing`, the doc-hidden
+    /// test hooks (dataless and stall injection), through any rename or glob. See
+    /// [`names_git_testing_hooks`].
+    GitTestingHookOutsideTests,
+    // ## m4b-t07-git
 }
 
 // ## m2b-t01-interfaces
@@ -2097,6 +2103,33 @@ fn expr_paths(t: &[SrcTok]) -> Vec<Vec<String>> {
     out
 }
 
+// ## m4b-t07-git (named exception, fix round 3, p3)
+/// The crate whose `tests/` alone may name its `testing` hooks.
+const GIT_HOOKS_HOME: &str = "hacivat-git";
+
+/// Whether the tokens name `hacivat_git::testing` (`GitTestingHookOutsideTests`): in a path
+/// expression or an import, through `use … as` and `extern crate … as` renames, or hidden
+/// behind a glob of the crate (`use hacivat_git::*`) or of the module.
+fn names_git_testing_hooks(t: &[SrcTok]) -> bool {
+    let (imported, globs) = imports(t);
+    let renames: HashMap<String, Vec<String>> = imported
+        .iter()
+        .map(|(path, name)| (name.clone(), path.clone()))
+        .collect();
+    let hooks = |p: &[String]| p.len() >= 2 && p[0] == "hacivat_git" && p[1] == "testing";
+    let crate_glob = |p: &[String]| p.len() == 1 && p[0] == "hacivat_git";
+    globs.iter().any(|g| {
+        let r = resolve_path(g, &renames);
+        hooks(&r) || crate_glob(&r)
+    }) || imported
+        .iter()
+        .any(|(p, _)| hooks(&resolve_path(p, &renames)))
+        || expr_paths(t)
+            .iter()
+            .any(|p| hooks(&resolve_path(p, &renames)))
+}
+// ## m4b-t07-git
+
 /// Whether the tokens reach an API that starts a process (`NoGitSubprocess` in the
 /// no-process crates): an identifier of [`PROCESS_IDENTS`], a path of [`PROCESS_PATHS`]
 /// through any rename (`use gix as g; g::command`), or a glob import from outside the crate
@@ -2612,6 +2645,15 @@ pub fn source_violations(workspace: &Path) -> Vec<Violation> {
             if leaks_a_temp_dir(&src_tokens(&src)) {
                 found.insert((name.clone(), Rule::TempDirOutlivesTest, rel.clone()));
             }
+            // ## m4b-t07-git (named exception, fix round 3, p3): every file but the hooks' own
+            // tests.
+            if !(name == GIT_HOOKS_HOME && in_crate.starts_with("tests/")) {
+                let (tokens, _, _) = effective_tokens(&f, &src);
+                if names_git_testing_hooks(&tokens) {
+                    found.insert((name.clone(), Rule::GitTestingHookOutsideTests, rel.clone()));
+                }
+            }
+            // ## m4b-t07-git
             // ## m4b-t01a-seams: every non-test file of a product crate (the crate's `tests/`
             // may run the git CLI on its own fixtures; xtask and the fuzz packages are tools).
             let product_file = is_crate
@@ -5376,6 +5418,8 @@ mod tests {
             Rule::BackendInPublicApi,
             Rule::NoGitSubprocess,
             Rule::WatcherFollowsLinks,
+            // ## m4b-t07-git (named exception, fix round 3, p3)
+            Rule::GitTestingHookOutsideTests,
         ] {
             let v: Vec<_> = all.iter().filter(|v| v.rule == rule).collect();
             assert!(v.is_empty(), "{rule:?}: {v:?}");
@@ -5411,6 +5455,69 @@ mod tests {
             assert!(!hits.contains(&f), "{rule:?}: {f} flagged: {hits:?}");
         }
     }
+
+    // ## m4b-t07-git (named exception, fix round 3, p3)
+    /// `hacivat_git::testing` is for `hacivat-git`'s own tests only: any other file, in any
+    /// crate (its `src/` or `tests/`), `fuzz/` or `xtask/`, that names it is flagged, however.
+    #[test]
+    fn git_testing_hooks_outside_its_tests_are_flagged() {
+        let forms: [(&str, &str); 6] = [
+            (
+                "direct.rs",
+                "fn f() { hacivat_git::testing::status_with_stall(p, l, s, || ()); }",
+            ),
+            ("use_item.rs", "use hacivat_git::testing::Stall;"),
+            (
+                "use_module.rs",
+                "use hacivat_git::testing as t;\nfn f() { t::status_treating_as_dataless(p, l, &[]); }",
+            ),
+            (
+                "renamed_crate.rs",
+                "use hacivat_git as g;\nfn f() { g::testing::status_with_stall(p, l, s, || ()); }",
+            ),
+            (
+                "grouped.rs",
+                "use hacivat_git::{status, testing::{self, Stall}};",
+            ),
+            (
+                "glob.rs",
+                "use hacivat_git::*;\nfn f() { testing::status_treating_as_dataless(p, l, &[]); }",
+            ),
+        ];
+        let ok: [(&str, &str); 1] = [(
+            "fine.rs",
+            "use hacivat_git::{GitLimits, status};\nmod testing { pub fn x() {} }\n\
+             fn f() { status(p, &GitLimits::default()); testing::x(); let s = \"hacivat_git::testing\"; }",
+        )];
+        assert_forms(
+            Rule::GitTestingHookOutsideTests,
+            "crates/core/hacivat-scripts/src/",
+            &forms,
+            &ok,
+        );
+        assert_forms(
+            Rule::GitTestingHookOutsideTests,
+            "crates/app/hacivat-app/tests/",
+            &forms,
+            &ok,
+        );
+        assert_forms(
+            Rule::GitTestingHookOutsideTests,
+            "crates/core/hacivat-git/src/",
+            &forms[..1],
+            &ok,
+        );
+        // `hacivat-git`'s own tests are where the hooks belong.
+        let dir = source_tree(&[
+            ("crates/core/hacivat-git/tests/t.rs", forms[0].1),
+            ("crates/core/hacivat-git/tests/u.rs", forms[3].1),
+        ]);
+        assert_eq!(
+            source_hits(dir.path(), Rule::GitTestingHookOutsideTests),
+            []
+        );
+    }
+    // ## m4b-t07-git
 
     /// I1: no process can start from the two M4b crates, however the API is reached.
     #[test]
