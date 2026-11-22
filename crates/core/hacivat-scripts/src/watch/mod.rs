@@ -43,21 +43,36 @@
 //!    [`HINT_CAPACITY`] waiting, is one [`WatchEvent::Rescan`]; undelivered events beyond
 //!    [`MAX_OUTBOX`] collapse into one `Rescan` too.
 //!
-//! The watcher's own loop runs on a named thread (`hv-library-watch`) that dropping the
-//! [`Watcher`] stops and joins; the source is unwatched and dropped on that thread, and the
-//! `notify` debouncer thread is joined in the source's `Drop`.
+//! The watcher's own loop runs on a named thread (`hv-library-watch`, R-T9-5); the source is
+//! unwatched and dropped on that thread, and the `notify` debouncer thread is joined in the
+//! source's `Drop`.
+//!
+//! ## m4b-t09-watcher fix round 1 (review I1-I8; rulings R-T9-2..R-T9-5)
+//! - **Racily clean files** (R-T9-3): an equal `(len, mtime)` younger than [`RACY_WINDOW`] (or
+//!   the time's granularity) proves nothing. A hinted file a tab has open is re-hashed; any
+//!   other one is [`WatchEvent::PossiblyChanged`]. An echo needs an equal content hash.
+//! - **Renames** pair on a unique hash only; identical files stay removals and creations.
+//! - **Unchanged trouble is quiet:** a scan stopped at the same limit with the same files, or a
+//!   root still gone, is no event; a change of that state is one `Rescan`.
+//! - **Bursts** count distinct paths over an extending window and become one `Rescan` once
+//!   quiet; nothing settles while hints keep arriving (at most 2 s).
+//! - **Linux** watches folder by folder ([`OsEventSource::per_directory`], R-T9-4) over
+//!   [`Reconciler::watch_dirs`], never recursively through `notify`.
+//! - **Windows** gets a root hint every [`BACKSTOP`] (R-T9-2).
+//! - **Drop** waits at most [`DROP_JOIN_BOUND`], then abandons a thread stuck in a file-system
+//!   call.
 
 pub mod debounce;
 pub mod echo;
 pub mod limits;
 pub mod poll;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use icu_normalizer::ComposingNormalizerBorrowed;
 use notify::{RecommendedWatcher, RecursiveMode};
@@ -109,6 +124,29 @@ pub trait EventSource: Send {
     fn watch(&mut self, root: &Path, sink: HintSink) -> Result<(), WatchError>;
     /// Stops delivering hints for `root`; unknown roots are ignored.
     fn unwatch(&mut self, root: &Path);
+
+    // ## m4b-t09-watcher fix round 1 (defaulted, so `testing::FakeEventSource` is unchanged).
+
+    /// Whether the source watches folders one by one (Linux inotify, R-T9-4) and needs
+    /// [`sync_dirs`](Self::sync_dirs) after every scan.
+    fn per_dir(&self) -> bool {
+        false
+    }
+
+    /// The folders under `root` to watch now: absolute, found by the watcher's own
+    /// `lstat`-verified, link-free walk ([`Reconciler::watch_dirs`]). A source that watches
+    /// per folder adds the new ones and drops the vanished ones; an error means it cannot
+    /// (the watch limit), and the watcher falls back to polling.
+    fn sync_dirs(&mut self, root: &Path, dirs: &BTreeSet<PathBuf>) -> Result<(), WatchError> {
+        let _ = (root, dirs);
+        Ok(())
+    }
+
+    /// How the last look at `root` went: whether anything changed, and what its scans cost.
+    /// The poll source paces itself on it (2 s, backing off to 30 s while idle).
+    fn pace(&mut self, root: &Path, changed: bool, cost: Duration) {
+        let _ = (root, changed, cost);
+    }
 }
 
 /// The configuration every OS and poll watcher is built with: directory links are never
@@ -123,11 +161,30 @@ pub struct OsEventSource {
     // per-root sinks its handler routes to.
     debouncer: Option<notify_debouncer_full::Debouncer<RecommendedWatcher, NoCache>>,
     sinks: Sinks,
+    // ## m4b-t09-watcher fix round 1 (I5, R-T9-4): with `per_dir`, every folder is its own
+    // non-recursive watch, added only for folders the watcher's walk verified.
+    per_dir: bool,
+    dirs: HashMap<PathBuf, BTreeSet<PathBuf>>,
 }
 
 impl OsEventSource {
     /// Builds the debouncer the only allowed way (R-T0-2). It watches nothing yet.
+    ///
+    /// ## m4b-t09-watcher fix round 1 (I5, R-T9-4): on Linux it watches folder by folder
+    /// ([`per_directory`](Self::per_directory)); elsewhere it watches each root recursively.
     pub fn new() -> Result<Self, WatchError> {
+        Self::build(cfg!(target_os = "linux"))
+    }
+
+    /// A source that never asks the backend for a recursive watch: the root and every folder
+    /// [`EventSource::sync_dirs`] names get one non-recursive watch each. Linux's default
+    /// (notify's recursive inotify walk follows a folder swapped for a link before it is
+    /// watched, `walkdir`'s `follow_root_links`); on other systems for tests.
+    pub fn per_directory() -> Result<Self, WatchError> {
+        Self::build(true)
+    }
+
+    fn build(per_dir: bool) -> Result<Self, WatchError> {
         // ## m4b-t09-watcher: the handler routes each debounced batch to its root's sink.
         let sinks = Sinks::default();
         let debouncer = new_debouncer_opt::<_, RecommendedWatcher, NoCache>(
@@ -141,6 +198,8 @@ impl OsEventSource {
         Ok(OsEventSource {
             debouncer: Some(debouncer),
             sinks,
+            per_dir,
+            dirs: HashMap::new(),
         })
     }
 }
@@ -158,18 +217,72 @@ impl EventSource for OsEventSource {
             return Err(WatchError::NotImplemented);
         };
         lock(&self.sinks).push((root.to_path_buf(), sink));
-        if let Err(e) = debouncer.watch(root, RecursiveMode::Recursive) {
+        let mode = if self.per_dir {
+            RecursiveMode::NonRecursive
+        } else {
+            RecursiveMode::Recursive
+        };
+        if let Err(e) = debouncer.watch(root, mode) {
             lock(&self.sinks).retain(|(r, _)| r != root);
             return Err(WatchError::Backend(e.to_string()));
+        }
+        if self.per_dir {
+            self.dirs
+                .insert(root.to_path_buf(), BTreeSet::from([root.to_path_buf()]));
         }
         Ok(())
     }
 
     fn unwatch(&mut self, root: &Path) {
         if let Some(debouncer) = self.debouncer.as_mut() {
+            for d in self.dirs.remove(root).unwrap_or_default() {
+                if d != root {
+                    let _ = debouncer.unwatch(&d);
+                }
+            }
             let _ = debouncer.unwatch(root);
         }
         lock(&self.sinks).retain(|(r, _)| r != root);
+    }
+
+    fn per_dir(&self) -> bool {
+        self.per_dir
+    }
+
+    fn sync_dirs(&mut self, root: &Path, dirs: &BTreeSet<PathBuf>) -> Result<(), WatchError> {
+        if !self.per_dir {
+            return Ok(());
+        }
+        let (Some(debouncer), Some(have)) = (self.debouncer.as_mut(), self.dirs.get_mut(root))
+        else {
+            return Ok(());
+        };
+        let gone: Vec<PathBuf> = have
+            .iter()
+            .filter(|d| *d != root && !dirs.contains(*d))
+            .cloned()
+            .collect();
+        for d in gone {
+            // A folder that vanished is unwatched by the kernel already; errors are moot.
+            let _ = debouncer.unwatch(&d);
+            have.remove(&d);
+        }
+        for d in dirs {
+            if have.contains(d) || !d.starts_with(root) {
+                continue;
+            }
+            match debouncer.watch(d, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    have.insert(d.clone());
+                }
+                Err(e) if matches!(e.kind, notify::ErrorKind::MaxFilesWatch) => {
+                    return Err(WatchError::Backend(e.to_string()));
+                }
+                // Gone (or not a folder any more) since the walk: the next walk decides.
+                Err(_) => {}
+            }
+        }
+        Ok(())
     }
 }
 // ## m4b-t01a-seams
@@ -198,18 +311,20 @@ fn handler(sinks: Sinks) -> impl FnMut(DebounceEventResult) + Send + 'static {
     move |result| route(&sinks, result)
 }
 
-/// Splits one debounced batch into hints per watched root (the deepest root that holds the
-/// path) and hands each root its hints.
+/// Splits one debounced batch into hints per watched root and hands each root its hints.
+///
+/// ## m4b-t09-watcher fix round 1 (m10): a path goes to every root that holds it, so nested
+/// libraries sharing one source each see their own subtree.
 fn route(sinks: &Sinks, result: DebounceEventResult) {
     let mut sinks = lock(sinks);
     let roots: Vec<PathBuf> = sinks.iter().map(|(r, _)| r.clone()).collect();
-    let owner = |p: &Path| {
+    let owners = |p: &Path| -> Vec<usize> {
         roots
             .iter()
             .enumerate()
             .filter(|(_, r)| p.starts_with(r))
-            .max_by_key(|(_, r)| r.as_os_str().len())
             .map(|(i, _)| i)
+            .collect()
     };
     let mut per: Vec<Vec<RawHint>> = vec![Vec::new(); roots.len()];
     let to_all = |per: &mut Vec<Vec<RawHint>>, make: &dyn Fn(&Path) -> RawHint| {
@@ -225,14 +340,14 @@ fn route(sinks: &Sinks, result: DebounceEventResult) {
                         to_all(&mut per, &|r| RawHint::Rescan(r.to_path_buf()));
                     }
                     for p in &ev.paths {
-                        if let Some(i) = owner(p) {
+                        for i in owners(p) {
                             per[i].push(RawHint::Rescan(roots[i].clone()));
                         }
                     }
                     continue;
                 }
                 for p in &ev.paths {
-                    if let Some(i) = owner(p) {
+                    for i in owners(p) {
                         per[i].push(RawHint::Path(p.clone()));
                     }
                 }
@@ -251,7 +366,7 @@ fn route(sinks: &Sinks, result: DebounceEventResult) {
                     });
                 }
                 for p in &e.paths {
-                    if let Some(i) = owner(p) {
+                    for i in owners(p) {
                         per[i].push(if lost {
                             RawHint::Lost
                         } else {
@@ -274,8 +389,11 @@ fn route(sinks: &Sinks, result: DebounceEventResult) {
 pub enum Backend {
     /// FSEvents, inotify or `ReadDirectoryChangesW`.
     Os,
-    /// `notify`'s poll watcher every [`POLL_INTERVAL`].
+    /// Hacivat's poll source, every [`POLL_INTERVAL`] or slower while idle.
     Poll(PollReason),
+    /// ## m4b-t09-watcher fix round 1 (m4): the OS backend was lost and no fallback could
+    /// watch the library either; nothing watches it (a diagnostic; Refresh still scans).
+    Unwatched,
 }
 
 /// Why the OS backend was given up.
@@ -285,6 +403,12 @@ pub enum LostReason {
     StartFailed,
     /// The source reported that it stopped working (the watch limit was reached).
     Failed,
+    /// ## m4b-t09-watcher fix round 1 (I5): the library has more folders than per-folder
+    /// watches allow ([`WatchOpts::max_dirs`]), or the kernel refused one.
+    WatchBudget,
+    /// ## m4b-t09-watcher fix round 1 (m4): the fallback could not be built or could not
+    /// watch; [`Backend::Unwatched`].
+    NoFallback,
 }
 
 /// What the watcher reports, after reconciliation and echo filtering. Paths are files
@@ -302,6 +426,11 @@ pub enum WatchEvent {
     /// A file whose stamp was still changing after [`WatchOpts::settle_tries`] looks: treat
     /// it as changed or created, knowing a writer may still be at work (alg/28 step 5).
     Unsettled(RelPath),
+    /// ## m4b-t09-watcher fix round 1 (I1, R-T9-3): a hint arrived for a known file whose
+    /// `(len, mtime)` did not change, but whose time is too recent to prove it unchanged (the
+    /// file system's time granularity, or 2 s), and whose contents were never hashed (no tab
+    /// has it open). A tab that has it open re-reads or re-hashes it; nothing else needs to.
+    PossiblyChanged(RelPath),
     /// Anything may have changed: rescan the library (a burst, a dropped-events signal, a
     /// root that moved or is gone, a scan that hit a limit).
     Rescan,
@@ -333,7 +462,16 @@ pub struct WatchOpts {
     pub backend: Backend,
     /// The file system the reconciler looks through (tests count the paths it is asked for).
     pub fs: Arc<dyn Fs + Send + Sync>,
+    /// ## m4b-t09-watcher fix round 1 (I5): the most folders a per-folder source may watch
+    /// (half the free inotify watches, R-M4b-14); past it the library is polled.
+    pub max_dirs: usize,
+    /// ## m4b-t09-watcher fix round 1 (I8, R-T9-2): a root hint this often, whatever the
+    /// backend says (Windows: 30 s, because `ReadDirectoryChangesW` can stop silently).
+    pub backstop: Option<Duration>,
 }
+
+/// The Windows backstop interval (R-T9-2).
+pub const BACKSTOP: Duration = Duration::from_secs(30);
 
 impl Default for WatchOpts {
     fn default() -> Self {
@@ -345,6 +483,8 @@ impl Default for WatchOpts {
             limits: Limits::default(),
             backend: Backend::Os,
             fs: Arc::new(RealFs),
+            max_dirs: 100_000,
+            backstop: cfg!(windows).then_some(BACKSTOP),
         }
     }
 }
@@ -358,6 +498,8 @@ impl fmt::Debug for WatchOpts {
             .field("settle_tries", &self.settle_tries)
             .field("limits", &self.limits)
             .field("backend", &self.backend)
+            .field("max_dirs", &self.max_dirs)
+            .field("backstop", &self.backstop)
             .finish_non_exhaustive()
     }
 }
@@ -404,6 +546,9 @@ struct Known {
     seen: Seen,
     /// The content hash when a tab or Hacivat's own write told us.
     hash: Option<u128>,
+    /// ## m4b-t09-watcher fix round 1 (I1, R-T9-3): when it was last seen with this stamp
+    /// (wall clock, taken before the look).
+    seen_at: SystemTime,
 }
 
 #[derive(Debug, Clone)]
@@ -428,8 +573,53 @@ enum HintKind {
     Scan,
 }
 
+/// What one scan says against the known files.
+enum ScanOutcome {
+    Diff(BTreeMap<RelPath, Option<Seen>>),
+    /// The root or the limit state changed: the library was re-learned.
+    Rescan,
+    /// The root is still gone, or the scan stopped at the same limit with the same files.
+    Quiet,
+}
+
 /// The names under `.git/` whose change means the status may have changed.
 const REPOSITORY_NAMES: [&str; 4] = ["index", "HEAD", "packed-refs", "refs"];
+
+/// ## m4b-t09-watcher fix round 1 (I1, R-T9-3): below this age an equal `(len, mtime)` does not
+/// prove a file unchanged; git calls such an entry "racily clean".
+pub const RACY_WINDOW: Duration = Duration::from_secs(2);
+
+/// The coarsest time step a modification time suggests: whole even seconds → 2 s (FAT), whole
+/// seconds → 1 s (HFS+, ext3, many SMB servers), anything finer → none.
+fn granularity(t: SystemTime) -> Duration {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) if d.subsec_nanos() == 0 && d.as_secs() % 2 == 0 => Duration::from_secs(2),
+        Ok(d) if d.subsec_nanos() == 0 => Duration::from_secs(1),
+        Ok(_) => Duration::ZERO,
+        Err(_) => Duration::from_secs(2),
+    }
+}
+
+/// Whether a file with time `mtime`, last seen with that stamp at `seen_at`, may have been
+/// written again since without its `(len, mtime)` changing: its time is within the file
+/// system's granularity, or within [`RACY_WINDOW`], of that look (or after it: clock skew).
+fn racy(mtime: SystemTime, seen_at: SystemTime) -> bool {
+    match seen_at.duration_since(mtime) {
+        Ok(age) => age < RACY_WINDOW.max(granularity(mtime)),
+        Err(_) => true,
+    }
+}
+
+/// What the last [`Reconciler::tick`] did, for the watcher's bookkeeping.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TickInfo {
+    /// Hints were looked at (the poll source paces itself on these ticks).
+    pub saw_hints: bool,
+    /// A scan ran (a per-folder source re-syncs its folders after one).
+    pub scanned: bool,
+    /// What the tick's scans cost.
+    pub cost: Duration,
+}
 
 /// Hints in, events out: the deterministic heart of the watcher (clock-injected; tests drive
 /// it with a real temp folder and chosen instants).
@@ -446,6 +636,15 @@ pub struct Reconciler {
     candidates: BTreeMap<RelPath, Candidate>,
     scan_due: Option<Instant>,
     echo: EchoHandle,
+    /// ## m4b-t09-watcher fix round 1 (I3): the limit the last scan stopped at, and the root
+    /// problem it found, so an unchanged state is not one `Rescan` per poll pass.
+    limited: Option<scan::LimitHit>,
+    root_problem: Option<scan::RootProblem>,
+    /// ## m4b-t09-watcher fix round 1 (I8, R-T9-2): the next backstop root hint.
+    backstop_next: Option<Instant>,
+    /// The wall clock at the start of the current tick (before any look).
+    wall: SystemTime,
+    info: TickInfo,
 }
 
 impl fmt::Debug for Reconciler {
@@ -471,14 +670,15 @@ impl Reconciler {
             candidates: BTreeMap::new(),
             scan_due: None,
             echo: EchoHandle::default(),
+            limited: None,
+            root_problem: None,
+            backstop_next: None,
+            wall: SystemTime::now(),
+            info: TickInfo::default(),
         };
+        let started = SystemTime::now();
         let s = r.scan();
-        if s.root.is_none() {
-            r.known = files_of(&s)
-                .map(|(rel, seen)| (rel, Known { seen, hash: None }))
-                .collect();
-        }
-        r.reindex();
+        r.learn_state(&s, started);
         r
     }
 
@@ -493,7 +693,8 @@ impl Reconciler {
     }
 
     /// The content stamp of `rel` as a tab read or saved it: kept while the file still has
-    /// that length and time, so a later move of it can be paired by hash.
+    /// that length and time, so a later move of it can be paired by hash, and an edit that
+    /// keeps its `(len, mtime)` is still seen (R-T9-3).
     pub fn remember(&mut self, rel: &RelPath, stamp: &DiskStamp) {
         if let Some(k) = self.known.get_mut(rel)
             && k.seen.len == stamp.len
@@ -503,12 +704,26 @@ impl Reconciler {
         }
     }
 
+    /// ## m4b-t09-watcher fix round 1 (I8, R-T9-2): from `from` on, a root hint every
+    /// [`WatchOpts::backstop`] (nothing when it is `None`).
+    pub fn start_backstop(&mut self, from: Instant) {
+        self.backstop_next = self.opts.backstop.map(|every| from + every);
+    }
+
     /// When [`tick`](Self::tick) has work next.
     pub fn next_due(&self) -> Option<Instant> {
-        match (self.settle.next(), self.scan_due) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        // Settle looks wait while a burst is still arriving (never a busy wake-up).
+        let hold = self.debouncer.hold_until();
+        let held = |t: Option<Instant>| t.map(|t| hold.map_or(t, |h| t.max(h)));
+        [
+            held(self.settle.next()),
+            held(self.scan_due),
+            self.debouncer.due(),
+            self.backstop_next,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The files known now (for tests and diagnostics).
@@ -516,16 +731,30 @@ impl Reconciler {
         self.known.len()
     }
 
+    /// What the last tick did.
+    pub fn last_tick(&self) -> TickInfo {
+        self.info
+    }
+
     /// Looks at what arrived and at what is due at `now`; answers the settled events.
     pub fn tick(&mut self, now: Instant) -> Vec<WatchEvent> {
+        self.wall = SystemTime::now();
+        self.info = TickInfo::default();
         let mut repository = false;
         let mut need_scan = false;
+        if let Some(due) = self.backstop_next
+            && due <= now
+        {
+            need_scan = true;
+            self.backstop_next = self.opts.backstop.map(|every| now + every);
+        }
         for flushed in self.debouncer.flush(now) {
             match flushed {
                 // The watcher switches the source; nothing to reconcile.
                 Flushed::Lost => {}
                 Flushed::Rescan => return self.rescan(),
                 Flushed::Paths(paths) => {
+                    self.info.saw_hints = true;
                     for p in paths {
                         match self.classify(&p) {
                             HintKind::Drop => {}
@@ -542,8 +771,17 @@ impl Reconciler {
             }
         }
 
+        // Fix round 1 (I7): while hints are still arriving, first looks happen but nothing
+        // settles: a burst that overflows becomes one `Rescan`, never its first thousand files
+        // one by one.
+        let holding = self.debouncer.holding(now);
         let mut settled: Vec<(RelPath, Option<Seen>, bool)> = Vec::new();
-        for rel in self.settle.take_due(now) {
+        let due = if holding {
+            Vec::new()
+        } else {
+            self.settle.take_due(now)
+        };
+        for rel in due {
             let Some(c) = self.candidates.get(&rel).cloned() else {
                 continue;
             };
@@ -560,10 +798,25 @@ impl Reconciler {
             }
         }
 
-        let scan_check = self.scan_due.is_some_and(|t| t <= now);
+        let scan_check = !holding && self.scan_due.is_some_and(|t| t <= now);
         if need_scan || scan_check {
-            let Some(diff) = self.scan_diff() else {
-                return self.rescan();
+            let diff = match self.scan_diff() {
+                ScanOutcome::Diff(diff) => diff,
+                ScanOutcome::Rescan => {
+                    self.candidates.clear();
+                    self.settle.clear();
+                    self.scan_due = None;
+                    let mut out = vec![WatchEvent::Rescan];
+                    if repository {
+                        out.push(WatchEvent::RepositoryChanged);
+                    }
+                    return out;
+                }
+                ScanOutcome::Quiet => {
+                    self.scan_due = None;
+                    self.candidates.retain(|_, c| !c.via_scan);
+                    BTreeMap::new()
+                }
             };
             if scan_check {
                 let scanned: Vec<(RelPath, Candidate)> = self
@@ -614,37 +867,80 @@ impl Reconciler {
         self.candidates.clear();
         self.settle.clear();
         self.scan_due = None;
+        let started = SystemTime::now();
         let s = self.scan();
-        if s.root.is_none() {
-            let old = std::mem::take(&mut self.known);
-            self.known = files_of(&s)
-                .map(|(rel, seen)| {
-                    let hash = old
-                        .get(&rel)
-                        .filter(|k| k.seen.same_content(&seen))
-                        .and_then(|k| k.hash);
-                    (rel, Known { seen, hash })
-                })
-                .collect();
-            self.reindex();
-        }
+        self.learn_state(&s, started);
         vec![WatchEvent::Rescan]
+    }
+
+    /// Takes a scan as the truth: the root and limit state, and (when the root is there) the
+    /// known files, keeping the hashes of files that did not change.
+    fn learn_state(&mut self, s: &ScanResult, started: SystemTime) {
+        self.root_problem = s.root.clone();
+        self.limited = s.stopped;
+        if s.root.is_some() {
+            return;
+        }
+        let old = std::mem::take(&mut self.known);
+        self.known = files_of(s)
+            .map(|(rel, seen)| {
+                let hash = old
+                    .get(&rel)
+                    .filter(|k| k.seen.same_content(&seen))
+                    .and_then(|k| k.hash);
+                (
+                    rel,
+                    Known {
+                        seen,
+                        hash,
+                        seen_at: started,
+                    },
+                )
+            })
+            .collect();
+        self.reindex();
     }
 
     fn scan(&self) -> ScanResult {
         scan::scan(&self.root, &self.opts.limits, &*self.opts.fs)
     }
 
-    /// What differs between the known files and one scan now; `None` when the scan cannot be
-    /// compared (the root is gone or moved, or a limit stopped it).
-    fn scan_diff(&self) -> Option<BTreeMap<RelPath, Option<Seen>>> {
+    /// One scan against the known files.
+    ///
+    /// ## m4b-t09-watcher fix round 1 (I3): a root that is still gone, or a scan that stops
+    /// at the same limit with the same files as before, is `Quiet`; only a change of that
+    /// state is a `Rescan` (before, every poll pass of a library at its limit was one).
+    fn scan_diff(&mut self) -> ScanOutcome {
+        let started = SystemTime::now();
+        let clock = Instant::now();
         let s = self.scan();
-        if s.root.is_some() || s.stopped.is_some() {
-            return None;
+        self.info.scanned = true;
+        self.info.cost += clock.elapsed();
+        if let Some(problem) = &s.root {
+            if self.root_problem.as_ref() == Some(problem) {
+                return ScanOutcome::Quiet;
+            }
+            self.root_problem = Some(problem.clone());
+            return ScanOutcome::Rescan;
+        }
+        if self.root_problem.is_some() || s.stopped != self.limited {
+            self.learn_state(&s, started);
+            return ScanOutcome::Rescan;
         }
         let now: HashMap<RelPath, Seen> = files_of(&s).collect();
+        if s.stopped.is_some() {
+            let same = now.len() == self.known.len()
+                && now
+                    .iter()
+                    .all(|(rel, seen)| self.known.get(rel).is_some_and(|k| k.seen == *seen));
+            if same {
+                return ScanOutcome::Quiet;
+            }
+            self.learn_state(&s, started);
+            return ScanOutcome::Rescan;
+        }
         let mut diff = BTreeMap::new();
-        for (rel, k) in &self.known {
+        for (rel, k) in self.known.iter_mut() {
             match now.get(rel) {
                 None => {
                     diff.insert(rel.clone(), None);
@@ -652,7 +948,12 @@ impl Reconciler {
                 Some(seen) if *seen != k.seen => {
                     diff.insert(rel.clone(), Some(seen.clone()));
                 }
-                Some(_) => {}
+                // R-T9-3: an open file whose equal stamp is too recent to trust is looked at
+                // again (and re-hashed when it settles).
+                Some(seen) if k.hash.is_some() && racy(seen.mtime, k.seen_at) => {
+                    diff.insert(rel.clone(), Some(seen.clone()));
+                }
+                Some(_) => k.seen_at = started,
             }
         }
         for (rel, seen) in now {
@@ -660,18 +961,27 @@ impl Reconciler {
                 diff.insert(rel, Some(seen));
             }
         }
-        Some(diff)
+        ScanOutcome::Diff(diff)
     }
 
     /// The first look at a known file after a hint.
     fn first_look(&mut self, rel: RelPath, obs: Option<Seen>, now: Instant) {
-        let unchanged = match (&obs, self.known.get(&rel)) {
+        let known = self.known.get(&rel);
+        let unchanged = match (&obs, known) {
             (Some(s), Some(k)) => *s == k.seen,
             (None, None) => true,
             _ => false,
         };
+        // R-T9-3: a hint on a file whose equal stamp is too recent to prove anything.
+        let racy_now = match (&obs, known) {
+            (Some(s), Some(k)) => *s == k.seen && racy(s.mtime, k.seen_at),
+            _ => false,
+        };
         let pending = self.candidates.get(&rel);
-        if unchanged && pending.is_none() {
+        if unchanged && !racy_now && pending.is_none() {
+            if let Some(k) = self.known.get_mut(&rel) {
+                k.seen_at = self.wall;
+            }
             return;
         }
         if pending.is_some_and(|c| c.via_scan) {
@@ -720,66 +1030,93 @@ impl Reconciler {
         }
     }
 
-    /// Settled looks → events: renames paired by hash, echoes dropped, the known files kept in
-    /// step.
+    /// Settled looks → events: renames paired by a unique hash, echoes dropped, racily clean
+    /// files verified, the known files kept in step.
     fn report(
         &mut self,
         settled: Vec<(RelPath, Option<Seen>, bool)>,
         now: Instant,
     ) -> Vec<WatchEvent> {
+        let wall = self.wall;
         let mut removed: Vec<RelPath> = Vec::new();
         let mut appeared: Vec<(RelPath, Seen, bool, bool)> = Vec::new(); // (rel, seen, new, forced)
+        let mut verify: Vec<(RelPath, Seen, Known)> = Vec::new();
         for (rel, obs, forced) in settled {
             match (self.known.get(&rel), obs) {
                 (None, None) => {}
                 (Some(_), None) => removed.push(rel),
                 (None, Some(s)) => appeared.push((rel, s, true, forced)),
                 (Some(k), Some(s)) => {
-                    if k.seen.same_content(&s) {
-                        let hash = k.hash;
-                        self.known.insert(rel, Known { seen: s, hash });
-                    } else {
+                    if !k.seen.same_content(&s) {
                         appeared.push((rel, s, false, forced));
+                    } else if racy(s.mtime, k.seen_at) {
+                        verify.push((rel, s, k.clone()));
+                    } else {
+                        let hash = k.hash;
+                        self.known.insert(
+                            rel,
+                            Known {
+                                seen: s,
+                                hash,
+                                seen_at: wall,
+                            },
+                        );
                     }
                 }
             }
         }
-        if removed.is_empty() && appeared.is_empty() {
+        if removed.is_empty() && appeared.is_empty() && verify.is_empty() {
             return Vec::new();
         }
         removed.sort();
         appeared.sort_by(|a, b| a.0.cmp(&b.0));
+        verify.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut hashes: HashMap<RelPath, Option<DiskStamp>> = HashMap::new();
         let mut events = Vec::new();
 
-        // Renames: a removed file whose hash is known, and a new one of the same length and
-        // hash.
-        let mut paired: HashSet<RelPath> = HashSet::new();
-        let mut renamed_from: HashSet<RelPath> = HashSet::new();
+        // Renames (fix round 1, I2): a removed file with a known hash and a new file of the
+        // same length and hash, only when that hash is unique on both sides; an ambiguous
+        // match (identical files) stays a removal and a creation.
+        let mut removed_by_hash: HashMap<u128, Vec<RelPath>> = HashMap::new();
+        let mut lens: HashSet<u64> = HashSet::new();
         for a in &removed {
-            let Some(Known {
-                seen: old,
+            if let Some(Known {
+                seen,
                 hash: Some(h),
-            }) = self.known.get(a).cloned()
-            else {
-                continue;
-            };
+                ..
+            }) = self.known.get(a)
+            {
+                removed_by_hash.entry(*h).or_default().push(a.clone());
+                lens.insert(seen.len);
+            }
+        }
+        let mut appeared_by_hash: HashMap<u128, Vec<RelPath>> = HashMap::new();
+        if !removed_by_hash.is_empty() {
             for (b, s, new, _) in &appeared {
-                if !*new || paired.contains(b) || !s.hashable() || s.len != old.len {
-                    continue;
-                }
-                let stamp = self.stamp_of(b, s, &mut hashes);
-                if stamp.is_some_and(|st| st.hash == h) {
-                    paired.insert(b.clone());
-                    renamed_from.insert(a.clone());
-                    events.push(WatchEvent::Renamed {
-                        from: a.clone(),
-                        to: b.clone(),
-                    });
-                    break;
+                if *new
+                    && s.hashable()
+                    && lens.contains(&s.len)
+                    && let Some(st) = self.stamp_of(b, s, &mut hashes)
+                {
+                    appeared_by_hash.entry(st.hash).or_default().push(b.clone());
                 }
             }
+        }
+        let mut pairs: Vec<(RelPath, RelPath)> = removed_by_hash
+            .iter()
+            .filter_map(
+                |(h, froms)| match (froms.as_slice(), appeared_by_hash.get(h)) {
+                    ([from], Some(tos)) if tos.len() == 1 => Some((from.clone(), tos[0].clone())),
+                    _ => None,
+                },
+            )
+            .collect();
+        pairs.sort();
+        let renamed_from: HashSet<RelPath> = pairs.iter().map(|(a, _)| a.clone()).collect();
+        let paired: HashSet<RelPath> = pairs.iter().map(|(_, b)| b.clone()).collect();
+        for (from, to) in pairs {
+            events.push(WatchEvent::Renamed { from, to });
         }
         for a in &removed {
             self.known.remove(a);
@@ -812,7 +1149,46 @@ impl Reconciler {
                     WatchEvent::Changed(rel.clone())
                 });
             }
-            self.known.insert(rel, Known { seen, hash });
+            self.known.insert(
+                rel,
+                Known {
+                    seen,
+                    hash,
+                    seen_at: wall,
+                },
+            );
+        }
+
+        // Racily clean (fix round 1, I1, R-T9-3): the stamp proves nothing. With a known hash
+        // the file is hashed again: another hash is a change, unless it is Hacivat's own
+        // write (the echo needs an equal content hash). Without one, nobody has it open, and
+        // the consumer is told it may have changed.
+        for (rel, seen, k) in verify {
+            let mut hash = k.hash;
+            match k.hash {
+                Some(h) if seen.hashable() => match self.stamp_of(&rel, &seen, &mut hashes) {
+                    Some(st) if st.hash == h => {}
+                    Some(st) => {
+                        hash = Some(st.hash);
+                        if !self.echo.lock().is_echo_at(&rel, &st, now) {
+                            events.push(WatchEvent::Changed(rel.clone()));
+                        }
+                    }
+                    None => {
+                        hash = None;
+                        events.push(WatchEvent::PossiblyChanged(rel.clone()));
+                    }
+                },
+                _ => events.push(WatchEvent::PossiblyChanged(rel.clone())),
+            }
+            self.known.insert(
+                rel,
+                Known {
+                    seen,
+                    hash,
+                    seen_at: wall,
+                },
+            );
         }
         self.reindex();
         events
@@ -840,6 +1216,60 @@ impl Reconciler {
         };
         cache.insert(rel.clone(), stamp);
         stamp
+    }
+
+    /// ## m4b-t09-watcher fix round 1 (I5, R-T9-4): the folders a per-folder source watches:
+    /// the root, its `.git` folder (for `HEAD`, `index` and `packed-refs`; nothing below it),
+    /// and every folder the scan would enter, found by our own walk through the [`Fs`] seam:
+    /// `lstat` only, a link is never entered, skipped names (`.`, `node_modules`) and
+    /// dataless folders are not watched, depth and names visited bounded like the scan.
+    /// `Err(count)` once there are more than [`WatchOpts::max_dirs`].
+    pub fn watch_dirs(&self) -> Result<BTreeSet<PathBuf>, usize> {
+        let fs = &*self.opts.fs;
+        let root = &self.root.canonical;
+        let mut out = BTreeSet::from([root.clone()]);
+        let git = root.join(".git");
+        if fs
+            .symlink_metadata(&git)
+            .is_ok_and(|m| m.kind == MetaKind::Dir && !m.dataless)
+        {
+            out.insert(git);
+        }
+        let limits = &self.opts.limits;
+        let mut visited = 0usize;
+        let mut stack = vec![(root.clone(), 0usize)];
+        while let Some((dir, depth)) = stack.pop() {
+            if depth + 1 >= limits.max_depth {
+                continue;
+            }
+            let Ok(names) = fs.read_dir(&dir, limits.max_visited) else {
+                continue;
+            };
+            for name in names {
+                visited += 1;
+                if visited > limits.max_visited {
+                    return Ok(out);
+                }
+                let Some(n) = name.to_str() else {
+                    continue;
+                };
+                if pathsafe::is_skipped(n) || pathsafe::component(&name).is_err() {
+                    continue;
+                }
+                let p = dir.join(n);
+                if fs
+                    .symlink_metadata(&p)
+                    .is_ok_and(|m| m.kind == MetaKind::Dir && !m.dataless)
+                {
+                    out.insert(p.clone());
+                    if out.len() > self.opts.max_dirs {
+                        return Err(out.len());
+                    }
+                    stack.push((p, depth + 1));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// What a hint's path is to this library.
@@ -974,11 +1404,21 @@ fn poll_fallback() -> Fallback {
     Box::new(|| Ok(Box::new(PollEventSource::new()?) as Box<dyn EventSource>))
 }
 
+/// How long dropping a [`Watcher`] waits for its thread before abandoning it (I6).
+pub const DROP_JOIN_BOUND: Duration = Duration::from_millis(250);
+
 /// Watches one library: a source, the reconciler on its own thread, and the events delivered
-/// to `sink`. Dropping it stops everything it started.
+/// to `sink`.
+///
+/// ## m4b-t09-watcher fix round 1 (I6)
+/// Dropping it signals the thread to stop and waits at most [`DROP_JOIN_BOUND`] for it to end
+/// (it ends at its next wake-up and then unwatches and drops its source); a thread stuck in a
+/// file-system call (a hung network share) is abandoned, never waited for, and ends on its
+/// own when the call returns. So a drop never blocks for long, on any thread.
 pub struct Watcher {
     queue: Arc<HintQueue>,
     thread: Option<JoinHandle<()>>,
+    done: std::sync::mpsc::Receiver<()>,
     echo: EchoHandle,
     backend: Arc<Mutex<Backend>>,
     token: Weak<()>,
@@ -1016,6 +1456,9 @@ struct Running {
     sink: mpsc::Sender<WatchBatch>,
     outbox: Vec<WatchEvent>,
     backend: Arc<Mutex<Backend>>,
+    // Dropped last (fields drop in order): the probe and the drop's wait see the end only
+    // after the source is gone.
+    _done: std::sync::mpsc::Sender<()>,
     _token: Arc<()>,
 }
 
@@ -1024,18 +1467,45 @@ fn hint_sink(queue: &Arc<HintQueue>) -> HintSink {
     Box::new(move |batch| queue.push(batch))
 }
 
+/// The folders a per-folder source must watch now, synced; `Err` when it cannot (too many
+/// folders, or the kernel refused one).
+fn sync_dirs(
+    source: &mut dyn EventSource,
+    rec: &Reconciler,
+    root: &Path,
+) -> Result<(), LostReason> {
+    if !source.per_dir() {
+        return Ok(());
+    }
+    let dirs = rec.watch_dirs().map_err(|_| LostReason::WatchBudget)?;
+    source
+        .sync_dirs(root, &dirs)
+        .map_err(|_| LostReason::WatchBudget)
+}
+
 impl Watcher {
     /// Picks the backend for `root` (R-M4b-14: [`backend_for`]) and starts watching it.
+    ///
+    /// ## m4b-t09-watcher fix round 1 (m6): `opts.backend` set to `Backend::Poll(_)` by the
+    /// caller (R-T9-1's per-library "poll" choice) is kept; otherwise the backend is measured.
+    /// On Linux the per-folder budget ([`WatchOpts::max_dirs`]) is half the free inotify
+    /// watches.
     pub fn open(
         root: LibraryRoot,
         mut opts: WatchOpts,
         sink: mpsc::Sender<WatchBatch>,
     ) -> Result<Watcher, WatchError> {
-        let backend = backend_for(&root.canonical);
-        opts.backend = backend;
-        let source: Result<Box<dyn EventSource>, WatchError> = match backend {
+        if !matches!(opts.backend, Backend::Poll(_)) {
+            opts.backend = backend_for(&root.canonical);
+        }
+        if let Some(free) = inotify_budget() {
+            opts.max_dirs = usize::try_from(free / 2).unwrap_or(usize::MAX);
+        }
+        let source: Result<Box<dyn EventSource>, WatchError> = match opts.backend {
             Backend::Os => OsEventSource::new().map(|s| Box::new(s) as Box<dyn EventSource>),
-            Backend::Poll(_) => PollEventSource::new().map(|s| Box::new(s) as Box<dyn EventSource>),
+            Backend::Poll(_) | Backend::Unwatched => {
+                PollEventSource::new().map(|s| Box::new(s) as Box<dyn EventSource>)
+            }
         };
         let source = source.unwrap_or_else(|e| Box::new(Refusing(e)));
         Watcher::start(root, opts, sink, source)
@@ -1043,8 +1513,8 @@ impl Watcher {
 
     /// Starts watching `root` with `source`, falling back to polling if it fails.
     ///
-    /// Blocks while the source registers the tree (inotify adds one watch per folder; the poll
-    /// source walks it once) and while the library is scanned once: call it off the UI thread.
+    /// Blocks while the source registers the tree and while the library is scanned once: call
+    /// it off the UI thread and off an async executor (the core runtime's blocking pool).
     pub fn start(
         root: LibraryRoot,
         opts: WatchOpts,
@@ -1075,11 +1545,28 @@ impl Watcher {
         // After the watch: a change between the scan and the first event is seen either by the
         // scan or by a hint.
         let window = opts.window;
-        let rec = Reconciler::new(root.clone(), opts);
+        let mut rec = Reconciler::new(root.clone(), opts);
+        let start = Instant::now();
+        if let Err(reason) = sync_dirs(source.as_mut(), &rec, &root.canonical) {
+            // Too many folders for one watch each: poll from the start.
+            source.unwatch(&root.canonical);
+            let mut polled = fallback()?;
+            polled.watch(&root.canonical, hint_sink(&queue))?;
+            source = polled;
+            backend = Backend::Poll(PollReason::WatchBudget);
+            outbox.push(WatchEvent::BackendLost(reason));
+        } else if source.per_dir() {
+            // Folders made between the scan and their watch: one look once they are watched.
+            rec.push(RawHint::Path(root.canonical.clone()), start);
+        }
+        if backend == Backend::Os {
+            rec.start_backstop(start);
+        }
         let echo = rec.echo();
         let backend = Arc::new(Mutex::new(backend));
         let token = Arc::new(());
         let probe = Arc::downgrade(&token);
+        let (done_tx, done) = std::sync::mpsc::channel();
         let running = Running {
             root,
             window,
@@ -1090,6 +1577,7 @@ impl Watcher {
             sink,
             outbox,
             backend: backend.clone(),
+            _done: done_tx,
             _token: token,
         };
         let thread = std::thread::Builder::new()
@@ -1099,6 +1587,7 @@ impl Watcher {
         Ok(Watcher {
             queue,
             thread: Some(thread),
+            done,
             echo,
             backend,
             token: probe,
@@ -1110,7 +1599,8 @@ impl Watcher {
         self.echo.clone()
     }
 
-    /// The content stamp a tab read or saved, for rename pairing.
+    /// The content stamp a tab read or saved: for rename pairing, and so an edit that keeps
+    /// the file's `(len, mtime)` is still seen (R-T9-3).
     pub fn remember(&self, rel: RelPath, stamp: DiskStamp) {
         self.queue.remember(rel, stamp);
     }
@@ -1132,8 +1622,16 @@ impl Watcher {
 impl Drop for Watcher {
     fn drop(&mut self) {
         self.queue.stop();
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        match self.done.recv_timeout(DROP_JOIN_BOUND) {
+            // The thread has dropped everything it held: the join returns at once.
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = thread.join();
+            }
+            // Stuck (a hung file-system call): abandoned; it ends when the call returns.
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => drop(thread),
         }
     }
 }
@@ -1166,9 +1664,19 @@ impl Running {
                 }
             }
             if lost {
-                self.fall_back(now);
+                self.fall_back(now, LostReason::Failed);
             }
             let events = self.rec.tick(now);
+            let info = self.rec.last_tick();
+            if let Some(source) = self.source.as_mut() {
+                if info.scanned
+                    && let Err(reason) = sync_dirs(source.as_mut(), &self.rec, &self.root.canonical)
+                {
+                    self.fall_back(now, reason);
+                } else if info.saw_hints || !events.is_empty() {
+                    source.pace(&self.root.canonical, !events.is_empty(), info.cost);
+                }
+            }
             self.outbox.extend(events);
             if !self.deliver() {
                 break;
@@ -1179,9 +1687,10 @@ impl Running {
         }
     }
 
-    /// The source stopped working: poll instead, say so, and rescan what may have been missed.
-    fn fall_back(&mut self, now: Instant) {
-        if matches!(*lock(&self.backend), Backend::Poll(PollReason::BackendLost)) {
+    /// The source stopped working (or cannot watch every folder): poll instead, say so, and
+    /// rescan what may have been missed.
+    fn fall_back(&mut self, now: Instant, reason: LostReason) {
+        if matches!(*lock(&self.backend), Backend::Poll(_) | Backend::Unwatched) {
             // Already the fallback: keep it (there is nothing further to fall back to) and
             // rescan what it may have missed.
             self.rec
@@ -1198,9 +1707,17 @@ impl Running {
         {
             self.source = Some(polled);
         }
-        *lock(&self.backend) = Backend::Poll(PollReason::BackendLost);
-        self.outbox
-            .push(WatchEvent::BackendLost(LostReason::Failed));
+        // Fix round 1 (m4): say so when nothing watches the library any more.
+        let (backend, reason) = match (&self.source, reason) {
+            (None, _) => (Backend::Unwatched, LostReason::NoFallback),
+            (Some(_), LostReason::WatchBudget) => (
+                Backend::Poll(PollReason::WatchBudget),
+                LostReason::WatchBudget,
+            ),
+            (Some(_), r) => (Backend::Poll(PollReason::BackendLost), r),
+        };
+        *lock(&self.backend) = backend;
+        self.outbox.push(WatchEvent::BackendLost(reason));
         self.rec
             .push(RawHint::Rescan(self.root.canonical.clone()), now);
     }
@@ -1306,7 +1823,8 @@ mod tests {
     }
 
     #[test]
-    fn paths_go_to_the_deepest_root_and_outside_paths_nowhere() {
+    /// Fix round 1 (m10): nested libraries sharing a source both see the inner subtree.
+    fn paths_go_to_every_root_that_holds_them_and_outside_paths_nowhere() {
         let outer = Path::new("/lib");
         let (sinks, outer_got) = sinks_for(outer);
         let inner_got: Arc<Mutex<Vec<Vec<RawHint>>>> = Arc::default();
@@ -1321,7 +1839,10 @@ mod tests {
         route(&sinks, Ok(vec![DebouncedEvent::new(ev, Instant::now())]));
         assert_eq!(
             *lock(&outer_got),
-            vec![vec![RawHint::Path("/lib/a.sql".into())]]
+            vec![vec![
+                RawHint::Path("/lib/a.sql".into()),
+                RawHint::Path("/lib/inner/b.sql".into())
+            ]]
         );
         assert_eq!(
             *lock(&inner_got),

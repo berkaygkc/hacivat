@@ -3,11 +3,12 @@
 //! The reconciler runs on a real temp folder with an injected clock (no OS events, no sleeps);
 //! the watcher end to end runs on `testing::FakeEventSource` with condition waits (≤ 10 s).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -129,6 +130,19 @@ fn drain(r: &mut Reconciler, at: Instant) -> Vec<WatchEvent> {
     panic!("the reconciler never settled: {out:?}");
 }
 
+/// Sets `path`'s modification time `secs` seconds into the past.
+fn age(path: &Path, secs: u64) {
+    let f = fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(SystemTime::now() - Duration::from_secs(secs))
+        .unwrap();
+}
+
+/// Sets `path`'s modification time.
+fn set_mtime(path: &Path, t: SystemTime) {
+    let f = fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(t).unwrap();
+}
+
 /// Waits (10 s ceiling) for `done`, looking every few milliseconds.
 fn poll_until(what: &str, done: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -168,7 +182,8 @@ fn a_thousand_hints_are_not_a_burst_and_windows_count_apart() {
         matches!(&out[..], [Flushed::Paths(p)] if p.len() == 1_000),
         "{out:?}"
     );
-    // 600 + 600 inside one window, flushed in between: a burst.
+    // 600 + 600 less than a window apart, flushed in between: one burst, rescanned once it
+    // has been quiet for a window (fix round 1: the rescan sees the end state).
     let mut d = Debouncer::new(ms(150));
     for i in 0..600 {
         d.push(raw_modify(&format!("a{i}.sql")), t0());
@@ -177,7 +192,10 @@ fn a_thousand_hints_are_not_a_burst_and_windows_count_apart() {
     for i in 0..600 {
         d.push(raw_modify(&format!("b{i}.sql")), t0() + ms(100));
     }
-    assert_eq!(d.flush(t0() + ms(120)), vec![Flushed::Rescan]);
+    assert_eq!(d.flush(t0() + ms(120)), vec![]);
+    assert_eq!(d.due(), Some(t0() + ms(250)));
+    assert_eq!(d.flush(t0() + ms(250)), vec![Flushed::Rescan]);
+    assert_eq!(d.due(), None);
     // 600 now and 600 two windows later: two ordinary windows.
     let mut d = Debouncer::new(ms(150));
     for i in 0..600 {
@@ -191,19 +209,53 @@ fn a_thousand_hints_are_not_a_burst_and_windows_count_apart() {
 }
 
 #[test]
-fn a_burst_rescans_once_per_window_and_lost_is_never_swallowed() {
+fn a_burst_rescans_once_when_quiet_and_lost_is_never_swallowed() {
     let mut d = Debouncer::new(ms(150));
     for i in 0..1_001 {
         d.push(raw_modify(&format!("f{i}.sql")), t0());
     }
     d.push(RawHint::Lost, t0());
-    assert_eq!(d.flush(t0()), vec![Flushed::Lost, Flushed::Rescan]);
-    // Later hints of the same window are looked at one by one, not rescanned again.
+    assert_eq!(d.flush(t0()), vec![Flushed::Lost]);
+    // The burst goes on: swallowed, and the rescan waits for it to end.
     d.push(raw_modify("late.sql"), t0() + ms(20));
+    assert_eq!(d.flush(t0() + ms(30)), vec![]);
+    assert_eq!(d.flush(t0() + ms(170)), vec![Flushed::Rescan]);
+    // A later hint is a new burst, looked at on its own.
+    d.push(raw_modify("next.sql"), t0() + ms(400));
     assert_eq!(
-        d.flush(t0() + ms(30)),
-        vec![Flushed::Paths(vec!["/lib/late.sql".into()])]
+        d.flush(t0() + ms(410)),
+        vec![Flushed::Paths(vec!["/lib/next.sql".into()])]
     );
+}
+
+#[test]
+fn one_file_rewritten_in_a_loop_is_never_a_burst() {
+    let mut d = Debouncer::new(ms(150));
+    for i in 0..5_000u64 {
+        d.push(raw_modify("log.sql"), t0() + Duration::from_micros(i * 10));
+    }
+    assert_eq!(
+        d.flush(t0() + ms(60)),
+        vec![Flushed::Paths(vec!["/lib/log.sql".into()])]
+    );
+}
+
+#[test]
+fn an_endless_burst_still_rescans_every_two_seconds() {
+    let mut d = Debouncer::new(ms(150));
+    let mut rescans = Vec::new();
+    for step in 0..50u64 {
+        // 1,001 new names every 100 ms, for 5 s: the burst never quiets.
+        let at = t0() + ms(step * 100);
+        for i in 0..1_001 {
+            d.push(raw_modify(&format!("s{step}-f{i}.sql")), at);
+        }
+        if d.flush(at).contains(&Flushed::Rescan) {
+            rescans.push(step);
+        }
+    }
+    assert_eq!(rescans, vec![20, 40]);
+    assert_eq!(d.flush(t0() + ms(4_900 + 150)), vec![Flushed::Rescan]);
 }
 
 #[test]
@@ -436,6 +488,8 @@ fn inplace_write_reported_as_create_is_a_change() {
 #[test]
 fn an_unchanged_file_is_not_reported() {
     let lib = Lib::new(&[("a.sql", "SELECT 1;")]);
+    // Old enough that its stamp proves it unchanged (R-T9-3).
+    age(&lib.path("a.sql"), 60);
     let mut r = lib.rec();
     assert_eq!(run(&mut r, vec![lib.hint("a.sql")], t0()), vec![]);
 }
@@ -703,20 +757,21 @@ fn root_gone_is_a_rescan_never_removals() {
         run(&mut r, vec![lib.hint("a.sql")], t0()),
         vec![WatchEvent::Rescan]
     );
-    assert_eq!(
-        run(&mut r, vec![lib.hint("")], t0() + ms(1_000)),
-        vec![WatchEvent::Rescan]
-    );
+    // Fix round 1 (I3): still gone is not news; one `Rescan` per change of the root's state.
+    assert_eq!(run(&mut r, vec![lib.hint("")], t0() + ms(1_000)), vec![]);
+    assert_eq!(r.known_files(), 2, "never a list of removals");
     // The guard still owns the (now missing) folder; recreate it so its drop is a no-op.
     fs::create_dir_all(lib.dir.path()).unwrap();
 }
 
 /// A file system that records every path it is asked about.
+#[cfg(unix)]
 #[derive(Default)]
 struct Counting {
     paths: Mutex<Vec<PathBuf>>,
 }
 
+#[cfg(unix)]
 impl Counting {
     fn note(&self, p: &Path) {
         self.paths.lock().unwrap().push(p.to_path_buf());
@@ -731,6 +786,7 @@ impl Counting {
     }
 }
 
+#[cfg(unix)]
 impl Fs for Counting {
     fn read_dir(&self, dir: &Path, cap: usize) -> io::Result<Vec<OsString>> {
         self.note(dir);
@@ -1190,4 +1246,724 @@ fn poll_source_hints_each_root_every_interval_until_unwatched() {
         Err(std::sync::mpsc::TryRecvError::Disconnected)
     ));
     drop(src);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m4b-t09-watcher fix round 1 (review I1-I8, m1-m10; rulings R-T9-2..R-T9-5).
+
+// I1 / R-T9-3: racily clean files.
+
+/// P1 (review probe): a same-length edit whose time equals the known one, with a hint, on a
+/// file a tab has open (its hash is known): re-hashed, and reported.
+#[test]
+fn same_len_same_mtime_edit_after_hint() {
+    let lib = Lib::new(&[("a.sql", "LIMIT 10")]);
+    let t = fs::metadata(lib.path("a.sql")).unwrap().modified().unwrap();
+    let mut r = Reconciler::new(lib.root.clone(), WatchOpts::default());
+    r.remember(&rel("a.sql"), &lib.read_stamp("a.sql"));
+    lib.write("a.sql", "LIMIT 20");
+    set_mtime(&lib.path("a.sql"), t);
+    let ev = run(&mut r, vec![lib.hint("a.sql")], Instant::now());
+    assert_eq!(
+        ev,
+        vec![WatchEvent::Changed(rel("a.sql"))],
+        "P1: edit missed"
+    );
+}
+
+/// P1, for a file nobody has open: its contents were never hashed, so the hint is passed on as
+/// "possibly changed" (R-T9-3: the service hashes only open files).
+#[test]
+fn same_len_same_mtime_edit_of_a_file_nobody_has_open_is_possibly_changed() {
+    let lib = Lib::new(&[("a.sql", "LIMIT 10")]);
+    let t = fs::metadata(lib.path("a.sql")).unwrap().modified().unwrap();
+    let mut r = lib.rec();
+    lib.write("a.sql", "LIMIT 20");
+    set_mtime(&lib.path("a.sql"), t);
+    assert_eq!(
+        run(&mut r, vec![lib.hint("a.sql")], Instant::now()),
+        vec![WatchEvent::PossiblyChanged(rel("a.sql"))]
+    );
+    // Its time set back a minute: a new stamp (a change), and from then on an equal stamp
+    // proves it unchanged.
+    age(&lib.path("a.sql"), 60);
+    let ev = run(&mut r, vec![lib.hint("a.sql")], Instant::now() + ms(1_000));
+    assert_eq!(ev, vec![WatchEvent::Changed(rel("a.sql"))]);
+    assert_eq!(
+        run(&mut r, vec![lib.hint("a.sql")], Instant::now() + ms(2_000)),
+        vec![]
+    );
+}
+
+/// P1b (review probe): Hacivat's save is absorbed as an echo; then a foreign same-length edit
+/// lands with the same time (a 1-2 s tick). The echo needs an equal content hash, so the
+/// foreign edit is reported.
+#[test]
+fn external_edit_right_after_own_save_coarse_mtime() {
+    let lib = Lib::new(&[("a.sql", "SELECT 1;")]);
+    let mut r = Reconciler::new(lib.root.clone(), WatchOpts::default());
+    let echo = r.echo();
+    let before = lib.read_stamp("a.sql");
+    let mut ours = None;
+    fileio::save_with_echo(
+        &lib.root,
+        &rel("a.sql"),
+        None,
+        text("SELECT 22;"),
+        Some(before),
+        &mut |s| {
+            ours = Some(*s);
+            echo.record(rel("a.sql"), *s)
+        },
+    )
+    .unwrap();
+    let t0 = Instant::now();
+    assert_eq!(run(&mut r, vec![lib.hint("a.sql")], t0), vec![]);
+    lib.write("a.sql", "SELECT 33;");
+    set_mtime(&lib.path("a.sql"), ours.unwrap().mtime);
+    let ev = run(&mut r, vec![lib.hint("a.sql")], t0 + ms(400));
+    assert_eq!(
+        ev,
+        vec![WatchEvent::Changed(rel("a.sql"))],
+        "P1b: edit hidden"
+    );
+}
+
+/// Times in whole seconds, as HFS+, ext3 and many SMB servers keep them.
+struct Coarse;
+
+impl Fs for Coarse {
+    fn read_dir(&self, dir: &Path, cap: usize) -> io::Result<Vec<OsString>> {
+        RealFs.read_dir(dir, cap)
+    }
+    fn symlink_metadata(&self, path: &Path) -> io::Result<Meta> {
+        let mut m = RealFs.symlink_metadata(path)?;
+        let secs = m.mtime.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        m.mtime = UNIX_EPOCH + Duration::from_secs(secs);
+        Ok(m)
+    }
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        RealFs.canonicalize(path)
+    }
+    fn read_link(&self, link: &Path) -> io::Result<PathBuf> {
+        RealFs.read_link(link)
+    }
+}
+
+#[test]
+fn a_same_second_edit_on_a_coarse_time_file_system_is_not_lost() {
+    let lib = Lib::new(&[("a.sql", "LIMIT 10"), ("old.sql", "LIMIT 10")]);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let second = UNIX_EPOCH + Duration::from_secs(now);
+    set_mtime(&lib.path("a.sql"), second + ms(100));
+    // A file last written a minute ago: a coarse time that old proves it unchanged.
+    set_mtime(
+        &lib.path("old.sql"),
+        second - Duration::from_secs(60) + ms(100),
+    );
+    let opts = WatchOpts {
+        fs: Arc::new(Coarse),
+        ..WatchOpts::default()
+    };
+    let mut r = lib.rec_with(opts);
+    // Edited within the same second, same length: the coarse view shows the same stamp.
+    lib.write("a.sql", "LIMIT 20");
+    set_mtime(&lib.path("a.sql"), second + ms(700));
+    assert_eq!(
+        run(
+            &mut r,
+            vec![lib.hint("a.sql"), lib.hint("old.sql")],
+            Instant::now()
+        ),
+        vec![WatchEvent::PossiblyChanged(rel("a.sql"))]
+    );
+}
+
+// I2: rename pairing on a unique hash only.
+
+/// P2 (review probe): two identical open files; `rm a.sql; mv b.sql c.sql` in one window.
+#[test]
+fn identical_files_rename_pairing() {
+    let lib = Lib::new(&[("a.sql", "SELECT 1;"), ("b.sql", "SELECT 1;")]);
+    let mut r = lib.rec();
+    r.remember(&rel("a.sql"), &lib.read_stamp("a.sql"));
+    r.remember(&rel("b.sql"), &lib.read_stamp("b.sql"));
+    fs::remove_file(lib.path("a.sql")).unwrap();
+    fs::rename(lib.path("b.sql"), lib.path("c.sql")).unwrap();
+    let ev = run(
+        &mut r,
+        ["a.sql", "b.sql", "c.sql"].map(|n| lib.hint(n)).to_vec(),
+        t0(),
+    );
+    assert_eq!(
+        ev,
+        vec![
+            WatchEvent::Removed(rel("a.sql")),
+            WatchEvent::Removed(rel("b.sql")),
+            WatchEvent::Created(rel("c.sql")),
+        ],
+        "P2: an ambiguous hash must not pair"
+    );
+}
+
+#[test]
+fn two_new_copies_of_one_moved_file_do_not_pair_either() {
+    let lib = Lib::new(&[("a.sql", "SELECT 1;")]);
+    let mut r = lib.rec();
+    r.remember(&rel("a.sql"), &lib.read_stamp("a.sql"));
+    fs::rename(lib.path("a.sql"), lib.path("b.sql")).unwrap();
+    fs::copy(lib.path("b.sql"), lib.path("c.sql")).unwrap();
+    let ev = run(
+        &mut r,
+        ["a.sql", "b.sql", "c.sql"].map(|n| lib.hint(n)).to_vec(),
+        t0(),
+    );
+    assert_eq!(
+        ev,
+        vec![
+            WatchEvent::Removed(rel("a.sql")),
+            WatchEvent::Created(rel("b.sql")),
+            WatchEvent::Created(rel("c.sql")),
+        ]
+    );
+}
+
+// I3: a library at its limit.
+
+fn limited(lib: &Lib) -> WatchOpts {
+    let _ = lib;
+    WatchOpts {
+        limits: Limits {
+            max_files: 2,
+            ..Limits::default()
+        },
+        ..WatchOpts::default()
+    }
+}
+
+/// P4 (review probe), deterministic: root hints (poll passes) on a library stopped at its
+/// limit are quiet while nothing changes; a change is one `Rescan`.
+#[test]
+fn polled_library_at_limit_rescans_once_per_change() {
+    let lib = Lib::new(&[("a.sql", "x"), ("b.sql", "y"), ("c.sql", "z")]);
+    let mut r = lib.rec_with(limited(&lib));
+    for pass in 0..5u64 {
+        let at = t0() + Duration::from_secs(2 * pass);
+        assert_eq!(run(&mut r, vec![lib.hint("")], at), vec![], "pass {pass}");
+    }
+    // A change the stopped scan sees (it lists the first files in byte order).
+    lib.write("a.sql", "xx");
+    let at = t0() + Duration::from_secs(20);
+    assert_eq!(
+        run(&mut r, vec![lib.hint("")], at),
+        vec![WatchEvent::Rescan]
+    );
+    let at = t0() + Duration::from_secs(22);
+    assert_eq!(run(&mut r, vec![lib.hint("")], at), vec![]);
+    // Back under the limit: the state changed, once more.
+    for n in ["b.sql", "c.sql"] {
+        fs::remove_file(lib.path(n)).unwrap();
+    }
+    let at = t0() + Duration::from_secs(24);
+    assert_eq!(
+        run(&mut r, vec![lib.hint("")], at),
+        vec![WatchEvent::Rescan]
+    );
+    let at = t0() + Duration::from_secs(26);
+    assert_eq!(run(&mut r, vec![lib.hint("")], at), vec![]);
+}
+
+/// P4 end to end through the watcher: five poll passes say nothing, a pass after a change says
+/// `Rescan` once. A repository hint after the passes is a marker: hints are taken in order, so
+/// once it is reported every pass before it has been looked at.
+#[test]
+fn polled_library_at_limit_rescans_forever() {
+    let lib = Lib::new(&[("a.sql", "x"), ("b.sql", "y"), ("c.sql", "z")]);
+    let (src, handle) = FakeEventSource::new();
+    let (tx, mut ev) = Events::new();
+    let _w = Watcher::start(lib.root.clone(), limited(&lib), tx, Box::new(src)).unwrap();
+    let marks = |e: &[WatchEvent]| {
+        e.iter()
+            .filter(|x| **x == WatchEvent::RepositoryChanged)
+            .count()
+    };
+    for _ in 0..5 {
+        handle.emit(&lib.root.canonical, vec![lib.hint("")]);
+    }
+    handle.emit(&lib.root.canonical, vec![lib.hint(".git/index")]);
+    ev.wait_for("marker", |e| marks(e) == 1);
+    assert_eq!(
+        ev.seen,
+        vec![WatchEvent::RepositoryChanged],
+        "P4: quiet passes rescanned"
+    );
+    lib.write("a.sql", "xx");
+    for _ in 0..5 {
+        handle.emit(&lib.root.canonical, vec![lib.hint("")]);
+    }
+    handle.emit(&lib.root.canonical, vec![lib.hint(".git/index")]);
+    ev.wait_for("marker", |e| marks(e) == 2);
+    assert_eq!(
+        ev.seen.iter().filter(|e| **e == WatchEvent::Rescan).count(),
+        1,
+        "{:?}",
+        ev.seen
+    );
+}
+
+#[test]
+fn a_missing_root_is_one_rescan_per_change() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let mut r = lib.rec();
+    let moved = lib.dir.path().with_extension("moved");
+    fs::rename(lib.dir.path(), &moved).unwrap();
+    assert_eq!(
+        run(&mut r, vec![lib.hint("")], t0()),
+        vec![WatchEvent::Rescan]
+    );
+    assert_eq!(
+        run(&mut r, vec![lib.hint("")], t0() + Duration::from_secs(2)),
+        vec![]
+    );
+    fs::rename(&moved, lib.dir.path()).unwrap();
+    assert_eq!(
+        run(&mut r, vec![lib.hint("")], t0() + Duration::from_secs(4)),
+        vec![WatchEvent::Rescan]
+    );
+    assert_eq!(r.known_files(), 1);
+}
+
+// I4: the poll source and the repository.
+
+#[test]
+fn poll_pass_reports_repository_changes() {
+    use hacivat_scripts::watch::PollEventSource;
+    let lib = Lib::new(&[("a.sql", "x"), (".git/HEAD", "ref: refs/heads/main\n")]);
+    lib.write(".git/index", "i");
+    let src = PollEventSource::with_interval(ms(20)).unwrap();
+    let (tx, mut ev) = Events::new();
+    let _w = Watcher::start(lib.root.clone(), WatchOpts::default(), tx, Box::new(src)).unwrap();
+    // Once a pass has seen the sentinel, the stamps are recorded; a commit rewrites the index.
+    lib.write("sentinel.sql", "s");
+    ev.wait_for("sentinel", |e| {
+        e.contains(&WatchEvent::Created(rel("sentinel.sql")))
+    });
+    lib.write(".git/index", "index after a commit");
+    ev.wait_for("repository", |e| e.contains(&WatchEvent::RepositoryChanged));
+    // A checkout moves HEAD.
+    let before = ev.seen.len();
+    lib.write(".git/HEAD", "ref: refs/heads/topic\n");
+    ev.wait_for("HEAD", |e| {
+        e[before..].contains(&WatchEvent::RepositoryChanged)
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_repository_folder_is_never_looked_into_by_the_poll_source() {
+    use hacivat_scripts::watch::PollEventSource;
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    let lib = Lib::new(&[("a.sql", "x")]);
+    std::os::unix::fs::symlink(outside.path(), lib.path(".git")).unwrap();
+    let mut src = PollEventSource::with_interval(ms(20)).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<RawHint>>();
+    let tx = Mutex::new(tx);
+    src.watch(
+        &lib.root.canonical,
+        Box::new(move |b| {
+            let _ = tx.lock().unwrap().send(b);
+        }),
+    )
+    .unwrap();
+    rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    fs::write(outside.path().join("HEAD"), "ref: refs/heads/other\n").unwrap();
+    for _ in 0..3 {
+        let batch = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(batch, vec![RawHint::Path(lib.root.canonical.clone())]);
+    }
+}
+
+// I5 / R-T9-4: per-folder watches over our own walk.
+
+#[cfg(unix)]
+#[test]
+fn watch_dirs_are_real_folders_only() {
+    let lib = Lib::new(&[
+        ("a/b/c.sql", "x"),
+        ("empty/keep.txt", "k"),
+        ("node_modules/m/x.sql", "x"),
+        (".hidden/y.sql", "y"),
+        (".git/HEAD", "h"),
+        (".git/objects/ab/cd", "o"),
+    ]);
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), lib.path("linked")).unwrap();
+    std::os::unix::fs::symlink("/", lib.path("a/root")).unwrap();
+    let counting = Arc::new(Counting::default());
+    let r = lib.rec_with(WatchOpts {
+        fs: counting.clone(),
+        ..WatchOpts::default()
+    });
+    let dirs = r.watch_dirs().unwrap();
+    let want: BTreeSet<PathBuf> = ["", ".git", "a", "a/b", "empty"]
+        .iter()
+        .map(|d| lib.root.canonical.join(d))
+        .map(|p| PathBuf::from(p.to_str().unwrap().trim_end_matches('/')))
+        .collect();
+    assert_eq!(dirs, want);
+    assert_eq!(
+        counting.asked_under(&lib.path("linked")),
+        Vec::<PathBuf>::new()
+    );
+    assert_eq!(
+        counting.asked_under(&lib.path("a/root")),
+        Vec::<PathBuf>::new()
+    );
+    assert_eq!(
+        counting.asked_under(&lib.path(".git")),
+        Vec::<PathBuf>::new()
+    );
+    let small = lib.rec_with(WatchOpts {
+        max_dirs: 3,
+        ..WatchOpts::default()
+    });
+    assert_eq!(small.watch_dirs(), Err(4));
+}
+
+/// A source that watches per folder and records what it was told.
+#[derive(Clone, Default)]
+struct PerDir {
+    synced: Arc<Mutex<Vec<BTreeSet<PathBuf>>>>,
+    refuse: bool,
+}
+
+impl EventSource for PerDir {
+    fn watch(&mut self, _root: &Path, _sink: hacivat_scripts::HintSink) -> Result<(), WatchError> {
+        Ok(())
+    }
+    fn unwatch(&mut self, _root: &Path) {}
+    fn per_dir(&self) -> bool {
+        true
+    }
+    fn sync_dirs(&mut self, _root: &Path, dirs: &BTreeSet<PathBuf>) -> Result<(), WatchError> {
+        self.synced.lock().unwrap().push(dirs.clone());
+        if self.refuse {
+            return Err(WatchError::Backend("watch limit".into()));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn per_folder_watches_follow_new_and_removed_folders() {
+    let lib = Lib::new(&[("a/x.sql", "x")]);
+    let src = PerDir::default();
+    let synced = src.synced.clone();
+    let (fake, handle) = FakeEventSource::new();
+    let (tx, mut ev) = Events::new();
+    // The fake delivers the hints; the per-folder source is the one synced.
+    struct Both(PerDir, FakeEventSource);
+    impl EventSource for Both {
+        fn watch(
+            &mut self,
+            root: &Path,
+            sink: hacivat_scripts::HintSink,
+        ) -> Result<(), WatchError> {
+            self.1.watch(root, sink)
+        }
+        fn unwatch(&mut self, root: &Path) {
+            self.1.unwatch(root)
+        }
+        fn per_dir(&self) -> bool {
+            true
+        }
+        fn sync_dirs(&mut self, root: &Path, dirs: &BTreeSet<PathBuf>) -> Result<(), WatchError> {
+            self.0.sync_dirs(root, dirs)
+        }
+    }
+    let _w = Watcher::start(
+        lib.root.clone(),
+        WatchOpts::default(),
+        tx,
+        Box::new(Both(src, fake)),
+    )
+    .unwrap();
+    let dirs = |names: &[&str]| -> BTreeSet<PathBuf> {
+        names.iter().map(|n| lib.root.canonical.join(n)).collect()
+    };
+    let root_only: BTreeSet<PathBuf> = BTreeSet::from([lib.root.canonical.clone()]);
+    assert_eq!(synced.lock().unwrap()[0], &root_only | &dirs(&["a"]));
+    lib.write("b/y.sql", "y");
+    handle.emit(&lib.root.canonical, vec![lib.hint("b")]);
+    ev.wait_for("created", |e| {
+        e.contains(&WatchEvent::Created(rel("b/y.sql")))
+    });
+    assert_eq!(
+        synced.lock().unwrap().last().unwrap(),
+        &(&root_only | &dirs(&["a", "b"]))
+    );
+    fs::remove_dir_all(lib.path("a")).unwrap();
+    handle.emit(&lib.root.canonical, vec![lib.hint("a")]);
+    ev.wait_for("removed", |e| {
+        e.contains(&WatchEvent::Removed(rel("a/x.sql")))
+    });
+    assert_eq!(
+        synced.lock().unwrap().last().unwrap(),
+        &(&root_only | &dirs(&["b"]))
+    );
+}
+
+#[test]
+fn too_many_folders_for_one_watch_each_falls_back_to_polling() {
+    let lib = Lib::new(&[("a/x.sql", "x"), ("b/y.sql", "y")]);
+    let (poll, poll_handle) = FakeEventSource::new();
+    let mut poll = Some(poll);
+    let (tx, mut ev) = Events::new();
+    let w = Watcher::start_with_fallback(
+        lib.root.clone(),
+        WatchOpts {
+            max_dirs: 2,
+            ..WatchOpts::default()
+        },
+        tx,
+        Box::new(PerDir::default()),
+        Box::new(move || Ok(Box::new(poll.take().unwrap()) as Box<dyn EventSource>)),
+    )
+    .unwrap();
+    assert_eq!(w.backend(), Backend::Poll(PollReason::WatchBudget));
+    assert_eq!(poll_handle.watched(), vec![lib.root.canonical.clone()]);
+    ev.wait_for("lost", |e| !e.is_empty());
+    assert_eq!(
+        ev.seen,
+        vec![WatchEvent::BackendLost(LostReason::WatchBudget)]
+    );
+}
+
+#[test]
+fn a_refused_folder_watch_falls_back_to_polling() {
+    let lib = Lib::new(&[("a/x.sql", "x")]);
+    let (poll, _poll_handle) = FakeEventSource::new();
+    let mut poll = Some(poll);
+    let (tx, _ev) = Events::new();
+    let w = Watcher::start_with_fallback(
+        lib.root.clone(),
+        WatchOpts::default(),
+        tx,
+        Box::new(PerDir {
+            refuse: true,
+            ..PerDir::default()
+        }),
+        Box::new(move || Ok(Box::new(poll.take().unwrap()) as Box<dyn EventSource>)),
+    )
+    .unwrap();
+    assert_eq!(w.backend(), Backend::Poll(PollReason::WatchBudget));
+}
+
+// I6: a bounded drop.
+
+/// A file system whose `symlink_metadata` of `a.sql` blocks while `gate` is set.
+struct Gated {
+    gate: Arc<AtomicBool>,
+    entered: Arc<AtomicBool>,
+}
+
+impl Fs for Gated {
+    fn read_dir(&self, d: &Path, cap: usize) -> io::Result<Vec<OsString>> {
+        RealFs.read_dir(d, cap)
+    }
+    fn symlink_metadata(&self, p: &Path) -> io::Result<Meta> {
+        if self.gate.load(Ordering::SeqCst) && p.ends_with("a.sql") {
+            self.entered.store(true, Ordering::SeqCst);
+            while self.gate.load(Ordering::SeqCst) {
+                std::thread::park_timeout(ms(10));
+            }
+        }
+        RealFs.symlink_metadata(p)
+    }
+    fn canonicalize(&self, p: &Path) -> io::Result<PathBuf> {
+        RealFs.canonicalize(p)
+    }
+    fn read_link(&self, p: &Path) -> io::Result<PathBuf> {
+        RealFs.read_link(p)
+    }
+}
+
+/// P5 (review probe): dropping the watcher while its thread is stuck in a file-system call (a
+/// hung network share) returns within the bound, and the thread ends once the call does.
+#[test]
+fn drop_blocks_during_a_blocked_fs_call() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let gate = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(AtomicBool::new(false));
+    let opts = WatchOpts {
+        fs: Arc::new(Gated {
+            gate: gate.clone(),
+            entered: entered.clone(),
+        }),
+        ..WatchOpts::default()
+    };
+    let (src, handle) = FakeEventSource::new();
+    let (tx, _ev) = Events::new();
+    let w = Watcher::start(lib.root.clone(), opts, tx, Box::new(src)).unwrap();
+    let probe = w.probe();
+    gate.store(true, Ordering::SeqCst);
+    lib.write("a.sql", "xy");
+    handle.emit(&lib.root.canonical, vec![lib.hint("a.sql")]);
+    poll_until("the thread is in the call", || {
+        entered.load(Ordering::SeqCst)
+    });
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let dropper = std::thread::spawn(move || {
+        let started = Instant::now();
+        drop(w);
+        let _ = done_tx.send(started.elapsed());
+    });
+    // The drop returns while the call is still hung.
+    let took = done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("P5: the drop blocked on the hung call");
+    assert!(gate.load(Ordering::SeqCst));
+    assert!(!probe.released(), "abandoned, still in the call");
+    dropper.join().unwrap();
+    gate.store(false, Ordering::SeqCst);
+    poll_until("the abandoned thread ends", || probe.released());
+    assert!(took < Duration::from_secs(5), "{took:?}");
+}
+
+// I7: short names (U-07); the Windows body is in `watch_real.rs`.
+
+/// A hint by another spelling of a known file's name (an 8.3 short name on Windows) is not a
+/// known path; it is reconciled by a scan, which reports the file under its listed name.
+#[cfg(not(windows))]
+#[test]
+fn short_name_event_is_reconciled() {
+    let lib = Lib::new(&[("longname_script.sql", "SELECT 1;")]);
+    let mut r = lib.rec();
+    lib.write("longname_script.sql", "SELECT 1; SELECT 2;");
+    assert_eq!(
+        run(&mut r, vec![lib.hint("LONGNA~1.SQL")], t0()),
+        vec![WatchEvent::Changed(rel("longname_script.sql"))]
+    );
+}
+
+// I8 / R-T9-2: the backstop.
+
+#[test]
+fn backstop_root_hint_finds_a_change_no_event_reported() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let mut r = lib.rec_with(WatchOpts {
+        backstop: Some(Duration::from_secs(30)),
+        ..WatchOpts::default()
+    });
+    r.start_backstop(t0());
+    assert_eq!(r.next_due(), Some(t0() + Duration::from_secs(30)));
+    // An edit the backend never reported.
+    lib.write("a.sql", "xyz");
+    assert_eq!(r.tick(t0() + Duration::from_secs(29)), vec![]);
+    let at = t0() + Duration::from_secs(30);
+    // The backstop's look, then the settle look one window later.
+    assert_eq!(r.tick(at), vec![]);
+    assert_eq!(r.next_due(), Some(at + W));
+    assert_eq!(r.tick(at + W), vec![WatchEvent::Changed(rel("a.sql"))]);
+    assert_eq!(r.next_due(), Some(at + Duration::from_secs(30)));
+}
+
+#[test]
+fn the_backstop_is_on_by_default_on_windows_only() {
+    assert_eq!(
+        WatchOpts::default().backstop,
+        cfg!(windows).then_some(Duration::from_secs(30))
+    );
+}
+
+// m4: no fallback.
+
+#[test]
+fn a_lost_backend_without_a_fallback_is_unwatched() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let (src, handle) = FakeEventSource::new();
+    let (tx, mut ev) = Events::new();
+    let w = Watcher::start_with_fallback(
+        lib.root.clone(),
+        WatchOpts::default(),
+        tx,
+        Box::new(src),
+        Box::new(|| Err(WatchError::Backend("no poll".into()))),
+    )
+    .unwrap();
+    handle.emit(&lib.root.canonical, vec![RawHint::Lost]);
+    ev.wait_for("lost", |e| !e.is_empty());
+    assert_eq!(ev.seen[0], WatchEvent::BackendLost(LostReason::NoFallback));
+    assert_eq!(w.backend(), Backend::Unwatched);
+}
+
+// m5: poll pace.
+
+#[test]
+fn poll_pace_backs_off_while_idle_and_resets_on_change() {
+    use hacivat_scripts::watch::poll::next_interval;
+    let (base, max) = (Duration::from_secs(2), Duration::from_secs(30));
+    let s = Duration::from_secs;
+    assert_eq!(next_interval(s(2), false, ms(50), base, max), s(4));
+    assert_eq!(next_interval(s(16), false, ms(50), base, max), s(30));
+    assert_eq!(next_interval(s(30), false, ms(50), base, max), s(30));
+    assert_eq!(next_interval(s(30), true, ms(50), base, max), s(2));
+    // Never closer than five times what a pass cost (a slow share).
+    assert_eq!(next_interval(s(2), true, ms(1_200), base, max), s(6));
+    assert_eq!(next_interval(s(30), false, s(10), base, max), s(50));
+}
+
+#[test]
+fn the_poll_source_paces_each_root() {
+    use hacivat_scripts::watch::PollEventSource;
+    let mut src =
+        PollEventSource::with_pace(Duration::from_secs(2), Duration::from_secs(30)).unwrap();
+    src.watch(Path::new("/lib"), Box::new(|_| {})).unwrap();
+    assert_eq!(
+        src.interval(Path::new("/lib")),
+        Some(Duration::from_secs(2))
+    );
+    for _ in 0..5 {
+        src.pace(Path::new("/lib"), false, ms(10));
+    }
+    assert_eq!(
+        src.interval(Path::new("/lib")),
+        Some(Duration::from_secs(30))
+    );
+    src.pace(Path::new("/lib"), true, ms(10));
+    assert_eq!(
+        src.interval(Path::new("/lib")),
+        Some(Duration::from_secs(2))
+    );
+}
+
+// m3: VM shared folders.
+
+#[test]
+fn vm_shared_folders_are_polled() {
+    let mountinfo = "\
+22 1 8:1 / / rw - ext4 /dev/sda1 rw
+50 22 0:60 / /media/sf_lib rw - vboxsf lib rw
+51 22 0:61 / /mnt/host rw - virtiofs host rw
+52 22 0:62 / /mnt/hgfs rw - fuse.vmhgfs-fuse vmhgfs-fuse rw
+53 22 0:63 / /media/psf rw - prl_fs none rw
+54 22 0:64 / /run/user/1000/gvfs rw - fuse.gvfsd-fuse gvfsd-fuse rw
+";
+    for p in [
+        "/media/sf_lib/x",
+        "/mnt/host/x",
+        "/mnt/hgfs/x",
+        "/media/psf/x",
+        "/run/user/1000/gvfs/smb/x",
+    ] {
+        assert_eq!(
+            fs_kind_from_mountinfo(mountinfo, Path::new(p)),
+            FsKind::Network,
+            "{p}"
+        );
+    }
 }

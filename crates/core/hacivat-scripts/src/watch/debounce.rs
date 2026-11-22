@@ -2,8 +2,8 @@
 //!
 //! ## m4b-t09-watcher
 //! Pure, clock-injected parts of the watcher:
-//! - [`Debouncer`] counts the hints of one window (150 ms from the first hint after a quiet
-//!   window) and turns more than [`MAX_HINTS_PER_WINDOW`] into one rescan;
+//! - [`Debouncer`] counts the distinct paths of a burst (hints less than a window apart) and
+//!   turns more than [`MAX_HINTS_PER_WINDOW`] into one rescan once the burst is quiet;
 //! - [`SettleQueue`] holds the second look of every candidate one window later (the settle
 //!   rule, alg/28 C6);
 //! - [`HintQueue`] carries hint batches from the event source's thread to the watcher's, holds
@@ -13,7 +13,7 @@
 //! the watcher looks at a hint as soon as it arrives; the window here is the one the burst
 //! rule and the settle rule count in.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -39,18 +39,34 @@ pub enum Flushed {
     Paths(Vec<PathBuf>),
 }
 
-/// Counts hints per window and collapses a burst into one rescan.
+/// Counts the distinct paths of a burst and collapses a burst into one rescan.
+///
+/// ## m4b-t09-watcher fix round 1 (I7)
+/// A burst is a run of hints each less than one window after the previous one (an extending
+/// window, so a `git checkout` spread over several of `notify`'s batches is one burst), and
+/// it counts **distinct paths** (a file rewritten in a loop is one path, never a burst). More
+/// than [`MAX_HINTS_PER_WINDOW`] of them makes the burst overflow: its paths are dropped, and
+/// one `Rescan` is handed on once the burst has been quiet for a window, so the rescan sees
+/// the end state. A burst that never quiets still gets one every `max_wait`.
 #[derive(Debug)]
 pub struct Debouncer {
     window: Duration,
     max_hints: usize,
-    /// The start of the window being counted, and its count.
-    started: Option<Instant>,
-    count: usize,
+    max_wait: Duration,
+    /// The first and the latest path hint of the current burst.
+    began: Option<Instant>,
+    last_at: Option<Instant>,
+    /// The distinct paths of the current burst (until it overflows).
+    burst: HashSet<PathBuf>,
+    /// Since when the current burst has overflowed, its rescan not yet handed on.
+    overflowed: Option<Instant>,
     paths: BTreeSet<PathBuf>,
     rescan: bool,
     lost: bool,
 }
+
+/// How long an overflowed burst that keeps going waits for its rescan at most.
+const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(2);
 
 impl Debouncer {
     /// A debouncer with the R-M4b-14 burst limit.
@@ -59,11 +75,18 @@ impl Debouncer {
     }
 
     pub fn with_max(window: Duration, max_hints: usize) -> Self {
+        Self::with_burst(window, max_hints, DEFAULT_MAX_WAIT)
+    }
+
+    pub fn with_burst(window: Duration, max_hints: usize, max_wait: Duration) -> Self {
         Debouncer {
             window,
             max_hints,
-            started: None,
-            count: 0,
+            max_wait,
+            began: None,
+            last_at: None,
+            burst: HashSet::new(),
+            overflowed: None,
             paths: BTreeSet::new(),
             rescan: false,
             lost: false,
@@ -79,22 +102,50 @@ impl Debouncer {
                 self.paths.clear();
             }
             RawHint::Path(path) => {
-                if self.started.is_none_or(|s| at >= s + self.window) {
-                    self.started = Some(at);
-                    self.count = 0;
+                if self.last_at.is_none_or(|l| at >= l + self.window) {
+                    // A new burst; an overflowed one that was not flushed yet is due now.
+                    if self.overflowed.take().is_some() {
+                        self.rescan = true;
+                        self.paths.clear();
+                    }
+                    self.burst.clear();
+                    self.began = Some(at);
                 }
-                self.count += 1;
-                if self.count == self.max_hints + 1 {
-                    // Once per window: the rescan covers everything seen so far.
-                    self.rescan = true;
+                self.last_at = Some(at);
+                if self.overflowed.is_some() {
+                    return;
+                }
+                self.burst.insert(path.clone());
+                self.paths.insert(path);
+                if self.burst.len() > self.max_hints {
+                    self.overflowed = Some(at);
+                    self.burst.clear();
                     self.paths.clear();
-                } else if !self.rescan {
-                    // After the rescan was handed on, later hints of the same window are
-                    // changes the rescan may not have seen: looked at one by one.
-                    self.paths.insert(path);
                 }
             }
         }
+    }
+
+    /// Until when reports wait because hints are still arriving: one window after the latest
+    /// hint, but never longer than `max_wait` after the burst began (fix round 1, I7: the
+    /// files of a `git checkout` must not settle one by one before the burst is known to
+    /// overflow). `None` before the first hint.
+    pub fn hold_until(&self) -> Option<Instant> {
+        let last = self.last_at?;
+        let began = self.began.unwrap_or(last);
+        Some((last + self.window).min(began + self.max_wait))
+    }
+
+    /// Whether reports wait at `now` ([`hold_until`](Self::hold_until)).
+    pub fn holding(&self, now: Instant) -> bool {
+        self.hold_until().is_some_and(|t| now < t)
+    }
+
+    /// When an overflowed burst's rescan is due.
+    pub fn due(&self) -> Option<Instant> {
+        let since = self.overflowed?;
+        let quiet = self.last_at.map_or(since, |l| l + self.window);
+        Some(quiet.min(since + self.max_wait))
     }
 
     /// Everything pending at `now`: `Lost` first, then either `Rescan` or the paths.
@@ -103,6 +154,14 @@ impl Debouncer {
         if std::mem::take(&mut self.lost) {
             out.push(Flushed::Lost);
         }
+        if let Some(due) = self.due()
+            && now >= due
+        {
+            self.rescan = true;
+            let going = self.last_at.is_some_and(|l| now < l + self.window);
+            // Still going: swallow on, and hand on another rescan later.
+            self.overflowed = going.then_some(now);
+        }
         if std::mem::take(&mut self.rescan) {
             self.paths.clear();
             out.push(Flushed::Rescan);
@@ -110,10 +169,6 @@ impl Debouncer {
             out.push(Flushed::Paths(
                 std::mem::take(&mut self.paths).into_iter().collect(),
             ));
-        }
-        if self.started.is_some_and(|s| now >= s + self.window) {
-            self.started = None;
-            self.count = 0;
         }
         out
     }

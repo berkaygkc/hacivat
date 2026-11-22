@@ -29,7 +29,10 @@ pub enum FsKind {
 }
 
 /// The file system types (`mountinfo`'s field after ` - `) that are polled.
-const NETWORK_TYPES: [&str; 17] = [
+///
+/// ## m4b-t09-watcher fix round 1 (m3): VM shared folders too (VirtualBox, virtiofs, VMware,
+/// Parallels, GVfs): inotify never sees the host's edits there.
+const NETWORK_TYPES: [&str; 22] = [
     "nfs",
     "nfs4",
     "cifs",
@@ -47,6 +50,11 @@ const NETWORK_TYPES: [&str; 17] = [
     "fuse.rclone",
     "fuse.s3fs",
     "fuse.davfs2",
+    "vboxsf",
+    "virtiofs",
+    "fuse.vmhgfs-fuse",
+    "prl_fs",
+    "fuse.gvfsd-fuse",
 ];
 
 /// The R-M4b-14 rule: a network file system is polled; with an inotify budget, a library
@@ -101,12 +109,18 @@ pub fn budget_from(max_user_watches: &str, in_use: u64) -> Option<u64> {
 const MAX_PIDS: usize = 65_536;
 const MAX_FDS: usize = 65_536;
 
-/// The inotify watches held by the processes whose descriptors we can read: one
-/// `inotify wd:` line per watch in `fdinfo` of every inotify descriptor.
+/// The inotify watches held by this user's processes: one `inotify wd:` line per watch in
+/// `fdinfo` of every inotify descriptor.
+///
+/// ## m4b-t09-watcher fix round 1 (m8): `max_user_watches` is per user, so only processes
+/// whose `/proc/<pid>` belongs to the owner of `/proc/self` count (run as root, another
+/// user's watches are not ours). Cost: one `read_dir` per process of ours and one `readlink`
+/// per descriptor, once per `Watcher::open` on Linux.
 fn watches_in_use(proc_root: &Path) -> u64 {
     let Ok(pids) = fs::read_dir(proc_root) else {
         return 0;
     };
+    let me = owner(&proc_root.join("self"));
     let mut total = 0u64;
     for pid in pids.take(MAX_PIDS).flatten() {
         let name = pid.file_name();
@@ -114,6 +128,9 @@ fn watches_in_use(proc_root: &Path) -> u64 {
             continue;
         };
         if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if me.is_some() && owner(&pid.path()) != me {
             continue;
         }
         let fd_dir = pid.path().join("fd");
@@ -136,6 +153,18 @@ fn watches_in_use(proc_root: &Path) -> u64 {
         }
     }
     total
+}
+
+/// The user owning `path` (`None` where the system has no such notion).
+#[cfg(unix)]
+fn owner(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|m| m.uid())
+}
+
+#[cfg(not(unix))]
+fn owner(_path: &Path) -> Option<u32> {
+    None
 }
 
 /// The folders under `root` (itself included), never through a link, counting stops at `cap`.

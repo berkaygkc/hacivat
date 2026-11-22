@@ -2219,6 +2219,9 @@ fn config_arg_ok(args: &[SrcTok]) -> bool {
         tok_ident(args, i, WATCHER_CONFIG_FN)
             && tok_punct(args, i + 1, '(')
             && tok_punct(args, i + 2, ')')
+            // ## m4b-t09-watcher fix round 1 (m1, named exception): only the bare call, never
+            // a path (`alt::watcher_config()`) or a method of the same name.
+            && !(i > 0 && (tok_punct(args, i - 1, ':') || tok_punct(args, i - 1, '.')))
     });
     shared || says_no_follow(args)
 }
@@ -2408,7 +2411,23 @@ fn watcher_decoys(t: &[SrcTok], home: bool) -> bool {
     let local_cache = t
         .iter()
         .any(|x| matches!(x, SrcTok::Ident(s) if s == "FileIdCache"));
-    local_cache || bound("NoCache", false) || bound(WATCHER_CONFIG_FN, home)
+    // Fix round 1 (m1): exactly one definition in the home file, at brace depth 0 (a nested
+    // `mod alt { fn watcher_config() … }` is refused).
+    let mut depth = 0usize;
+    let mut defs = 0usize;
+    let mut nested = false;
+    for i in 0..t.len() {
+        if tok_punct(t, i, '{') {
+            depth += 1;
+        } else if tok_punct(t, i, '}') {
+            depth = depth.saturating_sub(1);
+        } else if tok_ident(t, i, "fn") && tok_ident(t, i + 1, WATCHER_CONFIG_FN) {
+            defs += 1;
+            nested |= depth > 0;
+        }
+    }
+    let home_extra = home && (defs > 1 || nested);
+    local_cache || bound("NoCache", false) || bound(WATCHER_CONFIG_FN, home) || home_extra
 }
 // ## m4b-t09-watcher
 
@@ -5789,6 +5808,50 @@ mod tests {
             Rule::WatcherFollowsLinks,
             "crates/core/hacivat-scripts/src/watch/",
             &forms,
+            &ok,
+        );
+    }
+
+    /// Fix round 1 (review m1): the home file holds exactly one top-level `watcher_config`,
+    /// and a constructor takes only the bare call, never another module's.
+    #[test]
+    fn watcher_config_is_one_top_level_fn_called_bare() {
+        let blessed = "pub(crate) fn watcher_config() -> notify::Config {\n    notify::Config::default().with_follow_symlinks(false)\n}\n";
+        let homes = [
+            format!(
+                "{blessed}mod alt {{ fn watcher_config() -> Config {{ let _ = Config::default().with_follow_symlinks(false); Default::default() }} }}"
+            ),
+            format!(
+                "{blessed}#[cfg(test)]\nfn watcher_config() -> notify::Config {{ notify::Config::default().with_follow_symlinks(false) }}"
+            ),
+        ];
+        for home in &homes {
+            assert_forms(
+                Rule::WatcherFollowsLinks,
+                "crates/core/hacivat-scripts/src/watch/",
+                &[("mod.rs", home.as_str())],
+                &[],
+            );
+        }
+        let calls: [(&str, &str); 2] = [
+            (
+                "path_call.rs",
+                "fn w(h: H) { new_debouncer_opt::<_, RecommendedWatcher, NoCache>(D, None, h, NoCache, alt::watcher_config()); }",
+            ),
+            (
+                "method_call.rs",
+                "fn w(h: H, x: X) { RecommendedWatcher::new(h, x.watcher_config()); }",
+            ),
+        ];
+        let ok: [(&str, &str); 1] = [(
+            "mod.rs",
+            "pub(crate) fn watcher_config() -> notify::Config {\n    notify::Config::default().with_follow_symlinks(false)\n}\n\
+             fn w(h: H) { new_debouncer_opt::<_, RecommendedWatcher, NoCache>(D, None, h, NoCache, watcher_config()); }",
+        )];
+        assert_forms(
+            Rule::WatcherFollowsLinks,
+            "crates/core/hacivat-scripts/src/watch/",
+            &calls,
             &ok,
         );
     }

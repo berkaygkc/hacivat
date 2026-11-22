@@ -7,10 +7,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hacivat_scripts::fileio::{self, ReadLimits};
+#[cfg(unix)]
 use hacivat_scripts::scan::{Fs, Meta, RealFs};
 use hacivat_scripts::watch::{
     Backend, OsEventSource, PollEventSource, PollReason, WatchBatch, WatchEvent, WatchOpts, Watcher,
@@ -294,11 +296,13 @@ fn own_save_is_not_reported() {
 }
 
 /// Records every path the reconciler asks the file system about.
+#[cfg(unix)]
 #[derive(Default)]
 struct Counting {
     paths: Mutex<Vec<PathBuf>>,
 }
 
+#[cfg(unix)]
 impl Counting {
     fn asked_under(&self, dir: &Path) -> Vec<PathBuf> {
         let paths = self.paths.lock().unwrap();
@@ -313,6 +317,7 @@ impl Counting {
     }
 }
 
+#[cfg(unix)]
 impl Fs for Counting {
     fn read_dir(&self, dir: &Path, cap: usize) -> std::io::Result<Vec<std::ffi::OsString>> {
         self.paths.lock().unwrap().push(dir.into());
@@ -346,6 +351,9 @@ fn dir_symlink_created_after_watch_is_not_walked() {
         ..WatchOpts::default()
     };
     let mut w = Real::with(&lib, opts, Box::new(OsEventSource::new().unwrap()));
+    // Fix round 1 (m7): on Linux, the backend's own watches are counted too.
+    #[cfg(target_os = "linux")]
+    let watches_before = own_inotify_watches();
     std::os::unix::fs::symlink(big.path(), lib.path("outside")).unwrap();
     std::os::unix::fs::symlink("/", lib.path("root")).unwrap();
     // Writes inside the link targets, after the links exist.
@@ -353,6 +361,12 @@ fn dir_symlink_created_after_watch_is_not_walked() {
     fs::write(big.path().join("new.sql"), "SELECT 3;").unwrap();
     w.sentinel(&lib);
     assert_eq!(w.reported(), vec![]);
+    #[cfg(target_os = "linux")]
+    {
+        let after = own_inotify_watches();
+        println!("HV-FACT t09 link_watches_before={watches_before} after={after}");
+        assert_eq!(after, watches_before, "a watch was added through a link");
+    }
     // The scan that settled the sentinel listed the root, so it met both links, and went
     // through neither.
     assert!(counting.asked(&lib.path("outside")));
@@ -521,4 +535,147 @@ fn cpu_time() -> Duration {
         secs = secs * 60.0 + part.trim().parse::<f64>().unwrap_or(0.0);
     }
     Duration::from_secs_f64(secs)
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m4b-t09-watcher fix round 1 (review I5, I7, m6, m7).
+
+/// I5 / R-T9-4: a per-folder source (Linux's default; on macOS FSEvents with non-recursive
+/// watches) sees a folder made after the start, files in it, and a folder removed.
+#[test]
+fn per_directory_source_sees_new_and_removed_folders() {
+    let lib = Lib::new(&[("a/x.sql", "x")]);
+    let mut w = Real::with(
+        &lib,
+        WatchOpts::default(),
+        Box::new(OsEventSource::per_directory().unwrap()),
+    );
+    lib.write("b/c/y.sql", "y");
+    w.wait_for("created", |e| {
+        e.contains(&WatchEvent::Created(rel("b/c/y.sql")))
+    });
+    // `b/c` is watched now: an in-place edit there is seen without any folder event.
+    lib.write("b/c/y.sql", "yyy");
+    w.wait_for("changed", |e| {
+        e.contains(&WatchEvent::Changed(rel("b/c/y.sql")))
+    });
+    fs::remove_dir_all(lib.path("a")).unwrap();
+    w.wait_for("removed", |e| {
+        e.contains(&WatchEvent::Removed(rel("a/x.sql")))
+    });
+}
+
+/// m6: a caller's poll choice (R-T9-1's per-library "poll") is kept by `open`.
+#[test]
+fn open_keeps_a_chosen_poll_backend() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let (tx, _rx) = mpsc::channel(8);
+    let opts = WatchOpts {
+        backend: Backend::Poll(PollReason::NetworkFs),
+        ..WatchOpts::default()
+    };
+    let w = Watcher::open(lib.root.clone(), opts, tx).unwrap();
+    assert_eq!(w.backend(), Backend::Poll(PollReason::NetworkFs));
+}
+
+/// Runs the git command line on a fixture repository this test made (R-T1a-1: tests only),
+/// with no system or global configuration and no hooks.
+fn git_cli(dir: &Path, args: &[&str]) {
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let out = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "core.autocrlf=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", null)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// alg/28 HV-SCRIPT-08 named test: a branch switch that rewrites 2,000 scripts is one rescan,
+/// never 2,000 events (the burst rule over the whole checkout).
+#[test]
+fn git_checkout_2000_is_one_rescan() {
+    let lib = Lib::new(&[]);
+    for i in 0..2_000 {
+        lib.write(&format!("many/f{i:04}.sql"), "SELECT 1;");
+    }
+    git_cli(&lib.root.canonical, &["init", "-q"]);
+    git_cli(&lib.root.canonical, &["add", "-A"]);
+    git_cli(&lib.root.canonical, &["commit", "-q", "-m", "one"]);
+    git_cli(&lib.root.canonical, &["checkout", "-q", "-b", "topic"]);
+    for i in 0..2_000 {
+        lib.write(&format!("many/f{i:04}.sql"), "SELECT 2; -- topic");
+    }
+    git_cli(&lib.root.canonical, &["commit", "-q", "-a", "-m", "two"]);
+    git_cli(&lib.root.canonical, &["checkout", "-q", "main"]);
+    let mut w = Real::os(&lib);
+    git_cli(&lib.root.canonical, &["checkout", "-q", "topic"]);
+    w.wait_for("rescan", |e| e.contains(&WatchEvent::Rescan));
+    w.sentinel(&lib);
+    let per_file = w
+        .reported()
+        .iter()
+        .filter(|e| !matches!(e, WatchEvent::Rescan | WatchEvent::RepositoryChanged))
+        .count();
+    let rescans = w.seen.iter().filter(|e| **e == WatchEvent::Rescan).count();
+    println!("HV-FACT t09 git_checkout_files=2000 rescans={rescans} per_file_events={per_file}");
+    assert_eq!(per_file, 0, "{:?}", &w.reported()[..per_file.min(10)]);
+}
+
+/// U-07: a hint by a file's 8.3 short name is reconciled to the listed long name.
+#[cfg(windows)]
+#[test]
+fn short_name_event_is_reconciled() {
+    use hacivat_scripts::watch::{RawHint, Reconciler};
+    use std::os::windows::process::CommandExt;
+    let lib = Lib::new(&[("longname_script.sql", "SELECT 1;")]);
+    let long = lib._dir.path().join("longname_script.sql");
+    // The short name through cmd's `%~s` modifier (this crate makes no Win32 call).
+    let out = std::process::Command::new("cmd")
+        .raw_arg(format!(
+            "/C for %I in (\"{}\") do @echo %~sI",
+            long.display()
+        ))
+        .output()
+        .unwrap();
+    let short = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let Some(short_name) = Path::new(&short).file_name().map(|n| n.to_owned()) else {
+        panic!("no short name from cmd: {short:?}");
+    };
+    if short_name == "longname_script.sql" {
+        println!("HV-FACT t09 short_names=off");
+        return;
+    }
+    println!("HV-FACT t09 short_names=on short={short_name:?}");
+    let mut r = Reconciler::new(lib.root.clone(), WatchOpts::default());
+    lib.write("longname_script.sql", "SELECT 1; SELECT 2;");
+    let at = Instant::now();
+    r.push(RawHint::Path(lib.root.canonical.join(&short_name)), at);
+    let mut out = r.tick(at);
+    let mut now = at;
+    while let Some(due) = r.next_due() {
+        now = due.max(now);
+        out.extend(r.tick(now));
+        if out.len() > 4 {
+            break;
+        }
+    }
+    assert_eq!(out, vec![WatchEvent::Changed(rel("longname_script.sql"))]);
 }
