@@ -634,14 +634,102 @@ pub fn open_stream_checked(
 /// grow), so `(dev, ino)` is enough there. Residual: a network or FUSE mount may report a
 /// settable birth time (an NFSv4 `time_create`, an SMB creation time); such a library is
 /// polled, and a restore into its root can still refuse it (ADR 0009).
+///
+/// ## m4b-cifix-4: the same identity now serves files too ([`FileIdentity`], a SQLite script
+/// tab's database file, R-T14-1): a folder's is a [`FileIdentity`] read from a folder.
+pub(crate) type FolderIdentity = FileIdentity;
+
+// ## m4b-cifix-4-file-identity
+/// The identity of a file or folder: its device and inode (Unix), and on Linux its birth time
+/// (m4b-cifix-2, R-CI2-1; m4b-cifix-4 for files).
+///
+/// Device and inode alone do not tell a file from one made again at the same path: on ext4 a
+/// file deleted and written again in the same folder usually gets the freed inode back (CI
+/// 45077623376, a SQLite script tab whose database file was replaced at its path ran on the
+/// new file). The birth time (`statx` `btime`) is new for the new file, userland cannot set it,
+/// and a rename keeps it. On macOS the birth time moves back with a modification time set
+/// earlier, and APFS never reuses an object id, so `(dev, ino)` stays the identity there.
+/// Residual: a delete and a create inside one tick of Linux's coarse clock (1 to 4 ms), on an
+/// inode ext4 hands back, keep the same identity; the inode generation would close it, but
+/// reading it needs an `ioctl` (`unsafe`), as for folders (ADR 0009).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FolderIdentity {
+pub struct FileIdentity {
     pub dev: u64,
     pub ino: u64,
     /// The birth time on Linux; `None` elsewhere, or where the file system reports none. Both
     /// sides of a comparison are read on the same file system, so `None` matches only `None`.
-    pub born: Option<std::time::SystemTime>,
+    pub born: Option<SystemTime>,
 }
+
+impl FileIdentity {
+    /// The identity `meta` describes (Unix); `None` off Unix, where `std` has none.
+    pub fn of(meta: &Metadata) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some(FileIdentity {
+                dev: meta.dev(),
+                ino: meta.ino(),
+                born: unsettable_birth(meta),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = meta;
+            None
+        }
+    }
+
+    /// The text the app keeps it as (`workspace.json`, a recovery copy's sidecar):
+    /// `dev:ino`, then `:secs.nanos` of the birth time when it has one (`-secs.nanos` before
+    /// 1970). [`FileIdentity::parse`] reads it back exactly.
+    pub fn to_text(&self) -> String {
+        let (dev, ino) = (self.dev, self.ino);
+        match self.born {
+            None => format!("{dev}:{ino}"),
+            Some(t) => match t.duration_since(UNIX_EPOCH) {
+                Ok(d) => format!("{dev}:{ino}:{}.{:09}", d.as_secs(), d.subsec_nanos()),
+                Err(e) => {
+                    let d = e.duration();
+                    format!("{dev}:{ino}:-{}.{:09}", d.as_secs(), d.subsec_nanos())
+                }
+            },
+        }
+    }
+
+    /// Reads [`FileIdentity::to_text`] back; `None` for anything else. A text without a birth
+    /// time (written before m4b-cifix-4) reads as none, so on Linux it no longer matches the
+    /// file it named: a Run refuses until the tab is opened again (fail closed).
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split(':');
+        let dev = parts.next()?.parse().ok()?;
+        let ino = parts.next()?.parse().ok()?;
+        let born = match parts.next() {
+            None => None,
+            Some(b) => {
+                let (before, b) = match b.strip_prefix('-') {
+                    Some(rest) => (true, rest),
+                    None => (false, b),
+                };
+                let (secs, nanos) = b.split_once('.')?;
+                if nanos.len() != 9 || !nanos.bytes().all(|c| c.is_ascii_digit()) {
+                    return None;
+                }
+                let d = std::time::Duration::new(secs.parse().ok()?, nanos.parse().ok()?);
+                Some(if before {
+                    UNIX_EPOCH.checked_sub(d)?
+                } else {
+                    UNIX_EPOCH.checked_add(d)?
+                })
+            }
+        };
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(FileIdentity { dev, ino, born })
+    }
+}
+// ## m4b-cifix-4-file-identity
 
 /// The part of [`FolderIdentity`] userland cannot set: the birth time, on Linux only.
 #[cfg(unix)]
@@ -660,21 +748,11 @@ fn unsettable_birth(meta: &std::fs::Metadata) -> Option<std::time::SystemTime> {
 /// The [`FolderIdentity`] of a folder (Unix); `None` where it cannot be read or the platform
 /// has none in stable `std`.
 pub(crate) fn folder_identity(path: &std::path::Path) -> Option<FolderIdentity> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let meta = std::fs::symlink_metadata(path).ok()?;
-        meta.is_dir().then(|| FolderIdentity {
-            dev: meta.dev(),
-            ino: meta.ino(),
-            born: unsettable_birth(&meta),
-        })
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_dir() {
+        return None;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
-    }
+    FileIdentity::of(&meta)
 }
 // ## m4b-t10-service
 
@@ -1885,5 +1963,94 @@ mod tests {
         }
     }
     // ## m4b-cifix-2-root-birth
+
+    // ## m4b-cifix-4-file-identity
+    /// A file's identity round-trips through its text exactly, and a malformed text reads as
+    /// none.
+    #[test]
+    fn file_identity_text_round_trips() {
+        use std::time::Duration;
+        let at = |secs, nanos| FileIdentity {
+            dev: 16_777_232,
+            ino: 4_242,
+            born: Some(UNIX_EPOCH + Duration::new(secs, nanos)),
+        };
+        let none = FileIdentity {
+            born: None,
+            ..at(0, 0)
+        };
+        let before = FileIdentity {
+            born: UNIX_EPOCH.checked_sub(Duration::new(5, 7)),
+            ..none
+        };
+        for id in [
+            at(1_800_000_000, 123_456_789),
+            at(0, 0),
+            at(1, 1),
+            none,
+            before,
+        ] {
+            assert_eq!(FileIdentity::parse(&id.to_text()), Some(id), "{id:?}");
+        }
+        assert_eq!(none.to_text(), "16777232:4242");
+        assert_eq!(at(1, 5).to_text(), "16777232:4242:1.000000005");
+        for bad in [
+            "",
+            "1",
+            "1:",
+            "x:2",
+            "1:2:",
+            "1:2:3",
+            "1:2:3.4",
+            "1:2:3.0000000001",
+            "1:2:3.00000000x",
+            "1:2:3.000000000:4",
+        ] {
+            assert_eq!(FileIdentity::parse(bad), None, "{bad:?}");
+        }
+    }
+
+    /// A file deleted and written again at its path is another file, even where ext4 hands it
+    /// the freed inode (CI 45077623376); a rename keeps the identity.
+    #[test]
+    fn file_identity_tells_a_file_written_again_from_a_renamed_one() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("orders.db");
+        std::fs::write(&file, b"").unwrap();
+        let id = |p: &std::path::Path| FileIdentity::of(&std::fs::metadata(p).unwrap());
+        let first = id(&file);
+        assert_eq!(first.is_some(), cfg!(unix));
+        let Some(first) = first else {
+            return; // No identity off Unix: the path alone is compared.
+        };
+        assert_eq!(first.born.is_some(), cfg!(target_os = "linux"));
+        let away = d.path().join("away.db");
+        std::fs::rename(&file, &away).unwrap();
+        assert_eq!(id(&away), Some(first));
+        std::fs::rename(&away, &file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        // Linux stamps a new inode from the coarse clock: wait (on a condition) until a new
+        // file is born after the old one, so the next one is too.
+        if let Some(born) = first.born {
+            let probe = d.path().join("probe");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                std::fs::write(&probe, b"").unwrap();
+                let later = std::fs::metadata(&probe).unwrap().created().unwrap() > born;
+                std::fs::remove_file(&probe).unwrap();
+                if later {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the birth clock stood still"
+                );
+                std::thread::yield_now();
+            }
+        }
+        std::fs::write(&file, b"replaced").unwrap();
+        assert_ne!(id(&file), Some(first));
+    }
+    // ## m4b-cifix-4-file-identity
 }
 // ## m4b-t01a-seams
