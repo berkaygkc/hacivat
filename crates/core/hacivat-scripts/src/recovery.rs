@@ -275,6 +275,100 @@ pub fn discard_library(paths: &LocalPaths, lib: LibraryId) -> Result<(), Recover
     }
 }
 
+// ## m4b-t10-service (named exception; T5 mf4)
+/// How recently a library's copies must all be older than for [`sweep_unregistered`] to
+/// remove them: another instance that registered the library after this one read the registry
+/// writes its copies every 5 s of idle, so a folder touched this recently may be its.
+pub const SWEEP_MIN_AGE: Duration = Duration::from_secs(10 * 60);
+
+/// Removes the copy folders of libraries for which `registered` answers `false` (T5 mf4: a
+/// library detached or lost without its copies being discarded), except folders holding a copy
+/// whose instance is alive or of unknown liveness (fix round 1, I2: tested through that
+/// instance's advisory lock, as [`take_all`] does; R-T5-5), and folders holding a file modified
+/// in the last [`SWEEP_MIN_AGE`]. Only folders named by a library ID are touched (never
+/// `instances` or anything else), links are never followed, and an entry that cannot be read is
+/// left alone. Returns how many folders were removed. The caller runs it at launch, and only
+/// over a registry it could read (a read-only or set-aside registry lists nothing to keep).
+pub fn sweep_unregistered(paths: &LocalPaths, registered: &dyn Fn(LibraryId) -> bool) -> usize {
+    let Some(root) = instances_dir(paths).and_then(|d| d.parent().map(Path::to_path_buf)) else {
+        return 0;
+    };
+    let Ok(entries) = fs::read_dir(&root) else {
+        return 0;
+    };
+    let now = SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let Some(id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| {
+                Uuid::parse_str(n)
+                    .ok()
+                    .filter(|u| u.hyphenated().to_string() == n)
+            })
+            .map(LibraryId)
+        else {
+            continue;
+        };
+        let is_dir = fs::symlink_metadata(entry.path()).is_ok_and(|m| m.is_dir());
+        if !is_dir || registered(id) {
+            continue;
+        }
+        let Some(dir) = folder(paths, id) else {
+            continue;
+        };
+        // Fix round 1 (I2): a copy whose instance is alive, or whose liveness cannot be told
+        // (R-T5-5), keeps the folder; so does a sidecar that cannot be read. The age is a second
+        // line only.
+        if has_live_copy(paths, &dir) != Some(false) {
+            continue;
+        }
+        if touched_since(&dir, now, SWEEP_MIN_AGE) != Some(false) {
+            continue;
+        }
+        if discard_library(paths, id).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Whether a copy in `dir` belongs to an instance that is alive or whose liveness cannot be
+/// tested (fix round 1, I2); `None` when the folder or a sidecar cannot be read (kept too).
+fn has_live_copy(paths: &LocalPaths, dir: &Path) -> Option<bool> {
+    for entry in fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(META_EXT) {
+            continue;
+        }
+        let lstat = fs::symlink_metadata(&path).ok()?;
+        if !lstat.is_file() || lstat.len() > META_MAX_BYTES {
+            return None;
+        }
+        let sidecar: Sidecar = toml::from_str(&fs::read_to_string(&path).ok()?).ok()?;
+        let instance = Uuid::parse_str(&sidecar.instance).ok()?;
+        if liveness(paths, instance) != Liveness::Dead {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// Whether a file directly in `dir` was modified within `age` of `now`; `None` when the folder
+/// cannot be read.
+fn touched_since(dir: &Path, now: SystemTime, age: Duration) -> Option<bool> {
+    for entry in fs::read_dir(dir).ok()? {
+        let meta = fs::symlink_metadata(entry.ok()?.path()).ok()?;
+        let modified = meta.modified().ok()?;
+        if now.duration_since(modified).map_or(true, |d| d < age) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+// ## m4b-t10-service
+
 fn folder(paths: &LocalPaths, lib: LibraryId) -> Option<PathBuf> {
     paths.script_recovery_dir(&lib.to_string())
 }

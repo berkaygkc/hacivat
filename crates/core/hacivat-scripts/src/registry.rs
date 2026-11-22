@@ -13,6 +13,8 @@
 //! id = "<uuid v4>"
 //! path = "<absolute, as the user chose it>"
 //! added_at = "<RFC 3339 UTC>"
+//! canonical = "<the resolved root>"   # m4b-t10 fix round 2; set by the service
+//! inode = "<the root folder's inode>" # m4b-t10 fix round 2; Unix only
 //!
 //! [[mapping]]
 //! profile = "<profile uuid>"
@@ -190,6 +192,15 @@ pub struct RegisteredLibrary {
     pub path: PathBuf,
     /// RFC 3339 UTC (`2026-11-22T10:30:05Z`); empty when a hand-edited row has none.
     pub added_at: String,
+    // ## m4b-t10-service fix round 2 (named exception; review m-a, H6b)
+    /// The canonical path the folder had when the library service first resolved it; a later
+    /// launch whose resolution differs refuses the root (a folder above it replaced by a link).
+    /// `None` in rows written before, and by [`LibraryRegistry::add`].
+    pub canonical: Option<PathBuf>,
+    /// The folder's inode then (Unix); compared across sessions with the canonical path. The
+    /// device number is not kept: it can change across a reboot or a remount.
+    pub inode: Option<u64>,
+    // ## m4b-t10-service
 }
 
 impl RegisteredLibrary {
@@ -241,6 +252,90 @@ impl LibraryRegistry {
     /// Loads the registry at `path` (`LocalPaths::libraries_toml`). Never fails: what it could
     /// not use is in the diagnostics.
     pub fn load(path: &Path) -> (Self, Vec<RegistryDiag>) {
+        Self::load_with(path, &canonical_lenient)
+    }
+
+    // ## m4b-t10-service fix round 2 (named exception; review F1)
+    /// [`load`](Self::load) that touches no library folder: rows are compared by their text
+    /// (id and path) only, and a row whose folder is inside another's is dropped only when the
+    /// paths say so as written. The library service validates each root on its own worker
+    /// (canonical nesting included), so a folder on a hung mount never blocks the load.
+    pub fn load_text_only(path: &Path) -> (Self, Vec<RegistryDiag>) {
+        Self::load_with(path, &Path::to_path_buf)
+    }
+
+    /// Records the canonical path and inode a library's root resolved to (the service, after
+    /// the first validation of a row that has none). Does not save; `false` when unknown.
+    pub fn set_resolved(&mut self, id: LibraryId, canonical: &Path, inode: Option<u64>) -> bool {
+        if self.read_only {
+            return false;
+        }
+        match self.libraries.iter_mut().find(|l| l.id == id) {
+            Some(l) => {
+                l.canonical = Some(canonical.to_path_buf());
+                l.inode = inode;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`add`](Self::add) for a folder already resolved off this thread: `canonical` (and its
+    /// inode) come from the caller's worker, the attach guard's checks (filesystem root, home,
+    /// app folders) were made there, and `others` are the canonical paths of the registered
+    /// libraries as the caller knows them. Makes no file-system call. Does not save.
+    pub fn add_resolved(
+        &mut self,
+        path: &Path,
+        canonical: &Path,
+        inode: Option<u64>,
+        others: &[(LibraryId, PathBuf)],
+        now: SystemTime,
+    ) -> Result<LibraryRoot, RegistryError> {
+        self.writable()?;
+        if !path.is_absolute() {
+            return Err(RegistryError::NotAbsolute);
+        }
+        if path.to_str().is_none() {
+            return Err(RegistryError::NotUtf8Path);
+        }
+        for lib in &self.libraries {
+            let theirs = others
+                .iter()
+                .find(|(id, _)| *id == lib.id)
+                .map(|(_, c)| c.as_path())
+                .or(lib.canonical.as_deref())
+                .unwrap_or(&lib.path);
+            if theirs == canonical || lib.path == path {
+                return Err(RegistryError::AlreadyRegistered(lib.id));
+            }
+            if overlaps(canonical, theirs) || overlaps(path, &lib.path) {
+                return Err(RegistryError::Nested(lib.id));
+            }
+        }
+        if self.libraries.len() >= MAX_LIBRARIES {
+            return Err(RegistryError::TooMany);
+        }
+        let id = LibraryId::new();
+        self.libraries.push(RegisteredLibrary {
+            id,
+            path: path.to_path_buf(),
+            added_at: rfc3339(now),
+            canonical: Some(canonical.to_path_buf()),
+            inode,
+        });
+        Ok(LibraryRoot {
+            id,
+            path: path.to_path_buf(),
+            canonical: canonical.to_path_buf(),
+        })
+    }
+    // ## m4b-t10-service
+
+    fn load_with(
+        path: &Path,
+        canonical_of: &dyn Fn(&Path) -> PathBuf,
+    ) -> (Self, Vec<RegistryDiag>) {
         let mut reg = LibraryRegistry {
             path: path.to_path_buf(),
             libraries: Vec::new(),
@@ -293,19 +388,24 @@ impl LibraryRegistry {
             reg.set_aside(&mut diags);
             return (reg, diags);
         };
-        reg.load_libraries(&libraries, &mut diags);
+        reg.load_libraries(&libraries, &mut diags, canonical_of);
         reg.load_mappings(&mappings, &mut diags);
         (reg, diags)
     }
 
-    fn load_libraries(&mut self, rows: &[&toml::Table], diags: &mut Vec<RegistryDiag>) {
+    fn load_libraries(
+        &mut self,
+        rows: &[&toml::Table],
+        diags: &mut Vec<RegistryDiag>,
+        canonical_of: &dyn Fn(&Path) -> PathBuf,
+    ) {
         let mut too_many = false;
         // The kept rows' canonical paths (a missing folder through its deepest existing
         // ancestor), so a hand-edited file cannot project one folder twice.
         let mut canonical: Vec<PathBuf> = Vec::new();
         for (index, row) in rows.iter().enumerate() {
             let parsed = library_row(row).and_then(|lib| {
-                let here = canonical_lenient(&lib.path);
+                let here = canonical_of(&lib.path);
                 let same = self
                     .libraries
                     .iter()
@@ -388,6 +488,11 @@ impl LibraryRegistry {
             id: LibraryId,
             path: &'a str,
             added_at: &'a str,
+            // ## m4b-t10-service fix round 2 (m-a): written only once resolved.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            canonical: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            inode: Option<String>,
         }
         #[derive(Serialize)]
         struct MappingOut<'a> {
@@ -403,6 +508,8 @@ impl LibraryRegistry {
                     id: l.id,
                     path: l.path.to_str()?,
                     added_at: &l.added_at,
+                    canonical: l.canonical.as_deref().and_then(Path::to_str),
+                    inode: l.inode.map(|i| i.to_string()),
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -512,6 +619,8 @@ impl LibraryRegistry {
             id,
             path: path.to_path_buf(),
             added_at: rfc3339(now),
+            canonical: None,
+            inode: None,
         });
         Ok(LibraryRoot {
             id,
@@ -645,7 +754,24 @@ fn library_row(row: &toml::Table) -> Result<RegisteredLibrary, RowProblem> {
         .and_then(toml::Value::as_str)
         .unwrap_or_default()
         .to_string();
-    Ok(RegisteredLibrary { id, path, added_at })
+    // ## m4b-t10-service fix round 2 (m-a): the resolved root, when the service recorded it.
+    // A malformed value is dropped (the root is resolved again), never trusted.
+    let canonical = row
+        .get("canonical")
+        .and_then(toml::Value::as_str)
+        .map(PathBuf::from)
+        .filter(|c| c.is_absolute());
+    let inode = row
+        .get("inode")
+        .and_then(toml::Value::as_str)
+        .and_then(|i| i.parse::<u64>().ok());
+    Ok(RegisteredLibrary {
+        id,
+        path,
+        added_at,
+        canonical,
+        inode,
+    })
 }
 
 fn mapping_row(row: &toml::Table) -> Result<LocalMapping, RowProblem> {

@@ -71,6 +71,14 @@
 //! - `.git/logs/HEAD` counts as a repository change; a far-future time is not racy forever; a
 //!   hint through a linked folder re-syncs the folder watches; a backstop look that finds an
 //!   unannounced change re-arms the source ([`WatchEvent::BackendRearmed`]).
+//!
+//! ## m4b-t10-service fix round 3 (G2, R-T10-6; a Task 9 named exception in `watch/**`)
+//! The library's manifest, `.hacivat/workspace.toml`, passes the name filter like the
+//! repository names and is reported as [`WatchEvent::ManifestChanged`] (a hint on the
+//! `.hacivat` folder itself too, which also re-learns the folders). It is watched on every
+//! backend: a recursive OS watch sees it already; a per-folder source watches `.hacivat/`
+//! (non-recursively, a real folder only, [`Reconciler::watch_dirs`]); the poll source `lstat`s
+//! the file on each pass ([`poll`]). Nothing else under `.hacivat/` is reported.
 
 pub mod debounce;
 pub mod echo;
@@ -462,6 +470,9 @@ pub enum WatchEvent {
     Rescan,
     /// The repository's index, `HEAD` or refs changed (refresh the status, HV-SCRIPT-11).
     RepositoryChanged,
+    /// ## m4b-t10-service fix round 3 (G2, R-T10-6): the library's manifest,
+    /// `.hacivat/workspace.toml`, or its folder changed (re-read the binding and aliases).
+    ManifestChanged,
     /// The OS backend stopped; the library is polled from now on (a diagnostic).
     BackendLost(LostReason),
     /// ## m4b-t09-watcher fix round 2 (m-fr1-5): a backstop look found a change no event had
@@ -601,15 +612,25 @@ enum Named {
     Drop,
     Root,
     Repository,
+    /// ## m4b-t10-service fix round 3 (G2): `.hacivat/workspace.toml`.
+    Manifest,
+    /// `.hacivat` itself (made, removed or replaced).
+    ManifestFolder,
     Rel(RelPath),
 }
 
 enum HintKind {
     Drop,
     Repository,
+    Manifest,
+    ManifestFolder,
     File(RelPath),
     Scan,
 }
+
+/// ## m4b-t10-service fix round 3 (G2): the manifest's folder and file names (`manifest.rs`).
+const MANIFEST_DIR: &str = ".hacivat";
+const MANIFEST_FILE: &str = "workspace.toml";
 
 /// What one scan says against the known files.
 enum ScanOutcome {
@@ -761,7 +782,7 @@ impl Reconciler {
         };
         let counted = match self.name_filter(&path) {
             Named::Drop => return,
-            Named::Root | Named::Repository => true,
+            Named::Root | Named::Repository | Named::Manifest | Named::ManifestFolder => true,
             Named::Rel(rel) => {
                 let name = rel.name();
                 scan::script_kind(name).is_some()
@@ -840,6 +861,7 @@ impl Reconciler {
         self.now = now;
         self.info = TickInfo::default();
         let mut repository = false;
+        let mut manifest = false;
         let mut need_scan = false;
         let mut backstop_tick = false;
         if let Some(due) = self.backstop_next
@@ -862,6 +884,12 @@ impl Reconciler {
                         match self.classify(&p) {
                             HintKind::Drop => {}
                             HintKind::Repository => repository = true,
+                            HintKind::Manifest => manifest = true,
+                            // Folder watches are re-synced after a scan.
+                            HintKind::ManifestFolder => {
+                                manifest = true;
+                                need_scan = true;
+                            }
                             HintKind::Scan => need_scan = true,
                             HintKind::File(rel) => match self.look(&rel) {
                                 Look::RootGone => return self.rescan(),
@@ -918,6 +946,9 @@ impl Reconciler {
                     if repository {
                         out.push(WatchEvent::RepositoryChanged);
                     }
+                    if manifest {
+                        out.push(WatchEvent::ManifestChanged);
+                    }
                     return out;
                 }
                 ScanOutcome::Quiet => {
@@ -969,6 +1000,9 @@ impl Reconciler {
         let mut out = self.report(settled, now);
         if repository {
             out.push(WatchEvent::RepositoryChanged);
+        }
+        if manifest {
+            out.push(WatchEvent::ManifestChanged);
         }
         out
     }
@@ -1391,6 +1425,14 @@ impl Reconciler {
             }
             out.insert(git);
         }
+        // ## m4b-t10-service fix round 3 (G2): `.hacivat/`, for its `workspace.toml`.
+        let manifest = root.join(MANIFEST_DIR);
+        if fs
+            .symlink_metadata(&manifest)
+            .is_ok_and(|m| m.kind == MetaKind::Dir && !m.dataless)
+        {
+            out.insert(manifest);
+        }
         let limits = &self.opts.limits;
         let mut visited = 0usize;
         let mut stack = vec![(root.clone(), 0usize)];
@@ -1459,6 +1501,16 @@ impl Reconciler {
                 Named::Drop
             };
         }
+        // ## m4b-t10-service fix round 3 (G2): the manifest and its folder; nothing else in it.
+        if first.eq_ignore_ascii_case(MANIFEST_DIR) {
+            return match parts.get(1) {
+                None => Named::ManifestFolder,
+                Some(n) if parts.len() == 2 && n.eq_ignore_ascii_case(MANIFEST_FILE) => {
+                    Named::Manifest
+                }
+                Some(_) => Named::Drop,
+            };
+        }
         if parts.iter().any(|p| pathsafe::is_skipped(p)) || parts.len() > self.opts.limits.max_depth
         {
             return Named::Drop;
@@ -1474,6 +1526,8 @@ impl Reconciler {
             Named::Drop => return HintKind::Drop,
             Named::Root => return HintKind::Scan,
             Named::Repository => return HintKind::Repository,
+            Named::Manifest => return HintKind::Manifest,
+            Named::ManifestFolder => return HintKind::ManifestFolder,
             Named::Rel(rel) => rel,
         };
         if let Some(known) = self.lookup(&rel) {

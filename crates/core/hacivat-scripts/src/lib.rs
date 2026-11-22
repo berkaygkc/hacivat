@@ -37,6 +37,13 @@
 //! copies (ADR 0009 `m4b-t05`). The service's own `read`/`save`/`open_stream` stay stubs until
 //! Task 10.
 //!
+//! ## m4b-t10-service (named exception)
+//! Task 10 replaced the [`LibraryService`] stubs: one actor on the core runtime owns the
+//! registry, the scans, the event source and the status refresh and publishes
+//! [`WorkspaceSnapshot`]s; its `read`, `save` and `open_stream` go through `fileio` with the
+//! tab's environment. [`ScriptIndex`] is the "Go to script" index (ADR 0009 `m4b-t10`). The
+//! file operations (`create`, `rename`, `trash`) stay fail-closed stubs until Task 13.
+//!
 //! Module owners: `registry`, `manifest`, `binding`, `names` (Task 3); `scan`, `pathsafe`,
 //! `envscope`, `tree`, `dataless` (Task 4); `fileio`, `encoding`, `recovery` (Task 5); `secrets`
 //! (Task 6); `watch` (Task 9); `service`, `index`, `events` (Task 10).
@@ -78,5 +85,12 @@ pub use service::{
     AttachError, ChunkError, FileOpError, LibraryDiag, LibraryService, LibrarySnapshot,
     LibraryState, PollReason, ScriptChunks, UnavailableReason, WorkspaceSnapshot,
 };
+// ## m4b-t10-service (named exception): the service's new public types.
+pub use index::{Hit, Rank, ScriptIndex};
+pub use service::{MapError, ServiceOptions, SourceFactory, Sources};
+// fix round 1: the env-filtered view and events, the root refusals, the two-pass stream.
+pub use fileio::{PassRecord, ScriptStream};
+pub use service::{EnvView, GitSummary, LibraryView, RootRefusal, Subscription};
+// ## m4b-t10-service
 pub use watch::{EventSource, HintSink, RawHint, WatchError};
 // ## m4b-t01a-seams

@@ -34,5 +34,14 @@ pub enum LibraryEvent {
     GitChanged {
         id: LibraryId,
     },
+    // ## m4b-t10-service (fix round 1, I1, R-T10-2)
+    /// The file moved to a place this subscriber's connection does not show: "No longer
+    /// listed under this connection". Only a filtered `Subscription` sends it; its new path is
+    /// never given.
+    FileLeftScope {
+        id: LibraryId,
+        rel: RelPath,
+    },
+    // ## m4b-t10-service
 }
 // ## m4b-t01a-seams

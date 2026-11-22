@@ -80,6 +80,33 @@ impl FakeHandle {
         roots.sort();
         roots
     }
+
+    // ## m4b-t10-service (named exception; the watcher wiring): the library service starts one
+    // `Watcher` per library, each owning its source; these give every one of them a fake
+    // source that this handle drives.
+    /// Sources for `LibraryService::open_with`: each library's watcher gets a fake source that
+    /// delivers what this handle emits.
+    pub fn sources(&self) -> crate::service::Sources {
+        let sinks = self.sinks.clone();
+        crate::service::Sources::Custom(Arc::new(move || {
+            Ok(Box::new(FakeEventSource {
+                sinks: sinks.clone(),
+                refuse: None,
+            }) as Box<dyn EventSource>)
+        }))
+    }
+
+    /// Sources whose every `watch` fails with `err` (a backend that will not start).
+    pub fn refusing_sources(&self, err: WatchError) -> crate::service::Sources {
+        let sinks = self.sinks.clone();
+        crate::service::Sources::Custom(Arc::new(move || {
+            Ok(Box::new(FakeEventSource {
+                sinks: sinks.clone(),
+                refuse: Some(err.clone()),
+            }) as Box<dyn EventSource>)
+        }))
+    }
+    // ## m4b-t10-service
 }
 
 /// A logical name without the character rules (`LogicalDb::parse` refuses every name until

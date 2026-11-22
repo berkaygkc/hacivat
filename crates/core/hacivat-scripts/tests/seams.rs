@@ -8,23 +8,16 @@ use std::sync::{Arc, Mutex};
 use hacivat_proto::{EnvTag, ProfileId};
 use hacivat_scripts::testing::FakeEventSource;
 // ## m4b-t04-scanner (named exception): `envscope`, `pathsafe` and `visible` are Task 4's now.
+// ## m4b-t10-service (named exception): the service stubs' imports are gone with their tests.
 use hacivat_scripts::{
-    AttachError, DatabaseName, DbNode, EntryKind, EventSource, FileOpError, LibraryId,
-    LibraryService, LibraryState, LocalMapping, PathError, RawHint, ReadError, RegistryError,
-    RelPath, SaveError, SaveText, SecretKind, SpanKind, UnavailableReason, WatchError, binding,
+    DatabaseName, DbNode, EntryKind, EventSource, FileOpError, LibraryId, LibraryService,
+    LocalMapping, PathError, RawHint, RelPath, SecretKind, SpanKind, WatchError, binding,
     scan_secrets,
 };
 use hacivat_settings::LocalPaths;
 
 fn rel(s: &str) -> RelPath {
     RelPath::parse(s).unwrap()
-}
-
-fn text(s: &str) -> SaveText {
-    SaveText {
-        text: s.into(),
-        meta: Default::default(),
-    }
 }
 
 /// Every file name and its bytes under `dir`, recursively (the "nothing was written" check).
@@ -52,7 +45,7 @@ fn service_with_library() -> (LibraryService, tempfile::TempDir, tempfile::TempD
     let app = tempfile::tempdir().unwrap();
     let lib = tempfile::tempdir().unwrap();
     std::fs::write(lib.path().join("b.sql"), b"SELECT 1;").unwrap();
-    let (s, _rx) = LibraryService::open(
+    let s = LibraryService::open(
         &LocalPaths::under(app.path()),
         &tokio::runtime::Handle::current(),
     );
@@ -122,71 +115,15 @@ fn secret_scanner_seam_reports_values_only() {
 // ## m4b-t03-registry / m4b-t04-scanner (named exceptions, merged as a union): the manifest
 // and pathsafe stub assertions are gone; Task 3 wrote `tests/manifest.rs`, Task 4 `tests/pathsafe.rs`.
 
-// ## m4b-t05-fileio: `fileio::{read, save}` are real now (tests/fileio.rs); the service's
-// own read/save stubs below stay until Task 10. Fix round 2 (R-T5-6): they take the tab's
-// environment, and still refuse with one given.
+// ## m4b-t10-service (named exception): the service is Task 10's now. `save_stub_writes_nothing`,
+// `service_open_publishes_an_unavailable_empty_snapshot` and the attach/detach/map/read/stream
+// half of the test below moved to `tests/service.rs` as the real behaviour. The file operations
+// (create, rename, Move to Trash) stay fail-closed stubs until their task (T13):
 #[tokio::test]
-async fn save_stub_writes_nothing() {
-    let (s, app, dir) = service_with_library();
-    let lib = LibraryId::new();
-    assert!(matches!(
-        s.save(lib, &rel("a.sql"), Some(EnvTag::Dev), text("x"), None)
-            .await,
-        Err(SaveError::NotImplemented)
-    ));
-    assert!(!dir.path().join("a.sql").exists());
-    assert!(matches!(
-        s.save(lib, &rel("b.sql"), None, text("DROP TABLE t;"), None)
-            .await,
-        Err(SaveError::NotImplemented)
-    ));
-    assert_eq!(
-        std::fs::read(dir.path().join("b.sql")).unwrap(),
-        b"SELECT 1;"
-    );
-    assert!(tree(app.path()).is_empty());
-}
-
-#[tokio::test]
-async fn service_open_publishes_an_unavailable_empty_snapshot() {
-    let app = tempfile::tempdir().unwrap();
-    let paths = LocalPaths::under(app.path());
-    let (s, mut rx) = LibraryService::open(&paths, &tokio::runtime::Handle::current());
-    let snap = s.snapshot();
-    assert_eq!(snap.generation, 0);
-    assert_eq!(
-        snap.state,
-        LibraryState::Unavailable(UnavailableReason::NotImplemented)
-    );
-    assert!(snap.libraries.is_empty() && snap.mappings.is_empty() && snap.git.is_empty());
-    assert!(snap.library(LibraryId::new()).is_none());
-    // No registry was read or created, and nothing was announced.
-    assert!(!paths.libraries_toml().exists());
-    assert!(tree(app.path()).is_empty());
-    assert!(rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn every_service_call_refuses_and_touches_no_file() {
+async fn file_operation_stubs_refuse_and_touch_no_file() {
     let (s, app, dir) = service_with_library();
     let before = tree(dir.path());
     let id = LibraryId::new();
-    assert!(matches!(
-        s.attach(dir.path().into(), None, true).await,
-        Err(AttachError::NotImplemented)
-    ));
-    assert!(!dir.path().join(".hacivat").exists());
-    assert_eq!(s.detach(id).await, Err(RegistryError::NotImplemented));
-    let m = LocalMapping {
-        profile: ProfileId::new(),
-        database: DatabaseName::new("orders"),
-        library: id,
-    };
-    assert_eq!(s.map(m, true).await, Err(RegistryError::NotImplemented));
-    assert!(matches!(
-        s.read(id, &rel("b.sql"), Some(EnvTag::Dev)).await,
-        Err(ReadError::NotImplemented)
-    ));
     assert_eq!(
         s.create(id, &rel("c.sql"), EntryKind::Sql).await,
         Err(FileOpError::NotImplemented)
@@ -199,14 +136,14 @@ async fn every_service_call_refuses_and_touches_no_file() {
         s.trash(id, &rel("b.sql")).await,
         Err(FileOpError::NotImplemented)
     );
-    assert!(matches!(
-        s.open_stream(id, &rel("b.sql"), None),
-        Err(ReadError::NotImplemented)
-    ));
     assert_eq!(tree(dir.path()), before);
-    assert!(tree(app.path()).is_empty());
-    assert_eq!(s.snapshot().generation, 0);
+    assert!(
+        tree(app.path())
+            .iter()
+            .all(|(name, _)| !name.contains("c.sql"))
+    );
 }
+// ## m4b-t10-service
 
 #[test]
 fn rel_path_keeps_its_structural_invariant() {

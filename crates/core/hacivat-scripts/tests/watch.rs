@@ -2385,3 +2385,70 @@ fn a_second_hint_for_the_same_write_is_possibly_changed_unless_remembered() {
         assert_eq!(second, want, "remembered={remembered}");
     }
 }
+
+// ## m4b-t10-service fix round 3 (G2, R-T10-6; a Task 9 named exception): the library's
+// manifest, `.hacivat/workspace.toml`, is reported on every backend.
+
+#[test]
+fn a_manifest_change_is_reported_and_nothing_else_under_the_folder() {
+    let lib = Lib::new(&[("a.sql", "x"), (".hacivat/workspace.toml", "format = 1\n")]);
+    let mut r = lib.rec();
+    lib.write(
+        ".hacivat/workspace.toml",
+        "format = 1\ndatabase = \"billing\"\n",
+    );
+    lib.write(".hacivat/notes.sql", "n");
+    let hints = vec![
+        lib.hint(".hacivat/workspace.toml"),
+        lib.hint(".hacivat/notes.sql"),
+        lib.hint(".hidden/workspace.toml"),
+    ];
+    assert_eq!(run(&mut r, hints, t0()), vec![WatchEvent::ManifestChanged]);
+}
+
+#[test]
+fn a_new_or_removed_manifest_folder_is_a_manifest_change() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let mut r = lib.rec();
+    lib.write(".hacivat/workspace.toml", "format = 1\n");
+    let out = run(&mut r, vec![lib.hint(".hacivat")], t0());
+    assert!(out.contains(&WatchEvent::ManifestChanged), "{out:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_manifest_folder_is_watched_folder_by_folder() {
+    let lib = Lib::new(&[
+        ("a.sql", "x"),
+        (".hacivat/workspace.toml", "format = 1\n"),
+        (".other/y.sql", "y"),
+    ]);
+    let dirs = lib.rec().watch_dirs().unwrap();
+    assert!(dirs.contains(&lib.path(".hacivat")), "{dirs:?}");
+    assert!(!dirs.contains(&lib.path(".other")), "{dirs:?}");
+    // A linked `.hacivat` is not a folder of the library.
+    let linked = Lib::new(&[("a.sql", "x")]);
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), linked.path(".hacivat")).unwrap();
+    let dirs = linked.rec().watch_dirs().unwrap();
+    assert!(!dirs.contains(&linked.path(".hacivat")), "{dirs:?}");
+}
+
+#[test]
+fn poll_pass_reports_manifest_changes() {
+    use hacivat_scripts::watch::PollEventSource;
+    let lib = Lib::new(&[("a.sql", "x"), (".hacivat/workspace.toml", "format = 1\n")]);
+    let src = PollEventSource::with_interval(ms(20)).unwrap();
+    let (tx, mut ev) = Events::new();
+    let _w = Watcher::start(lib.root.clone(), WatchOpts::default(), tx, Box::new(src)).unwrap();
+    // Once a pass has seen the sentinel, the stamps are recorded; a pull rewrites the manifest.
+    lib.write("sentinel.sql", "s");
+    ev.wait_for("sentinel", |e| {
+        e.contains(&WatchEvent::Created(rel("sentinel.sql")))
+    });
+    lib.write(
+        ".hacivat/workspace.toml",
+        "format = 1\ndatabase = \"billing\"\n",
+    );
+    ev.wait_for("manifest", |e| e.contains(&WatchEvent::ManifestChanged));
+}

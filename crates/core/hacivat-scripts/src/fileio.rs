@@ -209,6 +209,11 @@ pub enum ReadError {
     Lossy,
     /// The bytes do not decode in the chosen encoding.
     Undecodable,
+    // ## m4b-t10-service fix round 1 (named exception; I7, R-T10-3)
+    /// A second pass ([`open_stream_checked`] with a [`PassRecord`]) found the file is not the
+    /// one the first pass read: refused before a byte is handed out.
+    Changed,
+    // ## m4b-t10-service
     Io(io::ErrorKind),
 }
 
@@ -396,6 +401,22 @@ pub fn save_with_echo(
     expect: Option<DiskStamp>,
     echo: &mut dyn FnMut(&DiskStamp),
 ) -> Result<DiskStamp, SaveError> {
+    save_echoing_landing(root, rel, env, text, expect, &mut |_, stamp| echo(stamp))
+}
+
+// ## m4b-t10-service fix round 3 (m-f; a Task 5 named exception)
+/// [`save_with_echo`], whose callback also gets the path the bytes land at, relative to the
+/// root: for a file link, its target inside the library (the `join` this save made, not an
+/// older listing's), else `rel`. The service records the echo under it, which is where the
+/// watcher sees the write.
+pub fn save_echoing_landing(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    text: SaveText,
+    expect: Option<DiskStamp>,
+    echo: &mut dyn FnMut(&RelPath, &DiskStamp),
+) -> Result<DiskStamp, SaveError> {
     // fr2 I-fr1-2: a preview's meta travels with whatever text the tab builds; never saved.
     if text.meta.partial {
         return Err(SaveError::PreviewOnly);
@@ -403,7 +424,8 @@ pub fn save_with_echo(
     let bytes = encoding::encode_exact(text.meta.encoding, text.meta.bom, &text.text)
         .map_err(|first_offset| SaveError::Unencodable { first_offset })?;
     drop(text);
-    let target = locate(root, rel, env).map_err(Refusal::for_save)?;
+    let (target, landing) = locate_landing(root, rel, env).map_err(Refusal::for_save)?;
+    let echo = &mut |stamp: &DiskStamp| echo(&landing, stamp);
     let dir = target.dir();
     dir.sweep_stale_temps(&is_temp_name);
     match target {
@@ -443,6 +465,28 @@ pub fn save_with_echo(
     }
 }
 
+// ## m4b-t10-service (named exception): the service's stamp of a changed file.
+/// The current stamp of `rel` under `env`, scoped and located exactly as [`read`] (the same
+/// `join`, `visible_at` and no-follow folder handles), its bytes hashed streaming and dropped:
+/// nothing is decoded or kept. The library service uses it for its echo, change and rename
+/// checks (HV-SCRIPT-08 steps 5–7), so script content is read only here, in `fileio` (T5 mg2).
+pub(crate) fn stamp_of(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+) -> Result<DiskStamp, ReadError> {
+    match locate(root, rel, env).map_err(Refusal::for_read)? {
+        Target::Missing { .. } => Err(ReadError::Io(io::ErrorKind::NotFound)),
+        Target::Existing { dir, name, lstat } => {
+            stamp_streaming(&dir, &name, &lstat).map_err(|e| match e {
+                SaveError::Io(kind) => ReadError::Io(kind),
+                _ => ReadError::PathRefused,
+            })
+        }
+    }
+}
+// ## m4b-t10-service
+
 /// A chunked UTF-8 reader of `rel` in `encoding` for "Run as script" (HV-SCRIPT-12), under
 /// `env` as [`read`]: the source behind `LibraryService::open_stream` (Task 10 wires it). Its
 /// BOM is dropped.
@@ -452,17 +496,143 @@ pub fn open_stream(
     env: Option<EnvTag>,
     encoding: TextEncoding,
 ) -> Result<Box<dyn ScriptChunks>, ReadError> {
+    Ok(Box::new(open_stream_checked(
+        root, rel, env, encoding, None,
+    )?))
+}
+
+// ## m4b-t10-service fix round 1 (named exception; I7, ruling R-T10-3)
+/// What one pass of a [`ScriptStream`] read: the file's identity at open (length, mtime and,
+/// privately, its full fingerprint: device, inode and ctime on Unix) and a running XXH3-64 of
+/// the raw bytes at the end of every 64 KiB block (one `u64` per block, so memory stays
+/// bounded: 2,400 values for a 150 MB file).
+///
+/// **The pass-1 / pass-2 contract (Task 12, R-M4b-47).** Pass 1 streams the file and keeps
+/// [`ScriptStream::record`]. Pass 2 calls [`open_stream_checked`] with that record: it is
+/// refused at once ([`ReadError::Changed`]) unless the file has the fingerprint pass 1 opened,
+/// and it stops with [`ChunkError::Changed`] the moment a block's running hash differs from
+/// pass 1's, before that block's text is handed out (or when the file has more or fewer blocks
+/// than pass 1 read). Pass 2 therefore sees exactly pass 1's bytes, chunked the same way, or
+/// nothing past the first difference. A record of an incomplete pass checks only the blocks it
+/// holds and then refuses to read further.
+///
+/// Fix round 2 (F4): the record binds the decoding too. Pass 2 is refused at open when its
+/// encoding is not pass 1's, and stops at its first block when the BOM pass 1 found (and
+/// dropped) is not there. The stream never decides a line ending (the text keeps the file's
+/// own), so there is no line-ending choice to bind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassRecord {
+    pub len: u64,
+    pub mtime: SystemTime,
+    pub encoding: TextEncoding,
+    /// Whether the first block began with the encoding's BOM (dropped from the text); `None`
+    /// before the first block was read.
+    pub bom: Option<bool>,
+    fingerprint: Fingerprint,
+    blocks: Vec<u64>,
+    complete: bool,
+}
+
+impl PassRecord {
+    /// How many 64 KiB blocks the pass read.
+    pub fn blocks(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Whether the pass read to the end of the file.
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    #[cfg(test)]
+    fn tamper(&mut self, block: usize) {
+        self.blocks[block] ^= 1;
+    }
+}
+
+/// A "Run as script" reader that records what it read ([`PassRecord`]).
+pub struct ScriptStream(FileStream);
+
+impl fmt::Debug for ScriptStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScriptStream")
+            .field("blocks", &self.0.blocks.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ScriptStream {
+    /// The opening stamp and the running hashes so far.
+    pub fn record(&self) -> PassRecord {
+        PassRecord {
+            len: self.0.at_open.len,
+            mtime: self.0.at_open.mtime.unwrap_or(UNIX_EPOCH),
+            encoding: self.0.encoding,
+            bom: self.0.bom,
+            fingerprint: self.0.at_open,
+            blocks: self.0.blocks.clone(),
+            complete: self.0.done && !self.0.failed,
+        }
+    }
+}
+
+impl ScriptChunks for ScriptStream {
+    fn next_chunk(&mut self) -> Option<Result<String, ChunkError>> {
+        self.0.next_chunk()
+    }
+}
+
+/// [`open_stream`] that records its pass; with `expect`, a second pass checked against the
+/// first ([`PassRecord`]).
+pub fn open_stream_checked(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    encoding: TextEncoding,
+    expect: Option<PassRecord>,
+) -> Result<ScriptStream, ReadError> {
     let decoder = StreamDecoder::new(encoding).ok_or(ReadError::UnknownEncoding)?;
     let opened = open_for_read(root, rel, env)?;
-    Ok(Box::new(FileStream {
-        at_open: Fingerprint::of(&opened.meta),
+    let at_open = Fingerprint::of(&opened.meta);
+    if expect
+        .as_ref()
+        .is_some_and(|e| e.fingerprint != at_open || e.encoding != encoding)
+    {
+        return Err(ReadError::Changed);
+    }
+    Ok(ScriptStream(FileStream {
+        at_open,
         dir: opened.dir,
         name: opened.name,
         file: opened.file,
         decoder,
         done: false,
+        failed: false,
+        hasher: twox_hash::XxHash3_64::new(),
+        blocks: Vec::new(),
+        encoding,
+        bom: None,
+        expect_bom: expect.as_ref().and_then(|e| e.bom),
+        expect: expect.map(|e| e.blocks),
     }))
 }
+
+/// The device and inode of a folder (Unix), the identity a library root keeps for a session
+/// (I3); `None` where it cannot be read or the platform has none in stable `std`.
+pub(crate) fn folder_identity(path: &std::path::Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        meta.is_dir().then(|| (meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+// ## m4b-t10-service
 
 /// The temp name a save of `name` writes first: `.<name>.hv-<uuid v4>.tmp`, with `<name>` cut
 /// on a character boundary so the whole stays within 255 bytes (alg/28 m10). It starts with
@@ -744,6 +914,16 @@ impl Target {
 /// the path it answered is walked with no-follow folder handles, and anything that is a link
 /// now is refused.
 fn locate(root: &LibraryRoot, rel: &RelPath, env: Option<EnvTag>) -> Result<Target, Refusal> {
+    locate_landing(root, rel, env).map(|(target, _)| target)
+}
+
+/// [`locate`], with the path it opens relative to the root (a file link's target, else
+/// `rel`). ## m4b-t10-service fix round 3 (m-f)
+fn locate_landing(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+) -> Result<(Target, RelPath), Refusal> {
     let joined = pathsafe::join(root, rel)?;
     {
         let kind = match joined.kind {
@@ -776,7 +956,7 @@ fn locate(root: &LibraryRoot, rel: &RelPath, env: Option<EnvTag>) -> Result<Targ
             if joined.target.is_some() {
                 return Err(Refusal::Path(PathError::Changed));
             }
-            return Ok(Target::Missing { dir, name });
+            return Ok((Target::Missing { dir, name }, open.clone()));
         }
         Err(e) => return Err(e.into()),
     };
@@ -786,7 +966,7 @@ fn locate(root: &LibraryRoot, rel: &RelPath, env: Option<EnvTag>) -> Result<Targ
     if !lstat.is_file() {
         return Err(Refusal::Fs(FsError::NotFile));
     }
-    Ok(Target::Existing { dir, name, lstat })
+    Ok((Target::Existing { dir, name, lstat }, open.clone()))
 }
 
 // ---- reading -------------------------------------------------------------------------------
@@ -1433,6 +1613,18 @@ struct FileStream {
     at_open: Fingerprint,
     decoder: StreamDecoder,
     done: bool,
+    // ## m4b-t10-service fix round 1 (named exception; I7): the pass record.
+    /// The stream ended on an error (its record is incomplete).
+    failed: bool,
+    hasher: twox_hash::XxHash3_64,
+    blocks: Vec<u64>,
+    /// Pass 1's running hashes, when this is pass 2.
+    expect: Option<Vec<u64>>,
+    /// Fix round 2 (F4): the decoding bound by the record.
+    encoding: TextEncoding,
+    bom: Option<bool>,
+    expect_bom: Option<bool>,
+    // ## m4b-t10-service
 }
 
 impl FileStream {
@@ -1466,15 +1658,41 @@ impl ScriptChunks for FileStream {
                 Ok(n) => n,
                 Err(e) => {
                     self.done = true;
+                    self.failed = true;
                     return Some(Err(ChunkError::Io(e.kind())));
                 }
             };
             // Checked after the read: bytes read under a changed stamp are never handed out.
             if !self.unchanged() {
                 self.done = true;
+                self.failed = true;
                 return Some(Err(ChunkError::Changed));
             }
             let last = n < buf.len();
+            // ## m4b-t10-service fix round 1 (I7): the running hash of this block, checked
+            // against pass 1's before the block's text is handed out.
+            {
+                use std::hash::Hasher as _;
+                self.hasher.write(&buf[..n]);
+                let running = self.hasher.finish();
+                let at = self.blocks.len();
+                self.blocks.push(running);
+                if at == 0 {
+                    let bom = encoding::bom_of(self.encoding);
+                    self.bom = Some(!bom.is_empty() && buf[..n].starts_with(bom));
+                }
+                let bom_differs = at == 0 && self.expect_bom.is_some_and(|b| Some(b) != self.bom);
+                let differs = bom_differs
+                    || self.expect.as_ref().is_some_and(|pass1| {
+                        pass1.get(at) != Some(&running) || (last && pass1.len() != at + 1)
+                    });
+                if differs {
+                    self.done = true;
+                    self.failed = true;
+                    return Some(Err(ChunkError::Changed));
+                }
+            }
+            // ## m4b-t10-service
             let Some(text) = self.decoder.feed(&buf[..n], last) else {
                 self.done = true;
                 return Some(Err(ChunkError::Decode));
@@ -1512,5 +1730,51 @@ mod tests {
         assert_eq!(preview_cut("abc\r"), 3);
         assert_eq!(preview_cut("abc"), 3);
     }
+
+    // ## m4b-t10-service fix round 1 (named exception; I7)
+    /// Pass 2 stops at the first block whose running hash is not pass 1's, before its text is
+    /// handed out, even when the file's fingerprint is the same (a tampered record stands for
+    /// bytes that differ without a visible metadata change).
+    #[test]
+    fn second_pass_stops_at_the_first_block_that_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let text: String = (0..3 * STREAM_CHUNK_BYTES / 10)
+            .map(|i| format!("{:09}\n", i % 1_000_000_000))
+            .collect();
+        std::fs::write(dir.path().join("big.sql"), &text).unwrap();
+        let id = crate::registry::LibraryId::new();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let root = LibraryRoot {
+            id,
+            path: canonical.clone(),
+            canonical,
+        };
+        let rel = RelPath::parse("big.sql").unwrap();
+        let utf8 = TextEncoding::UTF_8;
+        let drain = |s: &mut ScriptStream| {
+            let mut out = Vec::new();
+            while let Some(c) = s.next_chunk() {
+                out.push(c);
+            }
+            out
+        };
+        let mut pass1 = open_stream_checked(&root, &rel, None, utf8, None).unwrap();
+        let chunks1 = drain(&mut pass1);
+        let record = pass1.record();
+        assert!(record.is_complete());
+        assert_eq!(record.blocks(), 3);
+        // An identical second pass yields the same chunks.
+        let mut pass2 = open_stream_checked(&root, &rel, None, utf8, Some(record.clone())).unwrap();
+        assert_eq!(drain(&mut pass2), chunks1);
+        // A record that differs at block 1: block 0 is handed out, then `Changed`.
+        let mut forged = record;
+        forged.tamper(1);
+        let mut pass2 = open_stream_checked(&root, &rel, None, utf8, Some(forged)).unwrap();
+        let got = drain(&mut pass2);
+        assert_eq!(got.len(), 2, "{} chunks", got.len());
+        assert!(got[0].is_ok());
+        assert_eq!(got[1], Err(ChunkError::Changed));
+    }
+    // ## m4b-t10-service
 }
 // ## m4b-t01a-seams

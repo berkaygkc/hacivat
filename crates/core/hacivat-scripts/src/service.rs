@@ -1,3 +1,4 @@
+// ## m4b-t01a-seams
 //! The library service: one actor on the core runtime that owns the registry, the scans, the
 //! watchers and the status refresh, and publishes immutable [`WorkspaceSnapshot`]s through
 //! `arc-swap` with a generation (spec §5.4 rule 2; HV-SCRIPT-01..04, -08).
@@ -13,41 +14,110 @@
 //! `CoreRuntime` lives in `hacivat-session`, which this crate never depends on (R-M4b-28); and
 //! [`ScriptChunks`] mirrors `hacivat_exec::ScriptChunks` (the app adapts one to the other, as
 //! for `SpanKind`), because neither crate may depend on the other.
+// ## m4b-t01a-seams
+//!
+//! ## m4b-t10-service
+//! Task 10 (ADR 0009 `m4b-t10`, with its fix rounds 1 and 2 and the watcher wiring).
+//!
+//! - **One actor, bounded workers** (I6, R-T10-4). [`LibraryService::open`] starts one actor on
+//!   the core runtime's blocking pool. It alone owns the [`LibraryRegistry`](crate::registry::
+//!   LibraryRegistry) (the single writer of `libraries.toml`), every library's state, the event
+//!   source and the status refresh, and handles one message at a time from a bounded inbox. It
+//!   does no library I/O itself (F1): validating a root, starting its watcher, scanning,
+//!   probing, stamps and the attach and alias writes run as jobs on at most
+//!   [`ServiceOptions::workers`] blocking workers, one job per library at a time
+//!   (`service/work.rs`). A hung mount stalls its own library only: a job past
+//!   [`ServiceOptions::job_deadline`] stops counting and shows it `NotResponding` (F2,
+//!   R-T10-5), commands keep answering, and detach frees the worker at once.
+//! - **Task 9's watcher** (R-C0-7). Each library has its own `Watcher`, started on a worker
+//!   before its first scan. Its events (settled, echo-filtered, renames paired) patch the
+//!   listing through probes; a batch from a dropped watcher is ignored (a generation tag). A
+//!   save records its echo in that watcher's table under the path the bytes land at, and every
+//!   read and save `remember`s the file's stamp in it. There is no polling or settle of the
+//!   service's own: the watcher polls when it must (`Polling`), and `Unwatched` says nothing
+//!   watches a library.
+//! - **Immutable snapshots.** After each drained burst the actor publishes one new
+//!   [`WorkspaceSnapshot`] (generation + 1) if anything changed, then sends the events. Commands
+//!   reply after their snapshot is published.
+//! - **Per-connection reads** (m2, I1 and R-T10-2). The snapshot's listings, status maps and
+//!   diagnostics name files under `@<env>/` folders and stay crate-private; a connection reads
+//!   [`WorkspaceSnapshot::view`]. Events come through a [`Subscription`] for one environment:
+//!   a path a connection does not show never reaches it, and a file that moved out of its scope
+//!   arrives as [`LibraryEvent::FileLeftScope`].
+//! - **The root is re-validated** (I3) before every scan: a real folder (never a link), the
+//!   canonical path and identity it had this session, and the attach checks again.
+//! - **Watch before scan** (I5): a library's watcher starts before its first scan; events that
+//!   arrive during a job wait and are probed after it.
+//! - **Content is read only for open files** (I4): a changed file that no tab has open
+//!   (`read` or `save` remembers it) is a listing change; its bytes are never read.
+//! - **Two-pass streams** (I7, R-T10-3): [`LibraryService::open_stream`] returns a
+//!   [`ScriptStream`] whose [`PassRecord`] a second pass is checked against.
+//! - **File calls take the tab's environment** (R-T5-6).
+//! - **Launch hygiene** (T5 mf4): recovery folders of unregistered libraries are swept, sparing
+//!   any copy of a live instance (I2).
+
+// ## m4b-t10-service (fix round 1): the actor, the workers' I/O, the view and the filtered
+// events.
+mod actor;
+mod subscription;
+mod view;
+mod work;
+
+pub use subscription::Subscription;
+pub use view::{EnvView, GitSummary, LibraryView};
+// ## m4b-t10-service
 
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use hacivat_git::GitState;
-use hacivat_proto::EnvTag;
+use hacivat_git::{GitLimits, GitState};
+use hacivat_proto::{EnvTag, ProfileId};
 use hacivat_settings::paths::LocalPaths;
 use tokio::runtime::Handle;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::events::LibraryEvent;
-use crate::fileio::{Decoded, DiskStamp, ReadError, SaveError, SaveText};
+use crate::fileio::{
+    self, Decoded, DiskStamp, PassRecord, ReadError, ReadLimits, SaveError, SaveText, ScriptStream,
+    TextEncoding,
+};
 use crate::manifest;
-use crate::names::LogicalDb;
+use crate::names::{DatabaseName, LogicalDb, NameError};
 use crate::pathsafe::RelPath;
-use crate::registry::{LibraryId, LibraryRoot, LocalMapping, RegistryError};
-use crate::scan::{EntryKind, ScriptEntry};
+use crate::registry::{LibraryId, LibraryRoot, LocalMapping, RegistryDiag, RegistryError};
+use crate::scan::{EntryKind, LimitHit, Limits, RealFs, ScriptEntry};
+use crate::watch::{EventSource, WatchError};
+
+use actor::{Echoes, Msg};
 
 /// How many events a slow receiver may lag behind before it misses some (it then re-reads the
 /// snapshot).
 const EVENT_CAPACITY: usize = 256;
 
 /// Everything the UI reads, synchronously: all libraries, the local mappings and the status.
-#[derive(Debug, Clone)]
+///
+/// ## m4b-t10-service fix round 1 (m2)
+/// The per-path data (each library's entries and diagnostics, and the status maps) is read
+/// through [`view`](Self::view) for one connection's environment; it is not public here.
+/// Fix round 2 (m-b): its `Debug` prints counts, never a path.
+#[derive(Clone)]
 pub struct WorkspaceSnapshot {
     pub generation: u64,
-    /// The service's own state (Task 1a's stub: `Unavailable(NotImplemented)`).
+    /// The service's own state: `Scanning` until the registry is read and its libraries are
+    /// started, then `Watching`.
     pub state: LibraryState,
     pub libraries: Arc<[Arc<LibrarySnapshot>]>,
     pub mappings: Arc<[LocalMapping]>,
-    pub git: HashMap<LibraryId, GitState>,
+    pub(crate) git: HashMap<LibraryId, GitState>,
+    /// ## m4b-t10-service: what loading `libraries.toml` found (set aside, newer, unreadable,
+    /// dropped rows), for Settings › Script libraries.
+    pub registry: Arc<[RegistryDiag]>,
 }
 
 impl WorkspaceSnapshot {
@@ -55,20 +125,88 @@ impl WorkspaceSnapshot {
     pub fn library(&self, id: LibraryId) -> Option<&LibrarySnapshot> {
         self.libraries.iter().map(Arc::as_ref).find(|l| l.id == id)
     }
+
+    // ## m4b-t10-service fix round 1
+    /// A snapshot of `libraries` with no mappings and no status (tests, the index's callers).
+    pub fn new(generation: u64, libraries: Vec<Arc<LibrarySnapshot>>) -> Self {
+        WorkspaceSnapshot {
+            generation,
+            state: LibraryState::Watching,
+            libraries: Arc::from(libraries),
+            mappings: Arc::from([]),
+            git: HashMap::new(),
+            registry: Arc::from([]),
+        }
+    }
+    // ## m4b-t10-service
 }
 
-/// One library as last scanned.
-#[derive(Debug, Clone)]
+/// One library as last scanned. Its `Debug` prints counts, never a path (fix round 2, m-b).
+#[derive(Clone)]
 pub struct LibrarySnapshot {
     pub generation: u64,
     pub id: LibraryId,
     pub root: LibraryRoot,
     pub db: LogicalDb,
     pub aliases: Arc<[LogicalDb]>,
-    /// Sorted, folders first.
-    pub entries: Arc<[ScriptEntry]>,
+    /// Sorted, folders first. ## m4b-t10-service fix round 1 (m2): read through
+    /// [`LibraryView::entries`].
+    pub(crate) entries: Arc<[ScriptEntry]>,
     pub state: LibraryState,
-    pub diagnostics: Arc<[LibraryDiag]>,
+    /// ## m4b-t10-service fix round 1 (m2): read through [`LibraryView::diagnostics`].
+    pub(crate) diagnostics: Arc<[LibraryDiag]>,
+}
+
+// ## m4b-t10-service fix round 2 (m-b): a log line never names a file (or a root) of any
+// environment.
+impl fmt::Debug for WorkspaceSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WorkspaceSnapshot")
+            .field("generation", &self.generation)
+            .field("state", &self.state)
+            .field("libraries", &self.libraries)
+            .field("mappings", &self.mappings.len())
+            .field("repository", &self.git.len())
+            .field("registry", &self.registry.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for LibrarySnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LibrarySnapshot")
+            .field("id", &self.id)
+            .field("generation", &self.generation)
+            .field("state", &self.state)
+            .field("entries", &self.entries.len())
+            .field("diagnostics", &self.diagnostics.len())
+            .finish_non_exhaustive()
+    }
+}
+// ## m4b-t10-service
+
+impl LibrarySnapshot {
+    // ## m4b-t10-service fix round 1
+    /// A library snapshot (tests, `binding` callers): no diagnostics, generation 1.
+    pub fn new(
+        root: LibraryRoot,
+        db: LogicalDb,
+        aliases: Vec<LogicalDb>,
+        entries: Vec<ScriptEntry>,
+        state: LibraryState,
+    ) -> Self {
+        LibrarySnapshot {
+            generation: 1,
+            id: root.id,
+            root,
+            db,
+            aliases: Arc::from(aliases),
+            entries: Arc::from(entries),
+            state,
+            diagnostics: Arc::from([]),
+        }
+    }
+    // ## m4b-t10-service
 }
 
 /// Where a library (or the service) stands.
@@ -78,6 +216,10 @@ pub enum LibraryState {
     Watching,
     Polling(PollReason),
     Unavailable(UnavailableReason),
+    /// ## m4b-t10-service (watcher wiring): listed, but nothing watches it (the OS backend was
+    /// lost and no poll source could watch it either, Task 9's `Backend::Unwatched`, or no
+    /// watcher could start). A Refresh still rescans it.
+    Unwatched,
 }
 
 /// Why a library is polled instead of watched (HV-SCRIPT-08 step 1).
@@ -86,6 +228,7 @@ pub enum PollReason {
     NetworkFs,
     /// Linux: the folders would take more than half the free inotify watch budget.
     WatchBudget,
+    /// The event source stopped, or would not start.
     BackendLost,
 }
 
@@ -98,20 +241,177 @@ pub enum UnavailableReason {
     Missing,
     /// The root's canonical path changed (it became a link).
     RootChanged,
+    // ## m4b-t10-service (the T4 carry: every `RootProblem` is mapped)
+    /// The folder cannot be read.
+    Unreadable(io::ErrorKind),
+    /// The folder is (inside) an environment folder; scoping is relative to the root, so it is
+    /// refused ([`LibraryDiag::RootInEnvFolder`] names the folder).
+    InEnvFolder,
+    // ## m4b-t10-service
+    // ## m4b-t10-service fix round 2 (F2, R-T10-5)
+    /// The folder did not answer within `ServiceOptions::job_deadline` (a hung mount); shown so
+    /// until it answers.
+    NotResponding,
+    // ## m4b-t10-service
 }
 
-/// A library diagnostic, shown escaped.
+/// A library diagnostic. Names in it are already in their display form (escaped, NFC).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LibraryDiag {
     Manifest(manifest::Diag),
+    // ## m4b-t10-service (the T4 carry)
+    /// A scan diagnostic (bad names, unknown or contradictory environment folders, unreadable
+    /// folders, a link hidden by its target's scope).
+    Scan(crate::scan::Diag),
+    /// The scan stopped at this limit; what was found is listed (R-M4b-14).
+    ScanStopped(LimitHit),
+    /// This many more diagnostics were not kept.
+    Suppressed(usize),
+    /// The root sits in this environment folder (display form).
+    RootInEnvFolder(String),
+    /// Neither the manifest nor the folder name is a valid logical name: the library binds
+    /// only through a local mapping.
+    NoLogicalName,
+    // ## m4b-t10-service
+    // ## m4b-t10-service fix round 1
+    /// Why the root is `Unavailable(RootChanged)` (I3).
+    RootRefused(RootRefusal),
+    /// This many diagnostics name paths this connection does not show (a [`LibraryView`]
+    /// counts them instead of naming them, m2).
+    HiddenProblems(usize),
+    // ## m4b-t10-service
 }
 
-/// Why attaching a folder was refused.
+// ## m4b-t10-service fix round 1 (I3)
+/// Why a registered root is not served (re-checked at every open and rescan).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootRefusal {
+    /// The registered path is a link or junction now.
+    Link,
+    /// It is not a folder.
+    NotAFolder,
+    /// It resolves to another canonical path than when it was first resolved this session.
+    Moved,
+    /// It is another folder than the one first resolved this session (device, inode).
+    IdentityChanged,
+    FilesystemRoot,
+    HomeFolder,
+    /// An app folder, inside one or containing one.
+    AppFolder,
+    /// Inside or around that library.
+    Overlaps(LibraryId),
+}
+// ## m4b-t10-service
+
+/// Why attaching a folder was refused; nothing was registered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachError {
-    /// Task 1a's stub attaches nothing.
-    NotImplemented,
+    // ## m4b-t10-service (Task 1a's `NotImplemented` is gone)
+    /// The registry refused (read-only, already registered, nested, the home or an app folder,
+    /// too many, or the folder cannot be resolved).
+    Registry(RegistryError),
+    /// `.hacivat/workspace.toml` could not be written (a linked `.hacivat`, say); nothing else
+    /// was written into the folder.
+    Manifest(manifest::WriteError),
+    /// The folder is inside this environment folder (display form).
+    RootInEnvFolder(String),
+    /// A manifest was asked for without a database, and the folder name is not a valid name.
+    NoLogicalName,
+    /// The service has stopped.
+    Stopped,
+    /// ## fix round 1 (I3): the chosen path is a link or junction; attach its target instead
+    /// (a link root is refused at every launch).
+    RootIsLink,
+    // ## m4b-t10-service
 }
+
+// ## m4b-t10-service
+/// Why a local mapping was refused; nothing changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapError {
+    Registry(RegistryError),
+    /// The alias could not be added to the library's manifest (none, linked, newer, full).
+    Alias(manifest::WriteError),
+    /// The database name is not a valid logical name, so it cannot be an alias.
+    BadName(NameError),
+    /// The library is unavailable, so its manifest cannot be written.
+    Unavailable,
+    /// The service has stopped.
+    Stopped,
+}
+
+/// The service's timings and bounds. The defaults are the product's; tests shorten the timers
+/// and may inject a file system.
+#[derive(Clone)]
+pub struct ServiceOptions {
+    /// The watcher's debounce and settle window (alg/28 C6; Task 9's `WatchOpts::window`).
+    pub settle: Duration,
+    /// The status refresh debounce (HV-SCRIPT-11 step 7).
+    pub git_debounce: Duration,
+    /// Fix round 1 (m7): a slow status refresh of polled libraries and of libraries whose
+    /// repository's `.git` is above their root (a commit changes nothing in the library).
+    pub git_backstop: Duration,
+    /// How often an unavailable library is checked again.
+    pub recheck: Duration,
+    pub limits: Limits,
+    pub git: GitLimits,
+    /// The user's home folder, which is never a library (`AttachGuard`).
+    pub home: Option<PathBuf>,
+    /// Fix round 1 (I6): how many library jobs run at once (one per library at most).
+    pub workers: usize,
+    /// Fix round 2 (F2, R-T10-5): a job running longer stops counting against `workers`, and
+    /// its library is shown `Unavailable(NotResponding)` until it answers.
+    pub job_deadline: Duration,
+    /// Fix round 1 (I6): the file system the workers list and `lstat` through (tests inject one
+    /// that stalls).
+    pub fs: Arc<dyn crate::scan::Fs + Send + Sync>,
+}
+
+impl fmt::Debug for ServiceOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServiceOptions")
+            .field("settle", &self.settle)
+            .field("git_debounce", &self.git_debounce)
+            .field("git_backstop", &self.git_backstop)
+            .field("recheck", &self.recheck)
+            .field("workers", &self.workers)
+            .field("job_deadline", &self.job_deadline)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for ServiceOptions {
+    fn default() -> Self {
+        ServiceOptions {
+            settle: crate::watch::DEBOUNCE,
+            git_debounce: Duration::from_millis(500),
+            git_backstop: Duration::from_secs(60),
+            recheck: Duration::from_secs(2),
+            limits: Limits::default(),
+            git: GitLimits::default(),
+            home: std::env::home_dir(),
+            workers: 8,
+            job_deadline: Duration::from_secs(10),
+            fs: Arc::new(RealFs),
+        }
+    }
+}
+// ## m4b-t10-service
+
+// ## m4b-t10-service (watcher wiring)
+/// A builder of one library's event source.
+pub type SourceFactory = Arc<dyn Fn() -> Result<Box<dyn EventSource>, WatchError> + Send + Sync>;
+
+/// Where each library's watcher gets its event source.
+#[derive(Clone)]
+pub enum Sources {
+    /// Task 9's choice per library (`Watcher::open`): the OS watcher, or polling for a network
+    /// file system or past the Linux watch budget.
+    Os,
+    /// The caller's (tests: `testing::FakeHandle::sources`).
+    Custom(SourceFactory),
+}
+// ## m4b-t10-service
 
 /// Why creating, renaming or trashing a file was refused; the library is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,12 +437,20 @@ pub enum ChunkError {
     Io(io::ErrorKind),
 }
 
-/// The library service. Cheap to share by reference; the actor is Task 10's.
+/// The library service. Cheap to share by reference; dropping it stops the actor.
 pub struct LibraryService {
     snapshot: Arc<ArcSwap<WorkspaceSnapshot>>,
     events: broadcast::Sender<LibraryEvent>,
-    paths: LocalPaths,
+    // ## m4b-t10-service
     rt: Handle,
+    tx: mpsc::Sender<Msg>,
+    closed: Arc<AtomicBool>,
+    /// Each watched library's echo table (Task 9's `EchoHandle`), which a save records into.
+    echoes: Echoes,
+    /// How many times a script's content was read for a stamp (I4's test).
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    stamps: Arc<AtomicU64>,
+    // ## m4b-t10-service
 }
 
 impl fmt::Debug for LibraryService {
@@ -154,68 +462,158 @@ impl fmt::Debug for LibraryService {
 }
 
 impl LibraryService {
-    /// Starts the service on the core runtime `rt`, over the registry under `paths`.
+    /// Starts the service on the core runtime `rt`, over the registry under `paths`, watching
+    /// libraries with the OS event source (Task 9).
     ///
-    /// Task 1a stub (fail closed): reads no registry, starts no task, publishes one empty
-    /// snapshot in `LibraryState::Unavailable(NotImplemented)`.
-    pub fn open(paths: &LocalPaths, rt: &Handle) -> (Self, broadcast::Receiver<LibraryEvent>) {
-        let (events, rx) = broadcast::channel(EVENT_CAPACITY);
+    /// ## m4b-t10-service
+    /// Returns at once; the registry is read and the libraries started on the actor
+    /// (`WorkspaceSnapshot::state` is `Scanning` until then). Fix round 1 (R-T10-2): events are
+    /// read through [`subscribe`](Self::subscribe) for one environment, so `open` returns no
+    /// receiver.
+    pub fn open(paths: &LocalPaths, rt: &Handle) -> Self {
+        Self::open_with(paths, rt, Sources::Os, ServiceOptions::default())
+    }
+
+    // ## m4b-t10-service
+    /// [`open`](Self::open) with event sources and options of the caller's (tests pass
+    /// `testing::FakeHandle::sources` and short timers).
+    pub fn open_with(
+        paths: &LocalPaths,
+        rt: &Handle,
+        sources: Sources,
+        opts: ServiceOptions,
+    ) -> Self {
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let empty = WorkspaceSnapshot {
             generation: 0,
-            state: LibraryState::Unavailable(UnavailableReason::NotImplemented),
+            state: LibraryState::Scanning,
             libraries: Arc::from([]),
             mappings: Arc::from([]),
             git: HashMap::new(),
+            registry: Arc::from([]),
         };
-        let service = LibraryService {
-            snapshot: Arc::new(ArcSwap::from_pointee(empty)),
-            events,
+        let snapshot = Arc::new(ArcSwap::from_pointee(empty));
+        let (tx, inbox) = mpsc::channel(actor::INBOX_CAPACITY);
+        let closed = Arc::new(AtomicBool::new(false));
+        let echoes = Echoes::default();
+        let stamps = Arc::new(AtomicU64::new(0));
+        actor::start(actor::Wiring {
             paths: paths.clone(),
             rt: rt.clone(),
-        };
-        (service, rx)
+            opts,
+            tx: tx.clone(),
+            inbox,
+            closed: closed.clone(),
+            snapshot: snapshot.clone(),
+            events: events.clone(),
+            echoes: echoes.clone(),
+            stamps: stamps.clone(),
+            sources,
+        });
+        LibraryService {
+            snapshot,
+            events,
+            rt: rt.clone(),
+            tx,
+            closed,
+            echoes,
+            stamps,
+        }
     }
+    // ## m4b-t10-service
 
     /// The current snapshot; never blocks.
     pub fn snapshot(&self) -> Arc<WorkspaceSnapshot> {
         self.snapshot.load_full()
     }
 
-    /// Another receiver of the service's events.
-    pub fn subscribe(&self) -> broadcast::Receiver<LibraryEvent> {
-        self.events.subscribe()
+    /// A receiver of the service's events for a connection whose environment is `env`.
+    ///
+    /// ## m4b-t10-service fix round 1 (I1, R-T10-2)
+    /// Filtered: a path the connection does not show never reaches it ([`Subscription`]).
+    pub fn subscribe(&self, env: Option<EnvTag>) -> Subscription {
+        Subscription::new(self.events.subscribe(), env, self.snapshot.clone())
     }
 
     /// Registers `path` as a library bound to `db` (the folder name when `None`), writing
     /// `.hacivat/workspace.toml` only when `write_manifest` and the file is absent.
     ///
-    /// Task 1a stub (fail closed): attaches nothing and touches no file.
+    /// ## m4b-t10-service
+    /// `db` is what a manifest written now says. Without one written (`write_manifest ==
+    /// false`, or a manifest already there, which is read and never rewritten) the library
+    /// binds what its folder says, so the effective name is the snapshot's `db` once the
+    /// library has been scanned (m5); a database of the user's choosing is a local mapping
+    /// ([`map`](Self::map)). Refused before anything is written: a link (fix round 1, I3), the
+    /// registry's checks (HV-SCRIPT-01 step 2) and a root inside an environment folder. A
+    /// manifest that cannot be written refuses the attach. The folder's I/O runs on a worker,
+    /// so a hung folder holds up this call only.
     pub async fn attach(
         &self,
         path: PathBuf,
         db: Option<LogicalDb>,
         write_manifest: bool,
     ) -> Result<LibraryId, AttachError> {
-        let _ = (&self.paths, &self.rt, path, db, write_manifest);
-        Err(AttachError::NotImplemented)
+        self.ask(|reply| Msg::Attach {
+            path,
+            db,
+            write_manifest,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(AttachError::Stopped))
     }
 
     /// Forgets library `id`; the folder is never touched.
     ///
-    /// Task 1a stub (fail closed): changes nothing.
+    /// ## m4b-t10-service
+    /// Stops watching it, drops its listing and status, and discards its recovery copies
+    /// (R-T5-4). A job of the library that is still running is abandoned, never waited for.
+    /// `Io(BrokenPipe)` when the service has stopped.
     pub async fn detach(&self, id: LibraryId) -> Result<(), RegistryError> {
-        let _ = id;
-        Err(RegistryError::NotImplemented)
+        self.ask(|reply| Msg::Detach { id, reply })
+            .await
+            .unwrap_or(Err(actor::STOPPED))
     }
 
     /// Adds a local mapping; with `share_alias`, also appends the database as an alias to the
     /// library's manifest.
     ///
-    /// Task 1a stub (fail closed): changes nothing.
-    pub async fn map(&self, m: LocalMapping, share_alias: bool) -> Result<(), RegistryError> {
-        let _ = (m, share_alias);
-        Err(RegistryError::NotImplemented)
+    /// ## m4b-t10-service
+    /// The alias is written first (through `toml_edit`, keeping the teammate's formatting); if
+    /// that fails nothing changes. The mapping goes only into `libraries.toml` (R-M4b-8).
+    pub async fn map(&self, m: LocalMapping, share_alias: bool) -> Result<(), MapError> {
+        self.ask(|reply| Msg::Map {
+            m,
+            share_alias,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(MapError::Stopped))
     }
+
+    // ## m4b-t10-service
+    /// Removes the local mapping of the node `(profile, database)`; whether there was one.
+    pub async fn unmap(
+        &self,
+        profile: ProfileId,
+        database: DatabaseName,
+    ) -> Result<bool, RegistryError> {
+        self.ask(|reply| Msg::Unmap {
+            profile,
+            database,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(actor::STOPPED))
+    }
+
+    /// Drops every mapping of a deleted profile (R-M4b-2); how many.
+    pub async fn drop_profile(&self, profile: ProfileId) -> Result<usize, RegistryError> {
+        self.ask(|reply| Msg::DropProfile { profile, reply })
+            .await
+            .unwrap_or(Err(actor::STOPPED))
+    }
+    // ## m4b-t10-service
 
     /// Reads and decodes a script for a tab under a connection whose environment is `env`.
     ///
@@ -223,15 +621,33 @@ impl LibraryService {
     /// environment is required, as in `fileio::read`, so Task 10 passes it through
     /// (`None` sees no `@`-scoped file).
     ///
-    /// Task 1a stub (fail closed): opens nothing.
+    /// ## m4b-t10-service
+    /// `fileio::read` on the blocking pool, with the default limits (a preview above 20 MiB).
+    /// The file is then remembered as open in a tab (its changes are stamped and announced,
+    /// I4). A library that is not registered or not available answers `Io(NotFound)`.
     pub async fn read(
         &self,
         id: LibraryId,
         rel: &RelPath,
         env: Option<EnvTag>,
     ) -> Result<Decoded, ReadError> {
-        let _ = (id, rel, env);
-        Err(ReadError::NotImplemented)
+        let root = self
+            .root_of(id)
+            .ok_or(ReadError::Io(io::ErrorKind::NotFound))?;
+        let path = rel.clone();
+        let decoded = self
+            .blocking(move || fileio::read(&root, &path, env, ReadLimits::default()))
+            .await
+            .unwrap_or(Err(ReadError::Io(io::ErrorKind::Interrupted)))?;
+        // The watcher learns the open file's stamp (rename pairing, and an edit that keeps
+        // its `(len, mtime)`, R-T9-3); a later reload goes through here too (T9 carry).
+        self.tell(Msg::Remember {
+            id,
+            rel: rel.clone(),
+            stamp: decoded.stamp,
+        })
+        .await;
+        Ok(decoded)
     }
 
     /// Saves a script (HV-SCRIPT-07) for a tab under `env`, recording the echo before the
@@ -239,7 +655,10 @@ impl LibraryService {
     ///
     /// ## m4b-t05-fileio fix round 2 (named exception; I-fr1-1, R-T5-6): `env` as in `read`.
     ///
-    /// Task 1a stub (fail closed): writes nothing.
+    /// ## m4b-t10-service
+    /// `fileio::save_echoing_landing` on the blocking pool; the echo is recorded before the
+    /// new file replaces the old one, so the watcher's report of it announces nothing. The
+    /// file is remembered as open, and its listing entry refreshed.
     pub async fn save(
         &self,
         id: LibraryId,
@@ -248,13 +667,49 @@ impl LibraryService {
         text: SaveText,
         expect: Option<DiskStamp>,
     ) -> Result<DiskStamp, SaveError> {
-        let _ = (id, rel, env, text, expect);
-        Err(SaveError::NotImplemented)
+        let root = self
+            .root_of(id)
+            .ok_or(SaveError::Io(io::ErrorKind::NotFound))?;
+        // The echo goes under the path the bytes land at: a file link's target (R-C0-7). Fix
+        // round 3 (m-f): the one this save's own `join` resolved, never an older listing's.
+        let (path, echo) = (rel.clone(), self.echoes.get(id));
+        let saved = self
+            .blocking(move || {
+                fileio::save_echoing_landing(
+                    &root,
+                    &path,
+                    env,
+                    text,
+                    expect,
+                    &mut |landing, stamp| {
+                        if let Some(echo) = &echo {
+                            echo.record(landing.clone(), *stamp);
+                        }
+                    },
+                )
+            })
+            .await
+            .unwrap_or(Err(SaveError::Io(io::ErrorKind::Interrupted)));
+        let stamp = match &saved {
+            Ok(stamp) | Err(SaveError::SavedButPathChanged(stamp)) => Some(Some(*stamp)),
+            Err(SaveError::Damaged) => Some(None),
+            Err(_) => None,
+        };
+        if let Some(stamp) = stamp {
+            self.tell(Msg::Touched {
+                id,
+                rel: rel.clone(),
+                stamp,
+            })
+            .await;
+        }
+        saved
     }
 
     /// Creates an empty script or a folder.
     ///
-    /// Task 1a stub (fail closed): creates nothing.
+    /// Task 1a stub (fail closed): creates nothing. (Task 10: still a stub; the file operations
+    /// are Task 13's.)
     pub async fn create(
         &self,
         id: LibraryId,
@@ -267,7 +722,7 @@ impl LibraryService {
 
     /// Renames a script or folder inside its library.
     ///
-    /// Task 1a stub (fail closed): renames nothing.
+    /// Task 1a stub (fail closed): renames nothing. (Task 10: still a stub; Task 13's.)
     pub async fn rename(
         &self,
         id: LibraryId,
@@ -280,7 +735,7 @@ impl LibraryService {
 
     /// Moves a script or folder to the OS Trash (Q11).
     ///
-    /// Task 1a stub (fail closed): moves nothing.
+    /// Task 1a stub (fail closed): moves nothing. (Task 10: still a stub; Task 13's.)
     pub async fn trash(&self, id: LibraryId, rel: &RelPath) -> Result<(), FileOpError> {
         let _ = (id, rel);
         Err(FileOpError::NotImplemented)
@@ -291,15 +746,121 @@ impl LibraryService {
     ///
     /// ## m4b-t05-fileio fix round 2 (named exception; I-fr1-1, R-T5-6): `env` as in `read`.
     ///
-    /// Task 1a stub (fail closed): opens nothing.
-    pub fn open_stream(
+    /// ## m4b-t10-service
+    /// Async, and takes the file's `encoding` (the tab's `FileMeta::encoding`): opening is I/O,
+    /// so it runs on the blocking pool, and the stream decodes in the file's own encoding. The
+    /// reader does blocking reads; drive it off the UI thread.
+    ///
+    /// Fix round 1 (I7, R-T10-3), the pass-1/pass-2 contract: pass 1 opens with `expect: None`
+    /// and keeps [`ScriptStream::record`]; pass 2 opens with `Some(record)` and is refused with
+    /// [`ReadError::Changed`] unless the file is the one pass 1 opened, and stops with
+    /// [`ChunkError::Changed`] at the first block whose running hash differs
+    /// ([`PassRecord`]).
+    pub async fn open_stream(
         &self,
         id: LibraryId,
         rel: &RelPath,
         env: Option<EnvTag>,
-    ) -> Result<Box<dyn ScriptChunks>, ReadError> {
-        let _ = (id, rel, env);
-        Err(ReadError::NotImplemented)
+        encoding: TextEncoding,
+        expect: Option<PassRecord>,
+    ) -> Result<ScriptStream, ReadError> {
+        let root = self
+            .root_of(id)
+            .ok_or(ReadError::Io(io::ErrorKind::NotFound))?;
+        let path = rel.clone();
+        self.blocking(move || fileio::open_stream_checked(&root, &path, env, encoding, expect))
+            .await
+            .unwrap_or(Err(ReadError::Io(io::ErrorKind::Interrupted)))
+    }
+
+    // ## m4b-t10-service
+    /// Resolves once the service is quiet: no job running or queued, no open file waiting for
+    /// its stamp, no confirming scan due, no attach under way.
+    ///
+    /// Fix round 3 (m-i): it does **not** wait for the Task 9 watcher's own pending settle. A
+    /// hint handed to a watcher is reported only after the watcher's window (`settle`), so
+    /// `emit(...); settled().await` can resolve before that report arrives and see a listing
+    /// that has not caught up yet. Tests wait on a condition (the listing, an event) first,
+    /// and call `settled()` after it for the service's own follow-up work.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn settled(&self) {
+        let _ = self.ask(|reply| Msg::Settled { reply }).await;
+    }
+
+    /// Fix round 3 (H16): hands library `id` a watch batch as its watcher would, tagged with
+    /// the current watcher's generation, or with `stale`, the previous one (a dropped watcher's
+    /// late batch).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn inject_watch_batch(
+        &self,
+        id: LibraryId,
+        stale: bool,
+        batch: crate::watch::WatchBatch,
+    ) {
+        self.tell(Msg::InjectWatch { id, stale, batch }).await;
+    }
+
+    /// How many times a script's content was read for a stamp (fix round 1, I4: only files
+    /// open in a tab are ever read).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn stamps_read(&self) -> u64 {
+        self.stamps.load(Ordering::Relaxed)
+    }
+
+    /// The root of an available library, from the current snapshot.
+    fn root_of(&self, id: LibraryId) -> Option<LibraryRoot> {
+        let snap = self.snapshot.load();
+        let lib = snap.library(id)?;
+        servable(&lib.state).then(|| lib.root.clone())
+    }
+
+    async fn ask<T>(&self, make: impl FnOnce(oneshot::Sender<T>) -> Msg) -> Option<T> {
+        let (reply, answer) = oneshot::channel();
+        self.tx.send(make(reply)).await.ok()?;
+        answer.await.ok()
+    }
+
+    async fn tell(&self, msg: Msg) {
+        let _ = self.tx.send(msg).await;
+    }
+
+    async fn blocking<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        self.rt.spawn_blocking(f).await.ok()
+    }
+    // ## m4b-t10-service
+}
+
+// ## m4b-t10-service
+
+impl Drop for LibraryService {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
+        let _ = self.tx.try_send(Msg::Shutdown);
     }
 }
-// ## m4b-t01a-seams
+
+/// Whether files of a library in `state` may be opened.
+fn servable(state: &LibraryState) -> bool {
+    matches!(
+        state,
+        LibraryState::Scanning
+            | LibraryState::Watching
+            | LibraryState::Polling(_)
+            | LibraryState::Unwatched
+    )
+}
+
+impl LogicalDb {
+    /// The name of a library that binds nothing automatically: empty, which no parsed name
+    /// (and so no database node) ever equals.
+    pub(crate) fn unbindable() -> Self {
+        LogicalDb(Arc::from(""))
+    }
+}
+// ## m4b-t10-service
