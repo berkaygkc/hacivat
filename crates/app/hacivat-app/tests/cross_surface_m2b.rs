@@ -899,10 +899,18 @@ fn the_explanations_triggers_say_whether_it_is_open(cx: &mut TestAppContext) {
     });
     vcx.run_until_parked();
     // Every read-only access trigger drawn (the capsule's segment, the sheet's value).
+    //
+    // ## m4b-cifix-3-one-frame (named exception in M2b's test; CI 45068616161, Windows): in
+    // ONE frame. The record keeps every declaration made until it is taken, so a recording that
+    // spans `run_until_parked` also holds any later frame: a boot task on the core runtime that
+    // answers late on a slow runner (the history store's open, the script library registry's
+    // probe) redraws the window, and both triggers were counted twice. The app settles first;
+    // then the update draws the dirty window once before it returns (GPUI's test mode, as
+    // `support::full_frame` reads it), and nothing runs between that frame and the take.
     let triggers = |vcx: &VisualTestContext| {
+        vcx.run_until_parked();
         hacivat_ui::popover::a11y_record();
         vcx.cx.update(|cx| cx.refresh_windows());
-        vcx.run_until_parked();
         hacivat_ui::popover::a11y_take()
             .into_iter()
             .filter(|d| {
