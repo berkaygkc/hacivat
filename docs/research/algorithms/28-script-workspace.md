@@ -375,7 +375,7 @@ Run after review findings C1, C2, I2 and m3; throwaway code in the scratchpad, b
   4. **Chooser order and default** (R-M4b-9): focused tab's connection first if a candidate; then local, dev, test, staging, production (reverse of `EnvTag::severity_rank`); untagged; then name. Production is never preselected unless it is the focused connection. One non-production candidate → open directly; production or ≥ 2 → chooser; none → "Open without a connection".
 - **Edge cases:** 20,000 × 32 files (index ≤ 640k names; incremental updates from `LibraryEvent`s); a file visible on no connection; Turkish query `İSTANBUL` finds `istanbul.sql` (I18N-09 folding); the focused connection is production (it may be preselected, being the user's current context).
 - **Test cases (input → expected):**
-  - `goto_ranking_table` — query `ord` over `orders.sql`, `reorder.sql`, `big_orders.sql`, `o_r_d.sql` → that order (prefix, word-prefix, substring, subsequence).
+  - `goto_ranking_table` — query `ord` over `orders.sql`, `reorder.sql`, `big_orders.sql`, `o_r_d.sql` → `orders.sql` (prefix), `big_orders.sql` (word-prefix), `reorder.sql` (substring), `o_r_d.sql` (subsequence). (m4b-t10 named exception, ruling R-T10-1: the earlier text listed the files in input order, contradicting its own labels.)
   - `chooser_never_preselects_production` — candidates prod and staging, focused tab elsewhere → staging preselected.
   - `single_non_production_candidate_opens_directly` — one staging candidate → opens without the chooser; one prod candidate → chooser.
   - `index_reads_no_contents` — a FakeFs that fails any read → the index builds.

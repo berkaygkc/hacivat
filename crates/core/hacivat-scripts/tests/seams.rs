@@ -45,7 +45,7 @@ fn service_with_library() -> (LibraryService, tempfile::TempDir, tempfile::TempD
     let app = tempfile::tempdir().unwrap();
     let lib = tempfile::tempdir().unwrap();
     std::fs::write(lib.path().join("b.sql"), b"SELECT 1;").unwrap();
-    let (s, _rx) = LibraryService::open(
+    let s = LibraryService::open(
         &LocalPaths::under(app.path()),
         &tokio::runtime::Handle::current(),
     );

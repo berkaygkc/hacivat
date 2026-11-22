@@ -282,8 +282,10 @@ pub fn discard_library(paths: &LocalPaths, lib: LibraryId) -> Result<(), Recover
 pub const SWEEP_MIN_AGE: Duration = Duration::from_secs(10 * 60);
 
 /// Removes the copy folders of libraries for which `registered` answers `false` (T5 mf4: a
-/// library detached or lost without its copies being discarded), except folders holding a file
-/// modified in the last [`SWEEP_MIN_AGE`]. Only folders named by a library ID are touched (never
+/// library detached or lost without its copies being discarded), except folders holding a copy
+/// whose instance is alive or of unknown liveness (fix round 1, I2: tested through that
+/// instance's advisory lock, as [`take_all`] does; R-T5-5), and folders holding a file modified
+/// in the last [`SWEEP_MIN_AGE`]. Only folders named by a library ID are touched (never
 /// `instances` or anything else), links are never followed, and an entry that cannot be read is
 /// left alone. Returns how many folders were removed. The caller runs it at launch, and only
 /// over a registry it could read (a read-only or set-aside registry lists nothing to keep).
@@ -316,6 +318,12 @@ pub fn sweep_unregistered(paths: &LocalPaths, registered: &dyn Fn(LibraryId) -> 
         let Some(dir) = folder(paths, id) else {
             continue;
         };
+        // Fix round 1 (I2): a copy whose instance is alive, or whose liveness cannot be told
+        // (R-T5-5), keeps the folder; so does a sidecar that cannot be read. The age is a second
+        // line only.
+        if has_live_copy(paths, &dir) != Some(false) {
+            continue;
+        }
         if touched_since(&dir, now, SWEEP_MIN_AGE) != Some(false) {
             continue;
         }
@@ -324,6 +332,27 @@ pub fn sweep_unregistered(paths: &LocalPaths, registered: &dyn Fn(LibraryId) -> 
         }
     }
     removed
+}
+
+/// Whether a copy in `dir` belongs to an instance that is alive or whose liveness cannot be
+/// tested (fix round 1, I2); `None` when the folder or a sidecar cannot be read (kept too).
+fn has_live_copy(paths: &LocalPaths, dir: &Path) -> Option<bool> {
+    for entry in fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(META_EXT) {
+            continue;
+        }
+        let lstat = fs::symlink_metadata(&path).ok()?;
+        if !lstat.is_file() || lstat.len() > META_MAX_BYTES {
+            return None;
+        }
+        let sidecar: Sidecar = toml::from_str(&fs::read_to_string(&path).ok()?).ok()?;
+        let instance = Uuid::parse_str(&sidecar.instance).ok()?;
+        if liveness(paths, instance) != Liveness::Dead {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 /// Whether a file directly in `dir` was modified within `age` of `now`; `None` when the folder

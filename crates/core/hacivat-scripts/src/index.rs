@@ -20,9 +20,15 @@
 //!   a name prefix > a word prefix inside the name > a substring > a subsequence > a match in the
 //!   library-relative folder or the library's name only. Ties: the shorter path, then the
 //!   library's order in the snapshot, then the path's bytes. ("Recently opened" is the app's.)
-//! - **Scope.** [`ScriptIndex::query`] lists every offered file; [`ScriptIndex::query_for`]
-//!   only those shown under a connection whose environment is `env` (`envscope::visible`, the
-//!   same rule as the tree), so a `@production` file never appears for a staging connection.
+//! - **Scope.** [`ScriptIndex::query_for`] lists only the files shown under a connection whose
+//!   environment is `env` (`envscope::visible`, the same rule as the tree), so a `@production`
+//!   file never appears for a staging connection; [`ScriptIndex::query_for_any`] those shown
+//!   under at least one of several. Fix round 1 (m2): no public query or count spans every
+//!   environment ([`ScriptIndex::len_for`]).
+//! - **Cost** (m3): a query is cut to [`MAX_QUERY_CHARS`] characters. Keys are built on the
+//!   first query of each tolerance, under a `OnceLock`: a second thread querying meanwhile waits
+//!   for it (m4), so Task 15 queries one index from one thread (off the UI thread past 2,000
+//!   entries).
 
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
@@ -144,22 +150,28 @@ impl ScriptIndex {
         ScriptIndex { libs }
     }
 
-    /// How many scripts are offered.
-    pub fn len(&self) -> usize {
+    /// How many scripts are offered in all (every environment; crate-private, m2).
+    pub(crate) fn len(&self) -> usize {
         self.libs.iter().map(|l| l.entries.len()).sum()
+    }
+
+    // ## m4b-t10-service fix round 1 (m2): counts and hits are per environment.
+    /// How many scripts a connection whose environment is `env` is offered.
+    pub fn len_for(&self, env: Option<EnvTag>) -> usize {
+        self.libs
+            .iter()
+            .flat_map(|l| &l.entries)
+            .filter(|e| envscope::visible(&e.entry, env))
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// The best `limit` hits for `q` over every offered script, ranked (module docs).
-    pub fn query(&self, q: &str, opts: SearchOpts, limit: usize) -> Vec<Hit> {
-        self.query_where(q, opts, limit, &|_| true)
-    }
-
-    /// [`query`](Self::query) over the scripts shown under a connection whose environment is
-    /// `env` (`None`: an untagged connection, which sees only unscoped files).
+    /// The best `limit` hits for `q` over the scripts shown under a connection whose
+    /// environment is `env` (`None`: an untagged connection, which sees only unscoped files),
+    /// ranked (module docs).
     pub fn query_for(
         &self,
         q: &str,
@@ -170,15 +182,30 @@ impl ScriptIndex {
         self.query_where(q, opts, limit, &|e| envscope::visible(&e.entry, env))
     }
 
-    /// [`query`](Self::query) over the entries `keep` accepts.
-    pub fn query_where(
+    /// [`query_for`](Self::query_for) over the scripts shown under at least one of `envs` (Task 15:
+    /// the environments of the connections a file could open under).
+    pub fn query_for_any(
+        &self,
+        q: &str,
+        opts: SearchOpts,
+        limit: usize,
+        envs: &[Option<EnvTag>],
+    ) -> Vec<Hit> {
+        self.query_where(q, opts, limit, &|e| {
+            envs.iter().any(|env| envscope::visible(&e.entry, *env))
+        })
+    }
+
+    /// The ranked hits over the entries `keep` accepts.
+    pub(crate) fn query_where(
         &self,
         q: &str,
         opts: SearchOpts,
         limit: usize,
         keep: &dyn Fn(&IndexEntry) -> bool,
     ) -> Vec<Hit> {
-        let q = q.trim();
+        // m3: a pasted page of text is not a script name; matching it whole costs seconds.
+        let q = cap(q.trim());
         let matcher = Matcher::new(q, opts);
         // Candidates hold indexes only; the hits' strings are copied for the `limit` best.
         let mut found: Vec<(Sort, &IndexEntry, Vec<Range<usize>>)> = Vec::new();
@@ -226,6 +253,16 @@ impl ScriptIndex {
             .collect()
     }
 }
+
+/// The longest query matched, in characters (fix round 1, m3).
+pub const MAX_QUERY_CHARS: usize = 256;
+
+fn cap(q: &str) -> &str {
+    q.char_indices()
+        .nth(MAX_QUERY_CHARS)
+        .map_or(q, |(i, _)| &q[..i])
+}
+// ## m4b-t10-service
 
 /// Whether a scanned entry is offered: a script file that some connection can be shown, and a
 /// link that opens.

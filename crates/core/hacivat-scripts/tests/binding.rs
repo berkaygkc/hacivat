@@ -1,7 +1,6 @@
 //! M4b Task 3: logical-database binding (HV-SCRIPT-02; R-M4b-3, -7, -32).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use hacivat_proto::ProfileId;
@@ -21,20 +20,19 @@ fn db(name: &str) -> LogicalDb {
 /// A scanned library in folder `folder`, bound to `database` with `aliases`.
 fn lib(folder: &str, database: &str, aliases: &[&str]) -> LibrarySnapshot {
     let path = PathBuf::from("/libraries").join(folder);
-    LibrarySnapshot {
-        generation: 1,
-        id: LibraryId::new(),
-        root: LibraryRoot {
+    // ## m4b-t10-service fix round 1 (named exception, m2): the listing fields are
+    // crate-private now; the constructor builds the same snapshot.
+    LibrarySnapshot::new(
+        LibraryRoot {
             id: LibraryId::new(),
             path: path.clone(),
             canonical: path,
         },
-        db: db(database),
-        aliases: aliases.iter().map(|a| db(a)).collect::<Vec<_>>().into(),
-        entries: Arc::from([]),
-        state: LibraryState::Watching,
-        diagnostics: Arc::from([]),
-    }
+        db(database),
+        aliases.iter().map(|a| db(a)).collect(),
+        Vec::new(),
+        LibraryState::Watching,
+    )
 }
 
 fn node(profile: ProfileId, database: &str) -> DbNode {

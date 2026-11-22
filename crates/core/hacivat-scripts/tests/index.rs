@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime};
 use hacivat_l10n::search::{MatchMode, SearchOpts};
 use hacivat_proto::EnvTag;
 use hacivat_scripts::envscope::entry_scope;
-use hacivat_scripts::index::{Rank, ScriptIndex};
+use hacivat_scripts::index::{Hit, Rank, ScriptIndex};
 use hacivat_scripts::testing::logical;
 use hacivat_scripts::{
     EntryKind, LibraryId, LibraryRoot, LibrarySnapshot, LibraryState, LinkState, RelPath,
@@ -61,31 +61,34 @@ fn library(folder: &str, entries: Vec<ScriptEntry>) -> Arc<LibrarySnapshot> {
     let id = LibraryId::new();
     // A root that does not exist: the index never touches the disk (`index_reads_no_contents`).
     let path = std::env::temp_dir().join("hv-t10-no-such-dir").join(folder);
-    Arc::new(LibrarySnapshot {
-        generation: 1,
-        id,
-        root: LibraryRoot {
+    Arc::new(LibrarySnapshot::new(
+        LibraryRoot {
             id,
             path: path.clone(),
             canonical: path,
         },
-        db: logical(folder),
-        aliases: Arc::from([]),
-        entries: Arc::from(entries),
-        state: LibraryState::Watching,
-        diagnostics: Arc::from([]),
-    })
+        logical(folder),
+        Vec::new(),
+        entries,
+        LibraryState::Watching,
+    ))
 }
 
 fn snapshot(libs: Vec<Arc<LibrarySnapshot>>) -> WorkspaceSnapshot {
-    WorkspaceSnapshot {
-        generation: 1,
-        state: LibraryState::Watching,
-        libraries: Arc::from(libs),
-        mappings: Arc::from([]),
-        git: Default::default(),
-        registry: Arc::from([]),
-    }
+    WorkspaceSnapshot::new(1, libs)
+}
+
+/// Every environment a connection can have, untagged included.
+fn every_env() -> Vec<Option<EnvTag>> {
+    std::iter::once(None)
+        .chain(EnvTag::ALL.into_iter().map(Some))
+        .collect()
+}
+
+/// The query over every file some connection is shown (fix round 1, m2: there is no
+/// unscoped query).
+fn query(i: &ScriptIndex, q: &str, o: SearchOpts, limit: usize) -> Vec<Hit> {
+    i.query_for_any(q, o, limit, &every_env())
 }
 
 fn idx(paths: &[&str]) -> ScriptIndex {
@@ -93,7 +96,7 @@ fn idx(paths: &[&str]) -> ScriptIndex {
     ScriptIndex::build(&snapshot(vec![library("orders", entries)]))
 }
 
-fn names(hits: &[hacivat_scripts::index::Hit]) -> Vec<String> {
+fn names(hits: &[Hit]) -> Vec<String> {
     hits.iter().map(|h| h.display_name.clone()).collect()
 }
 
@@ -103,7 +106,7 @@ fn names(hits: &[hacivat_scripts::index::Hit]) -> Vec<String> {
 fn index_ranks_prefix_first() {
     let i = idx(&["reports/monthly.sql", "monthly_old.sql", "x/my_month.sql"]);
     assert_eq!(
-        names(&i.query("month", opts_en(), 10)),
+        names(&query(&i, "month", opts_en(), 10)),
         ["monthly_old.sql", "monthly.sql", "my_month.sql"]
     );
 }
@@ -111,8 +114,8 @@ fn index_ranks_prefix_first() {
 #[test]
 fn index_is_turkish_tolerant_for_tr() {
     let i = idx(&["müşteri_raporu.sql"]);
-    assert_eq!(i.query("musteri", opts_tr(), 10).len(), 1);
-    assert_eq!(i.query("musteri", opts_en_strict(), 10).len(), 0); // D-074
+    assert_eq!(query(&i, "musteri", opts_tr(), 10).len(), 1);
+    assert_eq!(query(&i, "musteri", opts_en_strict(), 10).len(), 0); // D-074
 }
 
 #[test]
@@ -129,11 +132,11 @@ fn query_over_10k_entries_under_5ms() {
     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     let i = idx(&refs);
     // The keys are built once per tolerance, on the first query.
-    let _ = i.query("warm", opts_tr(), 50);
+    let _ = query(&i, "warm", opts_tr(), 50);
     let mut best = u128::MAX;
     for _ in 0..5 {
         let t = Instant::now();
-        let hits = i.query("rep42", opts_tr(), 50);
+        let hits = query(&i, "rep42", opts_tr(), 50);
         best = best.min(t.elapsed().as_micros());
         assert!(!hits.is_empty());
     }
@@ -147,7 +150,7 @@ fn query_over_10k_entries_under_5ms() {
 #[test]
 fn goto_ranking_table() {
     let i = idx(&["o_r_d.sql", "reorder.sql", "big_orders.sql", "orders.sql"]);
-    let hits = i.query("ord", opts_en(), 10);
+    let hits = query(&i, "ord", opts_en(), 10);
     assert_eq!(
         names(&hits),
         ["orders.sql", "big_orders.sql", "reorder.sql", "o_r_d.sql"]
@@ -166,11 +169,13 @@ fn goto_ranking_table() {
 
 #[test]
 fn index_reads_no_contents() {
-    // Every library root here is a path that does not exist: building and querying the index
-    // touches no file system at all, so it can read no contents (R-M4b-15).
+    // alg/28 names "a FakeFs that fails any read". The index has no file-system seam at all:
+    // `index.rs` imports no I/O (the tripwire in `tests/service.rs` checks it), and it takes
+    // only a snapshot. So the roots here are paths that do not exist; building and querying
+    // the index touches no file system, so it can read no contents (R-M4b-15; review m10).
     let i = idx(&["a.sql", "notes/b.md"]);
-    assert_eq!(i.len(), 2);
-    assert_eq!(names(&i.query("b", opts_en(), 10)), ["b.md"]);
+    assert_eq!(i.len_for(None), 2);
+    assert_eq!(names(&query(&i, "b", opts_en(), 10)), ["b.md"]);
 }
 
 // --- the brief: names, escaping, scoping -----------------------------------------------------
@@ -182,7 +187,7 @@ fn musteri_finds_musteri_segment_also_when_the_name_is_nfd() {
         "müşteri_segment.sql",
         "eski/mu\u{308}s\u{327}teri_segment.sql",
     ]);
-    let hits = i.query("musteri", opts_tr(), 10);
+    let hits = query(&i, "musteri", opts_tr(), 10);
     assert_eq!(hits.len(), 2);
     // The display form is NFC either way (R-M4b-23); the identity keeps the OS bytes.
     assert!(hits.iter().all(|h| h.display_name == "müşteri_segment.sql"));
@@ -195,33 +200,33 @@ fn musteri_finds_musteri_segment_also_when_the_name_is_nfd() {
         "müşteri_segment.sql",
         "shorter path first"
     );
-    assert!(i.query("musteri", opts_en_strict(), 10).is_empty());
+    assert!(query(&i, "musteri", opts_en_strict(), 10).is_empty());
 }
 
 #[test]
 fn exact_name_outranks_prefix() {
     let i = idx(&["orders_old.sql", "deep/folder/orders.sql"]);
-    let hits = i.query("orders", opts_en(), 10);
+    let hits = query(&i, "orders", opts_en(), 10);
     assert_eq!(names(&hits), ["orders.sql", "orders_old.sql"]);
     assert_eq!(hits[0].rank, Rank::Exact);
     assert_eq!(hits[1].rank, Rank::Prefix);
     // Touching repeats are not an exact name.
     let i = idx(&["ordOrd.sql"]);
-    assert_ne!(i.query("ord", opts_en(), 10)[0].rank, Rank::Exact);
+    assert_ne!(query(&i, "ord", opts_en(), 10)[0].rank, Rank::Exact);
 }
 
 #[test]
 fn folder_path_match_ranks_last_and_limit_applies() {
     let i = idx(&["reports/x.sql", "reports_2026.sql", "y.sql"]);
-    let hits = i.query("reports", opts_en(), 10);
+    let hits = query(&i, "reports", opts_en(), 10);
     assert_eq!(names(&hits), ["reports_2026.sql", "x.sql"]);
     assert_eq!(hits[1].rank, Rank::Path);
     assert_eq!(hits[1].display_folder, "reports");
     assert!(hits[1].ranges.is_empty());
-    assert_eq!(i.query("reports", opts_en(), 1).len(), 1);
+    assert_eq!(query(&i, "reports", opts_en(), 1).len(), 1);
     // An empty query lists every file, shortest path first.
     assert_eq!(
-        names(&i.query("  ", opts_en(), 10)),
+        names(&query(&i, "  ", opts_en(), 10)),
         ["y.sql", "x.sql", "reports_2026.sql"]
     );
 }
@@ -229,7 +234,7 @@ fn folder_path_match_ranks_last_and_limit_applies() {
 #[test]
 fn highlight_ranges_index_the_display_name() {
     let i = idx(&["big_orders.sql"]);
-    let h = &i.query("ord", opts_en(), 10)[0];
+    let h = &query(&i, "ord", opts_en(), 10)[0];
     assert_eq!(&h.display_name[h.ranges[0].clone()], "ord");
 }
 
@@ -248,14 +253,14 @@ fn index_never_lists_hidden_or_out_of_scope_files() {
         entry("loop.sql", LinkState::Loop),
     ];
     let i = ScriptIndex::build(&snapshot(vec![library("orders", entries)]));
-    let all = |hits: Vec<hacivat_scripts::index::Hit>| {
+    let all = |hits: Vec<Hit>| {
         let mut v: Vec<String> = hits.iter().map(|h| h.rel.as_str().to_owned()).collect();
         v.sort();
         v
     };
     // Folders are not offered either; `@prod` and the contradiction never are.
     assert_eq!(
-        all(i.query("", opts_en(), 100)),
+        all(query(&i, "", opts_en(), 100)),
         ["@production/p.sql", "@staging/s.sql", "a.sql"]
     );
     assert_eq!(
@@ -273,7 +278,7 @@ fn index_never_lists_hidden_or_out_of_scope_files() {
     // An untagged connection sees only unscoped files.
     assert_eq!(all(i.query_for("", opts_en(), 100, None)), ["a.sql"]);
     assert!(
-        i.query("x", opts_en(), 100)
+        query(&i, "x", opts_en(), 100)
             .iter()
             .all(|h| h.rel.as_str() != "@prod/x.sql")
     );
@@ -300,7 +305,7 @@ fn a_stored_scope_narrower_than_the_path_hides_the_file() {
 #[test]
 fn display_names_escape_invisible_and_bidi_characters() {
     let i = idx(&["a\u{202E}lqs.sql", "zero\u{200B}width.sql"]);
-    let hits = i.query("", opts_en(), 10);
+    let hits = query(&i, "", opts_en(), 10);
     let shown = names(&hits);
     assert!(shown.contains(&"a<U+202E>lqs.sql".to_owned()), "{shown:?}");
     assert!(
@@ -310,7 +315,10 @@ fn display_names_escape_invisible_and_bidi_characters() {
     // The library name is escaped the same way.
     let lib = library("lib\u{202E}x", vec![entry("a.sql", LinkState::Plain)]);
     let i = ScriptIndex::build(&snapshot(vec![lib]));
-    assert_eq!(i.query("a", opts_en(), 10)[0].library_name, "lib<U+202E>x");
+    assert_eq!(
+        query(&i, "a", opts_en(), 10)[0].library_name,
+        "lib<U+202E>x"
+    );
 }
 
 #[test]
@@ -319,9 +327,72 @@ fn ties_follow_library_order() {
     let b = library("second", vec![entry("same.sql", LinkState::Plain)]);
     let (ida, idb) = (a.id, b.id);
     let i = ScriptIndex::build(&snapshot(vec![a, b]));
-    let hits = i.query("same", opts_en(), 10);
+    let hits = query(&i, "same", opts_en(), 10);
     assert_eq!(
         hits.iter().map(|h| h.library).collect::<Vec<_>>(),
         [ida, idb]
+    );
+}
+
+// --- fix round 1 ------------------------------------------------------------------------------
+
+/// m3: a pasted page of text is cut to `MAX_QUERY_CHARS` (H5 measured 2 s at 64 KiB).
+#[test]
+fn a_huge_query_is_cut_to_the_cap() {
+    let i = idx(&["report_müşteri.sql"]);
+    let huge: String = "rprt".chars().cycle().take(65_536).collect();
+    let capped: String = huge
+        .chars()
+        .take(hacivat_scripts::index::MAX_QUERY_CHARS)
+        .collect();
+    assert_eq!(
+        names(&query(&i, &huge, opts_tr(), 10)),
+        names(&query(&i, &capped, opts_tr(), 10))
+    );
+    assert_eq!(
+        names(&query(&i, "rprt", opts_tr(), 10)),
+        ["report_müşteri.sql"]
+    );
+}
+
+/// The reviewer's H5, kept as a measurement: the capped cost of a huge query.
+#[test]
+fn h5_huge_query_cost() {
+    let paths: Vec<String> = (0..2_000)
+        .map(|n| format!("f{}/report_{n}_müşteri.sql", n % 31))
+        .collect();
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let i = idx(&refs);
+    let _ = query(&i, "warm", opts_tr(), 50);
+    for len in [64usize, 4_096, 65_536] {
+        let q: String = "rprt".chars().cycle().take(len).collect();
+        let t = Instant::now();
+        let hits = query(&i, &q, opts_tr(), 50);
+        println!(
+            "HV-FACT t10 huge_query len={len} us={} hits={}",
+            t.elapsed().as_micros(),
+            hits.len()
+        );
+    }
+}
+
+/// m2: counts are per environment.
+#[test]
+fn counts_are_per_environment() {
+    let i = idx(&[
+        "a.sql",
+        "@production/p.sql",
+        "@staging/s.sql",
+        "@prod/x.sql",
+    ]);
+    assert_eq!(i.len_for(None), 1);
+    assert_eq!(i.len_for(Some(EnvTag::Staging)), 2);
+    assert_eq!(i.len_for(Some(EnvTag::Production)), 2);
+    let staging = i.query_for_any("", opts_en(), 10, &[None, Some(EnvTag::Staging)]);
+    assert_eq!(staging.len(), 2);
+    assert!(
+        staging
+            .iter()
+            .all(|h| !h.rel.as_str().starts_with("@production"))
     );
 }
