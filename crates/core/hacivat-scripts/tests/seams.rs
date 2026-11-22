@@ -104,17 +104,20 @@ fn env_set_has_one_bit_per_tag() {
     );
 }
 
+// ## m4b-t06-secrets (named exception): the scanner is Task 6's now (`tests/secrets.rs`); the
+// seam keeps its shape: clean text is clean, an `Other` span is never reported, a value is.
 #[test]
-fn secret_stub_reports_the_whole_text() {
-    let f = scan_secrets("SELECT 1", &[]);
+fn secret_scanner_seam_reports_values_only() {
+    assert!(scan_secrets("SELECT 1", &[]).is_empty());
+    assert!(scan_secrets("SELECT password_hash", &[(7..20, SpanKind::Other)]).is_empty());
+    let f = scan_secrets("PASSWORD 'x'", &[(9..12, SpanKind::Password)]);
     assert_eq!(f.len(), 1);
-    assert_eq!(f[0].range, 0..8);
-    assert_eq!(f[0].kind, SecretKind::Unscanned);
-    // Spans that say "nothing here" do not make the stub pass either.
-    let f = scan_secrets("SELECT password_hash", &[(7..20, SpanKind::Other)]);
-    assert_eq!(f.len(), 1);
-    assert_eq!(f[0].range, 0..20);
+    assert_eq!(
+        (f[0].range.clone(), f[0].kind),
+        (9..12, SecretKind::Password)
+    );
 }
+// ## m4b-t06-secrets
 
 // ## m4b-t03-registry / m4b-t04-scanner (named exceptions, merged as a union): the manifest
 // and pathsafe stub assertions are gone; Task 3 wrote `tests/manifest.rs`, Task 4 `tests/pathsafe.rs`.

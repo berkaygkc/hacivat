@@ -714,3 +714,64 @@ More than 256 dataless folders answer `Unavailable(Dataless)`, which keeps the e
 - So the doc-hidden hooks stay test-only, whoever depends on the crate.
 
 **Cost.** Measured on macOS, debug build: 170 ms for a 10,000-file status (its 10,100 loose objects are checked) and 345 ms for 20,000 dataless paths.
+
+## m4b-t06 — secret-literal scanner
+
+HV-SCRIPT-10; R-M4b-17, -28; alg/28 C9.
+
+- **Two inputs, one crate boundary (R-M4b-28).** `scan_secrets(text, history_spans)` takes the history redactor's spans as an argument; the app passes `hacivat_exec::history::secret_spans(text)` mapped one to one onto `SpanKind`. `hacivat-scripts` still never depends on `hacivat-exec` (dev-dependency only, for the tests).
+- **Value positions only (C9).** `secret_spans` is built from `scan_into`, the scan `redact` itself runs, so every range the history masks lies inside a span (`secret_spans_cover_what_redact_masks`, and a property test in `redact.rs`).
+  - Each mask now records a role: value position, comment value, connection string, meta-command line, or armed. `redact` and `scrub` ignore the role, and their output is unchanged.
+  - A value counts only when the word before it names the value itself: its last `_` part is the secret part (`PASSWORD`, `MASTER_PASSWORD`, `client_secret`, `api_key`, `@pw`). A word that only mentions a secret does not count, so `WHERE password_hash = 'x'` and `passwd_changed = now()` stay quiet. They are still masked in history.
+  - `IDENTIFIED … BY`, crypto-function arguments, `PRAGMA key`, `ATTACH … KEY` and `INTO @pw` always count.
+  - Inside a connection string or a psql meta-command line, the `password=` values, the secret pairs, the `Bearer` credentials and the URI password come back as `ConnectionValue` spans, never the whole string. So `'the password hash'` is quiet.
+  - Code quoted in code (a dollar body, or a string with doubled quotes) is read again, up to the redactor's depth of 3, and only its quoted values count.
+- **Not reported.** Empty and all-`*` literals; bind parameters (`:pw`, `$1`, `?`, `@pw`); templates (`${…}`, `{{…}}`, `<…>`); a bare `NULL`; a bare word that calls a function. A literal default such as `'changeme'` is reported.
+- **Token formats** live in `crates/core/hacivat-scripts/data/secret_patterns.toml`.
+  - Each row has `id`, `kind`, `regex`, `source` (an alg/28 S9–S16 document) and an optional `check`.
+  - The rows cover AWS, the GitHub prefixes and `github_pat_`, Slack, Stripe live keys, Stripe test keys as `TestKey`, the Google API key shape, PEM private-key labels, JWTs (the header must decode to a JSON object naming `alg`), and URI userinfo passwords.
+  - Publishable Stripe keys are never reported. There is no entropy rule (R-M4b-17).
+  - The patterns are written in our own words from those documents; no scanner's rule file was read.
+- **Linear time, no locale casing.** The regexes are compiled once and run on the `regex` crate, which never backtracks. Lines are found by a binary search over the newline offsets, and overlapping findings of one kind are merged. Casing is ASCII only.
+  - Measured on 2 MiB in a release build: `scan_secrets` takes 3 ms; `secret_spans` takes 66 ms, all of it the redactor's two readings.
+  - The app runs both off the UI thread, so the UI-thread share is 0.
+- **Allow marker.** A line whose comment holds `hacivat:allow-secret` drops its own findings; fix round 1 (m1) made "comment" exact (below). Known limit: a block comment opened on an earlier line does not carry the marker forward.
+- **Fail closed.**
+  - A pattern table that fails to parse, has a bad row, a duplicate id, an uncited source or an unknown key answers one `Unscanned` finding over the whole text.
+  - A span outside the text, or one that cuts a character, is reported with its range clamped, never dropped.
+- **Never the value.** `SecretFinding` holds a range, a zero-based line (`\r\n` counts once) and a kind. Nothing in the scanner logs; tests check `Debug`.
+- **Named exceptions.**
+  - `redact.rs`: the role field, set at every mask call site, and the `named` scan flag set where `Expect::Value` is set, all behaviour-neutral for `redact`/`scrub`.
+  - The two stub tests that pinned the fail-closed stubs now pin the filled shape: `hacivat-scripts/tests/seams.rs` `secret_scanner_seam_reports_values_only` and `hacivat-exec/tests/m4b_stubs.rs` `exec_secret_spans_tell_value_from_armed` (renamed in fix round 1, m9).
+  - `hacivat-exec/tests/history.rs`: new cases only.
+
+### Fix round 1 (review I1, I2, m1–m11; controller rulings)
+
+- **Byte identity, kept as a test.** `redact.rs` carries M3's redactor verbatim as the test-only module `redact/m3_base.rs`. `redact_is_byte_identical_to_m3` (SQL-shaped vocabulary) and `…_on_any_text` (proptest, 3,000 cases each) plus a fixed corpus compare `redact` and both `scrub`s with it.
+- **One behaviour change, found by that test: a vertical tab.** `u8::is_ascii_whitespace` leaves out 0x0b, so a vertical tab outside quotes made an empty token, and M3's scan never returned. The history writer and the secret scan spun forever on such text. The whitespace run now takes 0x0b too.
+  - M3 never returned once a vertical tab started a token, so on every text M3 returns on, this line is never reached and the output is byte-identical.
+  - `a_vertical_tab_never_hangs_the_scan` and `a_vertical_tab_is_white_space` guard it.
+  - The controller rules whether this M3 fix stays here (see the report).
+- **I1, comment prose.** `Mask` records the depth of the scan that made it. A bare-word value found in a comment body or in quoted code is `Armed`; this includes a word one reading masked inside a comment while the other read it as code (`# password reset flow`). Quoted values, `password=` values, URI passwords and tokens in comments still count. `-- IDENTIFIED BY tiger` is now quiet (alg/28 [Known gap]).
+- **I2, pair names.** A `password=`/JSON/`Bearer` value inside a string, comment or meta-command line is a `ConnectionValue` only when its pair's name names the value (`last_part_names_a_value` over the name's `_`/`-`/`.`/camelCase parts: `password`, `Pwd`, `apiKey`, `aws_secret_access_key`, SQLite `?key=`). `password_changed_at`, `password_policy`, `password_min_length` and `password_hash` stay quiet. URI passwords and `Bearer` credentials always count.
+- **m2, crypto keys.** A call records its key arguments, so only the key or password position (at the call's own depth) is a `Value`: `crypt` argument 1, `pgp_pub_decrypt` arguments 2 and 3, argument 2 of the others. Data, options and nested calls (`gen_salt('bf')`) are `Armed`, and history still masks them all.
+- **m1, allow marker.** A linear lexer in `secrets.rs` reads the text twice: MySQL (backslash escapes, backquotes, `#`, `--` before space, non-nesting blocks, `/*!` as code) and standard (nesting blocks, `$tag$` bodies). The marker counts only inside a comment that starts on its line in both readings, so a `#` comment never silences (MySQL only), and neither do markers in strings or after `#>`.
+- **m3.** Overlapping findings merge across kinds, keeping the most specific (private key > token > JWT > test key > connection string > password).
+- **m4, m5.** The AWS tail is base32 with a digit (`aws_shape`; about 4 % of real ids, all letters, are missed). Slack tokens start their first run with a digit and are at least 24 characters (`min_len`, [Inferred]).
+- **m6.** More placeholders are quiet: `%s`, `%(name)s`, `$NAME`, `{name}`, `${{ … }}`, `{{ … }}` with spaces or dots, `[REDACTED]`. A quoted `'null'` is a literal and is reported (m11).
+- **m7, m8.** New rows: `pgp-private-key-block` (alg/28 S21, RFC 4880 §6.2) and `sql-server-sp-addlogin` (S22; kind `password`). The loader now pins sources to alg/28 S9–S16, S21 and S22. Split tokens, positional `INSERT … VALUES` and comment prose are alg/28 [Known gap]s. The EXECUTE IMMEDIATE history gap is M3's and goes to the PO list, not touched here.
+- **m9, m10.** Stale test names and docs are fixed (`lib.rs` doc line, `m4b_stubs.rs` module doc). JWT fixtures are joined from parts.
+
+### Fix round 2 (re-review I-fr1-1, n1–n6)
+
+- **I-fr1-1.** A name whose last part *ends with* `PASSWORD`, `PASSWD`, `PWD` or `SECRET` names the value (`PGPASSWORD=`, `sslpassword=`, `dbpassword=`). Parts are compared uppercased, so ASCII case does not matter. `passwordhash`, `password_hash`, `password_policy` and `password_file` stay quiet.
+- **n1, a `#` glued to a name.** MySQL does read `app#1 …` as a comment: "From a `#` character to the end of the line", and `#` is not an unquoted-identifier character (MySQL 8.4 Reference Manual §11.7, §11.2). The warning still reports the standard reading's value there (`CREATE USER app#1 IDENTIFIED BY tiger`): the cross-reading downgrade of I1 skips a line whose first `#` is glued to a name, because the safe answer is to warn. One pass builds a per-line table, so the check stays linear. The check looks only at the **first** `#` on the line (p2). A line such as `SELECT '#'; ALTER USER u IDENTIFIED BY tiger # note` can therefore misjudge which `#` opened MySQL's comment, and in each such case it errs towards a warning, never towards silence.
+- **n2.** `{…}`, `{{…}}`, `${…}` and `${{…}}` are placeholders only when they hold name bytes (`[A-Za-z0-9_.-]`, spaces around allowed). `'{s3cr3t-P@ss!}'` reports, while `'{hunter2}'` reads as a name and stays quiet. `<…>` stays broad, as alg/28's `'<password>'` asks, so `'<P@ss w0rd>'` is quiet.
+- **n3, identity tests.**
+  - Proptests: the vocabulary and `\PC` identity proptests now run 20,000 cases each, and the vocabulary adds NUL, 0x01, 0x1f, FF, CR, DEL, NBSP, U+0085, U+3000, U+FEFF and more masked-path words.
+  - Fixed generator: `redact_is_byte_identical_to_m3_with_control_bytes` runs 20,000 cases over statement pieces and every control byte but VT. It asserts that at least a quarter are masked; measured: 15,204.
+  - Cost: about 110 s of debug test time at 20,000 cases.
+  - Gating (p3): the two identity proptests default to 4,000 cases and run 20,000 when `HACIVAT_IDENTITY_FULL=1`. The test reads that variable itself, because `with_cases` overrides `PROPTEST_CASES`. `ci.yml` `build-test` sets the variable only on the nightly schedule (`docker-full` runs only `--ignored` tests, so it never reaches these). The fixed 20,000-case control-byte test always runs.
+- **n4.** The allow marker needs a space after `--` (MySQL's rule). alg/28 step 1 and the two hint strings (`hv-scripts-secret-gutter-hint`, `hv-scripts-secret-allow`, en and tr; a named exception in T1b's FTL block) say so. The design mock's copy tables keep the old wording until the controller syncs them.
+- **n6, accepted.** `EXEC sp_password 'old', 's3cret', 'l'` reports only `'old'`. The redactor arms on `SP_PASSWORD`, and its first value takes the value position. The line is still flagged, which is all the save dialog needs.
+- **n5** (non-ASCII spaces, a lone CR in a meta line, `Bearer` before a TAB) is pre-existing M3 behaviour and is on the PO list; it is not touched.

@@ -4334,7 +4334,7 @@ hv-scripts-secret-gutter =
     }
 # Surface 8 (Secret warning).
 # Review: PO
-hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırda hacivat:allow-secret içeren bir yorum onu susturur.
+hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırdaki -- hacivat:allow-secret gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur.
 # Surface 8 (Secret warning).
 # Variables:
 #   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
@@ -4356,7 +4356,7 @@ hv-scripts-secret-git = Bu dosyayı commit ederseniz değer, depoyu okuyabilen h
 # Variables:
 #   $marker (String) - the literal hacivat:allow-secret (never translated).
 # Review: PO
-hv-scripts-secret-allow = Bir satırı bilerek tutmak için o satıra { $marker } içeren bir yorum ekleyin.
+hv-scripts-secret-allow = Bir satırı bilerek tutmak için o satıra -- { $marker } (tirelerden sonra bir boşlukla) ya da /* { $marker } */ yorumunu ekleyin.
 # Surface 8 (Secret warning).
 # Review: PO
 hv-scripts-secret-remember = Yine de kaydet, siz çıkana kadar bu sekme için hatırlanır.
