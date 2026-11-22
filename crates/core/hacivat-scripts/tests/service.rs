@@ -2730,8 +2730,10 @@ async fn h15_manifest_change_rebinds_on_a_polled_library() {
         db(&svc).as_deref() == Some("orders")
     })
     .await;
-    // Let a pass or two record the manifest's stamp first.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // ## m4b-cifix-3-manifest-poll (named exception in T10's test): no wait for a pass. The
+    // poll source takes its baseline when the root is watched, before the scan that read
+    // "orders"; the 150 ms sleep here hid a miss whenever the first pass came after the rewrite
+    // (CI 45068616161, macOS), and a rewrite right away is the harder case.
     rebind_to_billing(d.path());
     wait_until("the new binding", || db(&svc).as_deref() == Some("billing")).await;
     print_fact("t10-fr3 h15 source=poll db=billing");
