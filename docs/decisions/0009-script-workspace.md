@@ -1231,3 +1231,53 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
   - The test built its absolute entries from its own `canonical`, which strips `\\?\`.
   - The product's placeholder test reads file attributes and never compares spellings, so this was a test bug.
   - The test now spells absolute entries with `std::fs::canonicalize`. The hook's doc says so.
+
+## m4b-cifix-2 — fix round (review C1, C2, I1, I2; rulings R-CI2-1 to R-CI2-3)
+
+- **C1 (R-CI2-1): the birth time is part of a root's identity on Linux only.**
+  - On APFS and HFS+, setting a folder's modification time earlier than its birth time moves the birth time back. `rsync -a` or `tar -x` into the root (a `./` entry), `cp -Rp` and `touch -t` all do it.
+  - With the birth time in the identity on macOS, an unchanged library was refused (`RootChanged`, `IdentityChanged`) after a restore. The reviewer's probe showed this end to end.
+  - Linux userland cannot set `btime`, and ext4's inode reuse is what needs it. APFS never reuses an object id, and HFS+ CNIDs only grow, so macOS keeps `(dev, ino)`.
+  - **Residual:** a network or FUSE mount on Linux may report a settable birth time (an NFSv4 `time_create`, an SMB server's creation time). A restore into such a root can still refuse the library. Such libraries are polled; accepted.
+  - The cross-session check stays inode only (`m-a`, a T3 carry); with this fix it matters on Linux only.
+  - Tests:
+    - `a_root_whose_time_is_set_back_stays_the_same_library`: `touch -t 200001010000 <root>`, then a new file is listed and the library stays `Watching`. It failed with the birth time on macOS.
+    - The unit test asserts that a set-back time keeps the identity.
+- **C2 (R-CI2-2): index paths are never resolved unless they are plain, on every OS.**
+  - The n2 alias loop joined the first components of an **index entry** (untrusted repository content) to the worktree and resolved them. On Windows, `Path::join` with a `\\host\share` component replaces the base, so `canonicalize` would contact the host and answer its NTLM challenge.
+  - The same class already existed on Unix: an absolute `/net/<host>` head made `lstat` start macOS's automounter.
+  - Now `map::is_plain_index_path` requires every `/`-separated component to pass `gix::validate::path::component` with the Windows, NTFS and HFS protections on (`Options::default()`), and to be one `Normal` path component. That refuses:
+    - empty, `.` and `..` components;
+    - `\` anywhere, and drive, UNC, verbatim and device prefixes;
+    - NTFS streams and reserved device names (`aux.sql` too);
+    - a trailing dot or space;
+    - every spelling of `.git` (`GIT~1`, `.GIT`);
+    - control bytes, and non-UTF-8.
+  - `map::alias_candidate` also refuses 8.3 short-name components (`~` and a digit), since an alias is for a case-only rename. It checks that the joined path stays under the worktree, component for component.
+  - Where it applies:
+    - before n2's `same_file`;
+    - at every index entry: an entry that is not plain leaves the index copy, so gix never stats it, and inside the library it is `Unknown(UnsafePath)`, a new `UnknownWhy` with the highest precedence;
+    - in `into_library`, where such a path is keyed as the index spells it and never looked up;
+    - in `Lister::on_disk`, before any call.
+  - **Consequence:** on Unix a tracked name that Windows cannot hold (`a:b.sql`, `x?.sql`, `aux.sql`, a trailing dot) is now `Unknown(UnsafePath)` rather than compared. It is never a wrong badge.
+  - Tests:
+    - `hostile_index_paths_are_never_candidates`: UNC, drive, verbatim, device, `..` in each form, absolute `/net/x`, empty components, NTFS streams, reserved names, trailing dot and space, `.git`/`GIT~1`/`.GIT`, NUL, non-UTF-8, and 8.3 names (plain, but never an alias);
+    - `an_unsafe_index_path_is_unknown_and_never_looked_up`.
+- **I1 (R-CI2-3): a repository operation is one burst.**
+  - The quiet-window rule split a checkout whose events paused for one window into a burst under the limit, which settled one file at a time, and the rest. That is how `git_checkout_2000_is_one_rescan` failed under load.
+  - A hint on `.git/index.lock` makes the reconciler `lstat` it. It looks only at the library's own `.git`, which must be a real folder, never a link or gitfile. If the lock is held:
+    - `Debouncer::begin_operation` starts an operation, bounded by `REPO_OP_MAX` = 30 s;
+    - the burst does not end on a quiet window, and its distinct paths count across the whole operation;
+    - nothing settles but open files (R-T9-6);
+    - an overflow's rescan waits for the operation's end.
+  - The lock is looked at again once per window, so a removal no hint reports is still seen within a window.
+  - When the lock goes, an overflowed operation falls back to the ordinary rule from that moment: one `Rescan` once the hints are quiet for a window. So what FSEvents still delivers after the unlock is swallowed too. An operation under the limit releases its held looks one window later.
+  - A lock that outlives the bound is stale. The operation ends there (one `Rescan` if it overflowed), and no new operation starts, and no per-window look continues, until the lock has been seen gone.
+  - A repository above the library root gives no lock signal, and keeps the ordinary rule.
+  - Tests:
+    - `a_checkout_that_pauses_mid_way_is_one_rescan_while_the_index_is_locked`: 1,200 files with a 340 ms pause mid-checkout give `[Rescan]`, and only the open file is reported while the lock is held. The no-lock control reports 1,200 files one by one.
+    - `a_small_operation_releases_its_files_when_the_lock_goes_unheard`.
+    - `a_stale_index_lock_holds_at_most_once_for_the_bound`.
+    - All three fail when the lock hint is ignored.
+- **I2.** `watch_real`'s fixtures are an hour old, so no fixture file is racy when a watcher starts. `folder_move_is_seen_as_renames_for_known_contents` run alone: 0/20 failures (before: about 9 in 10).
+- **m1.** `NoCancel` does not forward `Watcher::configure` or `paths_mut`. The defaults apply, so the inner watcher can never be reconfigured, link following included. Its doc says so.
