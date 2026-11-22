@@ -168,7 +168,21 @@ pub struct StreamSplitter {
     held_max: usize,
     items_max: usize,
     // ## end m4b-t08-stream-hold
+    // ## m4b-t12-script-run (named exception, T12 fix round 1 I4: an accessor's count only)
+    /// The items the last split of the held text counted in what stays held (`Exact` path).
+    held_items: usize,
+    // ## end m4b-t12-script-run
 }
+
+// ## m4b-t12-script-run (named exception)
+/// Where a raw item of an analysis starts in the held text.
+fn raw_start(i: &RawItem) -> usize {
+    match i {
+        RawItem::Stmt(s) => usize::from(s.strict.start()),
+        RawItem::Empty(r) => usize::from(r.start()),
+    }
+}
+// ## end m4b-t12-script-run
 
 // ## m4b-t08-stream-hold
 /// What the eager cap rule decides on a pass ([`StreamSplitter::eager_check`]).
@@ -199,6 +213,8 @@ impl StreamSplitter {
             policy,
             held_max: STREAM_HELD_MAX,
             items_max: STREAM_HELD_ITEMS_MAX,
+            // ## m4b-t12-script-run (named exception)
+            held_items: 0,
         }
     }
 
@@ -217,6 +233,19 @@ impl StreamSplitter {
     pub fn held_len(&self) -> usize {
         self.held.len()
     }
+
+    // ## m4b-t12-script-run (named exception, T12 fix round 1 I4)
+    /// On the `Exact` path (every dialect but MySQL/MariaDB under `Eager`): how many items the
+    /// last split of the held text found in what is still held (0 before the first split, after
+    /// a stop, and on the eager path, which has its own item cap). The held text is split
+    /// again whenever it has doubled, so this lags the text by at most that much. "Run as
+    /// script" refuses a file once it passes [`STREAM_HELD_ITEMS_MAX`]. Reading it changes
+    /// nothing the stream gives out.
+    #[doc(hidden)]
+    pub fn held_items(&self) -> usize {
+        self.held_items
+    }
+    // ## end m4b-t12-script-run
 
     /// Whether the stream has stopped: an item that refuses ([`StreamItem::refuses`]) ended it,
     /// and nothing more is given out. Not enough for R-M4b-47's first pass: an `Ambiguous`
@@ -247,10 +276,14 @@ impl StreamSplitter {
         let a = self.analysis();
         let mut out = Vec::new();
         if let Some(x) = self.settled(&a) {
+            // ## m4b-t12-script-run (named exception): the count only.
+            self.held_items = a.items.iter().filter(|i| raw_start(i) >= x).count();
             self.give_out(&a, x, &mut out);
             self.tried = 0;
             return out;
         }
+        // ## m4b-t12-script-run (named exception): the count only.
+        self.held_items = a.items.len();
         self.tried = n;
         if n > STREAM_STATEMENT_MAX
             && let Some(RawItem::Stmt(s)) = a.items.last()
@@ -263,6 +296,8 @@ impl StreamSplitter {
             out.push(StreamItem::TooLong { offset: self.base });
             self.stopped = true;
             self.held = String::new();
+            // ## m4b-t12-script-run (named exception)
+            self.held_items = 0;
         }
         out
     }

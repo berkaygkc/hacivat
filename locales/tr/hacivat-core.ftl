@@ -1210,17 +1210,17 @@ exec-script-copy = Dosyadaki hiçbir şey çalıştırılmadı: { NUMBER($line, 
 # Review: PO
 exec-script-file-changed-before = Dosyadaki hiçbir şey çalıştırılmadı: Hacivat okurken dosya diskte değişti.
 # Review: PO
-exec-script-decode-failed = Dosya, kendi kodlamasında geçerli bir metin değil.
+exec-script-decode-failed = Dosyadaki hiçbir şey çalıştırılmadı: dosya, kendi kodlamasında geçerli bir metin değil.
 # Review: PO
-exec-script-read-failed = Dosya okunamadı.
+exec-script-read-failed = Dosyadaki hiçbir şey çalıştırılmadı: dosya okunamadı.
 # Review: PO
 exec-script-modes-differ = Dosyadaki hiçbir şey çalıştırılmadı: bağlantının tırnak ve kaçış ayarları değişti. Yeniden çalıştırın.
 # Review: PO
 exec-script-cancelled-before = Durduruldu. Dosyadaki hiçbir şey çalıştırılmadı.
 # Review: PO
-exec-script-cancelled = Durduruldu. Önceki ifadeler çalıştı.
+exec-script-cancelled = Durduruldu. Durdurmadan önceki ifadeler çalıştı.
 # Review: PO
-exec-script-file-changed = Dosya diskte değişti; önceki ifadeler çalıştı.
+exec-script-file-changed = Dosya diskte değiştiği için çalıştırma durdu. Değişiklikten önceki ifadeler çalıştı.
 # Review: PO
 exec-script-denied = { NUMBER($line, useGrouping: "false") }. satırda durduruldu: ifade gönderilmedi. Önceki ifadeler çalıştı.
 # Review: PO
@@ -1231,3 +1231,16 @@ exec-script-context-changed = { NUMBER($line, useGrouping: "false") }. satırda 
 exec-script-context-unconfirmed = { NUMBER($line, useGrouping: "false") }. satırda durduruldu: Hacivat bağlantının ayarlarını okuyamadı, bu yüzden ifade gönderilmedi. Önceki ifadeler çalıştı.
 # Review: PO
 exec-script-not-sent = { NUMBER($line, useGrouping: "false") }. satırda durduruldu: bağlantı ifadeyi çalıştırmadı. Önceki ifadeler çalıştı.
+# ## m4b-t12-script-run fix round 1
+# Review: PO
+exec-script-denied-before = Dosyadaki hiçbir şey çalıştırılmadı: { NUMBER($line, useGrouping: "false") }. satırdaki ifade gönderilmezdi.
+# Review: PO
+exec-script-connection-changed = { NUMBER($line, useGrouping: "false") }. satırda durduruldu: bağlantının ortamı ya da salt okunur ayarı değişti. Önceki ifadeler çalıştı.
+# Review: PO
+exec-script-reconnected = Bağlantı sıfırlandı; betik { NUMBER($n, useGrouping: "false") }. ifadeden sonra durdu. Sonrasında hiçbir şey gönderilmedi.
+# Review: PO
+exec-script-split-changed = { NUMBER($line, useGrouping: "false") }. satırda durduruldu: dosya ikinci okumada farklı çıktı. Önceki ifadeler çalıştı.
+# Review: PO
+exec-script-decode-failed-mid = Durduruldu: dosyanın geri kalanı kendi kodlamasında geçerli bir metin değil. Önceki ifadeler çalıştı.
+# Review: PO
+exec-script-read-failed-mid = Durduruldu: dosyanın geri kalanı okunamadı. Önceki ifadeler çalıştı.

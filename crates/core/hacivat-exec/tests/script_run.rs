@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use common::t12::{Answers, FileScript, Pass2, Rig, rig, script};
+use common::t12::{Answers, FileScript, Pass2, Rig, managed_rig, pg_context, rig, script};
 use common::{eventually, fake_pg, pg_error};
 use hacivat_driver::fake::{FakeDriver, FakeQuery};
 use hacivat_exec::{
-    ChunkError, ConfirmAnswer, ErrorPolicy, HistoryMeta, HistoryOrigin, HistoryRecord, Outcome,
-    SCRIPT_CHUNK_BYTES, ScriptHistory, ScriptPhase, ScriptPosition, ScriptRefuseReason,
+    ChunkError, ConfirmAnswer, ErrorPolicy, HistoryMeta, HistoryOrigin, HistoryRecord, LogMsg,
+    Outcome, SCRIPT_CHUNK_BYTES, ScriptHistory, ScriptPhase, ScriptPosition, ScriptRefuseReason,
     ScriptRunOutcome, ScriptStopReason,
 };
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
@@ -75,6 +75,7 @@ fn every_reason_has_its_words_in_both_locales() {
         ScriptRefuseReason::ClientCommand,
         ScriptRefuseReason::Params(None),
         ScriptRefuseReason::CopyUnsupported,
+        ScriptRefuseReason::Denied(GateReason::of("exec-gate-read-only")),
         ScriptRefuseReason::Read(ChunkError::Changed),
         ScriptRefuseReason::Read(ChunkError::Decode),
         ScriptRefuseReason::Read(ChunkError::Io(std::io::ErrorKind::Other)),
@@ -89,6 +90,9 @@ fn every_reason_has_its_words_in_both_locales() {
         ScriptStopReason::ConfirmCancelled,
         ScriptStopReason::ContextChanged,
         ScriptStopReason::ContextUnconfirmed,
+        ScriptStopReason::ConnectionChanged,
+        ScriptStopReason::Reconnected,
+        ScriptStopReason::Read(ChunkError::Io(std::io::ErrorKind::Other)),
         ScriptStopReason::NotSent,
         ScriptStopReason::Split(ScriptRefuseReason::NoBoundary),
     ];
@@ -171,24 +175,50 @@ async fn classified_bytes_equal_sent_bytes() {
         .await;
     assert!(matches!(out, ScriptRunOutcome::Finished(_)), "{out:?}");
     let classified = r.classified.lock().unwrap().clone();
-    assert_eq!(classified, units);
-    assert_eq!(r.sent(&units), classified);
+    // Pass 1 gates every unit (R-T12-2), then pass 2 classifies each again right before it is
+    // sent: the second reading is exactly what was sent.
+    assert_eq!(classified, [units, units].concat());
+    assert_eq!(r.sent(&units), classified[units.len()..]);
 }
 
 #[tokio::test]
 async fn read_only_profile_denies_writes_unit_by_unit() {
+    // R-T12-2 (fix round 1, I5): every unit meets the gate in pass 1 too; the write a read-only
+    // connection denies refuses the file, so not even the read before it runs.
     let r = rig(common::t12::pg_read_only(3), true).await;
     // The session sends its own `SELECT 1` at connect: the script reads other numbers.
     let units = ["SELECT 10", "DELETE FROM t WHERE id = 1", "SELECT 20"];
     let src = script("SELECT 10;\nDELETE FROM t WHERE id = 1;\nSELECT 20;\n").boxed();
     let (out, _) = r.run(r.request(src, None, Answers::new(&[]))).await;
-    let (reason, pos) = stopped(&out);
+    let (reason, pos) = refused(&out);
     assert!(
-        matches!(&reason, ScriptStopReason::Denied(g) if g.fluent_id == "exec-gate-read-only"),
+        matches!(&reason, ScriptRefuseReason::Denied(g) if g.fluent_id == "exec-gate-read-only"),
         "{reason:?}"
     );
     assert_eq!(pos, at(2, 2));
-    assert_eq!(r.sent(&units), ["SELECT 10"]);
+    nothing_of(&r, &units);
+}
+
+#[tokio::test]
+async fn a_denied_statement_late_in_a_file_sends_nothing() {
+    // R-T12-2: a denial three chunks in refuses the file before the first unit runs. The log
+    // says why, naming the line, with the gate's own reason on the next line.
+    let r = rig(common::t12::pg_read_only(8), true).await;
+    let text = format!("{}DELETE FROM t WHERE id = 1;\n", chunked_script(3));
+    let line = text.lines().count() as u64;
+    let (out, _) = r
+        .run(r.request(script(&text).boxed(), None, Answers::new(&[])))
+        .await;
+    let (reason, pos) = refused(&out);
+    assert!(
+        matches!(reason, ScriptRefuseReason::Denied(_)),
+        "{reason:?}"
+    );
+    assert_eq!(pos.map(|p| p.line), Some(line));
+    nothing_of(&r, &["SELECT 1", "SELECT 2", "SELECT 3"]);
+    assert!(r.all_sent().iter().all(|q| !q.starts_with("SELECT '")));
+    let ids: Vec<&str> = r.log.lines().iter().map(|l| l.msg.fluent_id()).collect();
+    assert_eq!(ids, ["exec-script-denied-before", "exec-gate-read-only"]);
 }
 
 #[tokio::test]
@@ -242,7 +272,6 @@ async fn stop_on_error_is_the_default() {
     ];
     let src = script(&format!("{};\n{};\n{};\n", units[0], units[1], units[2]));
     let req = r.request(src.boxed(), None, Answers::new(&[]));
-    assert_eq!(req.policy, ErrorPolicy::StopOnError);
     let (out, _) = r.run(req).await;
     let ScriptRunOutcome::Failed(s) = out else {
         panic!("expected a failure, got {out:?}");
@@ -682,6 +711,33 @@ async fn one_line_pg_script_over_64_mib_is_refused() {
     assert!(r.all_sent().iter().all(|q| !q.starts_with("SELECT '")));
 }
 
+/// `unit` repeated on one line, `left` bytes in all, read 64 KiB at a time (a pass 2 is never
+/// reached: its file is refused).
+struct Repeat {
+    unit: &'static str,
+    left: usize,
+}
+
+impl hacivat_exec::ScriptChunks for Repeat {
+    fn next_chunk(&mut self) -> Option<Result<String, ChunkError>> {
+        if self.left == 0 {
+            return None;
+        }
+        let n = (SCRIPT_CHUNK_BYTES / self.unit.len())
+            .min(self.left / self.unit.len())
+            .max(1);
+        self.left = self.left.saturating_sub(n * self.unit.len());
+        Some(Ok(self.unit.repeat(n)))
+    }
+
+    fn reopen_verified(
+        self: Box<Self>,
+    ) -> futures::future::BoxFuture<'static, Result<Box<dyn hacivat_exec::ScriptChunks>, ChunkError>>
+    {
+        Box::pin(async { Err(ChunkError::Changed) })
+    }
+}
+
 /// This process's resident set, in KiB (`ps`).
 fn rss_kib() -> u64 {
     let out = std::process::Command::new("ps")
@@ -746,7 +802,15 @@ async fn mysql_dump_of_150_mb_runs_in_constant_memory() {
         return;
     }
     let units = 150 * 1024;
-    let r = rig(mysql(), false).await;
+    let mut r = rig(mysql(), false).await;
+    // The rig's pool records every text it classifies; pass 1 classifies every unit, so this
+    // run uses a pool that keeps nothing (its RSS is the runner's).
+    r.runner = hacivat_exec::ScriptRunner::new(
+        std::sync::Arc::new(hacivat_exec::ExecService::new(
+            hacivat_results::MemoryBudget::new(1 << 30, 256 << 20),
+        )),
+        hacivat_exec::ClassifyPool::new(1),
+    );
     let before = rss_kib();
     let (tx, mut rx) = tokio::sync::watch::channel(hacivat_exec::ScriptProgress::default());
     let req = r.request(
@@ -780,4 +844,213 @@ async fn mysql_dump_of_150_mb_runs_in_constant_memory() {
     assert_eq!(s.units_run, units as u64);
     assert!(s.peak_held <= 256 << 10, "held {}", s.peak_held);
     assert!(growth_mib < 64, "RSS grew {growth_mib} MiB in pass 1");
+}
+
+// ---- fix round 1: lexing modes (I1) --------------------------------------------------------
+
+/// A split that differs across `standard_conforming_strings` (review P3).
+const SCS_SPLIT: &str = "SELECT 'a\\';\nDELETE FROM t WHERE id = 1;\n-- ';\n";
+
+#[tokio::test]
+async fn unknown_modes_must_read_alike() {
+    // P3: the session's modes are unknown, and the file reads differently under `on` and
+    // `off`: nothing is sent (M3's rule).
+    let r = rig(fake_pg(), false).await;
+    let (out, _) = r
+        .run(r.request(script(SCS_SPLIT).boxed(), None, Answers::new(&[])))
+        .await;
+    assert_eq!(refused(&out), (ScriptRefuseReason::ModesDiffer, None));
+    assert!(
+        r.all_sent().iter().all(|q| !q.contains("DELETE")),
+        "{:?}",
+        r.all_sent()
+    );
+    assert!(r.all_sent().iter().all(|q| !q.starts_with("SELECT 'a")));
+}
+
+#[tokio::test]
+async fn known_session_modes_split_the_file() {
+    // The session reads `off`: the file is split in its modes, so the backslash escapes the
+    // quote and the DELETE is inside one string, never a statement of its own.
+    let r = rig(pg_context(&["off", "off", "off", "off"]), false).await;
+    let (out, _) = r
+        .run(r.request(
+            script(SCS_SPLIT).boxed(),
+            None,
+            Answers::new(&[ConfirmAnswer::Execute]),
+        ))
+        .await;
+    assert!(matches!(out, ScriptRunOutcome::Finished(_)), "{out:?}");
+    assert_eq!(
+        r.sent(&["DELETE FROM t WHERE id = 1"]),
+        Vec::<String>::new()
+    );
+    let whole = "SELECT 'a\\';\nDELETE FROM t WHERE id = 1;\n-- '";
+    assert_eq!(r.sent(&[whole]), [whole]);
+}
+
+#[tokio::test]
+async fn a_tab_that_read_other_modes_is_refused() {
+    // M3's rule: the tab read `on`, the session now reads `off`.
+    let r = rig(pg_context(&["off"]), false).await;
+    let mut req = r.request(script("SELECT 1;\n").boxed(), None, Answers::new(&[]));
+    req.modes_known = true;
+    assert!(req.dialect.modes.standard_conforming_strings);
+    let (out, _) = r.run(req).await;
+    assert_eq!(refused(&out), (ScriptRefuseReason::ModesDiffer, None));
+    nothing_of(&r, &["SELECT 1"]);
+}
+
+#[tokio::test]
+async fn a_mode_change_mid_run_stops_before_the_next_unit() {
+    // The file was split under `on`; the SET turns it off, so the rest no longer reads as it
+    // was split: the run stops before statement 3.
+    let r = rig(pg_context(&["on", "off", "off", "off"]), false).await;
+    let units = [
+        "SELECT 1",
+        "SET standard_conforming_strings = off",
+        "SELECT 2",
+    ];
+    let src = script("SELECT 1;\nSET standard_conforming_strings = off;\nSELECT 2;\n").boxed();
+    let (out, _) = r.run(r.request(src, None, Answers::new(&[]))).await;
+    assert_eq!(stopped(&out), (ScriptStopReason::ContextChanged, at(3, 3)));
+    assert_eq!(r.sent(&units), units[..2]);
+}
+
+// ---- fix round 1: the live environment tag (I2) -------------------------------------------
+
+#[tokio::test]
+async fn a_retag_to_production_gates_the_next_unit_as_production() {
+    // Off production `DROP TABLE` runs without a question; retagged to production while the
+    // second chunk is read, the next unit asks with a typed name (and Cancel stops the run).
+    let text = format!(
+        "SELECT 1;\n{}DROP TABLE t;\n",
+        padding(2 * SCRIPT_CHUNK_BYTES)
+    );
+    let r = rig(fake_pg(), false).await;
+    let env = r.env.clone();
+    let src = script(&text).hook(move |pass, read| {
+        if pass == 2 && read > SCRIPT_CHUNK_BYTES {
+            env.send_replace(Some(EnvTag::Production));
+        }
+    });
+    let port = Answers::new(&[ConfirmAnswer::Cancel]);
+    let (out, _) = r
+        .run(r.request(src.boxed(), Some(EnvTag::Dev), port.clone()))
+        .await;
+    assert_eq!(stopped(&out).0, ScriptStopReason::ConfirmCancelled);
+    let asked = port.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(
+        asked[0].production && asked[0].type_to_confirm.is_some(),
+        "{asked:?}"
+    );
+    assert_eq!(r.sent(&["SELECT 1", "DROP TABLE t"]), ["SELECT 1"]);
+    // Without the retag, the same file runs to the end on dev.
+    let r = rig(fake_pg(), false).await;
+    let port = Answers::new(&[]);
+    let (out, _) = r
+        .run(r.request(script(&text).boxed(), Some(EnvTag::Dev), port.clone()))
+        .await;
+    assert!(matches!(out, ScriptRunOutcome::Finished(_)), "{out:?}");
+    assert!(port.asked_units().is_empty());
+    assert_eq!(
+        r.sent(&["SELECT 1", "DROP TABLE t"]),
+        ["SELECT 1", "DROP TABLE t"]
+    );
+}
+
+#[tokio::test]
+async fn a_retag_between_the_gate_and_the_send_stops() {
+    // M3's B-M4/A-M4 rule: the tag is read again right before the send. A retag while the
+    // dialog is open stops the run, and the confirmed statement is not sent.
+    let r = rig(fake_pg(), false).await;
+    let env = r.env.clone();
+    let port = Answers::with_hook(&[ConfirmAnswer::Execute], move || {
+        env.send_replace(Some(EnvTag::Production));
+    });
+    let src = script("SELECT 1;\nDELETE FROM t;\n").boxed();
+    let (out, _) = r.run(r.request(src, Some(EnvTag::Dev), port)).await;
+    assert_eq!(
+        stopped(&out),
+        (ScriptStopReason::ConnectionChanged, at(2, 2))
+    );
+    assert_eq!(r.sent(&["SELECT 1", "DELETE FROM t"]), ["SELECT 1"]);
+}
+
+// ---- fix round 1: a lost or reset connection (I3) ------------------------------------------
+
+#[tokio::test]
+async fn a_reset_connection_stops_the_run() {
+    // The connection is lost between units (a ping fails while the second chunk is read) and
+    // the session recovers in place: the new connection lost what the file set, so nothing
+    // more is sent, and the log says where the script stopped.
+    let reset = hacivat_driver::RawError {
+        kind: hacivat_driver::RawErrorKind::Io(std::io::ErrorKind::ConnectionReset),
+        server: None,
+    };
+    let r = managed_rig(fake_pg().pings(vec![Err(reset)])).await;
+    let session = r.session.clone();
+    let text = format!("SELECT 1;\n{}SELECT 2;\n", padding(2 * SCRIPT_CHUNK_BYTES));
+    let src = script(&text).hook(move |pass, read| {
+        if pass == 2 && read > SCRIPT_CHUNK_BYTES && read <= 2 * SCRIPT_CHUNK_BYTES {
+            drop(session.submit(hacivat_session::session::Request::Ping));
+        }
+    });
+    let (out, _) = r.run(r.request(src.boxed(), None, Answers::new(&[]))).await;
+    assert_eq!(stopped(&out).0, ScriptStopReason::Reconnected);
+    assert_eq!(r.sent(&["SELECT 1", "SELECT 2"]), ["SELECT 1"]);
+    let ids: Vec<&str> = r.log.lines().iter().map(|l| l.msg.fluent_id()).collect();
+    assert!(ids.contains(&"exec-script-reconnected"), "{ids:?}");
+}
+
+// ---- fix round 1: the item cap off MySQL (I4) and the log --------------------------------
+
+#[tokio::test]
+async fn one_line_of_tiny_statements_is_refused_by_the_item_cap() {
+    // Review P7: `Exact` holds about 50-80 bytes per byte of tiny statements on one line. The
+    // runner refuses once the held text holds more than 65,536 items, long before 64 MiB. The
+    // 65 MiB line is generated (no copy held by the test), so the test's peak RSS is the
+    // runner's (fix round 1 measures it with `/usr/bin/time -l`).
+    let r = rig(fake_pg(), false).await;
+    let line = Box::new(Repeat {
+        unit: "SELECT 1;",
+        left: 65 << 20,
+    });
+    let (out, progress) = r.run(r.request(line, None, Answers::new(&[]))).await;
+    assert_eq!(refused(&out), (ScriptRefuseReason::NoBoundary, at(1, 1)));
+    assert_eq!(progress.units_run, 0);
+    assert!(
+        progress.bytes < 4 << 20,
+        "read {} bytes before the refusal",
+        progress.bytes
+    );
+    nothing_of(&r, &["SELECT 1"]);
+}
+
+#[tokio::test]
+async fn log_lines_carry_the_units_place_in_the_file() {
+    // Review: each unit is its own run, so the service numbers it 1; the console's log says
+    // the statement's number in the file, and one summary line covers the run.
+    let r = rig(fake_pg().queries(vec![failing("UPDATE nope")]), false).await;
+    let text = "UPDATE a SET x = 1 WHERE id = 1;\nUPDATE b SET x = 1 WHERE id = 1;\nUPDATE nope SET x = 1 WHERE id = 1;\n";
+    let (out, _) = r
+        .run(r.request(script(text).boxed(), None, Answers::new(&[])))
+        .await;
+    assert!(matches!(out, ScriptRunOutcome::Failed(_)), "{out:?}");
+    let msgs: Vec<LogMsg> = r.log.lines().iter().map(|l| l.msg.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| matches!(m, LogMsg::Error { n: 3, .. })),
+        "{msgs:?}"
+    );
+    assert!(!msgs.iter().any(|m| matches!(m, LogMsg::Error { n: 1, .. })));
+    let summaries: Vec<&LogMsg> = msgs
+        .iter()
+        .filter(|m| matches!(m, LogMsg::Summary(_)))
+        .collect();
+    assert_eq!(summaries.len(), 1, "{msgs:?}");
+    let LogMsg::Summary(s) = summaries[0] else {
+        unreachable!()
+    };
+    assert_eq!((s.executed, s.failed, s.total), (2, 1, 3));
 }

@@ -1777,14 +1777,14 @@ exec-script-params = Nothing in the file was run: the statement on line { NUMBER
 exec-script-copy = Nothing in the file was run: line { NUMBER($line, useGrouping: "false") } has COPY … FROM STDIN or TO STDOUT, which needs the client to stream data.
 # The file on disk changed between the check and the run.
 exec-script-file-changed-before = Nothing in the file was run: the file changed on disk while Hacivat read it.
-exec-script-decode-failed = The file isn't valid text in its encoding.
-exec-script-read-failed = The file couldn't be read.
+exec-script-decode-failed = Nothing in the file was run: the file isn't valid text in its encoding.
+exec-script-read-failed = Nothing in the file was run: the file couldn't be read.
 # The connection reads quotes and escapes differently from the way the tab splits the file.
 exec-script-modes-differ = Nothing in the file was run: the connection's settings for quotes and escapes changed. Run it again.
 exec-script-cancelled-before = Stopped. Nothing in the file was run.
 # The run stopped part-way; the statements before the stop ran.
-exec-script-cancelled = Stopped. The statements before it ran.
-exec-script-file-changed = The file changed on disk; the statements before it ran.
+exec-script-cancelled = Stopped. The statements before the stop ran.
+exec-script-file-changed = The file changed on disk, so the run stopped. The statements before the change ran.
 # The safety check refused a statement; its own reason follows on its own row.
 # Variables:
 #   $line (Number) - the 1-based line in the file, e.g. 12.
@@ -1801,3 +1801,23 @@ exec-script-context-unconfirmed = Stopped at line { NUMBER($line, useGrouping: "
 # Variables:
 #   $line (Number) - the 1-based line in the file, e.g. 12.
 exec-script-not-sent = Stopped at line { NUMBER($line, useGrouping: "false") }: the connection didn't run the statement. The statements before it ran.
+# ## m4b-t12-script-run fix round 1
+# The gate refuses a statement whatever the user answers (a read-only connection, a statement
+# Hacivat couldn't check): nothing in the file runs. The gate's own reason follows on its row.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-denied-before = Nothing in the file was run: the statement on line { NUMBER($line, useGrouping: "false") } wouldn't be sent.
+# The profile's environment or read-only setting changed between the check and the send.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-connection-changed = Stopped at line { NUMBER($line, useGrouping: "false") }: the connection's environment or read-only setting changed. The statements before it ran.
+# The connection was lost or reset mid-run; the new connection lacks what the file set.
+# Variables:
+#   $n (Number) - how many statements of the file were handled before the stop, e.g. 41.
+exec-script-reconnected = The connection was reset, so the script stopped after statement { NUMBER($n, useGrouping: "false") }. Nothing after it was sent.
+# The file read differently the second time (never on an unchanged file).
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-split-changed = Stopped at line { NUMBER($line, useGrouping: "false") }: the file read differently the second time. The statements before it ran.
+exec-script-decode-failed-mid = Stopped: the rest of the file isn't valid text in its encoding. The statements before it ran.
+exec-script-read-failed-mid = Stopped: the rest of the file couldn't be read. The statements before it ran.

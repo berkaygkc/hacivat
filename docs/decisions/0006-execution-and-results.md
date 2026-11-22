@@ -1384,17 +1384,43 @@ HV-EXEC-15; R-M4b-20, R-M4b-24, R-M4b-47, R-T8-1, R-T8-3, R-T10-3).
   one-to-one with an exhaustive `match`. `hacivat-exec` still does not depend on
   `hacivat-scripts`.
 - **Two passes, every dialect (R-M4b-47).** Pass 1 streams the file with `StreamPolicy::Eager` and
-  runs nothing. The whole file is refused when any batch of `feed` or `finish` has an item that
-  refuses (`stream::any_refuses`, never only `stopped()`), or when an item is an unsupported
-  client command, a `COPY … FROM STDIN`/`TO STDOUT` (the splitter's own head, as M3's
-  `UnitKind::CopyStream`), or a statement with a parameter (no prompt per unit in a streamed run),
-  or when a read fails. These are M3's whole-split refusals. Only then does pass 2 open and run.
-  PostgreSQL, SQLite and Generic get both passes too. `Eager` is `Exact` there (R-T8-4), and a
-  single `Exact` pass would run the statements before a late refusal, such as an unterminated
-  string at the end. The cost is a second read of the file.
+  runs nothing. The whole file is refused, as M3 refuses a whole script, when:
+  - a batch of `feed` or `finish` has an item that refuses (`stream::any_refuses`, never only
+    `stopped()`);
+  - an item is an unsupported client command, a `COPY … FROM STDIN`/`TO STDOUT` (the splitter's
+    own head, as M3's `UnitKind::CopyStream`), or a statement with a parameter (no prompt per
+    unit in a streamed run);
+  - a read fails;
+  - the lexing modes do not resolve alike (below);
+  - the gate denies a unit whatever the user answers (below).
+
+  Only then does pass 2 open and run. PostgreSQL, SQLite and Generic get both passes too: `Eager`
+  is `Exact` there (R-T8-4), and a single `Exact` pass would run the statements before a late
+  refusal, such as an unterminated string at the end. The cost is a second read of the file.
+- **Lexing modes (fix round 1, I1; M3's rule).** When the session reads its modes, the file is
+  split, scanned and checked in them, and a tab that read other modes (`modes_known`) is
+  refused (`ModesDiffer`). When the session's modes are unknown, pass 1 runs one splitter per mode
+  combination that changes how the dialect lexes (M3's `context::variants`: PostgreSQL
+  `standard_conforming_strings`; MySQL `ANSI_QUOTES` × `NO_BACKSLASH_ESCAPES`; MariaDB also its
+  `ORACLE` mode). Each reading digests every item and its decision (SHA-256), and the file is
+  refused unless every reading equals the first. Mid-run, when the file was split in the
+  session's own modes and the session now reads others (a `SET sql_mode`, a `SET
+  standard_conforming_strings`), the run stops before the next unit (`ContextChanged`).
+- **Pass 1 meets the gate (fix round 1, I5; ruling R-T12-2).** Every unit is classified on the
+  pool and gated under the session's state at the start and the live tag. A unit the gate
+  denies (a read-only connection's writes, the classifier's and the policy's denials, everything
+  decided without the user) refuses the file before anything runs, naming the unit. Units after
+  one that may change the context are classified in a context the classifier reads as unknown,
+  as M3's `classify_units` reads them. Confirmations are not asked in pass 1. In pass 2 each unit
+  is gated again in its live state. A user's No stops the run, and the units the user confirmed
+  before it stay applied, which is the user's explicit choice. The stop notice says so. A denial
+  only the live state shows (after a context change pass 1 could not foresee) stops pass 2
+  likewise. The PO confirms R-T12-2 at the gate.
 - **Identical chunks (R-T8-1).** The runner re-cuts whatever the source hands out into 64 KiB
   pieces at a character boundary, and makes one `feed` per piece. The chunk sequence is then a
-  function of the text alone, whatever short reads the source made. Pass 1 records each piece's
+  function of the text alone, whatever short reads the source made. This supersedes the T10
+  re-review carry "one `feed` per `ScriptStream::next_chunk()`, no re-buffering" (review m5):
+  it holds even for a source whose reads differ between passes. Pass 1 records each piece's
   length and SHA-256 (40 bytes per 64 KiB). Pass 2 checks every piece against that record before
   feeding it, and checks that it ends where pass 1 ended. Any difference stops the run with
   `FileChanged`. So pass 2 runs only text that pass 1 checked, even behind a source that misses
@@ -1404,19 +1430,35 @@ HV-EXEC-15; R-M4b-20, R-M4b-24, R-M4b-47, R-T8-1, R-T8-3, R-T10-3).
   `reopen_verified`. A change between the passes refuses the file, and nothing has run. A change
   in pass 2 stops the run before the next unit. A unit is built from chunks that were all read
   and checked before it is sent.
-- **Held text (T8 m-fr3-3).** Off MySQL/MariaDB, once the splitter holds more than
-  `STREAM_HELD_MAX` (64 MiB), the file is refused with `NoBoundary` ("no statement boundary within
-  64 MiB"). Observed: the `Exact` stream splits such a held line again on every chunk, so the
-  refusal of a one-line 64 MiB PostgreSQL script takes minutes in a debug build. Stop still works
-  between chunks.
-- **Per unit, exactly as Run.** Before each unit the runner does five things:
-  - it reads the session's context with `run_context`, which answers after the previous unit's
-    request, so the state is settled;
-  - it stops if the session's lexing modes differ from the split's;
-  - it classifies the unit's final text on the classifier pool in that context;
-  - it gates the unit with `gate` and the connection as it is now (read-only flag, transaction
-    status and mode, the live tag the app passed);
-  - it asks through the same `ConfirmPort` the app uses.
+- **Held text (T8 m-fr3-3; fix round 1, I4).** Off MySQL/MariaDB the file is refused with
+  `NoBoundary` once the splitter holds more than `STREAM_HELD_MAX` (64 MiB) or more than
+  `STREAM_HELD_ITEMS_MAX` (65,536) items. The item count comes from `StreamSplitter::held_items`,
+  a doc-hidden accessor in sql-split (a named exception: a count only, so `Exact`'s output is
+  unchanged). `Exact` holds about 50–80 bytes of state per byte of tiny statements on one line.
+  Without the item cap, a one-line file of `SELECT 1;` reached 3.49 GB RSS before the byte cap
+  (review P7). With it, the same file at 1, 16 and 65 MiB is refused after 960 KiB at about
+  90 MB peak RSS (debug, fix round 1). A line of 4 KB statements still reaches the byte cap. The
+  `Exact` stream splits such a held line again as it doubles, so that refusal takes about 15 s in
+  release. Stop works between chunks.
+- **Per unit, as Run.** Before each unit the runner reads the session's context with
+  `run_context`, which answers after the previous unit's request, so the state is settled. It
+  then stops, before anything is sent, when:
+  - the connection was lost or reset since pass 2 began (fix round 1, I3): a `SessionEvent::Lost`
+    or `Reconnected`, a missed event, or a session that is reconnecting, disconnected or broken.
+    M3 sends a script in one request, so a loss fails the rest; a script run sends one request
+    per unit, and a session that recovers in place has lost what the file set (`USE`, `SET`,
+    variables, temporary tables; R-M4b-27). Its notice: "the connection was reset, so the script
+    stopped after statement N";
+  - the modes moved (above);
+  - the context of a production or read-only session could not be read.
+
+  It classifies the unit's final text on the classifier pool in that context. It gates the unit
+  with `gate` and the connection as it is now: the **live** environment tag (fix round 1, I2: a
+  `watch` the app keeps current, read before every gate, as M3 gates with "the profile as it is
+  now"), the read-only flag, and the transaction status and mode. It asks through the same
+  `ConfirmPort` the app uses. Right before the send it checks again for a loss, and checks that
+  the tag and the read-only flag are still the ones gated (M3's B-M4/A-M4), else
+  `ConnectionChanged`.
 
   Then it sends the unit through `ExecService::run_with_refresh` as a checked one-unit plan. The
   plan carries the context generation, so the session refuses a run whose context moved.
@@ -1424,30 +1466,38 @@ HV-EXEC-15; R-M4b-20, R-M4b-24, R-M4b-47, R-T8-1, R-T8-3, R-T10-3).
 
   The confirmation answers follow M3b:
   - Execute all covers later calm confirmations, never a typed name, and covers nothing on
-    production.
+    production. How many units it covers is not known in a stream; the dialog must say so (a T18
+    carry).
   - Skip and Skip all leave units unsent.
   - "Don't ask again" only where the dialog offers it, reported back in the summary.
   - Cancel stops the run.
   - After a dialog, the context and state are read again. A change stops the run.
 - **Results, log and history.** No cursor is kept and no result tab is shown. Each unit's ticket
-  is dropped when the unit ends. The console's log gets the service's lines for each unit, in its
-  10,000-line ring. History gets one summary row (R-M4b-24): origin `File`, the file's name as its
-  text, the run's outcome. HV-EXEC-12's per-unit rows are not written. The row has no field for
-  the statement count, which is in the outcome's summary.
-- **Errors and Stop.** Every `ErrorPolicy` stops at the first failure. A streamed run asks no
-  question per unit: R-M3-61's dialog needs units still waiting in the same run. Stop is checked
-  before every chunk and unit, and a unit in flight is cancelled through the session. A
+  is dropped when the unit ends. The service writes each unit's lines into a log of the unit's
+  own, and the runner copies them into the console's log with the statement number set to the
+  unit's place in the file (review: each unit is its own run, numbered 1). It leaves out the
+  per-unit summary lines, and writes one summary line for the run and the refusal or stop notice
+  (with its line, and the reason's own words on the next row). History gets one summary row
+  (R-M4b-24): origin `File`, the file's name as its text, the run's outcome. HV-EXEC-12's
+  per-unit rows are not written. The row has no field for the statement count, which is in the
+  outcome's summary.
+- **Errors and Stop.** There is no error policy to choose (review m3): every unit stops the run
+  at its first failure. A streamed run asks no question per unit, because R-M3-61's dialog needs
+  units still waiting in the same run. Stop is checked before every chunk and unit, and a unit in
+  flight is cancelled through the session. A unit that does not end within 30 s of its cancel is
+  flagged `last_unit_unknown`, and the run's final state read waits at most 5 s (review m1). A
   transaction left open stays open. The session's state carries it to the M3 transaction UI, and
   the summary's `tx_open` says so.
-- **Memory.** The splitter's own bound applies (T8: about 1 KiB held for an INSERT dump; at most
-  64 MiB held, about 287 MB RSS, on the adversarial shapes, which pass 1 refuses). On top of that:
-  - one 64 KiB piece being cut;
-  - the text from the last unit's start to the end of what was fed, for line numbers (at most
-    the held text plus a piece);
-  - the pass record;
-  - the session's per-unit buffers.
+- **Memory, per shape.** An INSERT dump runs in constant memory: about one statement held by the
+  splitter, plus one 64 KiB piece being cut, the line-count text from the last unit's start, the
+  pass record and the session's per-unit buffers (fake MySQL, 150 MiB: RSS grew 2 MiB in pass 1).
+  The shapes pass 1 refuses cost, before the refusal, the splitter's bound plus up to 64 MiB of
+  line-count text:
+  - MySQL's worst shapes: about 287 MB RSS (T8);
+  - off MySQL, a line of tiny statements: about 90 MB (the item cap);
+  - off MySQL, a line of long statements: up to the 64 MiB byte cap.
 
-  So an INSERT dump runs in constant memory, and an adversarial shape costs up to the T8 bound
-  plus 64 MiB before its refusal.
+  With the modes unknown, pass 1 runs one splitter per mode combination (2, 4 or 8), and the
+  splitter's share multiplies by that many.
 - **Words.** Refusals and stops carry Fluent IDs (`hacivat-core.ftl` block `m4b-t12-script-run`)
   and the statement number and line. T18 shows them.

@@ -2169,3 +2169,16 @@ re-export list is not in this task's files):
 - `STREAM_HELD_ITEMS_MAX`.
 
 `StreamItem::NoBoundary` is new. `held_len()` is `#[doc(hidden)]`; `with_caps()` is test-only.
+
+## m4b-t12 — the held-items accessor
+
+- `StreamSplitter::held_items()` (`#[doc(hidden)]`; a named exception in T12's fix round 1, I4)
+  counts the items the last split of the held text found in what stays held, on the `Exact` path.
+  It is 0 before the first split, after a stop, and on the eager path, which has its own item cap.
+- It is a count only. `Exact` gives out byte for byte what it gave before, and the sql-split suite
+  is unchanged.
+- "Run as script" refuses a file off MySQL/MariaDB with `NoBoundary` once the count passes
+  `STREAM_HELD_ITEMS_MAX`, as `Eager` does on MySQL (ADR 0006 `m4b-t12`).
+- The held text is split again as it doubles, so the count lags the text by at most that much.
+  The largest split before the refusal is about twice the cap's worth of items: about 90 MB RSS
+  for a line of tiny statements.

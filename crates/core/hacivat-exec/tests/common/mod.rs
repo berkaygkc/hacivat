@@ -2990,8 +2990,8 @@ pub mod t12 {
     use hacivat_exec::gate::CommitQuestion;
     use hacivat_exec::{
         ChunkError, ClassifyPool, CommitAnswer, ConfirmAnswer, ConfirmPort, ConfirmQuestion,
-        ErrorPolicy, ExecService, ScriptChunks, ScriptGate, ScriptProgress, ScriptRunOutcome,
-        ScriptRunRequest, ScriptRunner, SessionLog, SuppressSet, run_file,
+        ExecService, ScriptChunks, ScriptGate, ScriptProgress, ScriptRunOutcome, ScriptRunRequest,
+        ScriptRunner, SessionLog, SuppressSet, run_file,
     };
     use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
     use hacivat_results::MemoryBudget;
@@ -3298,11 +3298,19 @@ pub mod t12 {
 
     /// A port that answers confirmations from a list (then `Cancel`) and commit questions with
     /// Commit, recording every question.
-    #[derive(Debug)]
     pub struct Answers {
         answers: Mutex<VecDeque<ConfirmAnswer>>,
         pub asked: Mutex<Vec<ConfirmQuestion>>,
         pub commits: Mutex<Vec<CommitQuestion>>,
+        // ## m4b-t12-script-run fix round 1
+        /// Called on every question, while the dialog is "open".
+        on_ask: Option<Box<dyn Fn() + Send + Sync>>,
+    }
+
+    impl std::fmt::Debug for Answers {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Answers").finish_non_exhaustive()
+        }
     }
 
     impl Answers {
@@ -3311,6 +3319,20 @@ pub mod t12 {
                 answers: Mutex::new(answers.iter().copied().collect()),
                 asked: Mutex::default(),
                 commits: Mutex::default(),
+                on_ask: None,
+            })
+        }
+
+        /// [`Answers::new`] that calls `f` on every question.
+        pub fn with_hook(
+            answers: &[ConfirmAnswer],
+            f: impl Fn() + Send + Sync + 'static,
+        ) -> Arc<Answers> {
+            Arc::new(Answers {
+                answers: Mutex::new(answers.iter().copied().collect()),
+                asked: Mutex::default(),
+                commits: Mutex::default(),
+                on_ask: Some(Box::new(f)),
             })
         }
 
@@ -3323,6 +3345,9 @@ pub mod t12 {
     impl ConfirmPort for Answers {
         fn confirm(&self, q: ConfirmQuestion) -> oneshot::Receiver<ConfirmAnswer> {
             self.asked.lock().unwrap().push(q);
+            if let Some(f) = &self.on_ask {
+                f();
+            }
             let a = self
                 .answers
                 .lock()
@@ -3387,6 +3412,11 @@ pub mod t12 {
         /// Every text the runner's classifier pool classified, in order.
         pub classified: Arc<Mutex<Vec<String>>>,
         pub cancel: watch::Sender<bool>,
+        // ## m4b-t12-script-run fix round 1
+        /// The profile's live environment tag (I2): a test retags it mid-run.
+        pub env: watch::Sender<Option<EnvTag>>,
+        /// The manager of a managed session ([`managed_rig`]), kept alive with it.
+        pub manager: Option<Arc<hacivat_session::ConnectionManager>>,
     }
 
     /// A rig over `fake`; `read_only` makes the profile (and so the session) read-only, its
@@ -3419,7 +3449,110 @@ pub mod t12 {
             engine,
             classified,
             cancel: watch::channel(false).0,
+            env: watch::channel(None).0,
+            manager: None,
         }
+    }
+
+    // ## m4b-t12-script-run fix round 1
+    /// A rig over a console session that a `ConnectionManager` built over `fake` (I3): unlike
+    /// `fake_session`'s, it recovers a lost connection in place (`SessionEvent::Reconnected`).
+    pub async fn managed_rig(fake: FakeDriver) -> Rig {
+        use std::path::PathBuf;
+
+        use hacivat_driver::{DriverRegistry, EngineCatalog};
+        use hacivat_net::ssh::{KnownHosts, TunnelManager};
+        use hacivat_net::{BoxedStream, StreamFactory};
+        use hacivat_secrets::{CredentialFiles, MemoryBackend, SecretBackend, SecretStore};
+        use hacivat_session::pipeline::{ApprovedRoots, ConnectDeps, Interaction};
+        use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
+
+        let engine = fake.descriptor().kind;
+        let fake = Arc::new(fake);
+        let mut drivers = DriverRegistry::new();
+        drivers.register(fake.clone());
+        let known_hosts = KnownHosts::load(Vec::new(), PathBuf::from("hacivat-test-known-hosts"));
+        let tunnels = TunnelManager::new(known_hosts.clone(), Default::default());
+        let backend: Arc<dyn SecretBackend> = Arc::new(MemoryBackend::new());
+        let deps = ConnectDeps {
+            drivers: Arc::new(drivers),
+            catalog: EngineCatalog::embedded(),
+            secrets: Arc::new(SecretStore::new(Some(backend))),
+            files: CredentialFiles {
+                pgpass: None,
+                pg_service: None,
+            },
+            transport_wrap: Some(Arc::new(|_direct: StreamFactory| {
+                StreamFactory::new(|| {
+                    Box::pin(async {
+                        let (near, _far) = tokio::io::duplex(64);
+                        Ok(Box::new(near) as BoxedStream)
+                    })
+                })
+            })),
+            extra_steps: Vec::new(),
+            approved_roots: ApprovedRoots::for_user(),
+            timeout_override: None,
+            tunnels,
+            known_hosts,
+        };
+        let m = ConnectionManager::new(
+            tokio::runtime::Handle::current(),
+            Arc::new(deps),
+            ManagerConfig::m2b(),
+        );
+        let profile = Arc::new(super::profile_of(engine));
+        m.connect(profile.clone(), None, Interaction::Headless);
+        let mut changes = m.changes();
+        loop {
+            match m.state(profile.id) {
+                LiveState::Connected(_) => break,
+                LiveState::Failed(e) => panic!("the connect failed: {:?}", e.class),
+                _ => {}
+            }
+            changes.changed().await.unwrap();
+        }
+        let session = m
+            .sessions(profile.id)
+            .expect("connected")
+            .default_session()
+            .expect("a default session");
+        let classified: Arc<Mutex<Vec<String>>> = Arc::default();
+        let exec = Arc::new(ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)));
+        Rig {
+            runner: ScriptRunner::new(exec, ClassifyPool::new(1)),
+            session,
+            fake,
+            log: SessionLog::new(),
+            engine,
+            classified,
+            cancel: watch::channel(false).0,
+            env: watch::channel(None).0,
+            manager: Some(m),
+        }
+    }
+
+    /// A PostgreSQL fake whose context reads answer `modes` in turn
+    /// (`standard_conforming_strings`, then `public` as the search path), then nothing.
+    pub fn pg_context(modes: &[&'static str]) -> FakeDriver {
+        use hacivat_driver::ExecSummary;
+        use hacivat_driver::fake::FakeExec;
+        super::fake_pg().exec(
+            modes
+                .iter()
+                .map(|m| FakeExec {
+                    prefix: "SELECT pg_catalog.current_setting('standard_conforming_strings')",
+                    result: Ok(ExecSummary {
+                        rows: vec![vec![Some((*m).to_string()), Some("public".to_string())]],
+                        row_count: 1,
+                        ..ExecSummary::default()
+                    }),
+                    delay: std::time::Duration::ZERO,
+                    tx_after: None,
+                    panics: false,
+                })
+                .collect(),
+        )
     }
 
     /// The dialect of a script of `engine` (default modes) and its client flavor.
@@ -3455,8 +3588,12 @@ pub mod t12 {
                 engine: self.engine,
                 dialect,
                 flavor,
+                modes_known: false,
                 gate: ScriptGate {
-                    env,
+                    env: {
+                        self.env.send_replace(env);
+                        self.env.subscribe()
+                    },
                     confirm_unsafe_where: true,
                     allowlist: Arc::from(Vec::new()),
                     suppressed: SuppressSet::default(),
@@ -3464,7 +3601,6 @@ pub mod t12 {
                 },
                 confirm: port,
                 log: self.log.clone(),
-                policy: ErrorPolicy::default(),
                 cancel: self.cancel.subscribe(),
                 history: None,
                 refresh: None,
