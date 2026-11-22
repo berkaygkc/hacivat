@@ -91,6 +91,46 @@ const M4B_ROWS: &[Row] = &[
         Some("f2"),
         Some("f2"),
     ),
+    // ## m4b-t13-explorer (named exception): the Scripts tree's menu commands (menu and
+    // palette only; Move to Trash has no chord, ruling c).
+    ("scripts.open", "ExplorerTree", "ExplorerTree", None, None),
+    (
+        "scripts.new_script",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    (
+        "scripts.new_folder",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    ("scripts.trash", "ExplorerTree", "ExplorerTree", None, None),
+    (
+        "scripts.copy_path",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    (
+        "scripts.copy_relative_path",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    (
+        "scripts.refresh",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    // ## m4b-t13-explorer
 ];
 
 /// `chord` in the keymap's canonical spelling.
@@ -254,7 +294,8 @@ fn m4b_chords_avoid_altgr_the_palette_chord_and_reformat_and_take_no_ones_chord(
 fn m4b_stub_commands_are_disabled_and_out_of_the_palette(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
     let stubs: Vec<&str> = scripts::STUB_COMMANDS.to_vec();
-    assert_eq!(stubs.len(), 6);
+    // ## m4b-t13-explorer (named exception): `scripts.reveal` and `scripts.rename` are filled.
+    assert_eq!(stubs.len(), 4);
     let (enabled, listed) = vcx.cx.read(|cx| {
         let reg = cx.global::<ActionRegistry>();
         let enabled: Vec<&'static str> = reg
@@ -276,9 +317,10 @@ fn m4b_stub_commands_are_disabled_and_out_of_the_palette(cx: &mut TestAppContext
     }
     // The palette check is not vacuous: an enabled command is listed.
     assert!(listed.contains(&"workspace.open_settings"));
-    // The stub contributor is not registered (Task 13 registers the real one), so M4's own
-    // check that M4 registers none still holds.
-    assert!(vcx.cx.read(|cx| contributors(cx).is_empty()));
+    // ## m4b-t13-explorer (named exception): Task 13 registers the Scripts contributor; with
+    // no library service it lists nothing anywhere.
+    assert_eq!(vcx.cx.read(|cx| contributors(cx).len()), 1);
+    assert!(vcx.cx.read(|cx| contributors(cx)[0].generation()) == 0);
 }
 
 #[test]
@@ -332,9 +374,22 @@ fn every_m4b_title_id_exists_in_en_and_tr() {
     assert!(en_t11.iter().all(is_t11), "{en_t11:?}");
     assert_eq!(en_t11, tr_t11);
     // Every M4b command's title is in the block.
+    // ## m4b-t13-explorer (named exception): or in Task 13's own block (its menu commands), in
+    // English and Turkish alike.
+    let t13 = |ftl: &str| -> Vec<String> {
+        let (_, after) = ftl
+            .split_once("\n## m4b-t13-explorer\n")
+            .expect("Task 13's block");
+        message_ids_in(after.split("\n## ").next().unwrap_or(after))
+    };
+    let (en_t13, tr_t13) = (t13(EN_UI), t13(TR_UI));
+    assert_eq!(
+        en_t13, tr_t13,
+        "EN and TR hold the same ids, in the same order"
+    );
     for (id, ..) in M4B_ROWS {
         let title = format!("hv-cmd-{}", id.replace(['.', '_'], "-"));
-        assert!(en.contains(&title), "{title}");
+        assert!(en.contains(&title) || en_t13.contains(&title), "{title}");
     }
 }
 
@@ -722,7 +777,8 @@ fn scripts_contributor_stub_adds_no_node_so_m4_shots_hold(cx: &mut TestAppContex
         ["DEV", "shop", "  app", "    public"].map(String::from),
         "{before:?}"
     );
-    let stub = ScriptsContributor;
+    // ## m4b-t13-explorer (named exception): a contributor without a library service.
+    let stub = ScriptsContributor::default();
     vcx.cx.update(|cx| {
         assert!(stub.database_children(id, "app", cx).is_empty());
         assert_eq!(stub.children(TreeKey(1), cx), ChildState::Leaf);
@@ -731,14 +787,14 @@ fn scripts_contributor_stub_adds_no_node_so_m4_shots_hold(cx: &mut TestAppContex
     });
     assert_eq!(stub.generation(), 0);
     vcx.cx.update(|cx| {
-        register_contributor(Rc::new(ScriptsContributor), cx);
+        register_contributor(Rc::new(ScriptsContributor::default()), cx);
         contrib::contributors_changed(cx);
     });
     assert_eq!(lines(vcx), before);
     // Its activation opens nothing.
     let tabs_before = tab_count(vcx);
     in_window(vcx, |window, cx| {
-        ScriptsContributor.activate(TreeKey(1), window, cx)
+        ScriptsContributor::default().activate(TreeKey(1), window, cx)
     });
     vcx.run_until_parked();
     assert_eq!(tab_count(vcx), tabs_before);

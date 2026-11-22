@@ -220,6 +220,9 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
     crate::exec_ui::orchestrator::open_history(cx);
     // ## m4-t24-live (named lines): the explorer's catalogs (`CatalogHub` on the core runtime).
     crate::explorer::live::install(cx);
+    // ## m4b-t13-explorer (named line): the script libraries' service on the core runtime,
+    // when a library was ever attached (the Scripts nodes read its snapshot).
+    crate::scripts::projection::install_service(cx);
 }
 
 // ## m2b-t22-live

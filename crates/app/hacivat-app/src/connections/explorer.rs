@@ -835,12 +835,15 @@ impl ExplorerView {
             .stamp
             .as_ref()
             .is_none_or(|s| ptrs(s) != ptrs(&stamp) || s.l10n != stamp.l10n);
+        // ## m4b-t13-explorer (named exception, carries-w1 T13 m4): the nodes to ask again.
+        let mut reload: Vec<TreeKey> = Vec::new();
         if self
             .stamp
             .as_ref()
             .is_some_and(|s| s.contributors != stamp.contributors)
         {
             // A contributor changed: its expanded nodes are asked again.
+            reload = self.loads.keys().copied().collect();
             self.loads.clear();
             // ## m4b-t01b-seams: and their children's owners with them.
             self.load_owners.clear();
@@ -856,6 +859,10 @@ impl ExplorerView {
         // ## m4b-t01b-seams (named exception, R-M4b-34): the owners come with the places.
         let (contributed, owners) = contributed_places(&profiles, cx);
         self.owners = owners;
+        // ## m4b-t13-explorer (named exception, carries-w1 T13 m4): at once, in this rebuild, so
+        // their rows never pass through "not loaded" (the cursor on a script row stays there
+        // when its library changes, instead of moving up to the Scripts node).
+        self.reload_contributed(&reload, &contributed, cx);
         let inputs = ExplorerInputs {
             contributed,
             profiles,
@@ -1032,6 +1039,59 @@ impl ExplorerView {
         }
     }
 
+    // ## m4b-t13-explorer (named exception, carries-w1 T13 m4)
+    /// Asks the owners of `keys` (contributed nodes loaded before a contributor changed) for
+    /// their children again, parents before children, so a loaded subtree stays loaded. A key
+    /// whose node is gone, or has no owner now, is left unloaded.
+    fn reload_contributed(&mut self, keys: &[TreeKey], places: &[ContributedPlace], cx: &App) {
+        let mut pending: Vec<TreeKey> = keys.to_vec();
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut left = Vec::new();
+            for key in pending {
+                let node = places
+                    .iter()
+                    .flat_map(|p| p.nodes.iter())
+                    .chain(self.loads.values().flat_map(|l| l.nodes.iter()))
+                    .find(|n| n.key == key)
+                    .cloned();
+                let owner = self
+                    .owners
+                    .get(&key)
+                    .or_else(|| self.load_owners.get(&key))
+                    .cloned();
+                let (Some(node), Some(owner)) = (node, owner) else {
+                    left.push(key);
+                    continue;
+                };
+                let ContributedChildren::Lazy(f) = &node.children else {
+                    continue;
+                };
+                let state = f(cx);
+                let nodes: Vec<_> = match &state {
+                    ChildState::Loaded(kids) => kids
+                        .iter()
+                        .filter_map(|k| owner.child_node(*k, cx))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                for n in &nodes {
+                    if !self.owners.contains_key(&n.key) {
+                        self.load_owners
+                            .entry(n.key)
+                            .or_insert_with(|| owner.clone());
+                    }
+                }
+                self.loads.insert(key, ContributedLoad { state, nodes });
+            }
+            if left.len() == before {
+                break;
+            }
+            pending = left;
+        }
+    }
+    // ## m4b-t13-explorer
+
     /// An expanded contributed node with lazy children asks its contributor (UI thread).
     fn load_contributed(&mut self, key: TreeKey, cx: &mut Context<Self>) {
         let model = self.tree.read(cx).model().clone();
@@ -1072,8 +1132,15 @@ impl ExplorerView {
                 .collect(),
             _ => Vec::new(),
         };
+        // ## m4b-t13-explorer (named exception, T1b review m3): a key keeps its first owner. A
+        // contributor's own listed node, or a child another contributor loaded first, is never
+        // taken over by a later listing.
         for n in &nodes {
-            self.load_owners.insert(n.key, owner.clone());
+            if !self.owners.contains_key(&n.key) {
+                self.load_owners
+                    .entry(n.key)
+                    .or_insert_with(|| owner.clone());
+            }
         }
         self.loads.insert(key, ContributedLoad { state, nodes });
         self.refresh(cx);

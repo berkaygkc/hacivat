@@ -1160,3 +1160,60 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
 - **F3.** The relaunch loop prints `HV-FACT t10 h2 sweep_relaunches=N`.
 - **H16** is a test now, through the test-support hook `LibraryService::inject_watch_batch`: a batch tagged with the previous watcher's generation is ignored; the same batch at the current generation is acted on.
 - **m-h** is carried to Task 16 (a confirmed "Use this folder" that clears the persisted `canonical`/`inode`). Caveat: a file system whose inode numbers are not stable across mounts (FUSE such as sshfs without `use_ino`, some network mounts) shows such a library `RootChanged` at every launch until then.
+
+## m4b-t13 — explorer projection, file operations, git badges
+
+- **One data source.** The Scripts contributor (`crates/app/hacivat-app/src/scripts/projection.rs`) reads only `WorkspaceSnapshot::view(env)` (R-T10-2), with `env` read from the profile at answer time. Rows, counts, badges and the problems row all come from that view, so a staging connection never receives a `@production` path, not even in a count or a diagnostic. A profile's environment change moves the contributor's generation (it follows `ConnectionsModel`), so the tree is filtered again without a rescan.
+- **Placement** (R-M4b-25, -31, -32). PostgreSQL: only the session's database, else the profile's. MySQL/MariaDB: every database M4 asks about. SQLite: `main` only, bound by the main file's stem. With no catalog there is no node. The "shared" badge counts the places M4 would ask about (the same catalog rule as `contributed_places`, duplicated read-only in the contributor rather than exported from the M4 file).
+- **Keys** (R-M4b-26). Each key is `xxh3_128("hv-scripts\0" ‖ profile ‖ database ‖ library ‖ kind ‖ rel)`, with every part length-prefixed. The contributor keeps a key → place map per generation. Its lazy children are an `Arc<dyn Fn>` that holds only the key (it reaches the contributor through the app global), so no `Rc` is put in an `Arc`.
+- **Per-generation index.** A library's shown listing (children per folder in UI collation order, file badges, the folders that hold a change, counts) is built once per (generation, environment). Paint reads only rows the explorer already holds; no UI work grows with library size per frame.
+- **Explorer named exceptions (M4 files).**
+  - `connections/explorer.rs` `refresh`: when a contributor's generation moves, its loaded nodes are asked again *in the same rebuild* (`reload_contributed`), parents before children. Before, they passed through "not loaded", and the tree moved the cursor from a script row up to the Scripts node on every library change (pinned by `expanded_scripts_survive_refresh` and the trash test; RED without it).
+  - `load_contributed` keeps a key's first owner (T1b review m3; `a_child_key_keeps_its_first_owner`).
+  - `explorer/contrib.rs`: `Contributors` is `pub(crate)` (m7).
+  - `commands/palette.rs` passes `$os` to every palette title (m9). `hacivat-ui` `tree/view/row.rs`: `status_ink` — New is amber, Conflicted is ink (ruling R-T2-1 a, with a unit test and the `m4b-scripts-tree-prod` shot).
+- **The service in the app.** It opens on the core runtime at boot only when `libraries.toml` exists (`install_service`, a named line in `connections/boot.rs`). Task 16's attach opens it on demand (`ensure_service`). With no library nothing starts, so every M4 tree, test and shot is unchanged. One foreground task drains the service's events (`Changed`/`GitChanged` pass every subscription) and calls `contributors_changed` once per drained batch. At quit, and in the test teardown, the service is dropped before the core runtime stops, because its actor holds a blocking-pool thread.
+- **File operations** (`LibraryService::{create, rename, trash, refresh}`; T1a's stubs, now filled). They take the caller's `env` (R-T5-6).
+  - Names follow the scan's rules on this host *and* on Windows. A script must end in `.sql`/`.md`.
+  - The source must be shown under `env`, and so must the result. A folder that holds a listed file `env` does not show is neither renamed nor trashed (`HoldsHidden`): that would move or delete it unseen.
+  - All I/O runs under T5's `Dir` chain: no-follow opens, with identity checks before and after. Create is `O_EXCL`/`mkdir`. A rename of a regular file is `link` then `unlink`, so it never replaces anything.
+  - **Residual:** a folder, a file link, or a volume without hard links is renamed after an `lstat` of the new name. A file created there in between would be replaced (std has no `RENAME_NOREPLACE`).
+  - Each successful operation asks for a rescan (`Msg::Rescan`, also the tree's Refresh). The watcher's report then only confirms.
+- **Move to Trash** goes through `ServiceOptions::trasher`. The product's is `OsTrash`, a `trash::TrashContext` with `DeleteMethod::NsFileManager` on macOS, never the Finder `osascript` (T1a m3; a unit test asserts the method). `clippy.toml` bans `trash::delete`/`delete_all`. Tests use `FolderTrash`, so nothing reaches the user's trash.
+  - **Residual:** `trash` canonicalizes the parent itself. We verify the `Dir` chain right before and after the call, but a folder swapped for a link inside that window is not caught by us.
+- **Deviations.**
+  - The name field is a non-modal layer drawn over the row (its bounds from `row_bounds`), not a field inside the tree widget, which has no inline editor. It selects the whole name, because `TextInput` has no range selection.
+  - The diagnostics popover is the shipped `ExplainPopover` (300 px). Its "Script library settings…" footer is Task 16's.
+  - "Open under another connection…" (Task 15) and "Script library settings…" (Task 16) are shown disabled. `database_menu_items` stays Task 16's (its doc says so).
+  - The problems row counts the view's diagnostics plus polling and an untrusted repository.
+
+### Fix round 1 (review C1, I1, m1–m13; rulings R-T13-1, R-T13-2)
+
+- **No rename ever replaces an entry, on any system (C1, R-T13-1).**
+  - A file (or file link) is renamed only by `hard_link(old, new)` then `remove_file(old)`. `link` fails when `new` exists. Without hard links (FAT, exFAT, some shares) the rename is refused (`NoSafeRename`); there is no fallback to `rename`.
+    - Windows `std::fs::rename` is `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` and replaces a file, so it is never used on a file.
+  - **A name already taken** is `Exists` on every system: the exact name, or another entry equal to it in ASCII case. A library is shared with case-insensitive volumes, so `b.sql → C.sql` next to `c.sql` is refused on Linux too. The same check runs before a create (`chain_to_parent` plus a listing).
+  - **A case-only change of the entry itself** is proved by a known identity (Unix) or by its name being the only ASCII-case match. `Identity(0, 0)`, every file off Unix, is "unknown" and never proves "same file". The change goes in two steps through a random temp name with a leading dot (the scan skips it), each step after an absence check; a failed second step moves the entry back.
+  - **A folder** is renamed after an absence check of its new name.
+  - **Residual:** a folder created at that name in between could be replaced on Unix (`rename` onto an empty folder), and on Windows a file created between the check and a case-only step. Std has no no-replace rename and the crate takes no `unsafe`.
+- **A folder moves or goes only when it is known (I1).** A folder rename or Move to Trash is refused (`NotFullyListed`, "too large to check; remove it in your file manager") when:
+  - the scan did not list its whole subtree: a `ScanStopped` or `Suppressed` diagnostic anywhere (they name no place), or an `Unreadable`, `BadName` or `LinkScope` diagnostic at or under it, or a dataless folder at or under it;
+  - a names-only, no-follow walk of the folder at operation time hits 20,000 names, depth 32, an unreadable or non-UTF-8 name, or a dataless folder.
+
+  The same walk refuses `HoldsHidden` when it finds an environment folder `env` does not show, even one the scan never lists because it holds no script (`reports/@production/data.csv`). The walk reads names and metadata only, never a file.
+- **R-T13-2:** a rename never changes the environment scope of the entry or anything inside it (`ScopeChange`). Examples: `@staging → common`, or `common → @staging`. The same tag in another case is allowed. Moving between folders was never offered (`OtherFolder`).
+- **m1, corrected after the re-review (n1).** `clippy.toml` bans the method `trash::TrashContext::new`, and also the **type** `trash::TrashContext` (`disallowed-types`).
+  - A probe showed that a method entry for `trash::TrashContext::default` resolves to nothing: clippy says it "does not refer to a reachable function", because a derived trait impl's method cannot be named by a type path, and `allow-invalid` had hidden that. It caught none of `TrashContext::default()`, `<TrashContext as Default>::default()` or a `TrashContext`-typed `Default::default()`.
+  - The type ban refuses all three (probe run, then removed).
+  - `os_trash_context`, the one place that names the type, carries `#[expect(clippy::disallowed_types)]`, and its `new()` call `#[expect(clippy::disallowed_methods)]`. Clippy passes with both, so both bans are proven to apply.
+  - **Residual:** the crate's `DEFAULT_TRASH_CTX` constant cannot be banned by clippy (it is not a method). T20's hostile suite can add a token rule.
+- **m13:** a trash whose after-check fails is `TrashedButChanged`: "moved, but a folder on the way changed meanwhile; check the trash". It is never "nothing changed".
+- **App side:**
+  - **m2:** an `Alias` refusal, which is another spelling of a name on disk, shows as "already has that name", and the field stays open.
+  - **m3:** a name holding invisible or bidi characters is shown escaped under the field.
+  - **m9:** the boot looks for `libraries.toml` on the core runtime, never with a stat on the UI thread. Without the file it sweeps orphan recovery folders there.
+  - **m10:** "Open under another connection…" uses the chooser's candidate rule: the explorer's places plus each profile's configured database (R-M4b-31).
+  - **m11:** file rows of a shared library say "shared" to assistive technology.
+  - **m12:** the name field is re-anchored to its row on every frame.
+  - The contributor's generation also moves when a catalog lands (shared-ness can change).
+  - The row tooltip is one line, its facts joined by ` · `. A newline in it panicked GPUI's text layout on hover; the m7 hover shot found it.

@@ -18,10 +18,25 @@ disallowed-methods = [
     { path = "notify::Watcher::new", reason = "R-T0-2: a watcher is built only with watcher_config() (follow_symlinks(false)), at the one reviewed site", allow-invalid = true },
     { path = "notify::PollWatcher::new", reason = "R-T0-2: a watcher is built only with watcher_config() (follow_symlinks(false)), at the one reviewed site", allow-invalid = true },
     { path = "notify::PollWatcher::with_initial_scan", reason = "R-T0-2: a watcher is built only with watcher_config() (follow_symlinks(false)), at the one reviewed site", allow-invalid = true },
+    # ## m4b-t13-explorer (named exception, T1a review m3): the free functions use the default
+    # context, which on macOS runs `osascript` and asks Finder. Move to Trash goes through
+    # `hacivat_scripts::service::OsTrash` (a `TrashContext` with `DeleteMethod::NsFileManager`).
+    { path = "trash::delete", reason = "T1a m3: use hacivat_scripts::service::OsTrash (TrashContext with NsFileManager on macOS)", allow-invalid = true },
+    { path = "trash::delete_all", reason = "T1a m3: use hacivat_scripts::service::OsTrash (TrashContext with NsFileManager on macOS)", allow-invalid = true },
+    # ## m4b-t13-explorer fix round 1 (review m1): and the default context itself; the one
+    # blessed constructor (`os_trash_context`, NsFileManager) carries an `#[expect]`. Its derived
+    # `Default::default` cannot be named here (clippy: "does not refer to a reachable function"),
+    # so the type itself is banned below (`disallowed-types`, re-review n1).
+    { path = "trash::TrashContext::new", reason = "T1a m3: the default context runs osascript on macOS; use hacivat_scripts::service::OsTrash", allow-invalid = true },
 ]
 
 # ## m4b-t01a-seams (R-T0-2): the debouncer caches that walk through directory links.
 disallowed-types = [
+    # ## m4b-t13-explorer (re-review n1): every mention of the type, so `TrashContext::new()`,
+    # `TrashContext::default()`, `<TrashContext as Default>::default()` and a `TrashContext`-typed
+    # `Default::default()` are refused; only `os_trash_context` (NsFileManager) may name it. The
+    # crate's `DEFAULT_TRASH_CTX` constant names no type at the use site (T20 carry).
+    { path = "trash::TrashContext", reason = "T1a m3: the default context runs osascript on macOS; use hacivat_scripts::service::OsTrash", allow-invalid = true },
     { path = "notify_debouncer_full::FileIdMap", reason = "R-T0-2: follows directory links; use NoCache", allow-invalid = true },
     { path = "notify_debouncer_full::RecommendedCache", reason = "R-T0-2: FileIdMap on macOS and Windows; use NoCache", allow-invalid = true },
 ]

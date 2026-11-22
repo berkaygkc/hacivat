@@ -1316,6 +1316,9 @@ pub const TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(
 /// finish, leaves no worker to race the teardown; the quit handler's own stop is then a no-op.
 /// One body for both entry points (P20).
 fn stop_core_runtime_in(cx: &mut App) {
+    // ## m4b-t13-explorer (named exception): the library service's actor ends first (it runs
+    // on the core runtime's blocking pool until the service is dropped).
+    drop(hacivat_app::scripts::projection::take_service(cx));
     if let Some(m) = cx.try_global::<hacivat_app::connections::ConnectionsModel>() {
         m.core_runtime().shutdown(TEARDOWN_BUDGET);
     }
