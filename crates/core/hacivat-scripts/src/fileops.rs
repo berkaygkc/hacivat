@@ -59,6 +59,12 @@ impl Trasher for OsTrash {
 
 /// The context every trash call uses: on macOS `NSFileManager`'s `trashItemAtURL`, never the
 /// Finder script (`osascript`).
+// ## m4b-t13-explorer (re-review n1): the one place that may name the type (`clippy.toml`
+// bans it everywhere else).
+#[expect(
+    clippy::disallowed_types,
+    reason = "the one TrashContext: NsFileManager is set on macOS below"
+)]
 fn os_trash_context() -> trash::TrashContext {
     // ## m4b-t13-explorer fix round 1 (review m1): the one blessed constructor; `clippy.toml`
     // bans `TrashContext::new`/`default` everywhere else, so the Finder default is never used.

@@ -611,6 +611,17 @@ impl Render for NameField {
     }
 }
 
+// ## m4b-t13-explorer (re-review n3)
+/// The name as shown, when it holds a character the display escapes (a bidi control, a
+/// zero-width or other invisible character). An NFD name (macOS keeps them) is no reason: the
+/// display's NFC composition alone never counts.
+fn hidden_characters(name: &str) -> Option<String> {
+    let escaped = name.chars().any(|c| {
+        hacivat_scripts::pathsafe::display_name(c.encode_utf8(&mut [0; 4])).starts_with("<U+")
+    });
+    escaped.then(|| hacivat_scripts::pathsafe::display_name(name))
+}
+
 /// Pops the name field when it is the topmost layer (the focus goes back to the tree).
 fn close_field(window: &mut Window, cx: &mut App) {
     let Some(ws) = window.root::<Workspace>().flatten() else {
@@ -692,10 +703,7 @@ fn open_name_field(
             error: None,
             anchor,
             key,
-            hidden: {
-                let shown = hacivat_scripts::pathsafe::display_name(&initial);
-                (shown != initial).then_some(shown)
-            },
+            hidden: hidden_characters(&initial),
             indent,
             busy: false,
             _subscriptions: subscriptions,
@@ -909,6 +917,22 @@ fn failed(op: &'static str, name: &str, e: &FileOpError, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ## m4b-t13-explorer (re-review n3)
+    #[test]
+    fn only_escaped_characters_count_as_hidden() {
+        // NFD "müşteri.sql" (u + U+0308, s + U+0327): composed for display, nothing hidden.
+        assert_eq!(hidden_characters("mu\u{0308}s\u{0327}teri.sql"), None);
+        assert_eq!(hidden_characters("müşteri.sql"), None);
+        assert_eq!(
+            hidden_characters("a\u{202E}lqs.sql").as_deref(),
+            Some("a<U+202E>lqs.sql")
+        );
+        assert_eq!(
+            hidden_characters("x\u{200B}.sql").as_deref(),
+            Some("x<U+200B>.sql")
+        );
+    }
 
     #[test]
     fn name_problems_name_their_reason() {

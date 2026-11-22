@@ -549,10 +549,18 @@ async fn a_folder_holding_an_unlisted_hidden_env_folder_is_refused() {
 async fn turkish_i_names_never_replace_an_ascii_name() {
     let r = rig(&["i.sql", "rapor.sql"]).await;
     for name in ["İ.sql", "ı.sql"] {
-        r.svc
-            .create(r.id, &rel(name), EntryKind::Sql, None)
-            .await
-            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let got = r.svc.create(r.id, &rel(name), EntryKind::Sql, None).await;
+        // ## m4b-t13-explorer (re-review n2): NTFS's upcase table may fold `ı` (or `İ`) onto
+        // `I`, the same name as `i.sql` there; the product then refuses, which is the safety
+        // property. Elsewhere they are names of their own.
+        if cfg!(windows) {
+            assert!(
+                matches!(got, Ok(()) | Err(FileOpError::Exists)),
+                "{name}: {got:?}"
+            );
+        } else {
+            assert_eq!(got, Ok(()), "{name}");
+        }
     }
     assert_eq!(
         r.svc

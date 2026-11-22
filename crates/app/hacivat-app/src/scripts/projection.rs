@@ -136,20 +136,41 @@ pub fn install_service(cx: &mut App) {
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
     rt.spawn_blocking(move || {
-        let attached = paths.libraries_toml().exists();
-        if !attached {
+        let plan = boot_plan(paths.libraries_toml().try_exists());
+        if plan == BootPlan::SweepOrphans {
             hacivat_scripts::recovery::sweep_unregistered(&paths, &|_| false);
         }
-        let _ = tx.send(attached);
+        let _ = tx.send(plan);
     });
     cx.spawn(async move |cx| {
-        if rx.await == Ok(true) {
+        if rx.await == Ok(BootPlan::OpenService) {
             cx.update(|cx| {
                 ensure_service(cx);
             });
         }
     })
     .detach();
+}
+
+// ## m4b-t13-explorer (re-review n6, safety)
+/// What the boot does about the library registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootPlan {
+    /// The registry is there, or its presence cannot be told: the service opens and reads it
+    /// (it sweeps nothing over a registry it could not read cleanly, T10).
+    OpenService,
+    /// No registry, proven: no library was ever attached, so every recovery folder is an
+    /// orphan and is swept (copies of a live instance are spared).
+    SweepOrphans,
+}
+
+/// Recovery copies are swept only when the registry is *known* to be absent: an I/O error
+/// (an unmounted or unreadable config folder) never leads to a sweep.
+fn boot_plan(registry: std::io::Result<bool>) -> BootPlan {
+    match registry {
+        Ok(false) => BootPlan::SweepOrphans,
+        Ok(true) | Err(_) => BootPlan::OpenService,
+    }
 }
 
 /// The library service, opened now if it is not open yet (Task 16's attach calls this before
@@ -1365,6 +1386,42 @@ pub fn describe_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ## m4b-t13-explorer (re-review n6)
+    #[test]
+    fn the_boot_sweeps_only_when_the_registry_is_known_absent() {
+        assert_eq!(boot_plan(Ok(false)), BootPlan::SweepOrphans);
+        assert_eq!(boot_plan(Ok(true)), BootPlan::OpenService);
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::Other,
+        ] {
+            assert_eq!(
+                boot_plan(Err(kind.into())),
+                BootPlan::OpenService,
+                "{kind:?} never sweeps"
+            );
+        }
+    }
+
+    /// On a real folder the registry's parent cannot be searched in: `try_exists` answers an
+    /// error, and the boot plans no sweep.
+    #[cfg(unix)]
+    #[test]
+    fn an_unsearchable_config_folder_never_leads_to_a_sweep() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("config");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let probe = locked.join("libraries.toml").try_exists();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Root may search anything; the rule under test is the plan for an error.
+        if probe.is_err() {
+            assert_eq!(boot_plan(probe), BootPlan::OpenService);
+        }
+    }
 
     #[test]
     fn keys_are_scoped_by_profile_database_library_kind_and_path() {

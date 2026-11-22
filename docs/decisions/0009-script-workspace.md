@@ -1202,7 +1202,10 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
 
   The same walk refuses `HoldsHidden` when it finds an environment folder `env` does not show, even one the scan never lists because it holds no script (`reports/@production/data.csv`). The walk reads names and metadata only, never a file.
 - **R-T13-2:** a rename never changes the environment scope of the entry or anything inside it (`ScopeChange`). Examples: `@staging → common`, or `common → @staging`. The same tag in another case is allowed. Moving between folders was never offered (`OtherFolder`).
-- **m1:** `clippy.toml` also bans `trash::TrashContext::new` and `::default`. The one constructor, `os_trash_context` (with `NsFileManager`), carries an `#[expect(clippy::disallowed_methods)]`, which also proves the ban applies (an unfulfilled `expect` fails the build).
+- **m1, corrected after the re-review (n1).** `clippy.toml` bans the method `trash::TrashContext::new`, and also the **type** `trash::TrashContext` (`disallowed-types`).
+  - A probe showed that a method entry for `trash::TrashContext::default` resolves to nothing: clippy says it "does not refer to a reachable function", because a derived trait impl's method cannot be named by a type path, and `allow-invalid` had hidden that. It caught none of `TrashContext::default()`, `<TrashContext as Default>::default()` or a `TrashContext`-typed `Default::default()`.
+  - The type ban refuses all three (probe run, then removed).
+  - `os_trash_context`, the one place that names the type, carries `#[expect(clippy::disallowed_types)]`, and its `new()` call `#[expect(clippy::disallowed_methods)]`. Clippy passes with both, so both bans are proven to apply.
   - **Residual:** the crate's `DEFAULT_TRASH_CTX` constant cannot be banned by clippy (it is not a method). T20's hostile suite can add a token rule.
 - **m13:** a trash whose after-check fails is `TrashedButChanged`: "moved, but a folder on the way changed meanwhile; check the trash". It is never "nothing changed".
 - **App side:**
