@@ -13,7 +13,13 @@ sql-text.workspace = true
 twox-hash.workspace = true
 smallvec.workspace = true
 
+# ## m4b-t08-splitter: `StreamSplitter::with_caps` (small eager caps) for the test suite only.
+[features]
+test-support = []
+
 [dev-dependencies]
+# ## m4b-t08-splitter: the tests turn on `test-support` for this crate.
+sql-split = { path = ".", features = ["test-support"] }
 proptest.workspace = true
 sql-testkit.workspace = true
 # The SQLite splitter differential (Task 8).
