@@ -553,10 +553,12 @@ async fn missing_at_launch_is_unavailable_and_recovers() {
     std::fs::rename(&lib, &away).unwrap();
     let r = rig_with(app.path(), opts());
     ready(&r).await;
-    assert_eq!(
-        r.snap().library(id).map(|l| l.state.clone()),
-        Some(LibraryState::Unavailable(UnavailableReason::Missing))
-    );
+    // Each library comes up on its own worker after the registry is read.
+    wait_until("Unavailable(Missing)", || {
+        r.snap().library(id).map(|l| l.state.clone())
+            == Some(LibraryState::Unavailable(UnavailableReason::Missing))
+    })
+    .await;
     std::fs::rename(&away, &lib).unwrap();
     wait_until("the library to come back", || {
         r.snap()
@@ -700,12 +702,12 @@ async fn root_in_an_env_folder_is_refused_and_mapped() {
     std::fs::write(paths.libraries_toml(), text).unwrap();
     let r = rig_with(app.path(), opts());
     ready(&r).await;
+    wait_until("Unavailable(InEnvFolder)", || {
+        r.snap().library(id).map(|l| l.state.clone())
+            == Some(LibraryState::Unavailable(UnavailableReason::InEnvFolder))
+    })
+    .await;
     let snap = r.snap();
-    let l = snap.library(id).unwrap();
-    assert_eq!(
-        l.state,
-        LibraryState::Unavailable(UnavailableReason::InEnvFolder)
-    );
     assert!(entries_in(&snap, id, Some(EnvTag::Staging)).is_empty());
     assert!(diags_in(&snap, id, None).contains(&LibraryDiag::RootInEnvFolder("@staging".into())));
     assert!(r.fake.watched().is_empty());
