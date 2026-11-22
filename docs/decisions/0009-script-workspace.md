@@ -1281,3 +1281,26 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
     - All three fail when the lock hint is ignored.
 - **I2.** `watch_real`'s fixtures are an hour old, so no fixture file is racy when a watcher starts. `folder_move_is_seen_as_renames_for_known_contents` run alone: 0/20 failures (before: about 9 in 10).
 - **m1.** `NoCancel` does not forward `Watcher::configure` or `paths_mut`. The defaults apply, so the inner watcher can never be reconfigured, link following included. Its doc says so.
+- **A lock held for minutes** (`git commit -a` with the editor open holds `index.lock` for the whole message edit) delays unopened files' reports once, by up to `REPO_OP_MAX` = 30 s. After that the lock counts as stale until it has been seen gone. Accepted.
+
+## m4b-cifix-2 — fix round 2 (re-review N1, N2; ruling R-CI2-4)
+
+- **N1: no index-derived path is walked through an on-disk link (completes R-CI2-2).**
+  - `map::Lister::on_disk` checked each component's name but still `read_dir`ed a listed folder that was a link: a library folder `link -> /net/<host>` (macOS automount) or `-> \\host\share` (Windows, NTLM), plus a crafted index entry `lib/link/x.sql`, listed the outside folder.
+  - The dataless check `lstat`ed `worktree.join(index path)`, which follows every leading component.
+  - Now each listing keeps every entry's `file_type()` from `read_dir`. That type follows nothing; on Windows it covers symlinks and junctions, and an unreadable type counts as a link.
+  - `on_disk` never descends into a link: every component but the last must be a listed non-link, or, found only by case folding, one whose `lstat` is not a link.
+  - The dataless check goes through the same walk (`Lister::lstat_under`) and `lstat`s only the last component.
+  - gix's own worktree walk already refuses linked leading folders (`SymlinkCheck`).
+  - Listings now index names and NFC forms, so the walk does no scan per lookup.
+  - Test: `an_index_path_under_a_linked_folder_never_leaves_the_library`. Its counting seam records every path listed or `lstat`ed. The test also covers the case-only spelling `LINK/x.sql` and the badge path through `into_library`. It fails when the link check is removed.
+- **N2 (R-CI2-4): the name rules are the host's, as git applies them.**
+  - On every OS, a component must be:
+    - one `Normal` path component of valid UTF-8;
+    - not empty, `.` or `..`;
+    - without `/` or NUL;
+    - never a `.git` spelling.
+  - The Windows and NTFS protections (`\`, drive, UNC and verbatim prefixes, streams, reserved device names, trailing dot or space, `GIT~1`) apply on Windows only, and the HFS+ `.git` spellings on macOS only.
+  - The fix round's consequence for Unix is gone: `con.sql`, `aux.sql` and `a:b.sql` keep their true badge on Linux and macOS, and are `Unknown(UnsafePath)` on Windows (`windows_only_names_keep_their_badge_off_windows`).
+  - A backslash is an ordinary character on Unix and cannot reach a UNC path there.
+- **N3 (monorepo lock signal): carried to T20, not done here.**

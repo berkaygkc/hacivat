@@ -403,6 +403,7 @@ fn collect(
     // made the walk quadratic (U-05: past the 5 s budget), so Task 7 drops entries instead.
     let extra: BTreeSet<String> = extra_dataless.iter().map(|l| map::nfc(l)).collect();
     let mut dataless_paths: BTreeSet<BString> = BTreeSet::new();
+    let mut walk = map::Lister::default();
     let mut tracked: Vec<(BString, gix::index::entry::Mode)> = Vec::new();
     for entry in on_disk.entries() {
         let path = entry.path(&on_disk);
@@ -427,10 +428,14 @@ fn collect(
             badges.add(path, FileStatus::Unknown(UnknownWhy::Submodule));
             continue;
         }
+        // ## m4b-cifix-2 fix round 2 (re-review N1): through the link-refusing walk, `lstat`
+        // only at the last component (a plain path is UTF-8); a path under a linked folder is
+        // never looked at here, and gix's own walk (`SymlinkCheck`) does not enter it either.
         let dataless = extra.contains(&map::nfc(&rel))
-            || gix::path::from_bstr(path)
+            || path
+                .to_str()
                 .ok()
-                .and_then(|p| std::fs::symlink_metadata(found.worktree.join(p)).ok())
+                .and_then(|p| walk.lstat_under(&found.worktree, p))
                 .is_some_and(|m| map::is_dataless(&m));
         if dataless {
             dataless_paths.insert(path.to_owned());
