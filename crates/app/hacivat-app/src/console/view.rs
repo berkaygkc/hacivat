@@ -1353,17 +1353,9 @@ impl ConsoleHost {
             && self.binding.is_some_and(|(_, slot)| slot == 0)
             && let Some(doc) = self.script.clone()
         {
-            let db = doc
-                .read(cx)
-                .spec(cx)
-                .and_then(|t| t.database)
-                .map(|d| d.as_str().to_string())
-                .unwrap_or_default();
+            // ## m4b-t14-tabs fix round 1 (I3, R-T14-3): never a shared session.
             doc.update(cx, |d, cx| {
-                d.show(
-                    crate::scripts::tabs::Notice::SwitchFailed { database: db },
-                    cx,
-                );
+                d.show(crate::scripts::tabs::Notice::OneSession, cx);
                 d.switch = crate::scripts::tabs::Switch::Failed;
             });
             self.acquire = Acquire::Cancelled;

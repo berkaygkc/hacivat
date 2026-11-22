@@ -2339,6 +2339,13 @@ async fn recover(
             break_now(core, ctl, class).await;
             return true;
         }
+        // ## m4b-t14-tabs (named exception, R-T14-2): the new connection's database and schema
+        // are read again after the replay (a reconnect may land on an edited profile's
+        // database); a read that fails leaves them unknown, never the old connection's.
+        if !core.reprobe().await {
+            core.schema = None;
+        }
+        // ## m4b-t14-tabs
         let lost = core.lost.take().unwrap_or_default();
         ctl.emit(SessionEvent::Lost(lost));
         let (tx, schema) = (core.tx.clone(), core.schema.clone());

@@ -82,6 +82,36 @@ fn pg_fake(db: &'static str) -> FakeDriver {
         .queries(scs_queries())
 }
 
+/// A PostgreSQL fake whose schema probes answer `dbs` in order (the last one again after
+/// that), with `extra` typed queries scripted after the context probe's.
+fn pg_fake_seq(dbs: &[&'static str], extra: Vec<FakeQuery>) -> FakeDriver {
+    let mut exec: Vec<FakeExec> = (0..48)
+        .flat_map(|_| {
+            [
+                answer("SHOW standard_conforming_strings", &[Some("on")]),
+                answer("SELECT pg_catalog.txid_current_if_assigned()", &[None]),
+            ]
+        })
+        .collect();
+    let last = *dbs.last().expect("a database");
+    for db in dbs.iter().chain(std::iter::repeat_n(&last, 32)) {
+        exec.push(answer(
+            "SELECT current_database()",
+            &[
+                Some(db),
+                Some("public"),
+                Some("public"),
+                Some("deploy"),
+                Some("public"),
+            ],
+        ));
+    }
+    FakeDriver::new(DbmsKind::Postgres)
+        .tracks_transactions()
+        .exec(exec)
+        .queries(scs_queries().into_iter().chain(extra).collect())
+}
+
 /// The typed form of the SQL-context probe (read-only sessions run it inside the guard).
 fn scs_queries() -> Vec<FakeQuery> {
     (0..48)
@@ -264,12 +294,27 @@ impl Rig {
         self.vcx.cx.update(|cx| {
             open_script(cx, lib, rel_path, profile, db.map(DatabaseName::new));
         });
-        let tab = self.active();
+        // The tab opens after the current update (a SQLite one after its file was read).
+        let want = rel.to_string();
         wait_until(self.vcx, "the script tab shows its file", |vcx| {
             redraw_full(vcx);
-            doc(vcx, tab).is_some_and(|d| vcx.cx.read(|cx| *d.read(cx).load() == Load::Ready))
+            let ws = workspace(vcx);
+            let tab = vcx.cx.read(|cx| ws.read(cx).active_tab());
+            tab.and_then(|t| doc(vcx, t)).is_some_and(|d| {
+                vcx.cx.read(|cx| {
+                    let d = d.read(cx);
+                    *d.load() == Load::Ready
+                        && d.spec(cx).is_some_and(|s| {
+                            s.rel.as_str() == want
+                                && s.profile == profile
+                                && db.is_none_or(|db| {
+                                    s.database.as_ref().is_some_and(|x| x.as_str() == db)
+                                })
+                        })
+                })
+            })
         });
-        tab
+        self.active()
     }
 
     fn active(&self) -> TabId {
@@ -383,6 +428,19 @@ impl Rig {
     fn write_file(&self, rel: &str, text: &str) {
         std::fs::write(self.root.join(rel), text).unwrap();
         self.hint(rel);
+    }
+
+    fn spec_id(&self, tab: TabId) -> tabs::ScriptTabId {
+        let doc = self.doc(tab);
+        self.vcx.cx.read(|cx| doc.read(cx).script_id())
+    }
+
+    fn session(&self, tab: TabId) -> hacivat_session::session::SessionHandle {
+        let console = self.console(tab);
+        self.vcx
+            .cx
+            .read(|cx| Consoles::get(cx, console).and_then(|s| s.session.clone()))
+            .expect("a session")
     }
 
     fn session_db(&self, tab: TabId) -> Option<String> {
@@ -633,7 +691,11 @@ fn unbound_script_tab_is_never_bound_by_a_connect(cx: &mut TestAppContext) {
     assert_eq!(state, Some((None, false)), "no profile, no session");
     // Run does nothing anywhere, and the capsule names no connection for it.
     r.run(tab);
-    settle(r.vcx, Duration::from_millis(50));
+    wait_until(r.vcx, "the refusal", |vcx| {
+        toast_texts(vcx)
+            .iter()
+            .any(|t| t == "Run refused: this tab has no connection.")
+    });
     assert!(queries(&r.fakes[0]).is_empty());
     assert!(queries(&r.fakes[1]).is_empty());
     assert_eq!(capsule(r.vcx), None, "the capsule shows no connection");
@@ -693,16 +755,23 @@ fn pg_script_under_a_database_the_session_is_not_on_opens_nothing(cx: &mut TestA
     );
 }
 
+/// C1 (R-T14-2), the reviewer's hostile test 1: the tab opened under `orders`; the profile is
+/// edited to `orders_v2` and the session reconnects onto it, after an earlier statement had
+/// filled the session's cached database with `orders`. Run asks the server, never the cache,
+/// and refuses, naming both databases; nothing is sent.
 #[gpui::test]
 fn run_refuses_when_a_pg_session_is_on_another_database(cx: &mut TestAppContext) {
-    // The session reports `orders_v2`: the profile was edited after the tab opened under orders.
-    let r = rig_with(
+    // Schema probes: the switch below (orders), then everything after the edit (orders_v2).
+    let mut r = rig_with(
         cx,
-        vec![(DbmsKind::Postgres, PROD, pg_fake("orders_v2"))],
+        vec![(
+            DbmsKind::Postgres,
+            PROD,
+            pg_fake_seq(&["orders", "orders_v2"], Vec::new()),
+        )],
         &[("a.sql", "SELECT 1")],
         false,
     );
-    let mut r = r;
     let prod = add_profile(
         r.vcx,
         pg_profile("orders-prod", EnvTag::Production, PROD, "orders"),
@@ -710,13 +779,47 @@ fn run_refuses_when_a_pg_session_is_on_another_database(cx: &mut TestAppContext)
     let tab = r.open("a.sql", Some(prod), Some("orders"));
     connected(&r, "orders-prod");
     r.wait_session(tab, "the session");
+    let session = r.session(tab);
+    let _ = futures::executor::block_on(
+        session
+            .submit(hacivat_session::session::Request::SwitchSchema(
+                "public".into(),
+            ))
+            .reply,
+    );
+    assert_eq!(
+        r.session_db(tab).as_deref(),
+        Some("orders"),
+        "the cache is filled"
+    );
+    // The profile is edited to another database, and the connection drops and comes back.
+    let mut p = r
+        .vcx
+        .cx
+        .read(|cx| {
+            cx.global::<hacivat_app::connections::ConnectionsModel>()
+                .get(prod)
+        })
+        .unwrap()
+        .as_ref()
+        .clone();
+    p.database = Some("orders_v2".to_string());
+    save_draft(r.vcx, hacivat_session::profile::ProfileDraft::edit(p));
+    let fake = r.fakes[0].clone();
+    fake.kill_connections();
+    let _ = futures::executor::block_on(
+        session
+            .submit(hacivat_session::session::Request::Ping)
+            .reply,
+    );
+    r.wait_session(tab, "the session again");
     r.run(tab);
     wait_until(r.vcx, "the refusal", |_| {
         r.notices(tab)
             .iter()
             .any(|n| matches!(n, Notice::RunRefused(RunRefused::Edited { .. })))
     });
-    assert!(queries(&r.fakes[0]).is_empty(), "nothing was sent");
+    assert!(queries(&fake).is_empty(), "nothing was sent");
     let shown: Vec<String> = full_frame(r.vcx)
         .into_iter()
         .map(|t| t.text.to_string())
@@ -1068,7 +1171,9 @@ fn save_over_external_change_asks(cx: &mut TestAppContext) {
     });
     // Cancel (Escape) keeps the file on disk as it is.
     press_key(r.vcx, "escape");
-    settle(r.vcx, Duration::from_millis(50));
+    wait_until(r.vcx, "the question closed", |vcx| {
+        !layer_ids(vcx).contains(&"dialog")
+    });
     assert_eq!(
         std::fs::read_to_string(r.root.join("a.sql")).unwrap(),
         "SELECT 99"
@@ -1174,6 +1279,36 @@ fn moved_into_production_folder_keeps_binding_and_notices(cx: &mut TestAppContex
         !shown.iter().any(|t| t.contains("@production")),
         "{shown:?}"
     );
+    // I6 (R-T14-4): Run and Save are off (fail closed), with Close offered.
+    let doc = r.doc(tab);
+    assert!(!r.vcx.cx.read(|cx| doc.read(cx).run_enabled(cx)));
+    r.focus(tab);
+    let save_on = r.vcx.cx.read(|cx| {
+        let def = cx
+            .global::<hacivat_ui::actions::ActionRegistry>()
+            .get("file.save")
+            .expect("file.save");
+        (def.enabled)(cx)
+    });
+    assert!(!save_on, "Save is off");
+    r.type_text(tab, " -- mine");
+    let doc = r.doc(tab);
+    in_window(r.vcx, |window, cx| {
+        hacivat_app::scripts::save::save(&doc, window, cx, None);
+    });
+    wait_until(r.vcx, "Save says why", |vcx| {
+        toast_texts(vcx)
+            .iter()
+            .any(|t| t.starts_with("Run and Save are off in this tab"))
+    });
+    assert!(
+        !r.root.join("a.sql").exists(),
+        "never written back at the old path"
+    );
+    assert!(
+        shown.iter().any(|t| t == "Close tab"),
+        "Close is offered: {shown:?}"
+    );
 }
 
 #[gpui::test]
@@ -1219,8 +1354,11 @@ fn save_never_writes_outside_the_library(cx: &mut TestAppContext) {
     r.type_text(tab, ";\nSELECT 2");
     r.save(tab);
     wait_until(r.vcx, "saved", |_| !r.dirty(tab));
-    // Wait past the recovery idle too: nothing of it lands in the library.
-    settle(r.vcx, Duration::from_millis(100));
+    // Past the recovery idle too (the executor clock): nothing of it lands in the library.
+    r.vcx
+        .executor()
+        .advance_clock(tabs::RECOVERY_IDLE + Duration::from_millis(10));
+    r.vcx.run_until_parked();
     let files = tree(&r.root);
     assert_eq!(files.len(), 1, "only the script itself: {files:?}");
     let (name, bytes) = &files[0];
@@ -1402,31 +1540,114 @@ fn the_prompt_opens_on_cancel(cx: &mut TestAppContext) {
     assert_eq!(focused, Some(2), "Cancel (the third button) has the focus");
 }
 
+/// R-M4b-39 with a real open transaction (I7): the quit asks about the transaction first, then
+/// about each dirty script tab ("1 of 2", with the env · connection · database subtitle, I5).
+/// I4: "Don't save" followed by Cancel stops the quit with the first tab still dirty, still
+/// asked about, and its recovery copy kept.
 #[gpui::test]
 fn quit_asks_each_dirty_script_tab_after_open_transactions(cx: &mut TestAppContext) {
-    let (mut r, prod, staging) = prod_staging(cx, &[("a.sql", "SELECT 1")]);
+    let begin = FakeQuery {
+        prefix: "BEGIN",
+        tx_after: Some(hacivat_driver::TxStatus::InTx),
+        ..Default::default()
+    };
+    let mut r = rig_with(
+        cx,
+        vec![
+            (DbmsKind::Postgres, PROD, pg_fake("orders")),
+            (
+                DbmsKind::Postgres,
+                STAGING,
+                pg_fake_seq(&["orders"], vec![begin]),
+            ),
+        ],
+        &[("a.sql", "SELECT 1"), ("tx.sql", "BEGIN")],
+        false,
+    );
+    let prod = add_profile(
+        r.vcx,
+        pg_profile("orders-prod", EnvTag::Production, PROD, "orders"),
+    );
+    let staging = add_profile(
+        r.vcx,
+        pg_profile("orders-staging", EnvTag::Staging, STAGING, "orders"),
+    );
+    connected(&r, "orders-staging");
+    // A user transaction on staging's script tab.
+    let tx = r.open("tx.sql", Some(staging), Some("orders"));
+    r.wait_session(tx, "the session");
+    r.run(tx);
+    let tx_console = r.console(tx);
+    wait_until(r.vcx, "the user's transaction", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::exec_ui::tx::user_tx(tx_console, cx).is_some())
+    });
+    // Two dirty script tabs.
     let a = r.open("a.sql", Some(prod), Some("orders"));
     let b = r.open("a.sql", Some(staging), Some("orders"));
     r.type_text(a, " -- a");
     r.type_text(b, " -- b");
+    r.vcx
+        .executor()
+        .advance_clock(tabs::RECOVERY_IDLE + Duration::from_millis(10));
+    let dir = paths(r.vcx)
+        .script_recovery_dir(&r.lib.to_string())
+        .unwrap();
+    let copies = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "sql"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    wait_until(r.vcx, "both copies", |_| copies(&dir) == 2);
     let quit = r.vcx.cx.update(hacivat_app::commands::request_quit);
     assert_eq!(quit, hacivat_app::shell::CloseDecision::Defer);
-    wait_until(r.vcx, "the first prompt", |vcx| {
+    // The transaction asks first.
+    wait_until(r.vcx, "the transaction prompt", |vcx| {
+        layer_ids(vcx).contains(&"dialog") && dialog_title(vcx).contains("open transaction")
+    });
+    let dialog = r
+        .vcx
+        .cx
+        .read(hacivat_app::exec_ui::close_prompt::open_prompt_dialog)
+        .expect("the prompt");
+    r.vcx.cx.update(|cx| {
+        dialog.update(cx, |_, cx| {
+            cx.emit(hacivat_ui::dialog::DialogEvent::Pressed(1))
+        })
+    });
+    // Then each dirty script tab, with its connection.
+    wait_until(r.vcx, "the first unsaved prompt", |vcx| {
         has_dialog(vcx, "Save changes to a.sql?")
     });
     let body = dialog_body(r.vcx);
+    assert!(body.contains("production · orders-prod · orders"), "{body}");
     assert!(body.contains("1 of 2 unsaved scripts"), "{body}");
-    // Don't save the first: the second asks next.
+    // Don't save the first, then Cancel the second: the quit stops.
     press_key(r.vcx, "shift-tab");
     press_key(r.vcx, "shift-tab");
     press_key(r.vcx, "enter");
     wait_until(r.vcx, "the second prompt", |vcx| {
-        dialog_body(vcx).contains("2 of 2")
+        layer_ids(vcx).contains(&"dialog") && dialog_body(vcx).contains("2 of 2")
     });
-    // Cancel stops the quit; both tabs stay.
+    assert!(dialog_body(r.vcx).contains("staging · orders-staging · orders"));
     press_key(r.vcx, "escape");
-    assert!(tab_count(r.vcx) >= 2);
-    assert!(r.dirty(b));
+    wait_until(r.vcx, "the prompt closed", |vcx| {
+        !layer_ids(vcx).contains(&"dialog")
+    });
+    // I4: the first tab is still dirty, keeps its copy, and is asked again.
+    assert!(r.dirty(a) && r.dirty(b));
+    assert_eq!(copies(&dir), 2, "the recovery copies stay");
+    let quit = r.vcx.cx.update(hacivat_app::commands::request_quit);
+    assert_eq!(quit, hacivat_app::shell::CloseDecision::Defer);
+    wait_until(r.vcx, "asked again", |vcx| {
+        has_dialog(vcx, "Save changes to a.sql?")
+            && dialog_body(vcx).contains("production · orders-prod · orders")
+    });
+    press_key(r.vcx, "escape");
 }
 
 #[gpui::test]
@@ -1705,7 +1926,11 @@ fn restore_with_deleted_profile_runs_nothing_and_says_so(cx: &mut TestAppContext
     let doc = r.doc(tab);
     assert!(r.vcx.cx.read(|cx| doc.read(cx).runs_nowhere(cx)));
     r.run(tab);
-    settle(r.vcx, Duration::from_millis(50));
+    wait_until(r.vcx, "the refusal", |vcx| {
+        toast_texts(vcx)
+            .iter()
+            .any(|t| t == "Run refused: this tab has no connection.")
+    });
     assert!(queries(&r.fakes[0]).is_empty());
     assert_eq!(capsule(r.vcx), None, "no connection shown for it");
 }
@@ -1775,4 +2000,303 @@ fn core_and_editor_tiers_agree() {
         cfg.tiers.preview_bytes,
         hacivat_scripts::fileio::PREVIEW_BYTES as u64
     );
+}
+
+// ---- fix round 1 (T14 review) ------------------------------------------------------------------
+
+/// C2 (R-T14-1): a SQLite tab is bound to the file its profile pointed at when it opened. A
+/// profile edited to another file, or the file replaced at its path, refuses Run; nothing is
+/// sent.
+#[gpui::test]
+fn sqlite_tab_refuses_run_when_the_profile_points_to_another_file(cx: &mut TestAppContext) {
+    let dir = temp_root();
+    let first = dir.join("orders.db");
+    let second = dir.join("orders_v2.db");
+    std::fs::write(&first, b"").unwrap();
+    std::fs::write(&second, b"").unwrap();
+    let mut r = rig_with(
+        cx,
+        vec![(DbmsKind::Sqlite, ".db", FakeDriver::new(DbmsKind::Sqlite))],
+        &[("a.sql", "SELECT 1")],
+        false,
+    );
+    let mut p = test_profile("orders-local", Some(EnvTag::Local), "127.0.0.1");
+    p.engine = DbmsKind::Sqlite;
+    p.endpoint = hacivat_session::profile::ProfileEndpoint::File {
+        path: first.clone(),
+        create_if_missing: false,
+    };
+    let id = add_profile(r.vcx, p);
+    let tab = r.open("a.sql", Some(id), Some("main"));
+    let stored = r
+        .vcx
+        .cx
+        .read(|cx| tabs::sqlite_file(r.spec_id(tab), cx))
+        .expect("the file it opened on");
+    assert_eq!(
+        std::path::Path::new(&stored.path),
+        std::fs::canonicalize(&first).unwrap()
+    );
+    connected(&r, "orders-local");
+    r.wait_session(tab, "the session");
+    r.run(tab);
+    wait_until(r.vcx, "it ran on its file", |_| {
+        queries(&r.fakes[0]) == ["SELECT 1"]
+    });
+    // The profile now points at another file: refused, naming both.
+    let mut p = r
+        .vcx
+        .cx
+        .read(|cx| {
+            cx.global::<hacivat_app::connections::ConnectionsModel>()
+                .get(id)
+        })
+        .unwrap()
+        .as_ref()
+        .clone();
+    p.endpoint = hacivat_session::profile::ProfileEndpoint::File {
+        path: second.clone(),
+        create_if_missing: false,
+    };
+    save_draft(
+        r.vcx,
+        hacivat_session::profile::ProfileDraft::edit(p.clone()),
+    );
+    r.run(tab);
+    wait_until(r.vcx, "the refusal", |_| {
+        r.notices(tab).iter().any(|n| {
+            matches!(n, Notice::RunRefused(RunRefused::Edited { bound, current })
+                if bound == "orders.db" && current == "orders_v2.db")
+        })
+    });
+    assert_eq!(queries(&r.fakes[0]), ["SELECT 1"], "nothing more was sent");
+    // Back on the first path, but the file there was replaced: refused too.
+    p.endpoint = hacivat_session::profile::ProfileEndpoint::File {
+        path: first.clone(),
+        create_if_missing: false,
+    };
+    save_draft(r.vcx, hacivat_session::profile::ProfileDraft::edit(p));
+    std::fs::remove_file(&first).unwrap();
+    std::fs::write(&first, b"replaced").unwrap();
+    r.run(tab);
+    wait_until(r.vcx, "the replaced file is refused", |_| {
+        r.notices(tab).iter().any(|n| {
+            matches!(n, Notice::RunRefused(RunRefused::Edited { bound, current })
+                if bound == "orders.db" && current == "orders.db")
+        })
+    });
+    assert_eq!(queries(&r.fakes[0]), ["SELECT 1"], "nothing more was sent");
+}
+
+/// I3 (R-T14-3): a MySQL script tab never shares a session; a profile that cannot give it one
+/// of its own refuses it at open.
+#[gpui::test]
+fn mysql_profile_without_room_for_a_second_session_refuses_script_tabs(cx: &mut TestAppContext) {
+    let r = rig_with(
+        cx,
+        vec![(DbmsKind::MySql, MYSQL, mysql_fake(&["orders"]))],
+        &[("a.sql", "SELECT 1")],
+        false,
+    );
+    let mut single = mysql_profile("api-single", EnvTag::Dev, "orders");
+    single.single_session = true;
+    let mut one = mysql_profile("api-one", EnvTag::Dev, "orders");
+    one.max_connections = 1;
+    let ids = [add_profile(r.vcx, single), add_profile(r.vcx, one)];
+    let before = tab_count(r.vcx);
+    for id in ids {
+        let (lib, rel) = (r.lib, r.rel("a.sql"));
+        r.vcx.cx.update(|cx| {
+            assert_eq!(
+                open_script(cx, lib, rel, Some(id), Some(DatabaseName::new("orders"))),
+                None
+            );
+        });
+        r.vcx.run_until_parked();
+    }
+    assert_eq!(tab_count(r.vcx), before, "no tab opens");
+    let toasts = toast_texts(r.vcx).join(" | ");
+    assert!(
+        toasts
+            .contains("This connection allows one session; close the console or raise the limit."),
+        "{toasts}"
+    );
+}
+
+/// A shell restored at launch over a library attached in an earlier run (`prepare`), with
+/// `workspace.json` holding `tab_json` as its active tab, and (optionally) a crash copy of
+/// `crash_text` for the same unbound binding.
+fn relaunch(
+    cx: &mut TestAppContext,
+    crash_text: Option<&str>,
+    profile: Option<ProfileId>,
+) -> (&'static mut VisualTestContext, PathBuf, LibraryId) {
+    let lib_dir = temp_root().join("orders");
+    std::fs::create_dir_all(&lib_dir).unwrap();
+    std::fs::write(lib_dir.join("a.sql"), "SELECT 1").unwrap();
+    let lib_dir = std::fs::canonicalize(&lib_dir).unwrap();
+    let lib = std::cell::Cell::new(None);
+    let crash = crash_text.map(str::to_string);
+    let (vcx, _) = shell_with_routes_prepared(cx, "en", Vec::new(), |paths| {
+        let core = hacivat_session::runtime::CoreRuntime::new().unwrap();
+        let (_, watch) = FakeEventSource::new();
+        let service = LibraryService::open_with(paths, &core.handle(), watch.sources(), opts());
+        let id = futures::executor::block_on(service.attach(
+            lib_dir.clone(),
+            Some(LogicalDb::parse("orders").unwrap()),
+            false,
+        ))
+        .unwrap();
+        service.shutdown();
+        drop(service);
+        core.shutdown(Duration::from_secs(5));
+        if let Some(text) = &crash {
+            let crashed = hacivat_scripts::recovery::Instance::start(paths).unwrap();
+            hacivat_scripts::recovery::store(
+                paths,
+                &crashed,
+                &hacivat_scripts::recovery::RecoveryKey {
+                    library: id,
+                    rel: RelPath::parse("a.sql").unwrap(),
+                    profile,
+                    database: profile.map(|_| DatabaseName::new("orders")),
+                },
+                text,
+                &hacivat_scripts::recovery::CopyMeta::default(),
+            )
+            .unwrap();
+            drop(crashed);
+        }
+        let (profile, database) = match profile {
+            Some(p) => (format!("\"{p}\""), "\"orders\"".to_string()),
+            None => ("null".to_string(), "null".to_string()),
+        };
+        let json = format!(
+            r#"{{"version": 2,
+                "tiles": {{"explorer_w": 260.0, "conn_panel_h": 180.0, "editor_h": 420.0,
+                          "inspector_w": 300.0, "explorer_visible": true}},
+                "panes": {{"root": {{"Leaf": 0}}, "panes": {{"0": {{"tabs": [0, 1], "active": 1}}}},
+                          "focused": 0}},
+                "tabs": [{{"id": 0, "kind": "console", "n": 1}},
+                         {{"id": 1, "kind": "script", "library": "{id}", "rel_path": "a.sql",
+                           "profile": {profile}, "database": {database}}}]}}"#
+        );
+        std::fs::write(paths.data.join("workspace.json"), json).unwrap();
+        lib.set(Some(id));
+    });
+    (vcx, lib_dir, lib.get().unwrap())
+}
+
+/// The active tab's doc once its load ended (any state but "Opening…").
+fn settled_doc(vcx: &VisualTestContext) -> (TabId, Entity<ScriptDoc>) {
+    wait_until(vcx, "the restored tab's load ends", |vcx| {
+        redraw_full(vcx);
+        let ws = workspace(vcx);
+        let tab = vcx.cx.read(|cx| ws.read(cx).active_tab());
+        tab.and_then(|t| doc(vcx, t))
+            .is_some_and(|d| vcx.cx.read(|cx| *d.read(cx).load() != Load::Opening))
+    });
+    let ws = workspace(vcx);
+    let tab = vcx.cx.read(|cx| ws.read(cx).active_tab()).unwrap();
+    (tab, doc(vcx, tab).unwrap())
+}
+
+fn stop_service(vcx: &VisualTestContext) {
+    if let Some(service) = vcx.cx.read(hacivat_app::scripts::open::service) {
+        service.shutdown();
+    }
+}
+
+/// I1, the reviewer's hostile test 3: a script tab restored at launch shows its file once the
+/// service has listed the library, never "isn't in the library any more".
+#[gpui::test]
+fn hostile_restored_active_script_tab_at_launch(cx: &mut TestAppContext) {
+    let (vcx, _, lib) = relaunch(cx, None, None);
+    let (_, d) = settled_doc(vcx);
+    let (load, text, spec) = vcx.cx.read(|cx| {
+        let doc = d.read(cx);
+        (
+            doc.load().clone(),
+            doc.editor()
+                .map(|e| e.read(cx).snapshot().buffer.to_string()),
+            doc.spec(cx).unwrap(),
+        )
+    });
+    assert_eq!(load, Load::Ready);
+    assert_eq!(text.as_deref(), Some("SELECT 1"));
+    assert_eq!(spec.library, lib);
+    stop_service(vcx);
+}
+
+/// I2, the reviewer's hostile test 2: a crash copy of a tab that is in the restored layout
+/// replaces its disk text when it loads; the tab is dirty, with the recovery notice.
+#[gpui::test]
+fn hostile_crash_recovery_with_the_tab_in_the_restored_layout(cx: &mut TestAppContext) {
+    let (vcx, lib_dir, _) = relaunch(cx, Some("SELECT 1 -- unsaved"), None);
+    let (_, d) = settled_doc(vcx);
+    wait_until(vcx, "the recovered text", |vcx| {
+        vcx.cx.read(|cx| {
+            let doc = d.read(cx);
+            doc.editor()
+                .is_some_and(|e| e.read(cx).snapshot().buffer.to_string() == "SELECT 1 -- unsaved")
+                && doc.is_dirty(cx)
+                && doc
+                    .notices()
+                    .iter()
+                    .any(|n| matches!(n, Notice::Recovered { .. }))
+        })
+    });
+    let toasts = toast_texts(vcx).join(" | ");
+    assert!(
+        toasts.contains("Recovered unsaved changes to 1 script"),
+        "{toasts}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(lib_dir.join("a.sql")).unwrap(),
+        "SELECT 1"
+    );
+    stop_service(vcx);
+}
+
+/// I7: a tab saved bound to a profile that no longer exists comes back across a restart
+/// unbound in effect: it says its connection was deleted, its capsule names none, and Run
+/// sends nothing anywhere.
+#[gpui::test]
+fn restore_with_deleted_profile_is_unbound_and_runs_nothing(cx: &mut TestAppContext) {
+    let gone = ProfileId::new();
+    let (vcx, _, _) = relaunch(cx, None, Some(gone));
+    let (tab, d) = settled_doc(vcx);
+    assert!(
+        vcx.cx
+            .read(|cx| d.read(cx).notices().contains(&Notice::Removed))
+    );
+    assert!(vcx.cx.read(|cx| d.read(cx).runs_nowhere(cx)));
+    assert!(!vcx.cx.read(|cx| d.read(cx).run_enabled(cx)));
+    assert_eq!(tab_title(vcx), "a.sql · no connection");
+    // The binding is kept as saved (never re-resolved to another connection).
+    let spec = vcx.cx.read(|cx| d.read(cx).spec(cx)).unwrap();
+    assert_eq!(spec.profile, Some(gone));
+    let console = vcx.cx.read(|cx| Consoles::by_tab(cx, tab)).unwrap();
+    assert_eq!(
+        vcx.cx
+            .read(|cx| Consoles::get(cx, console).map(|s| (s.profile, s.session.is_some()))),
+        Some((None, false))
+    );
+    let editor = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, console).and_then(|s| s.editor.clone()))
+        .unwrap();
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |e, cx| {
+            e.run_command("editor.run", window, cx);
+        });
+    });
+    wait_until(vcx, "the refusal", |vcx| {
+        toast_texts(vcx)
+            .iter()
+            .any(|t| t == "Run refused: this tab has no connection.")
+    });
+    redraw_full(vcx);
+    assert_eq!(capsule(vcx), None, "no connection shown for it");
+    stop_service(vcx);
 }

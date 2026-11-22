@@ -49,6 +49,19 @@ enum Answer {
 struct QuitRound {
     total: usize,
     asked: usize,
+    /// ## m4b-t14-tabs fix round 1 (I4): the tabs answered "Don't save" in this round. The
+    /// answer takes effect only when the quit goes on; a cancelled quit leaves them dirty, asked
+    /// again, with their recovery copies.
+    dont_save: Vec<hacivat_ui_core::gpui_surface::WeakEntity<ScriptDoc>>,
+}
+
+impl QuitRound {
+    fn skips(&self, doc: &Entity<ScriptDoc>) -> bool {
+        self.dont_save.iter().any(|w| {
+            w.upgrade()
+                .is_some_and(|d| d.entity_id() == doc.entity_id())
+        })
+    }
 }
 
 impl Global for QuitRound {}
@@ -77,6 +90,10 @@ pub(crate) fn close_after_tx(tab: TabId, cx: &mut App) -> bool {
     if !asks(&doc, cx) {
         return false;
     }
+    // ## m4b-t14-tabs fix round 1 (minor 7): the slot is held only where a window will ask.
+    if crate::exec_ui::workspace_window(cx).is_none() {
+        return false;
+    }
     close_prompt::hold_prompt(None, cx);
     crate::exec_ui::in_workspace_window(cx, move |ws, window, cx| {
         open(&doc, For::Tab(tab), None, ws, window, cx);
@@ -90,9 +107,18 @@ pub(crate) fn quit_guard(restart: bool, cx: &mut App) -> Option<CloseDecision> {
     let waiting: Vec<Entity<ScriptDoc>> = tabs::all_docs(cx)
         .into_iter()
         .filter(|d| asks(d, cx))
+        .filter(|d| cx.try_global::<QuitRound>().is_none_or(|r| !r.skips(d)))
         .collect();
     let Some(doc) = waiting.first().cloned() else {
-        cx.set_global(QuitRound::default());
+        // The quit goes on: the "Don't save" answers of this round take effect now (I4), on
+        // this thread, as the consoles' autosave at quit does.
+        let round = std::mem::take(cx.default_global::<QuitRound>());
+        for doc in round.dont_save.iter().filter_map(|w| w.upgrade()) {
+            doc.update(cx, |d, cx| {
+                d.discarded = true;
+                d.discard_copy_now(cx);
+            });
+        }
         return None;
     };
     if crate::exec_ui::workspace_window(cx).is_none() {
@@ -135,8 +161,15 @@ fn open(
             vec![("file", ArgValue::Text(file.clone()))],
         )
     });
+    // ## m4b-t14-tabs fix round 1 (I5): the env, connection and database the text belongs to
+    // (one file may be dirty under two connections, Q2).
+    let subtitle = subtitle(doc.read(cx), cx);
     let body: TextFn = Rc::new(move |cx: &App| {
-        let body = msg(cx, "hv-scripts-unsaved-body", Vec::new());
+        let body = format!(
+            "{subtitle}\n{}",
+            msg(cx, "hv-scripts-unsaved-body", Vec::new())
+        );
+        let body: hacivat_ui_core::gpui_surface::SharedString = body.into();
         match count {
             Some((n, total)) => {
                 let head = msg(
@@ -194,6 +227,13 @@ fn answered(doc: Entity<ScriptDoc>, what: For, answer: Answer, cx: &mut App) {
         Answer::Cancel => {
             cx.set_global(QuitRound::default());
         }
+        // ## m4b-t14-tabs fix round 1 (I4): at quit, only noted until the quit goes on.
+        Answer::DontSave if matches!(what, For::Quit { .. }) => {
+            cx.default_global::<QuitRound>()
+                .dont_save
+                .push(doc.downgrade());
+            proceed(&doc, what, cx);
+        }
         Answer::DontSave => {
             doc.update(cx, |d, cx| {
                 d.discarded = true;
@@ -218,6 +258,33 @@ fn answered(doc: Entity<ScriptDoc>, what: For, answer: Answer, cx: &mut App) {
                 );
             });
         }
+    }
+}
+
+/// The prompt's subtitle: environment · connection · database (I5).
+fn subtitle(doc: &ScriptDoc, cx: &App) -> String {
+    let tab = doc.spec(cx);
+    let profile = tab
+        .as_ref()
+        .and_then(|t| t.profile)
+        .and_then(|p| crate::scripts::open::profile_of(p, cx));
+    match (profile, tab.and_then(|t| t.database)) {
+        (Some(p), Some(db)) => msg(
+            cx,
+            "hv-scripts-unsaved-subtitle",
+            vec![
+                (
+                    "env",
+                    ArgValue::Text(
+                        crate::connections::capsule::env_word(cx, p.environment).to_string(),
+                    ),
+                ),
+                ("conn", ArgValue::Text(tabs::display_name(&p.name))),
+                ("database", ArgValue::Text(tabs::display_name(db.as_str()))),
+            ],
+        )
+        .to_string(),
+        _ => msg(cx, "hv-scripts-unsaved-subtitle-unbound", Vec::new()).to_string(),
     }
 }
 

@@ -4781,11 +4781,6 @@ hv-scripts-moved = { $path } konumuna taşındı
 #   $conn (String) - the connection's name (data), e.g. "orders-staging".
 # Review: PO
 hv-scripts-moved-body = Dosya diskte taşındı ve bu sekme onu izliyor. Yine yalnızca { $conn } üzerinde çalışır.
-# Surface 6 (Changes on disk): the file moved to a place this connection does not show (its new path is not shown).
-# Variables:
-#   $conn (String) - the connection's name (data), e.g. "orders-staging".
-# Review: PO
-hv-scripts-unlisted-moved-body = Bu bağlantının göstermediği bir yere taşındı. Bu sekme yine yalnızca { $conn } üzerinde çalışır.
 # Surface 6 (Changes on disk): the Deleted on disk notice's second button.
 # Review: PO
 hv-scripts-disk-close = Sekmeyi kapat
@@ -4808,3 +4803,34 @@ hv-scripts-recover-item-unbound = { $file } · bağlantı yok
 #   $encoding (String) - the encoding's name (data), e.g. "windows-1254".
 # Review: PO
 hv-scripts-enc-open-as = { $encoding } olarak aç
+# Fix round 1 (T14 review).
+# Surface 5 (Script tab): a MySQL/MariaDB script tab never shares a session (R-T14-3); the profile cannot give it one of its own.
+# Review: PO
+hv-scripts-one-session = Bu bağlantı tek oturuma izin veriyor; konsolu kapatın ya da sınırı yükseltin.
+# Surface 6 (Changes on disk): why a "No longer listed" tab is off (R-T14-4); the file moved where this connection does not show it.
+# Review: PO
+hv-scripts-unlisted-gone = Bu bağlantının göstermediği bir yere taşındı.
+# Surface 6 (Changes on disk).
+# Variables:
+#   $folder (String) - the environment folder (data), e.g. "@production".
+# Review: PO
+hv-scripts-unlisted-env = Başka bir ortamın klasörü olan { $folder } içinde.
+# Surface 6 (Changes on disk): Run and Save are off on a tab whose file is no longer listed (R-T14-4).
+# Review: PO
+hv-scripts-unlisted-off = Bu sekmede Çalıştır ve Kaydet kapalı; dosya artık ait olmadığı yerde hiç çalışmaz ya da yazılmaz.
+# Surface 5 (Script tab): why "Open under another connection…" is disabled (a sentence, N2).
+# Review: PO
+hv-scripts-open-under-none-reason = Bu dosyayı gösteren başka bağlantı yok.
+# Surface 5 (Script tab): why "Open under another connection…" is disabled until the chooser can pick (production is never chosen for you).
+# Review: PO
+hv-scripts-open-under-chooser = İstediğiniz bağlantının Betikler düğümünden açın.
+# Surface 6b (Unsaved changes): the prompt's subtitle (I5).
+# Variables:
+#   $env (String) - the environment word, e.g. "PRODUCTION".
+#   $conn (String) - the connection's name (data), e.g. "orders-prod".
+#   $database (String) - the database (data), e.g. "orders".
+# Review: PO
+hv-scripts-unsaved-subtitle = { $env } · { $conn } · { $database }
+# Surface 6b (Unsaved changes): the subtitle of a tab with no connection.
+# Review: PO
+hv-scripts-unsaved-subtitle-unbound = Bağlantı yok

@@ -4951,10 +4951,6 @@ hv-scripts-moved = Moved to { $path }
 # Variables:
 #   $conn (String) - the connection's name (data), e.g. "orders-staging".
 hv-scripts-moved-body = The file was moved on disk and this tab follows it. It still runs only on { $conn }.
-# Surface 6 (Changes on disk): the file moved to a place this connection does not show (its new path is not shown).
-# Variables:
-#   $conn (String) - the connection's name (data), e.g. "orders-staging".
-hv-scripts-unlisted-moved-body = It moved to a place this connection doesn't show. This tab still runs only on { $conn }.
 # Surface 6 (Changes on disk): the Deleted on disk notice's second button.
 hv-scripts-disk-close = Close tab
 # Surface 12 (Recovery): a recovered copy whose writer may still be running (R-T5-5).
@@ -4972,3 +4968,26 @@ hv-scripts-recover-item-unbound = { $file } · no connection
 # Variables:
 #   $encoding (String) - the encoding's name (data), e.g. "windows-1254".
 hv-scripts-enc-open-as = Open as { $encoding }
+# Fix round 1 (T14 review).
+# Surface 5 (Script tab): a MySQL/MariaDB script tab never shares a session (R-T14-3); the profile cannot give it one of its own.
+hv-scripts-one-session = This connection allows one session; close the console or raise the limit.
+# Surface 6 (Changes on disk): why a "No longer listed" tab is off (R-T14-4); the file moved where this connection does not show it.
+hv-scripts-unlisted-gone = It moved to a place this connection doesn't show.
+# Surface 6 (Changes on disk).
+# Variables:
+#   $folder (String) - the environment folder (data), e.g. "@production".
+hv-scripts-unlisted-env = It is in { $folder }, a folder for another environment.
+# Surface 6 (Changes on disk): Run and Save are off on a tab whose file is no longer listed (R-T14-4).
+hv-scripts-unlisted-off = Run and Save are off in this tab, so it never runs or writes the file where it no longer belongs.
+# Surface 5 (Script tab): why "Open under another connection…" is disabled (a sentence, N2).
+hv-scripts-open-under-none-reason = No other connection shows this file.
+# Surface 5 (Script tab): why "Open under another connection…" is disabled until the chooser can pick (production is never chosen for you).
+hv-scripts-open-under-chooser = Open it from the Scripts node of the connection you want.
+# Surface 6b (Unsaved changes): the prompt's subtitle (I5).
+# Variables:
+#   $env (String) - the environment word, e.g. "PRODUCTION".
+#   $conn (String) - the connection's name (data), e.g. "orders-prod".
+#   $database (String) - the database (data), e.g. "orders".
+hv-scripts-unsaved-subtitle = { $env } · { $conn } · { $database }
+# Surface 6b (Unsaved changes): the subtitle of a tab with no connection.
+hv-scripts-unsaved-subtitle-unbound = No connection

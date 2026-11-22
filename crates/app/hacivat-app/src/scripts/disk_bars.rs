@@ -207,23 +207,18 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                     }),
                 )
         }
+        // ## m4b-t14-tabs fix round 1 (I6, R-T14-4): Run and Save are off; Close, and
+        // "Open under another connection…" where the file is listed.
         Notice::Unlisted(why) => {
             let body = match why {
-                Unlisted::Moved => msg(
-                    cx,
-                    "hv-scripts-unlisted-moved-body",
-                    vec![("conn", ArgValue::Text(conn.clone()))],
-                ),
+                Unlisted::Moved => msg(cx, "hv-scripts-unlisted-gone", Vec::new()),
                 Unlisted::Env { folder } => msg(
                     cx,
-                    "hv-scripts-unlisted-body",
-                    vec![
-                        ("reason", ArgValue::Text("env".to_string())),
-                        ("folder", ArgValue::Text(folder.clone())),
-                        ("conn", ArgValue::Text(conn.clone())),
-                    ],
+                    "hv-scripts-unlisted-env",
+                    vec![("folder", ArgValue::Text(folder.clone()))],
                 ),
             };
+            let b = weak.clone();
             let n = InlineNotice::new(NoticeIcon::Info)
                 .line(msg(
                     cx,
@@ -233,7 +228,21 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                         ("conn", ArgValue::Text(conn)),
                     ],
                 ))
-                .secondary(body);
+                .secondary(body)
+                .secondary(msg(cx, "hv-scripts-unlisted-off", Vec::new()))
+                .action(
+                    Button::new(
+                        id("script-unlisted-close"),
+                        msg(cx, "hv-scripts-disk-close", Vec::new()),
+                    )
+                    .on_click(move |_, window, cx| {
+                        if b.upgrade().is_some()
+                            && let Some(ws) = window.root::<crate::shell::Workspace>().flatten()
+                        {
+                            crate::shell::Workspace::request_close_active_tab(&ws, window, cx);
+                        }
+                    }),
+                );
             with_open_under(n, doc, cx)
         }
         Notice::Moved { path } => {
@@ -271,9 +280,7 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                     ),
                     msg(cx, "hv-scripts-run-refused-unknown-body", Vec::new()),
                 ),
-                RunRefused::Mysql { bound, current }
-                | RunRefused::Edited { bound, current }
-                | RunRefused::Shared { bound, current } => {
+                RunRefused::Mysql { bound, current } | RunRefused::Edited { bound, current } => {
                     let reason = if matches!(why, RunRefused::Mysql { .. }) {
                         "mysql"
                     } else {
@@ -396,6 +403,10 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
         }
         // The editor's own T2 banner says it (Task 11); the status bar has the segment.
         Notice::Preview => return None,
+        // ## m4b-t14-tabs fix round 1 (I3, R-T14-3)
+        Notice::OneSession => {
+            InlineNotice::new(NoticeIcon::Info).line(msg(cx, "hv-scripts-one-session", Vec::new()))
+        }
     };
     Some(card.into_any_element())
 }
@@ -408,7 +419,16 @@ fn with_open_under(n: InlineNotice, doc: &Entity<ScriptDoc>, cx: &mut App) -> In
     };
     let places = open::other_places(&spec, cx);
     let tab = doc.read(cx).tab.0;
-    if places.is_empty() {
+    // ## m4b-t14-tabs fix round 1 (minors 4, 11): disabled with its reason (a sentence) when no
+    // other connection shows the file, or when only the chooser (Task 15) could pick one.
+    let reason = if places.is_empty() {
+        Some("hv-scripts-open-under-none-reason")
+    } else if !open::can_open_under(&places, cx) {
+        Some("hv-scripts-open-under-chooser")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
         return n
             .action(
                 Button::new(
@@ -417,7 +437,7 @@ fn with_open_under(n: InlineNotice, doc: &Entity<ScriptDoc>, cx: &mut App) -> In
                 )
                 .disabled(true),
             )
-            .secondary(msg(cx, "hv-scripts-menu-open-under-none", Vec::new()));
+            .secondary(msg(cx, reason, Vec::new()));
     }
     n.action(
         Button::new(
@@ -493,12 +513,33 @@ fn discard_and_reload(doc: &Entity<ScriptDoc>, cx: &mut App) {
         return;
     };
     let env = doc.read(cx).env(cx);
+    // ## m4b-t14-tabs fix round 1 (minor 1): in the file's own encoding, as `reload` reads.
+    let meta = doc.read(cx).meta;
+    let tier = doc.read(cx).tier;
+    let label = (meta.encoding != hacivat_scripts::fileio::TextEncoding::UTF_8 && !meta.bom)
+        .then_some(meta.encoding.name());
     let (lib, rel) = (tab.library, tab.rel.clone());
-    let read = tabs::on_core(cx, async move { service.read(lib, &rel, env).await });
+    let read = tabs::on_core(cx, async move {
+        match label {
+            Some(label) => service.read_with(lib, &rel, env, label).await,
+            None => service.read(lib, &rel, env).await,
+        }
+    });
     let doc = doc.clone();
     cx.spawn(async move |cx| {
         let read = read.await;
         cx.update(|cx| match read {
+            // A file that is now a T2 preview (or a preview tab) is never loaded into this
+            // editor in place (minor 1); an open composition holds the replacement, so the
+            // clean version would mark the user's composed text clean (minor 2): the bar
+            // stays, and the user answers again.
+            Some(Ok(decoded))
+                if decoded.tier == hacivat_scripts::fileio::SizeTier::Preview
+                    || tier == hacivat_scripts::fileio::SizeTier::Preview
+                    || editor.read(cx).status().composing =>
+            {
+                doc.update(cx, |d, cx| d.show(Notice::Changed, cx));
+            }
             Some(Ok(decoded)) => {
                 editor.update(cx, |e, cx| e.set_text(&decoded.text, cx));
                 let v = editor.read(cx).snapshot().version;

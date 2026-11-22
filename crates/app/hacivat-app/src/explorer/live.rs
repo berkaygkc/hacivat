@@ -1100,6 +1100,7 @@ fn user_session(id: ProfileId, cx: &App) -> Option<hacivat_session::session::Ses
             .find_map(|s| s.session.clone())
     })
 }
+// ## m4b-t14-tabs
 
 /// The database `id`'s user session is on, when a session of it has read its context
 /// (`SessionSnapshot::schema`).

@@ -121,6 +121,20 @@ enum SavedKind {
         profile: Option<String>,
         #[serde(default, deserialize_with = "crate::scripts::restore::lenient")]
         database: Option<String>,
+        // ## m4b-t14-tabs fix round 1 (C2, R-T14-1): a SQLite tab's file, as it was at open
+        // (its canonical path and `dev:ino`); left out for every other tab.
+        #[serde(
+            default,
+            deserialize_with = "crate::scripts::restore::lenient",
+            skip_serializing_if = "Option::is_none"
+        )]
+        sqlite_path: Option<String>,
+        #[serde(
+            default,
+            deserialize_with = "crate::scripts::restore::lenient",
+            skip_serializing_if = "Option::is_none"
+        )]
+        sqlite_id: Option<String>,
         #[serde(skip)]
         interned: Option<crate::scripts::ScriptTabId>,
     },
@@ -391,11 +405,15 @@ impl Workspace {
                             // ## m4b-t01b-seams (R-M4b-22): the binding itself, never a handle.
                             TabKind::Script { script } => {
                                 let tab = crate::scripts::tabs::spec(*script, cx)?;
+                                // ## m4b-t14-tabs fix round 1 (C2)
+                                let file = crate::scripts::tabs::sqlite_file(*script, cx);
                                 SavedKind::Script {
                                     library: Some(tab.library.to_string()),
                                     rel_path: Some(tab.rel.as_str().to_string()),
                                     profile: tab.profile.map(|p| p.to_string()),
                                     database: tab.database.map(|d| d.as_str().to_string()),
+                                    sqlite_id: file.as_ref().and_then(|f| f.id_text()),
+                                    sqlite_path: file.map(|f| f.path),
                                     interned: None,
                                 }
                             }
@@ -1113,6 +1131,8 @@ fn intern_script_tab(kind: &mut SavedKind, cx: &mut App) {
         rel_path,
         profile,
         database,
+        sqlite_path,
+        sqlite_id,
         interned,
     } = kind
     else {
@@ -1133,7 +1153,13 @@ fn intern_script_tab(kind: &mut SavedKind, cx: &mut App) {
         profile: profile.as_deref().and_then(|p| p.parse().ok()),
         database: database.as_deref().map(crate::scripts::DatabaseName::new),
     };
-    *interned = Some(crate::scripts::tabs::intern(tab, cx));
+    let id = crate::scripts::tabs::intern(tab, cx);
+    // ## m4b-t14-tabs fix round 1 (C2): the SQLite file it was opened on (Run compares it).
+    if let Some(path) = sqlite_path.as_deref() {
+        let file = crate::scripts::tabs::SqliteFile::parse(path, sqlite_id.as_deref());
+        crate::scripts::tabs::set_sqlite_file(id, file, cx);
+    }
+    *interned = Some(id);
 }
 
 /// A restored workspace, consistent and within the window.

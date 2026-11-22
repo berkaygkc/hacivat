@@ -49,12 +49,15 @@ pub(super) enum M4b {
     ScriptRemoved,
     /// Surface 6b: "Save changes to …?" (Don't save · Save · Cancel focused).
     ScriptUnsaved,
+    /// Surface 5, connected (fix round 1, minor 12): a script tab under the production
+    /// connection, connected: the capsule, the hairline and the status segment follow it.
+    ScriptConnectedProd,
     // ## m4b-t14-tabs
 }
 
 /// Every M4b state, in shot order.
 // ## m4b-t14-tabs (named exception): Task 14's states after Task 11's.
-pub(super) const M4B_STATES: [M4b; 9] = [
+pub(super) const M4B_STATES: [M4b; 10] = [
     M4b::T2Preview,
     M4b::PasteConfirm,
     M4b::ScriptTabs,
@@ -64,6 +67,7 @@ pub(super) const M4B_STATES: [M4b; 9] = [
     M4b::ScriptRunRefused,
     M4b::ScriptRemoved,
     M4b::ScriptUnsaved,
+    M4b::ScriptConnectedProd,
 ];
 
 /// The preview's file: 148 MB (the mock's).
@@ -88,6 +92,7 @@ impl M4b {
             M4b::ScriptRunRefused => "m4b-script-run-refused",
             M4b::ScriptRemoved => "m4b-script-removed",
             M4b::ScriptUnsaved => "m4b-script-unsaved",
+            M4b::ScriptConnectedProd => "m4b-script-connected-prod",
         }
     }
 
@@ -97,7 +102,7 @@ impl M4b {
             M4b::T2Preview => ("#editor-t2-title", None),
             M4b::PasteConfirm => ("hacivat-ui/src/dialog.rs:", None),
             // ## m4b-t14-tabs
-            M4b::ScriptTabs => ("#tab-title", None),
+            M4b::ScriptTabs | M4b::ScriptConnectedProd => ("#tab-title", None),
             M4b::ScriptUnsaved => ("hacivat-ui/src/dialog.rs:", None),
             M4b::ScriptChanged
             | M4b::ScriptDeleted
@@ -119,6 +124,7 @@ impl M4b {
             | M4b::ScriptRunRefused
             | M4b::ScriptRemoved
             | M4b::ScriptTabs
+            | M4b::ScriptConnectedProd
             | M4b::ScriptUnsaved => &[],
         }
     }
@@ -128,7 +134,17 @@ impl M4b {
         save(cx, pg(DEV, EnvTag::Dev));
         // ## m4b-t14-tabs: the connections a script is open under.
         if self.is_script() {
-            save(cx, pg(PROD, EnvTag::Production));
+            let mut prod = pg(PROD, EnvTag::Production);
+            if self.connects() {
+                // An IP literal: nothing resolves (the M3a fakes dial themselves).
+                prod.endpoint = ProfileEndpoint::Server {
+                    host: "10.0.4.12".into(),
+                    port: None,
+                };
+                prod.user = Some("deploy".into());
+                prod.auth = hacivat_secrets::AuthProviderId::None;
+            }
+            save(cx, prod);
             save(cx, pg(STAGING, EnvTag::Staging));
             let mut api = pg(API, EnvTag::Dev);
             api.engine = DbmsKind::MySql;
@@ -138,6 +154,11 @@ impl M4b {
     }
 
     // ## m4b-t14-tabs
+    /// A state that connects for real (over the M3a fakes), so its capsule shows.
+    pub(super) fn connects(self) -> bool {
+        self == M4b::ScriptConnectedProd
+    }
+
     /// A script tab state (Task 14).
     fn is_script(self) -> bool {
         !matches!(self, M4b::T2Preview | M4b::PasteConfirm)
@@ -402,6 +423,24 @@ fn script_steps(state: M4b) -> Vec<Step> {
                         .is_some_and(|ws| ws.read(cx).layer_ids().contains(&"dialog"))
                 },
             ));
+        }
+        M4b::ScriptConnectedProd => {
+            steps.push(step(
+                |_, cx| {
+                    if let Some(id) = profile_named(cx, PROD) {
+                        ConnectionsModel::connect(cx, id, None);
+                    }
+                },
+                |_, cx| {
+                    profile_named(cx, PROD).is_some_and(|id| {
+                        matches!(
+                            cx.global::<ConnectionsModel>().live(id),
+                            hacivat_session::LiveState::Connected(_)
+                        )
+                    })
+                },
+            ));
+            steps.push(open_step(REPORT, Some(PROD), Some("orders")));
         }
         M4b::T2Preview | M4b::PasteConfirm => {}
     }

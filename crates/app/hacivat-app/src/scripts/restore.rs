@@ -147,6 +147,15 @@ fn offer(found: Vec<RecoveryEntry>, cx: &mut App) {
             .map(|p| display_name(&p.name));
         items.push((file, conn));
         let id = tabs::intern(tab, cx);
+        // ## m4b-t14-tabs fix round 1 (I2): a tab already in the restored layout (the usual
+        // crash: the dirty tab was open) takes its copy, read or not.
+        if let Some(doc) = tabs::doc_of_script(id, cx) {
+            doc.update(cx, |d, cx| d.apply_recovered(entry, cx));
+            crate::exec_ui::in_workspace_window(cx, move |ws, _, cx| {
+                ws.update(cx, |ws, cx| ws.open_script_tab(id, cx));
+            });
+            continue;
+        }
         // Two copies of one binding (two instances): the newest wins, the other stays offered
         // for a later launch.
         let pending = &mut cx.default_global::<PendingRecovered>().0;

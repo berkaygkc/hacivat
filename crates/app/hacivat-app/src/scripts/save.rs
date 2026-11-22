@@ -81,7 +81,8 @@ fn active_doc(cx: &App) -> Option<Entity<ScriptDoc>> {
 fn save_enabled(cx: &App) -> bool {
     active_doc(cx).is_some_and(|d| {
         let d = d.read(cx);
-        d.load == tabs::Load::Ready && d.tier != SizeTier::Preview
+        // ## m4b-t14-tabs fix round 1 (I6): off once the file left the connection.
+        d.load == tabs::Load::Ready && d.tier != SizeTier::Preview && !d.unlisted()
     })
 }
 
@@ -139,6 +140,12 @@ pub fn save(doc: &Entity<ScriptDoc>, window: &mut Window, cx: &mut App, then: Op
     if preview {
         let text = msg(cx, "hv-scripts-preview-no-save", Vec::new());
         info_toast(text, cx);
+        return finish(then, SaveOutcome::NotSaved, cx);
+    }
+    // ## m4b-t14-tabs fix round 1 (I6, R-T14-4): a file no longer listed under the tab's
+    // connection is never written back where it no longer belongs.
+    if doc.read(cx).unlisted() {
+        info_toast(msg(cx, "hv-scripts-unlisted-off", Vec::new()), cx);
         return finish(then, SaveOutcome::NotSaved, cx);
     }
     let text = editor.read(cx).snapshot().buffer.to_string();

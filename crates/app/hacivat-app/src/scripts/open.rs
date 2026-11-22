@@ -168,13 +168,12 @@ pub fn session_plan(
             }
         }
         DbLevel::SchemaIsDatabase => {
+            // ## m4b-t14-tabs fix round 1 (I3, R-T14-3): a MySQL/MariaDB script tab never shares
+            // a session (another console's queued `USE` could land between its check and its
+            // run): a profile that cannot give it one of its own refuses it.
             let own_db = profile.database.as_deref() == Some(db);
-            if profile.single_session {
-                if own_db {
-                    Ok(SessionPlan::Shared)
-                } else {
-                    Err(Refusal::SingleSession)
-                }
+            if profile.single_session || profile.max_connections < 2 {
+                Err(Refusal::SingleSession)
             } else {
                 Ok(SessionPlan::Own { switch: !own_db })
             }
@@ -210,11 +209,11 @@ pub(crate) fn refusal_text(
             "hv-scripts-open-db-unknown",
             vec![("file", file), ("conn", conn), ("database", database)],
         ),
-        Refusal::SingleSession => tabs::msg(
-            cx,
-            "hv-scripts-open-single-session",
-            vec![("file", file), ("conn", conn), ("database", database)],
-        ),
+        // ## m4b-t14-tabs fix round 1 (I3)
+        Refusal::SingleSession => {
+            let _ = (file, conn, database);
+            tabs::msg(cx, "hv-scripts-one-session", Vec::new())
+        }
     }
 }
 
@@ -274,6 +273,12 @@ pub fn open_script(
                 refuse(refusal, &rel, p.name.clone(), db.as_str().to_string(), cx);
                 return None;
             }
+            // ## m4b-t14-tabs fix round 1 (C2, R-T14-1): a SQLite tab is bound to the file the
+            // profile points at now, read on the core runtime; the tab opens once it is known.
+            if database_level(p.engine) == DbLevel::File {
+                open_sqlite(library, rel, id, db, &p, cx);
+                return None;
+            }
             Some(db)
         }
     };
@@ -286,6 +291,12 @@ pub fn open_script(
         },
         cx,
     );
+    show_tab(script, cx)
+}
+
+/// Opens (or focuses) the tab of handle `script` after the current update; the console of a
+/// tab that was already open and read.
+fn show_tab(script: tabs::ScriptTabId, cx: &mut App) -> Option<ConsoleId> {
     // Already open and read: its console, focused after this update.
     let open = tabs::doc_of_script(script, cx).and_then(|doc| doc.read(cx).console());
     crate::exec_ui::in_workspace_window(cx, move |ws, window, cx| {
@@ -303,6 +314,56 @@ pub fn open_script(
 }
 
 // ---- open under another connection ----------------------------------------------------------------
+
+/// A SQLite script: its profile's file identity is read off the UI thread, then the tab is
+/// interned with it and opened (C2, R-T14-1). A file that cannot be read opens nothing.
+fn open_sqlite(
+    library: LibraryId,
+    rel: RelPath,
+    profile: ProfileId,
+    database: DatabaseName,
+    p: &Profile,
+    cx: &mut App,
+) {
+    let path = tabs::sqlite_path(p);
+    let name = p.name.clone();
+    let found = tabs::on_core(cx, async move {
+        tokio::task::spawn_blocking(move || path.as_deref().and_then(tabs::sqlite_identity))
+            .await
+            .ok()
+            .flatten()
+    });
+    cx.spawn(async move |cx| {
+        let file = found.await.flatten();
+        cx.update(|cx| {
+            let Some(file) = file else {
+                refuse(
+                    Refusal::DatabaseUnknown,
+                    &rel,
+                    name,
+                    database.as_str().to_string(),
+                    cx,
+                );
+                return;
+            };
+            let script = tabs::intern(
+                ScriptTab {
+                    library,
+                    rel,
+                    profile: Some(profile),
+                    database: Some(database),
+                },
+                cx,
+            );
+            // A tab already open on another file keeps its own (its Run refuses).
+            if tabs::sqlite_file(script, cx).is_none() {
+                tabs::set_sqlite_file(script, file, cx);
+            }
+            show_tab(script, cx);
+        });
+    })
+    .detach();
+}
 
 /// The other places a script tab's file can be opened under (N2): every profile's configured
 /// database (R-M4b-31) whose binding includes the library and whose environment shows the file
@@ -372,6 +433,16 @@ impl Global for OpenUnderHook {}
 /// Installs Task 15's chooser for "Open under another connection…".
 pub fn set_open_under_another(hook: OpenUnderFn, cx: &mut App) {
     cx.set_global(OpenUnderHook(hook));
+}
+
+/// ## m4b-t14-tabs fix round 1 (minor 4): whether "Open under another connection…" can act on
+/// `places` now: with Task 15's chooser always; without it, only one place that is not
+/// production (the chooser decides everything else; production is never chosen for the user).
+pub fn can_open_under(places: &[(ProfileId, DatabaseName)], cx: &App) -> bool {
+    if cx.has_global::<OpenUnderHook>() {
+        return !places.is_empty();
+    }
+    matches!(places, [(p, _)] if profile_of(*p, cx).and_then(|p| p.environment) != Some(EnvTag::Production))
 }
 
 /// "Open under another connection…" of the tab bound as `tab`: a new tab, never a rebind.

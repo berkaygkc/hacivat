@@ -689,6 +689,22 @@ impl LibraryService {
         .await;
     }
 
+    /// [`forget`](Self::forget) queued now, from any thread (the UI's tab close): it is in the
+    /// inbox before any later read can remember the file again (T14 review minor 13). A full
+    /// inbox hands it to the core runtime instead.
+    pub fn forget_now(&self, id: LibraryId, rel: &RelPath) {
+        let msg = Msg::Forget {
+            id,
+            rel: rel.clone(),
+        };
+        if let Err(mpsc::error::TrySendError::Full(msg)) = self.tx.try_send(msg) {
+            let tx = self.tx.clone();
+            self.rt.spawn(async move {
+                let _ = tx.send(msg).await;
+            });
+        }
+    }
+
     /// Stops the service now, as dropping it does (the app at quit: the core runtime's shutdown
     /// then never waits for the actor). Every later call answers as a stopped service does.
     pub fn shutdown(&self) {
