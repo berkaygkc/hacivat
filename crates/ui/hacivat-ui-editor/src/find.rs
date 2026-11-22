@@ -78,6 +78,10 @@ pub struct FindStatus {
     pub counted: u32,
     /// A query is set (`set_find(Some(..))`).
     pub active: bool,
+    // ## m4b-t11-editor (named item; UI-EDIT-23 edge case "search in T2")
+    /// The editor is a T2 preview: find searches the shown part of the file only, and the
+    /// host's find bar says so.
+    pub preview_only: bool,
 }
 
 /// The most matches the state keeps (ALG UI-EDIT-22 step 11: highlighting stops at 100,000).
@@ -573,6 +577,8 @@ pub(crate) fn say_capped(v: &mut EditorView, max: u64, n: u64, cx: &mut Context<
 /// The panel's status: the count, and the current match when the main selection is one.
 pub(crate) fn status(v: &EditorView) -> FindStatus {
     let mut s = v.find.status;
+    // ## m4b-t11-editor (named item)
+    s.preview_only = v.tier.tier == crate::config::Tier::Preview;
     if s.active && v.find.version == v.model.version() {
         let r = v.model.selection().main().range();
         let at = v.find.matches.partition_point(|m| m.start < r.start);

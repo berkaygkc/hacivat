@@ -101,6 +101,9 @@ mod m3c;
 // ## m4-t32-shots: the M4 states (`design/m4-explorer`; the PO's R-W5-14 surfaces).
 #[path = "shots/m4.rs"]
 mod m4;
+// ## m4b-t11-editor: the M4b states (`design/m4b-scripts`), Task 11's first.
+#[path = "shots/m4b.rs"]
+mod m4b;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -235,6 +238,8 @@ enum Surface {
     M3c(m3c::M3c),
     // ## m4-t32-shots: every M4 state (`m4::M4_STATES`), at 1280x800 and 960x600.
     M4(m4::M4),
+    // ## m4b-t11-editor: every M4b state (`m4b::M4B_STATES`), at 1280x800 and 960x600.
+    M4b(m4b::M4b),
 }
 
 const SURFACES: [Surface; 78] = [
@@ -418,6 +423,8 @@ impl Surface {
             Surface::M3c(s) => s.name(),
             // ## m4-t32-shots
             Surface::M4(s) => s.name(),
+            // ## m4b-t11-editor
+            Surface::M4b(s) => s.name(),
         }
     }
 
@@ -452,6 +459,8 @@ impl Surface {
             || matches!(self, Surface::M3a(_) | Surface::M3b(_) | Surface::M3c(_))
             // ## m4-t32-shots: and every M4 state.
             || matches!(self, Surface::M4(_))
+            // ## m4b-t11-editor: and every M4b state.
+            || matches!(self, Surface::M4b(_))
         {
             // ## m2b-t22-live: the default window and the minimum one (ruling I1).
             return &[(1280.0, 800.0), (960.0, 600.0)];
@@ -660,6 +669,8 @@ impl Surface {
             Surface::M3c(s) => s.marker(),
             // ## m4-t32-shots
             Surface::M4(s) => s.marker(),
+            // ## m4b-t11-editor
+            Surface::M4b(s) => s.marker(),
         }
     }
 
@@ -685,6 +696,8 @@ impl Surface {
             Surface::M3c(s) => s.also_shown(),
             // ## m4-t32-shots
             Surface::M4(s) => s.also_shown(),
+            // ## m4b-t11-editor
+            Surface::M4b(s) => s.also_shown(),
             _ => &[],
         }
     }
@@ -827,6 +840,10 @@ impl Surface {
         }
         // ## m4-t32-shots: an M4 state saves its fixtures, then its steps expand the tree.
         if let Surface::M4(state) = self {
+            return state.open(window, cx);
+        }
+        // ## m4b-t11-editor: an M4b state saves its profile, then its steps open the console.
+        if let Surface::M4b(state) = self {
             return state.open(window, cx);
         }
         if self.needs_connections() {
@@ -1112,6 +1129,10 @@ fn shots() -> Vec<Shot> {
     // ## m4-t32-shots: then every M4 state.
     for state in m4::M4_STATES {
         push_matrix(&mut out, Surface::M4(state));
+    }
+    // ## m4b-t11-editor: then every M4b state.
+    for state in m4b::M4B_STATES {
+        push_matrix(&mut out, Surface::M4b(state));
     }
     out
 }
@@ -1563,6 +1584,8 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         // ## m4-t32-shots: an M4 state's steps after its fixtures.
         _ => match shot.surface {
             Surface::M4(s) => s.steps(),
+            // ## m4b-t11-editor
+            Surface::M4b(s) => s.steps(),
             _ => Vec::new(),
         },
     };
@@ -1925,6 +1948,8 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             + m3c::all().len() * 8 * 2
             // ## m4-t32-shots: every M4 state.
             + m4::M4_STATES.len() * 8 * 2
+            // ## m4b-t11-editor: every M4b state.
+            + m4b::M4B_STATES.len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
@@ -1946,7 +1971,12 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     // ## m4-t32-shots: and the M4 states x 16.
     assert_eq!(
         all.len(),
-        1020 + 68 * 16 + 71 * 16 + 101 * 16 + m4::M4_STATES.len() * 16
+        1020 + 68 * 16
+            + 71 * 16
+            + 101 * 16
+            + m4::M4_STATES.len() * 16
+            // ## m4b-t11-editor
+            + m4b::M4B_STATES.len() * 16
     );
     let m3b_from = 1020 + 68 * 16;
     let order = [
@@ -1987,6 +2017,16 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             all[at..at + 16]
                 .iter()
                 .all(|s| s.surface == Surface::M4(state)),
+            "{state:?} at {at}"
+        );
+        at += 16;
+    }
+    // ## m4b-t11-editor: the M4b states after them.
+    for state in m4b::M4B_STATES {
+        assert!(
+            all[at..at + 16]
+                .iter()
+                .all(|s| s.surface == Surface::M4b(state)),
             "{state:?} at {at}"
         );
         at += 16;

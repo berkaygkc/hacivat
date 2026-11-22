@@ -196,6 +196,7 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 - **Running:** a 26 px strip under the notice (the cursor-strip anatomy, raised): the amber run marker, "Running as script", "1,204 statements sent" (mono), "line 48213", "38 MB of 148 MB", **Stop** (Default, Tab stop). Run as script is disabled meanwhile (tooltip "Running as script: wait for it, or stop it"). Each statement still goes through the classifier, the gate and its confirmations.
 - **Stopped on error:** the strip wraps: ink alert, "Stopped at statement 1,205: the server returned an error. Nothing after it was sent." + **Close**; the server text is in Output verbatim. **Stopped by the user:** "Stopped after 1,204 statements. Nothing after them was sent."
 - **Paste 20–100 MB:** 420 alertdialog "Paste 42.6 MB?" / "That makes this document 61 MB, too large to edit. Paste it as a read-only preview, or cancel." — **Paste as preview** (Default) · **Cancel** (Primary, focused).
+- *Task 11 fix round 1 (controller rulings):* there is no editable "Paste" past 20 MB (R-T11-2, R-M3-49), as the dialog above shows. **Mock error:** sizes follow the format locale, which follows the OS region (spec L15(d)), not the UI language; the mock's `nf()` follows the language toggle. A tr-TR region writes "42,6 MB" in either language; the product formats sizes with one decimal ("148,0 MB"; the shared app formatter, the same as the T1 banner's).
 
 **States.** T2 preview · running · stopped on error · paste · 960 × 600 in Turkish.
 

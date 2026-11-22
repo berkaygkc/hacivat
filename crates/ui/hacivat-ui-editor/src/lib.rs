@@ -64,3 +64,7 @@ pub use find::{FindMatcher, FindStatus};
 pub use mouse::DRAG_AUTOSCROLL_TICK;
 // ## m4b-t01b-seams
 pub use reload::{PreviewSpec, ReloadRefused};
+// ## m4b-t11-editor
+pub use clipboard::{PasteAnswer, PastedDocument};
+pub use reload::{DiskEdit, disk_edit};
+pub use view::UiWork;
