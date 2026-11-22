@@ -147,6 +147,23 @@ fn offer(found: Vec<RecoveryEntry>, cx: &mut App) {
             .map(|p| display_name(&p.name));
         items.push((file, conn));
         let id = tabs::intern(tab, cx);
+        // ## m4b-t14-tabs fix round 2 (m-fr1-7): its first read waits for the listing.
+        tabs::mark_restored(id, cx);
+        // ## m4b-t14-tabs fix round 3 (m-fr2-1): a SQLite tab keeps the file its copy was
+        // written on (Run then refuses, with its notice, if the profile was repointed since);
+        // a tab of the restored layout already knows it.
+        if let Some(file) = entry.copy.db_file.clone()
+            && tabs::sqlite_file(id, cx).is_none()
+        {
+            tabs::set_sqlite_file(
+                id,
+                tabs::SqliteFile {
+                    path: file.path,
+                    id: file.dev_ino,
+                },
+                cx,
+            );
+        }
         // ## m4b-t14-tabs fix round 1 (I2): a tab already in the restored layout (the usual
         // crash: the dirty tab was open) takes its copy, read or not.
         if let Some(doc) = tabs::doc_of_script(id, cx) {

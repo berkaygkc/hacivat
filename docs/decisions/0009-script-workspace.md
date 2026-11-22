@@ -1400,6 +1400,44 @@ Task 14 fills `scripts::{tabs,open,save,disk_bars,restore,unsaved_prompt}` and t
 - **Minor findings fixed:** discard-and-reload reads in the file's encoding and refuses a preview or an open composition (1, 2); a followed rename removes the old path's copy (3); "Open under another connection…" is disabled with a reason when only Task 15's chooser could pick (4); absence asserts wait on the refusal they prove (5); the one-prompt slot is held only where a window will ask (7); the M4 `user_session` block is fenced (9); a second Run press during a check or a switch back waits (10); the reason line is a sentence (11); a connected production script-tab shot shows the capsule, hairline and status segment (12); the last tab's `Forget` is queued synchronously (`LibraryService::forget_now`) (13); a closed tab's handle is un-interned (14).
 - **Minor findings not fixed:** (6) the editor's accessible name is cached by the editor (`a11y_label_cache`, keyed by the localization generation), so a rename does not refresh it until the language changes; refreshing needs an editor API. (8) A garbled `profile` restores the tab unbound rather than dropping it: it runs nothing (fail-safe), and T1b's `a_saved_script_tab_with_a_bad_binding_closes_and_one_without_a_profile_stays_unbound` codifies it.
 
+### Fix round 2 (re-review fr1: I-fr1-1, m-fr1-1 to m-fr1-7)
+
+- **I-fr1-1: the post-replay probe is bounded.** The schema probe after a reconnect is now the last step of the replay future. It runs inside the same `timeout(connect timeout)` and the same Close-serving `select!` as M3's replay.
+  - A probe that hangs counts as a timed-out replay: the connection is closed, and the next attempt follows M3's backoff and give-up clock.
+  - A Close during the probe ends the session at once.
+  - A probe that reads nothing on a working connection leaves the database unknown (`schema` is `None`, published), so a script tab's Run refuses.
+  - The last schema is kept in `kept_schema` for the next replay's plan, so M3's `USE` / `search_path` restore is unchanged. A probe that reads clears it.
+  - The schema is also published as unknown while a failed replay retries.
+  - Tests in `hacivat-session/tests/manager_m2b.rs` (all three fail on the fix-round-1 code):
+    - `a_close_during_the_probe_after_the_replay_ends_it_at_once`;
+    - `a_probe_that_hangs_after_the_replay_times_out_and_the_next_attempt_follows`;
+    - `a_probe_that_fails_after_the_replay_leaves_the_database_unknown_and_keeps_the_use`.
+- **m-fr1-1: SQLite checks the session's file too.** Each Run reads `PRAGMA database_list` on the tab's session and compares its `main` file (canonical path and `dev:ino`) with the tab's file and the profile's file. Any mismatch refuses, naming the tab's file and the other one. An in-memory or unreported `main` refuses, so the check fails closed.
+- **m-fr1-2: some tabs take the profile's file on Run.**
+  - A SQLite tab with no stored file (launch recovery without a layout entry, or a layout written before fix round 1) takes the profile's file at its first Run, as a fresh open would. The open no longer refuses it.
+  - After a remount (same canonical path and inode, another device number), the tab follows its file.
+  - A file replaced at the same path (a new inode) still refuses.
+- **m-fr1-3:** the probe is queued before the context generation is read, and the comment now says so. A move between the two bumps the generation, which the orchestrator refuses.
+- **m-fr1-4:** `RunChecks` records the session the check was made on. `generation_holds` requires both that session and the generation.
+- **m-fr1-5: "Don't save" removes copies off the UI thread.** At quit, its recovery copies are removed on the core runtime's blocking pool. The scripts' quit hook (`tabs::install`) waits for those removals.
+- **m-fr1-6:** `open_script` always answers `None` for SQLite, because its tab opens once the file identity is read. Task 15 must find the tab by its binding (`tabs::doc_of_script`), never through this return value. This is documented on `open_script`.
+- **m-fr1-7: only restored tabs wait.** The bounded "listed" wait runs only for a handle restored at launch, from the layout or from launch recovery (`tabs::mark_restored`). A tab opened from a listed row reads at once.
+- **m-fr1-8:** the shot-harness flake (`marks-awaiting`, `fold-failed`) is carried to T21.
+
+### Fix round 3 (re-review fr2 minors: m-fr2-1 to m-fr2-3; ruling R-T14-5)
+
+- **m-fr2-2, R-T14-5: a remount is followed only on the first Run after a launch restore.** "Remount" means the same canonical path and inode, but another device number.
+  - On a tab restored at launch (from the layout or from launch recovery), the first Run may follow the remounted file. It shows "The database file is on a different volume now; running on <path>." and records the file again.
+  - On any other Run, a device change refuses like any other identity change ("Run refused"), until the tab is reopened.
+  - **Caveat 1, FAT and exFAT:** these file systems have no stable inode. The OS synthesizes the number from the file's directory position, so two different sticks with the same layout can match on path and inode. An APFS clone also keeps its inode number.
+  - **Residual:** a swapped volume at the same mount path can therefore be followed on that one first Run, but never mid-session. The notice names the path, so the user can see it.
+  - **Caveat 2, Windows:** it compares paths only, as recorded in fix round 1.
+- **m-fr2-1: a recovery copy records the SQLite file.** The copy's sidecar now stores the bound SQLite file's canonical path and `dev:ino` (`db_file_path`, `db_file_id`). Both fields are lenient: absent in older copies and for other engines. To carry them, `CopyMeta` gained `db_file` and is no longer `Copy`; this is a named exception in `hacivat-scripts`.
+  - When launch recovery opens a SQLite tab that has no file of its own, the tab takes the copy's file.
+  - If the profile was repointed between the crash and the relaunch, Run refuses with the "Run refused" notice naming both files; it never adopts the new file silently.
+  - A copy written before this change still takes the profile's file at the first Run (fix round 2's rule).
+- **m-fr2-3:** a comment on `QuitDiscards` now says that only the quit guard pushes to it (when the quit goes on) and only the quit hook drains it. Its futures are `!Send`.
+
 ## m4b-t15 — Go to script and the connection chooser
 
 Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES surface 7) and wires the "Open under another connection…" items Tasks 13 and 14 left disabled. The one rule: **production is never chosen for the user**, on every path that opens the chooser.

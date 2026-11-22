@@ -110,13 +110,13 @@ pub(crate) fn quit_guard(restart: bool, cx: &mut App) -> Option<CloseDecision> {
         .filter(|d| cx.try_global::<QuitRound>().is_none_or(|r| !r.skips(d)))
         .collect();
     let Some(doc) = waiting.first().cloned() else {
-        // The quit goes on: the "Don't save" answers of this round take effect now (I4), on
-        // this thread, as the consoles' autosave at quit does.
+        // The quit goes on: the "Don't save" answers of this round take effect now (I4); their
+        // copies are removed on the core runtime, and the quit hook waits (fix round 2, m-fr1-5).
         let round = std::mem::take(cx.default_global::<QuitRound>());
         for doc in round.dont_save.iter().filter_map(|w| w.upgrade()) {
             doc.update(cx, |d, cx| {
                 d.discarded = true;
-                d.discard_copy_now(cx);
+                d.discard_copy_at_quit(cx);
             });
         }
         return None;

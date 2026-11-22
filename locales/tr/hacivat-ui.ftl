@@ -4983,6 +4983,12 @@ hv-scripts-unsaved-subtitle = { $env } · { $conn } · { $database }
 # Surface 6b (Unsaved changes): the subtitle of a tab with no connection.
 # Review: PO
 hv-scripts-unsaved-subtitle-unbound = Bağlantı yok
+# m4b-t14-tabs fix round 3 (R-T14-5): the first Run after a launch restore follows a SQLite
+# file that is now on another volume (same path and inode).
+# Variables:
+#   $path (String) - the database file's path (data), e.g. "/Volumes/data/orders.db".
+# Review: PO
+hv-scripts-sqlite-remounted = Veritabanı dosyası artık başka bir birimde; { $path } üzerinde çalıştırılıyor.
 
 ## m4b-t15-goto
 # Surface 7 (Go to script). Palette title of the tree row's "Open under another connection…" (the chooser without the row's connection); no default chord.

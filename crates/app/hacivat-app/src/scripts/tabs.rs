@@ -189,10 +189,24 @@ pub(crate) fn install(cx: &mut App) {
         if let Some(service) = open::service(cx) {
             service.shutdown();
         }
-        async {}
+        // ## m4b-t14-tabs fix round 2 (m-fr1-5): the quit waits for "Don't save"'s removals.
+        let discards = std::mem::take(&mut cx.default_global::<QuitDiscards>().0);
+        async move {
+            for discard in discards {
+                discard.await;
+            }
+        }
     })
     .detach();
 }
+
+/// The recovery copies a quit's "Don't save" is removing (fix round 2, m-fr1-5). Its futures
+/// are `!Send`: only `unsaved_prompt::quit_guard` pushes to it, when the quit goes on, and the
+/// quit hook in [`install`] drains it (fix round 3, m-fr2-3); nothing else may.
+#[derive(Default)]
+struct QuitDiscards(Vec<std::pin::Pin<Box<dyn Future<Output = ()>>>>);
+
+impl Global for QuitDiscards {}
 
 /// Runs `fut` on the core runtime and answers its output on the calling executor (`None`
 /// when the runtime dropped it): file and service calls never run on the UI thread.
@@ -487,13 +501,9 @@ impl ScriptDoc {
             // never given "the profile's database".
             return Err(Refusal::DatabaseUnknown);
         };
-        // ## m4b-t14-tabs fix round 1 (C2, R-T14-1): a SQLite tab knows the file it was opened
-        // on, or it runs nothing.
-        if hacivat_meta::kind::database_level(p.engine) == hacivat_meta::kind::DbLevel::File
-            && sqlite_file(id, cx).is_none()
-        {
-            return Err(Refusal::DatabaseUnknown);
-        }
+        // ## m4b-t14-tabs fix round 2 (m-fr1-2): a SQLite tab without the file it was opened on
+        // (launch recovery without a layout entry) takes the profile's file at its first Run,
+        // as a fresh open would; every Run compares it (C2, R-T14-1).
         open::session_plan(&p, &db, cx)
     }
 
@@ -664,12 +674,17 @@ impl ScriptDoc {
         let env = self.env(cx);
         let service = rt.service.clone();
         let (lib, rel) = (tab.library, tab.rel.clone());
+        // ## m4b-t14-tabs fix round 2 (m-fr1-7): only a tab restored at launch (its layout or
+        // launch recovery) waits; a tab opened from a listed row reads at once.
+        let restored = take_restored(self.id, cx);
         let read = on_core(cx, async move {
             // ## m4b-t14-tabs fix round 1 (I1): a tab restored at launch waits (bounded) until
             // the service has read its registry and listed the library, so a file that exists
             // is never "not in the library" because the first scan was still running.
-            let lister = service.clone();
-            let _ = tokio::task::spawn_blocking(move || listed(&lister, lib)).await;
+            if restored {
+                let lister = service.clone();
+                let _ = tokio::task::spawn_blocking(move || listed(&lister, lib)).await;
+            }
             match encoding {
                 Some(label) => service.read_with(lib, &rel, env, label).await,
                 None => service.read(lib, &rel, env).await,
@@ -848,6 +863,11 @@ impl ScriptDoc {
             base: self.stamp,
             secret_suspected: false,
             damaged: false,
+            // ## m4b-t14-tabs fix round 3 (m-fr2-1): the SQLite file the tab is bound to.
+            db_file: sqlite_file(self.id, cx).map(|f| hacivat_scripts::recovery::DbFile {
+                path: f.path,
+                dev_ino: f.id,
+            }),
         };
         let old = self
             .recovered
@@ -971,15 +991,27 @@ impl ScriptDoc {
         }
     }
 
-    /// Removes this tab's own recovery copy now, on this thread (a quit that goes on, I4).
-    pub(crate) fn discard_copy_now(&mut self, cx: &mut Context<Self>) {
+    /// Removes this tab's own recovery copy for a quit that goes on (I4): on the core runtime's
+    /// blocking pool (fix round 2, m-fr1-5); the quit waits for it (`install`'s quit hook).
+    pub(crate) fn discard_copy_at_quit(&mut self, cx: &mut Context<Self>) {
         let (Some(rt), Some(key)) = (open::current(cx), self.recovery_key(cx)) else {
             return;
         };
         self.recovery_task = None;
-        if let Some(Some(instance)) = rt.instance.get() {
-            let _ = recovery::discard(&rt.paths, instance, &key);
-        }
+        let task = on_core(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                if let Some(Some(instance)) = rt.instance.get() {
+                    let _ = recovery::discard(&rt.paths, instance, &key);
+                }
+            })
+            .await
+            .ok()
+        });
+        cx.default_global::<QuitDiscards>()
+            .0
+            .push(Box::pin(async move {
+                let _ = task.await;
+            }));
     }
 
     /// The text is clean at `version` with the file at `stamp` (a save or a reload).
@@ -1363,14 +1395,42 @@ struct Checked {
     generation: Option<u64>,
     /// The database the server says the session is on (`None`: it could not say).
     database: Option<String>,
-    /// SQLite: whether the profile's file is still the tab's, and its name now.
-    file: Option<(bool, String)>,
+    /// SQLite: the files the check found.
+    file: Option<FileCheck>,
+}
+
+/// What a SQLite tab's Run check found (C2, R-T14-1; fix round 2, m-fr1-1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileCheck {
+    /// The profile's database file now.
+    profile: Option<SqliteFile>,
+    /// The file the tab's session has open (`PRAGMA database_list`, `main`).
+    session: Option<SqliteFile>,
+}
+
+/// The `main` database's file in a `PRAGMA database_list` answer (`seq`, `name`, `file`).
+fn main_file(answer: &hacivat_driver::ExecSummary) -> Option<String> {
+    answer
+        .rows
+        .iter()
+        .find(|r| r.get(1).and_then(Option::as_deref) == Some("main"))
+        .and_then(|r| r.get(2).cloned().flatten())
+        .filter(|p| !p.is_empty())
+}
+
+/// Whether `now` is `stored` after a remount: the same path and inode, another device.
+fn remounted(stored: &SqliteFile, now: &SqliteFile) -> bool {
+    stored.path == now.path
+        && stored
+            .id
+            .zip(now.id)
+            .is_some_and(|((d1, i1), (d2, i2))| i1 == i2 && d1 != d2)
 }
 
 /// The context generation each script console's last passed check was read under; the
 /// orchestrator sends a run only under it.
 #[derive(Default)]
-struct RunChecks(HashMap<ConsoleId, Option<u64>>);
+struct RunChecks(HashMap<ConsoleId, (hacivat_session::session::SessionId, Option<u64>)>);
 
 impl Global for RunChecks {}
 
@@ -1378,17 +1438,19 @@ impl Global for RunChecks {}
 /// `generation` may be sent (C1, R-T14-2): always for a console of its own; for a script tab
 /// only under the generation its last check read (taken: one check, one run). Anything that
 /// moved the context in between (a reconnect, a replay, a queued `USE`) refuses, and the next
-/// Run checks again.
-pub(crate) fn generation_holds(console: ConsoleId, generation: Option<u64>, cx: &mut App) -> bool {
+/// Run checks again. The check must also have been made on `session`, the session the run goes
+/// to (fix round 2, m-fr1-4).
+pub(crate) fn generation_holds(
+    console: ConsoleId,
+    session: hacivat_session::session::SessionId,
+    generation: Option<u64>,
+    cx: &mut App,
+) -> bool {
     if !is_script_console(console, cx) {
         return true;
     }
-    let checked = cx
-        .default_global::<RunChecks>()
-        .0
-        .remove(&console)
-        .flatten();
-    checked.is_some() && checked == generation
+    let checked = cx.default_global::<RunChecks>().0.remove(&console);
+    checked.is_some_and(|(on, read)| on == session && read.is_some() && read == generation)
 }
 
 /// The SQLite file a SQLite script tab was opened on (C2, R-T14-1): its canonical path and,
@@ -1432,6 +1494,15 @@ pub fn sqlite_file(id: ScriptTabId, cx: &App) -> Option<SqliteFile> {
 /// Records the SQLite file handle `id` was opened on (the open, a restore).
 pub(crate) fn set_sqlite_file(id: ScriptTabId, file: SqliteFile, cx: &mut App) {
     cx.default_global::<SqliteFiles>().0.insert(id.0, file);
+}
+
+/// Forgets the SQLite file handle `id` was opened on, as a tab opened by launch recovery
+/// without a layout entry has none (tests; fix round 2, m-fr1-2).
+#[cfg(feature = "test-support")]
+pub fn forget_sqlite_file_for_tests(id: ScriptTabId, cx: &mut App) {
+    if cx.has_global::<SqliteFiles>() {
+        cx.default_global::<SqliteFiles>().0.remove(&id.0);
+    }
 }
 
 /// The canonical path and identity of the file at `path` now. Blocking: call it on the core
@@ -1484,6 +1555,53 @@ fn listed(service: &hacivat_scripts::service::LibraryService, lib: LibraryId) ->
         std::thread::sleep(Duration::from_millis(25));
     }
 }
+
+// ## m4b-t14-tabs fix round 2 (m-fr1-7)
+/// The handles restored at launch whose first read has not started.
+#[derive(Default)]
+struct RestoredAtLaunch(std::collections::HashSet<u64>);
+
+impl Global for RestoredAtLaunch {}
+
+/// Marks handle `id` as restored at launch (the layout, launch recovery): its first read waits
+/// for the library's first listing, and its first Run may follow a remounted SQLite file
+/// (fix round 3, R-T14-5).
+pub(crate) fn mark_restored(id: ScriptTabId, cx: &mut App) {
+    cx.default_global::<RestoredAtLaunch>().0.insert(id.0);
+    cx.default_global::<FirstRunAfterRestore>().0.insert(id.0);
+}
+
+// ## m4b-t14-tabs fix round 3 (m-fr2-2, R-T14-5)
+/// The handles restored at launch that have not been run since.
+#[derive(Default)]
+struct FirstRunAfterRestore(std::collections::HashSet<u64>);
+
+impl Global for FirstRunAfterRestore {}
+
+/// Whether this is handle `id`'s first Run check since it was restored at launch (taken).
+fn take_first_run(id: ScriptTabId, cx: &mut App) -> bool {
+    cx.has_global::<FirstRunAfterRestore>()
+        && cx.default_global::<FirstRunAfterRestore>().0.remove(&id.0)
+}
+
+/// Marks handle `id` as restored at launch (tests).
+#[cfg(feature = "test-support")]
+pub fn mark_restored_for_tests(id: ScriptTabId, cx: &mut App) {
+    mark_restored(id, cx);
+}
+
+/// Records `file` as the SQLite file handle `id` was opened on (tests: a remount).
+#[cfg(feature = "test-support")]
+pub fn set_sqlite_file_for_tests(id: ScriptTabId, file: SqliteFile, cx: &mut App) {
+    set_sqlite_file(id, file, cx);
+}
+// ## m4b-t14-tabs fix round 3
+
+/// Whether handle `id` was restored at launch and has not read yet (taken).
+fn take_restored(id: ScriptTabId, cx: &mut App) -> bool {
+    cx.has_global::<RestoredAtLaunch>() && cx.default_global::<RestoredAtLaunch>().0.remove(&id.0)
+}
+// ## m4b-t14-tabs fix round 2
 
 /// Forgets handle `id` (its tab closed): the same binding opened again gets a new handle.
 fn unintern(id: ScriptTabId, cx: &mut App) {
@@ -1583,41 +1701,51 @@ impl ScriptDoc {
         let file_level =
             hacivat_meta::kind::database_level(engine) == hacivat_meta::kind::DbLevel::File;
         // ## m4b-t14-tabs fix round 1 (C1, R-T14-2; C2, R-T14-1): every Run asks the server, on
-        // this tab's own session, which database it is on (a SQLite tab: whether the profile's
-        // file is still the tab's), never a cached value; and reads the session's context
-        // generation right after, on the same queue. This Run then runs again with the answer.
+        // this tab's own session, which database it is on (a SQLite tab: which file it has
+        // open, and whether the profile's file is still the tab's), never a cached value. The
+        // session's context generation is read after the probe is queued (fix round 2,
+        // m-fr1-3), and a move between the two bumps it, which the orchestrator refuses. This
+        // Run then runs again with the answer.
         let checked = self.checked.take().filter(|c| c.session == session.id());
         let Some(checked) = checked else {
             self.probing = true;
-            let generation = session.run_context();
             let sid = session.id();
+            let ticket = session.submit(Request::Exec {
+                sql: hacivat_session::session::schema_probe_sql(engine).to_string(),
+                opts: hacivat_driver::ExecOpts::values(16),
+                origin: hacivat_session::session::ExecOrigin::Internal { idempotent: true },
+            });
+            let generation = session.run_context();
             let found: std::pin::Pin<Box<dyn Future<Output = Checked>>> = if file_level {
-                let stored = sqlite_file(self.id, cx);
                 let path = sqlite_path(&profile);
-                let now = on_core(cx, async move {
-                    tokio::task::spawn_blocking(move || path.as_deref().and_then(sqlite_identity))
+                let files = on_core(cx, async move {
+                    let open = ticket
+                        .reply
                         .await
                         .ok()
-                        .flatten()
+                        .and_then(Result::ok)
+                        .and_then(|answer| main_file(&answer));
+                    tokio::task::spawn_blocking(move || FileCheck {
+                        profile: path.as_deref().and_then(sqlite_identity),
+                        session: open.and_then(|p| sqlite_identity(std::path::Path::new(&p))),
+                    })
+                    .await
+                    .ok()
                 });
                 Box::pin(async move {
-                    let now = now.await.flatten();
-                    let same = stored.is_some() && now.is_some() && stored == now;
-                    let name = now.map(|f| f.path).unwrap_or_default();
+                    let files = files.await.flatten().unwrap_or(FileCheck {
+                        profile: None,
+                        session: None,
+                    });
                     let (_, generation) = generation.await;
                     Checked {
                         session: sid,
                         generation,
                         database: None,
-                        file: Some((same, name)),
+                        file: Some(files),
                     }
                 })
             } else {
-                let ticket = session.submit(Request::Exec {
-                    sql: hacivat_session::session::schema_probe_sql(engine).to_string(),
-                    opts: hacivat_driver::ExecOpts::values(16),
-                    origin: hacivat_session::session::ExecOrigin::Internal { idempotent: true },
-                });
                 Box::pin(async move {
                     let database = ticket
                         .reply
@@ -1653,25 +1781,62 @@ impl ScriptDoc {
             d.hide(|n| matches!(n, Notice::RunRefused(_)), cx);
             cx.default_global::<RunChecks>()
                 .0
-                .insert(console, checked.generation);
+                .insert(console, (checked.session, checked.generation));
             true
         };
-        if let Some((same, now)) = &checked.file {
-            if *same {
+        if let Some(found) = &checked.file {
+            // ## m4b-t14-tabs fix round 2 (m-fr1-2): a tab without its file takes the profile's
+            // file now (as a fresh open would); after a remount (same path and inode, another
+            // device number) the tab follows its file.
+            //
+            // ## m4b-t14-tabs fix round 3 (m-fr2-2, R-T14-5): a remount is followed only on the
+            // first Run after a launch restore, and said; mid-session a device change refuses
+            // (FAT/exFAT inodes are synthesized, so another stick can match; ADR 0009).
+            let stored = sqlite_file(self.id, cx);
+            let first_after_restore = take_first_run(self.id, cx);
+            let adopted = match (&stored, &found.profile) {
+                (None, Some(now)) => Some(now.clone()),
+                (Some(was), Some(now)) if first_after_restore && remounted(was, now) => {
+                    let path = display_name(&now.path);
+                    toast(
+                        msg(
+                            cx,
+                            "hv-scripts-sqlite-remounted",
+                            vec![("path", ArgValue::Text(path))],
+                        ),
+                        cx,
+                    );
+                    Some(now.clone())
+                }
+                _ => None,
+            };
+            if let Some(file) = adopted.clone() {
+                set_sqlite_file(self.id, file, cx);
+            }
+            let stored = adopted.or(stored);
+            // The profile's file is the tab's, and it is the file the session has open
+            // (m-fr1-1).
+            if stored.is_some() && stored == found.profile && found.session == found.profile {
                 return pass(self, cx);
             }
-            let tab_file = sqlite_file(self.id, cx).map(|f| f.path).unwrap_or_default();
-            let name = |p: &str| {
-                std::path::Path::new(p)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
+            let name = |f: Option<&SqliteFile>| {
+                f.and_then(|f| {
+                    std::path::Path::new(&f.path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                })
+                .unwrap_or_default()
             };
-            tracing::info!("scripts: Run refused: the profile's SQLite file is not the tab's");
+            let current = if stored != found.profile {
+                found.profile.as_ref()
+            } else {
+                found.session.as_ref()
+            };
+            tracing::info!("scripts: Run refused: the SQLite file is not the tab's");
             self.show(
                 Notice::RunRefused(RunRefused::Edited {
-                    bound: name(&tab_file),
-                    current: name(now),
+                    bound: name(stored.as_ref()),
+                    current: name(current),
                 }),
                 cx,
             );

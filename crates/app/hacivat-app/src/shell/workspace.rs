@@ -1154,6 +1154,8 @@ fn intern_script_tab(kind: &mut SavedKind, cx: &mut App) {
         database: database.as_deref().map(crate::scripts::DatabaseName::new),
     };
     let id = crate::scripts::tabs::intern(tab, cx);
+    // ## m4b-t14-tabs fix round 2 (m-fr1-7): its first read waits for the library's listing.
+    crate::scripts::tabs::mark_restored(id, cx);
     // ## m4b-t14-tabs fix round 1 (C2): the SQLite file it was opened on (Run compares it).
     if let Some(path) = sqlite_path.as_deref() {
         let file = crate::scripts::tabs::SqliteFile::parse(path, sqlite_id.as_deref());
