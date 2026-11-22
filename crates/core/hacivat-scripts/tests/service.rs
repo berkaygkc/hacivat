@@ -29,9 +29,12 @@ use hacivat_scripts::testing::FakeHandle;
 use hacivat_scripts::watch::{PollEventSource, WatchEvent};
 use hacivat_scripts::{
     DatabaseName, EventSource, GitSummary, LibraryEvent, LibraryId, LibraryState, LocalMapping,
-    PollReason, RawHint, ReadError, RelPath, RootRefusal, SaveError, SaveText, ScriptEntry,
-    Subscription, TextEncoding, UnavailableReason, WatchError,
+    PollReason, RawHint, ReadError, RelPath, SaveError, SaveText, ScriptEntry, Subscription,
+    TextEncoding, UnavailableReason, WatchError,
 };
+// Only the `cfg(unix)` root-refusal tests name it; a plain import is unused on Windows.
+#[cfg(unix)]
+use hacivat_scripts::RootRefusal;
 use hacivat_settings::LocalPaths;
 use tokio::sync::broadcast;
 

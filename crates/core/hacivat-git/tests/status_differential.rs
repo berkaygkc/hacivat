@@ -1218,9 +1218,14 @@ fn index_entry_ceiling_is_measured_at_the_boundary() {
         return;
     }
     let ceiling = (16 << 20) / std::mem::size_of::<gix::index::Entry>();
+    // ## m4b-cifix-1: the test measures a size ceiling, not the 5 s call budget. Decoding and
+    // walking ~200,000 entries in a debug build takes longer than 5 s on a slow CI runner
+    // (CI 44981552034, macOS: `Unavailable(Timeout)` at the ceiling), so the call gets a budget
+    // no runner reaches and a `Timeout` can never stand in for either answer. The product's
+    // budget stays `GitLimits::default().timeout` (5 s, asserted in the crate's unit tests).
     let limits = GitLimits {
         max_entries: usize::MAX,
-        ..GitLimits::default()
+        timeout: std::time::Duration::from_secs(600),
     };
     let mut results = Vec::new();
     for n in [ceiling, ceiling + 1] {

@@ -15,9 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use hacivat_scripts::fileio::{self, ReadLimits};
 use hacivat_scripts::scan::{Fs, Limits, Meta, RealFs};
 use hacivat_scripts::testing::{FakeEventSource, FakeHandle};
-use hacivat_scripts::watch::limits::{
-    budget_from, count_dirs, fs_kind_from_mountinfo, inotify_budget_at,
-};
+use hacivat_scripts::watch::limits::{budget_from, count_dirs, fs_kind_from_mountinfo};
 use hacivat_scripts::watch::{
     Backend, Debouncer, EchoTable, EventSource, Flushed, FsKind, HintQueue, LostReason, PollReason,
     RawHint, Reconciler, WatchBatch, WatchError, WatchEvent, WatchOpts, Watcher, choose_backend,
@@ -914,6 +912,8 @@ fn inotify_budget_is_max_user_watches_minus_the_watches_in_use() {
 #[cfg(unix)]
 #[test]
 fn inotify_budget_reads_a_simulated_proc() {
+    // Imported here: the test is `cfg(unix)`, and a file-level import is unused on Windows.
+    use hacivat_scripts::watch::limits::inotify_budget_at;
     use std::os::unix::fs::symlink;
     let proc_root = tempfile::tempdir().unwrap();
     let p = proc_root.path();
