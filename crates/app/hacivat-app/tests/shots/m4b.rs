@@ -40,8 +40,9 @@ pub(super) enum M4b {
     /// The same library under orders-staging: no `@production`, its own count.
     ScriptsStaging,
     // 2 · Context menus
-    /// A file row's menu (Open, Open under another connection… disabled, Rename F2, Move to
-    /// Trash, Reveal, Copy path, Copy relative path).
+    /// A file row's menu (Open, Open under another connection… (## m4b-t15-goto: enabled,
+    /// orders-prod also shows the file), Rename F2, Move to Trash, Reveal, Copy path, Copy
+    /// relative path).
     ScriptsFileMenu,
     // 11 · Library diagnostics popover
     /// The problems row's popover: an unknown `@prod` folder, said in plain words.
@@ -77,13 +78,28 @@ pub(super) enum M4b {
     /// connection, connected: the capsule, the hairline and the status segment follow it.
     ScriptConnectedProd,
     // ## m4b-t14-tabs
+    // ## m4b-t15-goto: surface 7 (`design/m4b-scripts`).
+    /// Go to script's results for the empty query: names, folders (the `@production` one with
+    /// its mark), libraries.
+    GotoResults,
+    /// The chooser for a file three connections show, no tab active: dev active, production
+    /// last and never preselected ("Production is never chosen for you.").
+    GotoChooser,
+    /// The chooser for a `@production` file: production only, no row active.
+    GotoProdOnly,
+    /// The chooser with a production tab active: production first, "current", and active.
+    GotoFocusedProd,
+    /// The chooser for a file no connection shows: "Open without a connection".
+    GotoNoCandidate,
+    // ## m4b-t15-goto
 }
 
 /// Every M4b state, in shot order.
 // ## m4b-t13-explorer: Task 13's four after Task 11's two.
 // ## m4b-t13-explorer fix round 1 (review m7): and its four more.
 // ## m4b-t14-tabs (named exception): Task 14's states after Task 11's.
-pub(super) const M4B_STATES: [M4b; 18] = [
+// ## m4b-t15-goto (named exception): Task 15's five after them.
+pub(super) const M4B_STATES: [M4b; 23] = [
     M4b::T2Preview,
     M4b::PasteConfirm,
     M4b::ScriptsProd,
@@ -102,6 +118,12 @@ pub(super) const M4B_STATES: [M4b; 18] = [
     M4b::ScriptRemoved,
     M4b::ScriptUnsaved,
     M4b::ScriptConnectedProd,
+    // ## m4b-t15-goto
+    M4b::GotoResults,
+    M4b::GotoChooser,
+    M4b::GotoProdOnly,
+    M4b::GotoFocusedProd,
+    M4b::GotoNoCandidate,
 ];
 
 /// The preview's file: 148 MB (the mock's).
@@ -137,6 +159,12 @@ impl M4b {
             M4b::ScriptRemoved => "m4b-script-removed",
             M4b::ScriptUnsaved => "m4b-script-unsaved",
             M4b::ScriptConnectedProd => "m4b-script-connected-prod",
+            // ## m4b-t15-goto
+            M4b::GotoResults => "m4b-goto-results",
+            M4b::GotoChooser => "m4b-goto-chooser",
+            M4b::GotoProdOnly => "m4b-goto-chooser-prod-only",
+            M4b::GotoFocusedProd => "m4b-goto-chooser-prod-focused",
+            M4b::GotoNoCandidate => "m4b-goto-chooser-no-candidate",
         }
     }
 
@@ -162,6 +190,12 @@ impl M4b {
             | M4b::ScriptUnlisted
             | M4b::ScriptRunRefused
             | M4b::ScriptRemoved => ("hacivat-ui/src/notice.rs:", None),
+            // ## m4b-t15-goto
+            M4b::GotoResults => (GOTO, Some("daily_revenue.sql")),
+            M4b::GotoChooser | M4b::GotoProdOnly | M4b::GotoFocusedProd => {
+                (GOTO, Some("orders-prod"))
+            }
+            M4b::GotoNoCandidate => (GOTO, None),
         }
     }
 
@@ -186,6 +220,12 @@ impl M4b {
             | M4b::ScriptTabs
             | M4b::ScriptConnectedProd
             | M4b::ScriptUnsaved => &[],
+            // ## m4b-t15-goto
+            M4b::GotoResults
+            | M4b::GotoChooser
+            | M4b::GotoProdOnly
+            | M4b::GotoFocusedProd
+            | M4b::GotoNoCandidate => &[],
         }
     }
 
@@ -200,7 +240,8 @@ impl M4b {
         }
         save(cx, pg(DEV, EnvTag::Dev));
         // ## m4b-t14-tabs: the connections a script is open under.
-        if self.is_script() {
+        // ## m4b-t15-goto (named line): and the ones Go to script offers.
+        if self.is_script() || self.is_goto() {
             let mut prod = pg(PROD, EnvTag::Production);
             if self.connects() {
                 // An IP literal: nothing resolves (the M3a fakes dial themselves).
@@ -241,6 +282,19 @@ impl M4b {
         )
     }
 
+    // ## m4b-t15-goto
+    /// A Go to script state (Task 15).
+    fn is_goto(self) -> bool {
+        matches!(
+            self,
+            M4b::GotoResults
+                | M4b::GotoChooser
+                | M4b::GotoProdOnly
+                | M4b::GotoFocusedProd
+                | M4b::GotoNoCandidate
+        )
+    }
+
     // ## m4b-t13-explorer
     /// The connection a Scripts state shows its library under.
     fn scripts_under(self) -> Option<&'static str> {
@@ -261,6 +315,12 @@ impl M4b {
             | M4b::ScriptRemoved
             | M4b::ScriptUnsaved
             | M4b::ScriptConnectedProd => None,
+            // ## m4b-t15-goto
+            M4b::GotoResults
+            | M4b::GotoChooser
+            | M4b::GotoProdOnly
+            | M4b::GotoFocusedProd
+            | M4b::GotoNoCandidate => None,
         }
     }
 
@@ -276,6 +336,10 @@ impl M4b {
         // ## m4b-t14-tabs
         if self.is_script() {
             return script_steps(self);
+        }
+        // ## m4b-t15-goto
+        if self.is_goto() {
+            return goto_steps(self);
         }
         match self {
             M4b::T2Preview => vec![
@@ -372,6 +436,12 @@ impl M4b {
             | M4b::ScriptRemoved
             | M4b::ScriptUnsaved
             | M4b::ScriptConnectedProd => Vec::new(),
+            // ## m4b-t15-goto: reached through `goto_steps` above.
+            M4b::GotoResults
+            | M4b::GotoChooser
+            | M4b::GotoProdOnly
+            | M4b::GotoFocusedProd
+            | M4b::GotoNoCandidate => Vec::new(),
         }
     }
 }
@@ -575,10 +645,163 @@ fn script_steps(state: M4b) -> Vec<Step> {
         | M4b::ScriptsTooltip
         | M4b::ScriptsEngines
         | M4b::ScriptsTrashed => {}
+        // ## m4b-t15-goto: `goto_steps`.
+        M4b::GotoResults
+        | M4b::GotoChooser
+        | M4b::GotoProdOnly
+        | M4b::GotoFocusedProd
+        | M4b::GotoNoCandidate => {}
     }
     steps
 }
 // ## m4b-t14-tabs
+
+// ## m4b-t15-goto ---------------------------------------------------------------------------------
+/// Go to script's labels are drawn here.
+const GOTO: &str = "hacivat-app/src/scripts/goto.rs";
+
+/// The Go-to-script states' libraries: `orders` (bound to the database of orders-prod,
+/// orders-staging and orders-dev) and `misc` (bound to no connection), on a service whose
+/// watcher is a fake.
+#[derive(Clone, Copy)]
+struct GotoLibraries(hacivat_scripts::LibraryId);
+
+impl hacivat_ui_core::gpui_surface::Global for GotoLibraries {}
+
+fn goto_libraries(cx: &mut App) -> Option<hacivat_scripts::LibraryId> {
+    if let Some(lib) = cx.try_global::<GotoLibraries>() {
+        return Some(lib.0);
+    }
+    let paths = cx.try_global::<hacivat_app::AppState>()?.paths.clone();
+    let base = paths.config.parent()?.to_path_buf();
+    // Without a manifest a library binds its folder's name.
+    let orders = base.join("goto").join("orders");
+    for (rel, text) in [
+        (REPORT, REPORT_TEXT),
+        ("reports/daily_revenue.sql", "SELECT 1;\n"),
+        ("reports/müşteri_segment.sql", "SELECT 2;\n"),
+        ("@production/purge_old.sql", "SELECT 3;\n"),
+    ] {
+        let p = orders.join(rel);
+        std::fs::create_dir_all(p.parent()?).ok()?;
+        std::fs::write(p, text).ok()?;
+    }
+    let misc = base.join("goto").join("misc");
+    std::fs::create_dir_all(&misc).ok()?;
+    std::fs::write(misc.join("todo.sql"), "SELECT 4;\n").ok()?;
+    let (orders, misc) = (
+        std::fs::canonicalize(&orders).ok()?,
+        std::fs::canonicalize(&misc).ok()?,
+    );
+    let handle = cx.global::<ConnectionsModel>().runtime();
+    let (_, watch) = hacivat_scripts::testing::FakeEventSource::new();
+    let service = std::sync::Arc::new(hacivat_scripts::service::LibraryService::open_with(
+        &paths,
+        &handle,
+        watch.sources(),
+        hacivat_scripts::service::ServiceOptions {
+            home: None,
+            ..Default::default()
+        },
+    ));
+    hacivat_app::scripts::open::install_service(service.clone(), cx);
+    let id = futures::executor::block_on(service.attach(
+        orders,
+        Some(hacivat_scripts::LogicalDb::parse("orders").ok()?),
+        false,
+    ))
+    .ok()?;
+    futures::executor::block_on(service.attach(
+        misc,
+        Some(hacivat_scripts::LogicalDb::parse("misc").ok()?),
+        false,
+    ))
+    .ok()?;
+    cx.set_global(GotoLibraries(id));
+    Some(id)
+}
+
+/// The open Go-to-script layer's view.
+fn goto_host(
+    cx: &App,
+) -> Option<hacivat_ui_core::gpui_surface::Entity<hacivat_app::scripts::goto::GotoHost>> {
+    hacivat_app::scripts::goto::open_host(cx)
+}
+
+/// Go to script's result row that starts with `path`, picked (Enter on it).
+fn goto_pick_step(path: &'static str) -> Step {
+    step(
+        move |window, cx| {
+            let Some(host) = goto_host(cx) else {
+                return;
+            };
+            let ix = host
+                .read(cx)
+                .result_rows()
+                .iter()
+                .position(|r| r.starts_with(path));
+            if let Some(ix) = ix {
+                host.update(cx, |h, cx| h.confirm_result(ix, window, cx));
+            }
+        },
+        |_, cx| goto_host(cx).is_some_and(|h| h.read(cx).is_choosing()),
+    )
+}
+
+fn goto_steps(state: M4b) -> Vec<Step> {
+    let mut steps = vec![step(
+        |_, cx| {
+            goto_libraries(cx);
+        },
+        |_, cx| {
+            hacivat_app::scripts::open::service(cx).is_some_and(|s| {
+                let snap = s.snapshot();
+                snap.libraries.len() == 2
+                    && snap.libraries.iter().all(|l| {
+                        snap.view(Some(EnvTag::Production))
+                            .library(l.id)
+                            .is_some_and(|v| v.file_count() > 0)
+                    })
+            })
+        },
+    )];
+    if state == M4b::GotoFocusedProd {
+        // The user works on production: its script tab is the active one.
+        steps.push(step(
+            |_, cx| {
+                let Some(lib) = goto_libraries(cx) else {
+                    return;
+                };
+                let prod = profile_named(cx, PROD);
+                hacivat_app::scripts::open::open_script(
+                    cx,
+                    lib,
+                    hacivat_scripts::RelPath::parse(REPORT).expect("a path"),
+                    prod,
+                    Some(hacivat_scripts::DatabaseName::new("orders")),
+                );
+            },
+            |window, cx| ready_doc(window, cx).is_some(),
+        ));
+    }
+    // ⇧⌘O, then the results of the empty query.
+    steps.push(step(
+        |window, cx| {
+            hacivat_ui::actions::ActionRegistry::run("scripts.goto", window, cx);
+        },
+        |_, cx| goto_host(cx).is_some_and(|h| h.read(cx).result_rows().len() >= 5),
+    ));
+    match state {
+        M4b::GotoChooser | M4b::GotoFocusedProd => {
+            steps.push(goto_pick_step("reports/daily_revenue.sql"));
+        }
+        M4b::GotoProdOnly => steps.push(goto_pick_step("@production/purge_old.sql")),
+        M4b::GotoNoCandidate => steps.push(goto_pick_step("todo.sql")),
+        _ => {}
+    }
+    steps
+}
+// ## m4b-t15-goto
 
 /// Where the preview of [`dump`] ends (UI-EDIT-23 step 1).
 fn shown() -> usize {
@@ -964,6 +1187,12 @@ mod scripts {
             | M4b::ScriptRemoved
             | M4b::ScriptUnsaved
             | M4b::ScriptConnectedProd => {}
+            // ## m4b-t15-goto: Task 15's states (`goto_steps`).
+            M4b::GotoResults
+            | M4b::GotoChooser
+            | M4b::GotoProdOnly
+            | M4b::GotoFocusedProd
+            | M4b::GotoNoCandidate => {}
         }
         out
     }

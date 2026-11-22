@@ -77,7 +77,8 @@ const COMMANDS: [(&str, &str, &str); 6] = [
 // (`file_ops::filled`).
 // ## m4b-t14-tabs (named exception): `file.save` and `file.save_all` are Task 14's
 // (`save::register_commands`).
-pub const STUB_COMMANDS: [&str; 2] = ["scripts.goto", "scripts.attach"];
+// ## m4b-t15-goto (named exception): `scripts.goto` is Task 15's (`goto::filled`).
+pub const STUB_COMMANDS: [&str; 1] = ["scripts.attach"];
 
 /// A stub command is never enabled.
 fn not_yet(_: &App) -> bool {
@@ -98,7 +99,10 @@ pub fn install(cx: &mut App) {
     // Every command is a stub until its task fills it (and gives it its own run and enabled).
     for (id, title_id, context) in COMMANDS {
         // ## m4b-t13-explorer (named exception): Task 13's filled commands.
-        let (run, enabled) = file_ops::filled(id).unwrap_or_else(|| (Rc::new(|_, _| {}), not_yet));
+        // ## m4b-t15-goto (named exception): and Task 15's `scripts.goto`.
+        let (run, enabled) = file_ops::filled(id)
+            .or_else(|| goto::filled(id))
+            .unwrap_or_else(|| (Rc::new(|_, _| {}), not_yet));
         // A duplicate keeps the first definition (registration order is the palette's order).
         let _ = reg.register(ActionDef {
             id,
@@ -113,6 +117,8 @@ pub fn install(cx: &mut App) {
     let contributor = ScriptsContributor::for_app(cx);
     crate::explorer::contrib::register_contributor(Rc::new(contributor), cx);
     // ## m4b-t13-explorer
+    // ## m4b-t15-goto (named line): `scripts.open_under` and the tabs' chooser hook.
+    chooser::install(cx);
 }
 
 // ---- the database menus (R-M4b-34) -------------------------------------------------------------

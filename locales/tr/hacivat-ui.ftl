@@ -4989,3 +4989,8 @@ hv-scripts-unsaved-subtitle-unbound = Bağlantı yok
 #   $path (String) - the database file's path (data), e.g. "/Volumes/data/orders.db".
 # Review: PO
 hv-scripts-sqlite-remounted = Veritabanı dosyası artık başka bir birimde; { $path } üzerinde çalıştırılıyor.
+
+## m4b-t15-goto
+# Surface 7 (Go to script). Palette title of the tree row's "Open under another connection…" (the chooser without the row's connection); no default chord.
+# Review: PO
+hv-cmd-scripts-open-under = Betiği başka bir bağlantıda aç…
