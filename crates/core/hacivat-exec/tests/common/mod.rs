@@ -2970,3 +2970,535 @@ pub mod t26 {
         (m, s)
     }
 }
+
+// ## m4b-t12-script-run
+/// Task 12's helpers (`script_run`): script sources (in memory, with their own chunkings per
+/// pass, and a real file read through one handle), a confirmation port that answers from a
+/// list, and a runner over a fake console session.
+pub mod t12 {
+    use std::collections::VecDeque;
+    use std::fs::File;
+    use std::io::Read;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::SystemTime;
+
+    use futures::future::BoxFuture;
+    use hacivat_driver::Driver;
+    use hacivat_driver::fake::{FakeDriver, FakeTypedCall};
+    use hacivat_exec::gate::CommitQuestion;
+    use hacivat_exec::{
+        ChunkError, ClassifyPool, CommitAnswer, ConfirmAnswer, ConfirmPort, ConfirmQuestion,
+        ErrorPolicy, ExecService, ScriptChunks, ScriptGate, ScriptProgress, ScriptRunOutcome,
+        ScriptRunRequest, ScriptRunner, SessionLog, SuppressSet, run_file,
+    };
+    use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+    use hacivat_results::MemoryBudget;
+    use hacivat_session::session::{SessionHandle, StatementClassifier};
+    use hacivat_session::testing::{fake_session, fake_session_classified};
+    use sha2::{Digest, Sha256};
+    use sql_dialect::{ClientFlavor, DialectCtx, DialectId};
+    use tokio::sync::{oneshot, watch};
+
+    /// A hook a source calls after each chunk.
+    pub type Hook = Arc<dyn Fn(usize, usize) + Send + Sync>;
+
+    // ---- in-memory sources -------------------------------------------------------------------
+
+    /// What a [`MemScript`]'s second pass does differently.
+    #[derive(Debug, Clone, Default)]
+    pub enum Pass2 {
+        /// Reads the same text (in its own chunk sizes).
+        #[default]
+        Same,
+        /// Reads another text, saying nothing (a reader that does not notice a change).
+        Text(String),
+        /// Answers `Err(e)` instead of its `n`-th chunk (from 0), then nothing.
+        FailAt(usize, ChunkError),
+        /// `reopen_verified` refuses with `e` (the file changed between the passes).
+        Refused(ChunkError),
+    }
+
+    /// Counts of what a [`MemScript`] did, over both passes.
+    #[derive(Debug, Default)]
+    pub struct Stats {
+        pub reopens: AtomicUsize,
+        pub chunks: AtomicUsize,
+    }
+
+    /// A script in memory, read in chunks of `sizes[pass]` bytes (cycled; widened to a
+    /// character boundary): the short reads of a real reader, different in each pass.
+    #[derive(Clone)]
+    pub struct MemScript {
+        text: Arc<str>,
+        sizes: [Vec<usize>; 2],
+        pass2: Pass2,
+        /// Pass 1 fails with `e` instead of its `n`-th chunk.
+        pass1_fail: Option<(usize, ChunkError)>,
+        pass: usize,
+        at: usize,
+        k: usize,
+        failed: bool,
+        pub stats: Arc<Stats>,
+        /// Called with `(pass, bytes handed out in this pass)` after each chunk.
+        hook: Option<Hook>,
+    }
+
+    /// `text` in 64 KiB reads in both passes.
+    pub fn script(text: &str) -> MemScript {
+        MemScript {
+            text: Arc::from(text),
+            sizes: [vec![64 << 10], vec![64 << 10]],
+            pass2: Pass2::Same,
+            pass1_fail: None,
+            pass: 0,
+            at: 0,
+            k: 0,
+            failed: false,
+            stats: Arc::default(),
+            hook: None,
+        }
+    }
+
+    impl MemScript {
+        /// Reads of `sizes` bytes in pass `pass` (1 or 2).
+        pub fn sizes(mut self, pass: usize, sizes: &[usize]) -> Self {
+            self.sizes[pass - 1] = sizes.to_vec();
+            self
+        }
+
+        pub fn pass2(mut self, p: Pass2) -> Self {
+            self.pass2 = p;
+            self
+        }
+
+        pub fn pass1_fails_at(mut self, n: usize, e: ChunkError) -> Self {
+            self.pass1_fail = Some((n, e));
+            self
+        }
+
+        pub fn hook(mut self, f: impl Fn(usize, usize) + Send + Sync + 'static) -> Self {
+            self.hook = Some(Arc::new(f));
+            self
+        }
+
+        pub fn boxed(self) -> Box<dyn ScriptChunks> {
+            Box::new(self)
+        }
+    }
+
+    impl ScriptChunks for MemScript {
+        fn next_chunk(&mut self) -> Option<Result<String, ChunkError>> {
+            if self.failed {
+                return None;
+            }
+            let fail = match (&self.pass2, self.pass) {
+                (Pass2::FailAt(n, e), 1) if *n == self.k => Some(e.clone()),
+                (_, 0) => self
+                    .pass1_fail
+                    .as_ref()
+                    .filter(|(n, _)| *n == self.k)
+                    .map(|(_, e)| e.clone()),
+                _ => None,
+            };
+            if let Some(e) = fail {
+                self.failed = true;
+                return Some(Err(e));
+            }
+            let text: Arc<str> = match (&self.pass2, self.pass) {
+                (Pass2::Text(t), 1) => Arc::from(t.as_str()),
+                _ => self.text.clone(),
+            };
+            if self.at >= text.len() {
+                return None;
+            }
+            let sizes = &self.sizes[self.pass];
+            let size = sizes[self.k % sizes.len()].max(1);
+            let mut end = (self.at + size).min(text.len());
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            let out = text[self.at..end].to_string();
+            self.at = end;
+            self.k += 1;
+            self.stats.chunks.fetch_add(1, Ordering::SeqCst);
+            if let Some(h) = &self.hook {
+                h(self.pass + 1, self.at);
+            }
+            Some(Ok(out))
+        }
+
+        fn reopen_verified(
+            self: Box<Self>,
+        ) -> BoxFuture<'static, Result<Box<dyn ScriptChunks>, ChunkError>> {
+            let mut next = *self;
+            Box::pin(async move {
+                next.stats.reopens.fetch_add(1, Ordering::SeqCst);
+                if let Pass2::Refused(e) = &next.pass2 {
+                    return Err(e.clone());
+                }
+                next.pass = 1;
+                next.at = 0;
+                next.k = 0;
+                next.failed = false;
+                Ok(Box::new(next) as Box<dyn ScriptChunks>)
+            })
+        }
+    }
+
+    // ---- a real file through one handle ------------------------------------------------------
+
+    /// What identifies the file a pass read: length, mtime and (Unix) the inode.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Stamp {
+        len: u64,
+        mtime: Option<SystemTime>,
+        ino: u64,
+    }
+
+    fn stamp(m: &std::fs::Metadata) -> Stamp {
+        #[cfg(unix)]
+        let ino = std::os::unix::fs::MetadataExt::ino(m);
+        #[cfg(not(unix))]
+        let ino = 0;
+        Stamp {
+            len: m.len(),
+            mtime: m.modified().ok(),
+            ino,
+        }
+    }
+
+    /// A script file read through **one** open handle in 64 KiB blocks, the way
+    /// `hacivat_scripts` reads one (HV-SCRIPT-12 step 4): after every read the handle's and the
+    /// path's stamps must equal the stamp at open, else `ChunkError::Changed`, and nothing read
+    /// after the change is handed out. Its second pass checks that the file is the one pass 1
+    /// read (the stamp) and that every block hashes as in pass 1 (R-T10-3's contract).
+    pub struct FileScript {
+        path: PathBuf,
+        file: File,
+        at_open: Stamp,
+        blocks: Vec<[u8; 32]>,
+        expect: Option<Vec<[u8; 32]>>,
+        k: usize,
+        done: bool,
+        pass: usize,
+        /// Called with `(pass, block)` after each block is read and checked.
+        hook: Option<Hook>,
+    }
+
+    impl FileScript {
+        pub fn open(path: PathBuf) -> FileScript {
+            let file = File::open(&path).expect("the script opens");
+            let at_open = stamp(&file.metadata().expect("its metadata"));
+            FileScript {
+                path,
+                file,
+                at_open,
+                blocks: Vec::new(),
+                expect: None,
+                k: 0,
+                done: false,
+                pass: 1,
+                hook: None,
+            }
+        }
+
+        pub fn hook(mut self, f: impl Fn(usize, usize) + Send + Sync + 'static) -> Self {
+            self.hook = Some(Arc::new(f));
+            self
+        }
+
+        fn unchanged(&self) -> bool {
+            let by_handle = self.file.metadata().map(|m| stamp(&m)).ok();
+            let by_path = std::fs::symlink_metadata(&self.path)
+                .map(|m| stamp(&m))
+                .ok();
+            by_handle == Some(self.at_open) && by_path == Some(self.at_open)
+        }
+    }
+
+    impl ScriptChunks for FileScript {
+        fn next_chunk(&mut self) -> Option<Result<String, ChunkError>> {
+            if self.done {
+                return None;
+            }
+            let mut buf = vec![0u8; 64 << 10];
+            let mut n = 0;
+            while n < buf.len() {
+                match self.file.read(&mut buf[n..]) {
+                    Ok(0) => break,
+                    Ok(k) => n += k,
+                    Err(e) => {
+                        self.done = true;
+                        return Some(Err(ChunkError::Io(e.kind())));
+                    }
+                }
+            }
+            if !self.unchanged() {
+                self.done = true;
+                return Some(Err(ChunkError::Changed));
+            }
+            if n == 0 {
+                self.done = true;
+                let short = self.expect.as_ref().is_some_and(|e| e.len() != self.k);
+                return short.then_some(Err(ChunkError::Changed));
+            }
+            buf.truncate(n);
+            let digest: [u8; 32] = Sha256::digest(&buf).into();
+            if let Some(expect) = &self.expect
+                && expect.get(self.k) != Some(&digest)
+            {
+                self.done = true;
+                return Some(Err(ChunkError::Changed));
+            }
+            self.blocks.push(digest);
+            self.k += 1;
+            if let Some(h) = &self.hook {
+                h(self.pass, self.k);
+            }
+            // The fixtures are ASCII: a block never splits a character.
+            match String::from_utf8(buf) {
+                Ok(s) => Some(Ok(s)),
+                Err(_) => {
+                    self.done = true;
+                    Some(Err(ChunkError::Decode))
+                }
+            }
+        }
+
+        fn reopen_verified(
+            self: Box<Self>,
+        ) -> BoxFuture<'static, Result<Box<dyn ScriptChunks>, ChunkError>> {
+            Box::pin(async move {
+                if !self.done || self.pass != 1 {
+                    return Err(ChunkError::Changed);
+                }
+                let file = File::open(&self.path).map_err(|e| ChunkError::Io(e.kind()))?;
+                let now = stamp(&file.metadata().map_err(|e| ChunkError::Io(e.kind()))?);
+                if now != self.at_open {
+                    return Err(ChunkError::Changed);
+                }
+                Ok(Box::new(FileScript {
+                    path: self.path,
+                    file,
+                    at_open: now,
+                    blocks: Vec::new(),
+                    expect: Some(self.blocks),
+                    k: 0,
+                    done: false,
+                    pass: 2,
+                    hook: self.hook,
+                }) as Box<dyn ScriptChunks>)
+            })
+        }
+    }
+
+    // ---- confirmations -----------------------------------------------------------------------
+
+    /// A port that answers confirmations from a list (then `Cancel`) and commit questions with
+    /// Commit, recording every question.
+    #[derive(Debug)]
+    pub struct Answers {
+        answers: Mutex<VecDeque<ConfirmAnswer>>,
+        pub asked: Mutex<Vec<ConfirmQuestion>>,
+        pub commits: Mutex<Vec<CommitQuestion>>,
+    }
+
+    impl Answers {
+        pub fn new(answers: &[ConfirmAnswer]) -> Arc<Answers> {
+            Arc::new(Answers {
+                answers: Mutex::new(answers.iter().copied().collect()),
+                asked: Mutex::default(),
+                commits: Mutex::default(),
+            })
+        }
+
+        /// The statement numbers asked about (`ConfirmQuestion::index`), in order.
+        pub fn asked_units(&self) -> Vec<u32> {
+            self.asked.lock().unwrap().iter().map(|q| q.index).collect()
+        }
+    }
+
+    impl ConfirmPort for Answers {
+        fn confirm(&self, q: ConfirmQuestion) -> oneshot::Receiver<ConfirmAnswer> {
+            self.asked.lock().unwrap().push(q);
+            let a = self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(ConfirmAnswer::Cancel);
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(a);
+            rx
+        }
+
+        fn commit_decision(&self, q: CommitQuestion) -> oneshot::Receiver<CommitAnswer> {
+            self.commits.lock().unwrap().push(q);
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(CommitAnswer::Commit);
+            rx
+        }
+    }
+
+    /// A PostgreSQL fake that answers the read-only guard `rounds` times (its transaction, a
+    /// clean canary, its rollback), as `hacivat-session`'s `carries_m3b` does.
+    pub fn pg_read_only(rounds: usize) -> FakeDriver {
+        use hacivat_driver::fake::FakeExec;
+        use hacivat_driver::{ExecSummary, TxStatus};
+        let step = |prefix: &'static str, rows: Vec<Vec<Option<String>>>, tx| FakeExec {
+            prefix,
+            result: Ok(ExecSummary {
+                row_count: rows.len() as u64,
+                rows,
+                ..ExecSummary::default()
+            }),
+            delay: std::time::Duration::ZERO,
+            tx_after: tx,
+            panics: false,
+        };
+        let mut script = Vec::new();
+        for _ in 0..rounds {
+            script.push(step(
+                "BEGIN ISOLATION LEVEL",
+                Vec::new(),
+                Some(TxStatus::InTx),
+            ));
+            script.push(step(
+                "SELECT pg_catalog.txid_current_if_assigned()",
+                vec![vec![None]],
+                None,
+            ));
+            script.push(step("ROLLBACK", Vec::new(), Some(TxStatus::Idle)));
+        }
+        super::fake_pg().exec(script)
+    }
+
+    // ---- the runner over a fake session ------------------------------------------------------
+
+    /// A runner over a console session of a fake.
+    pub struct Rig {
+        pub runner: ScriptRunner,
+        pub session: SessionHandle,
+        pub fake: Arc<FakeDriver>,
+        pub log: Arc<SessionLog>,
+        pub engine: DbmsKind,
+        /// Every text the runner's classifier pool classified, in order.
+        pub classified: Arc<Mutex<Vec<String>>>,
+        pub cancel: watch::Sender<bool>,
+    }
+
+    /// A rig over `fake`; `read_only` makes the profile (and so the session) read-only, its
+    /// guard asking a classifier pool of its own.
+    pub async fn rig(fake: FakeDriver, read_only: bool) -> Rig {
+        let engine = fake.descriptor().kind;
+        let classified: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = classified.clone();
+        let pool = ClassifyPool::observed(
+            1,
+            Arc::new(move |sql: &str, _: &hacivat_exec::ClassifyCtx| {
+                seen.lock().unwrap().push(sql.to_string());
+            }),
+        );
+        let mut profile = super::profile_of(engine);
+        profile.read_only = read_only;
+        let rt = tokio::runtime::Handle::current();
+        let (session, fake) = if read_only {
+            let guard = ClassifyPool::new(1) as Arc<dyn StatementClassifier>;
+            fake_session_classified(rt, fake, profile, guard).await
+        } else {
+            fake_session(rt, fake, profile).await
+        };
+        let exec = Arc::new(ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)));
+        Rig {
+            runner: ScriptRunner::new(exec, pool),
+            session,
+            fake,
+            log: SessionLog::new(),
+            engine,
+            classified,
+            cancel: watch::channel(false).0,
+        }
+    }
+
+    /// The dialect of a script of `engine` (default modes) and its client flavor.
+    pub fn dialect_of(engine: DbmsKind) -> (DialectCtx, ClientFlavor) {
+        match engine {
+            DbmsKind::MySql => (
+                DialectCtx::new(DialectId::MySql, None),
+                ClientFlavor::MySqlCli,
+            ),
+            DbmsKind::MariaDb => (
+                DialectCtx::new(DialectId::MariaDb, None),
+                ClientFlavor::MySqlCli,
+            ),
+            DbmsKind::Sqlite => (DialectCtx::new(DialectId::Sqlite, None), ClientFlavor::None),
+            _ => (super::pg18(), ClientFlavor::Psql),
+        }
+    }
+
+    impl Rig {
+        /// A request running `source` on the rig's session under `env`, asking `port`.
+        pub fn request(
+            &self,
+            source: Box<dyn ScriptChunks>,
+            env: Option<EnvTag>,
+            port: Arc<Answers>,
+        ) -> ScriptRunRequest {
+            let (dialect, flavor) = dialect_of(self.engine);
+            ScriptRunRequest {
+                session: self.session.clone(),
+                source,
+                console: 7,
+                profile: ProfileId::new(),
+                engine: self.engine,
+                dialect,
+                flavor,
+                gate: ScriptGate {
+                    env,
+                    confirm_unsafe_where: true,
+                    allowlist: Arc::from(Vec::new()),
+                    suppressed: SuppressSet::default(),
+                    connection: Arc::from("orders"),
+                },
+                confirm: port,
+                log: self.log.clone(),
+                policy: ErrorPolicy::default(),
+                cancel: self.cancel.subscribe(),
+                history: None,
+                refresh: None,
+            }
+        }
+
+        /// Runs `req`; the outcome and the last progress published.
+        pub async fn run(&self, req: ScriptRunRequest) -> (ScriptRunOutcome, ScriptProgress) {
+            let (tx, rx) = watch::channel(ScriptProgress::default());
+            let out = run_file(&self.runner, req, tx).await;
+            let last = rx.borrow().clone();
+            (out, last)
+        }
+
+        /// Every typed query and statement the fake ran, typed ones first.
+        pub fn all_sent(&self) -> Vec<String> {
+            self.fake
+                .typed_log()
+                .into_iter()
+                .filter_map(|c| match c {
+                    FakeTypedCall::Query(q) => Some(q),
+                    _ => None,
+                })
+                .chain(self.fake.executed())
+                .collect()
+        }
+
+        /// What the fake ran of the statements `of`, in order (the session's own context
+        /// reads and guards are left out).
+        pub fn sent(&self, of: &[&str]) -> Vec<String> {
+            self.all_sent()
+                .into_iter()
+                .filter(|q| of.contains(&q.as_str()))
+                .collect()
+        }
+    }
+}

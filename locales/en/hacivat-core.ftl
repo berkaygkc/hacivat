@@ -1751,3 +1751,53 @@ intro-filter-warn-empty-item = The empty part at character { NUMBER($column, use
 # A cache write failed for lack of disk space; the explorer keeps working from memory (shown
 # once per connection; HV-MODEL-03, T11 carry).
 model-cache-write-failed = The cached metadata couldn't be saved because the disk is full. The explorer keeps working; the metadata is read again on the next connect.
+
+## m4b-t12-script-run
+# Run as script (HV-SCRIPT-12) reads the whole file before it runs anything (R-M4b-47): these
+# say why nothing in the file was run. Each names the line of the file where it found the reason.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-uncertain = Nothing in the file was run: Hacivat can't be sure where the statement on line { NUMBER($line, useGrouping: "false") } ends.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-too-long = Nothing in the file was run: the statement on line { NUMBER($line, useGrouping: "false") } is longer than 64 MiB.
+# R-T8-3: the file has no place to cut it into statements for that long.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-no-boundary = Nothing in the file was run: no statement boundary within 64 MiB of text from line { NUMBER($line, useGrouping: "false") }. Split the file, or open it and use Run.
+# A psql or mysql client command (\c, \i, SOURCE…) that Hacivat doesn't run as the client would.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-client-command = Nothing in the file was run: line { NUMBER($line, useGrouping: "false") } holds a client command that Run as script doesn't run.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-params = Nothing in the file was run: the statement on line { NUMBER($line, useGrouping: "false") } has a parameter, and Run as script doesn't ask for values.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-copy = Nothing in the file was run: line { NUMBER($line, useGrouping: "false") } has COPY … FROM STDIN or TO STDOUT, which needs the client to stream data.
+# The file on disk changed between the check and the run.
+exec-script-file-changed-before = Nothing in the file was run: the file changed on disk while Hacivat read it.
+exec-script-decode-failed = The file isn't valid text in its encoding.
+exec-script-read-failed = The file couldn't be read.
+# The connection reads quotes and escapes differently from the way the tab splits the file.
+exec-script-modes-differ = Nothing in the file was run: the connection's settings for quotes and escapes changed. Run it again.
+exec-script-cancelled-before = Stopped. Nothing in the file was run.
+# The run stopped part-way; the statements before the stop ran.
+exec-script-cancelled = Stopped. The statements before it ran.
+exec-script-file-changed = The file changed on disk; the statements before it ran.
+# The safety check refused a statement; its own reason follows on its own row.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-denied = Stopped at line { NUMBER($line, useGrouping: "false") }: the statement wasn't sent. The statements before it ran.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-confirm-cancelled = Stopped at line { NUMBER($line, useGrouping: "false") }: you cancelled. The statements before it ran.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-context-changed = Stopped at line { NUMBER($line, useGrouping: "false") }: the connection's settings changed while the file ran. The statements before it ran.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-context-unconfirmed = Stopped at line { NUMBER($line, useGrouping: "false") }: Hacivat couldn't read the connection's settings, so the statement wasn't sent. The statements before it ran.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-not-sent = Stopped at line { NUMBER($line, useGrouping: "false") }: the connection didn't run the statement. The statements before it ran.

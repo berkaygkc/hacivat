@@ -1193,3 +1193,41 @@ intro-filter-warn-empty-item = { NUMBER($column, useGrouping: "false") }. karakt
 ## m4-t24-live
 # Review: PO
 model-cache-write-failed = Disk dolu olduğu için önbellekteki üst veri kaydedilemedi. Gezgin çalışmaya devam eder; üst veri bir sonraki bağlantıda yeniden okunur.
+
+## m4b-t12-script-run
+# Review: PO
+exec-script-uncertain = Dosyadaki hiçbir şey çalıştırılmadı: Hacivat { NUMBER($line, useGrouping: "false") }. satırdaki ifadenin nerede bittiğinden emin olamıyor.
+# Review: PO
+exec-script-too-long = Dosyadaki hiçbir şey çalıştırılmadı: { NUMBER($line, useGrouping: "false") }. satırdaki ifade 64 MiB'den uzun.
+# Review: PO
+exec-script-no-boundary = Dosyadaki hiçbir şey çalıştırılmadı: { NUMBER($line, useGrouping: "false") }. satırdan başlayan 64 MiB'lik metinde ifade sınırı yok. Dosyayı bölün ya da açıp Çalıştır'ı kullanın.
+# Review: PO
+exec-script-client-command = Dosyadaki hiçbir şey çalıştırılmadı: { NUMBER($line, useGrouping: "false") }. satırda Betik olarak çalıştır'ın çalıştırmadığı bir istemci komutu var.
+# Review: PO
+exec-script-params = Dosyadaki hiçbir şey çalıştırılmadı: { NUMBER($line, useGrouping: "false") }. satırdaki ifadede bir parametre var ve Betik olarak çalıştır değer sormaz.
+# Review: PO
+exec-script-copy = Dosyadaki hiçbir şey çalıştırılmadı: { NUMBER($line, useGrouping: "false") }. satırda COPY … FROM STDIN ya da TO STDOUT var; bu, istemcinin veri aktarmasını gerektirir.
+# Review: PO
+exec-script-file-changed-before = Dosyadaki hiçbir şey çalıştırılmadı: Hacivat okurken dosya diskte değişti.
+# Review: PO
+exec-script-decode-failed = Dosya, kendi kodlamasında geçerli bir metin değil.
+# Review: PO
+exec-script-read-failed = Dosya okunamadı.
+# Review: PO
+exec-script-modes-differ = Dosyadaki hiçbir şey çalıştırılmadı: bağlantının tırnak ve kaçış ayarları değişti. Yeniden çalıştırın.
+# Review: PO
+exec-script-cancelled-before = Durduruldu. Dosyadaki hiçbir şey çalıştırılmadı.
+# Review: PO
+exec-script-cancelled = Durduruldu. Önceki ifadeler çalıştı.
+# Review: PO
+exec-script-file-changed = Dosya diskte değişti; önceki ifadeler çalıştı.
+# Review: PO
+exec-script-denied = { NUMBER($line, useGrouping: "false") }. satırda durduruldu: ifade gönderilmedi. Önceki ifadeler çalıştı.
+# Review: PO
+exec-script-confirm-cancelled = { NUMBER($line, useGrouping: "false") }. satırda durduruldu: siz iptal ettiniz. Önceki ifadeler çalıştı.
+# Review: PO
+exec-script-context-changed = { NUMBER($line, useGrouping: "false") }. satırda durduruldu: dosya çalışırken bağlantının ayarları değişti. Önceki ifadeler çalıştı.
+# Review: PO
+exec-script-context-unconfirmed = { NUMBER($line, useGrouping: "false") }. satırda durduruldu: Hacivat bağlantının ayarlarını okuyamadı, bu yüzden ifade gönderilmedi. Önceki ifadeler çalıştı.
+# Review: PO
+exec-script-not-sent = { NUMBER($line, useGrouping: "false") }. satırda durduruldu: bağlantı ifadeyi çalıştırmadı. Önceki ifadeler çalıştı.

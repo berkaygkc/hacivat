@@ -1369,3 +1369,85 @@ case.
   still refreshes the catalog (nothing of the text is kept). `RunRequest` is unchanged, so no
   literal of it moves. `hacivat_exec` re-exports `StmtKind` and `StmtReport` (ruling I2: the
   app takes no `sql-safety` dependency).
+
+## m4b-t12 — run as script
+
+`hacivat_exec::script_run` fills Task 1a's fail-closed seam (HV-SCRIPT-12, the reduced
+HV-EXEC-15; R-M4b-20, R-M4b-24, R-M4b-47, R-T8-1, R-T8-3, R-T10-3).
+
+- **The source seam.** `ScriptChunks` keeps `next_chunk` and gains
+  `reopen_verified(self: Box<Self>) -> BoxFuture<Result<Box<dyn ScriptChunks>, ChunkError>>`: the
+  second pass over the same file, called only after the first answered `None`. It must refuse a
+  file that is not the one the first pass read, and the new pass must stop with
+  `ChunkError::Changed` at the first read whose bytes differ. `ChunkError` is unchanged
+  (`Changed`, `Decode`, `Io`), so the app's adapter over `hacivat_scripts`' reader maps it
+  one-to-one with an exhaustive `match`. `hacivat-exec` still does not depend on
+  `hacivat-scripts`.
+- **Two passes, every dialect (R-M4b-47).** Pass 1 streams the file with `StreamPolicy::Eager` and
+  runs nothing. The whole file is refused when any batch of `feed` or `finish` has an item that
+  refuses (`stream::any_refuses`, never only `stopped()`), or when an item is an unsupported
+  client command, a `COPY … FROM STDIN`/`TO STDOUT` (the splitter's own head, as M3's
+  `UnitKind::CopyStream`), or a statement with a parameter (no prompt per unit in a streamed run),
+  or when a read fails. These are M3's whole-split refusals. Only then does pass 2 open and run.
+  PostgreSQL, SQLite and Generic get both passes too. `Eager` is `Exact` there (R-T8-4), and a
+  single `Exact` pass would run the statements before a late refusal, such as an unterminated
+  string at the end. The cost is a second read of the file.
+- **Identical chunks (R-T8-1).** The runner re-cuts whatever the source hands out into 64 KiB
+  pieces at a character boundary, and makes one `feed` per piece. The chunk sequence is then a
+  function of the text alone, whatever short reads the source made. Pass 1 records each piece's
+  length and SHA-256 (40 bytes per 64 KiB). Pass 2 checks every piece against that record before
+  feeding it, and checks that it ends where pass 1 ended. Any difference stops the run with
+  `FileChanged`. So pass 2 runs only text that pass 1 checked, even behind a source that misses
+  a change.
+- **Change detection (R-T10-3).** The source owns the stamp. It re-checks after every read
+  (`hacivat_scripts`' one open handle, HV-SCRIPT-12 step 4) and refuses a changed file at
+  `reopen_verified`. A change between the passes refuses the file, and nothing has run. A change
+  in pass 2 stops the run before the next unit. A unit is built from chunks that were all read
+  and checked before it is sent.
+- **Held text (T8 m-fr3-3).** Off MySQL/MariaDB, once the splitter holds more than
+  `STREAM_HELD_MAX` (64 MiB), the file is refused with `NoBoundary` ("no statement boundary within
+  64 MiB"). Observed: the `Exact` stream splits such a held line again on every chunk, so the
+  refusal of a one-line 64 MiB PostgreSQL script takes minutes in a debug build. Stop still works
+  between chunks.
+- **Per unit, exactly as Run.** Before each unit the runner does five things:
+  - it reads the session's context with `run_context`, which answers after the previous unit's
+    request, so the state is settled;
+  - it stops if the session's lexing modes differ from the split's;
+  - it classifies the unit's final text on the classifier pool in that context;
+  - it gates the unit with `gate` and the connection as it is now (read-only flag, transaction
+    status and mode, the live tag the app passed);
+  - it asks through the same `ConfirmPort` the app uses.
+
+  Then it sends the unit through `ExecService::run_with_refresh` as a checked one-unit plan. The
+  plan carries the context generation, so the session refuses a run whose context moved.
+  Confirm-in-transaction goes to the same port, and the catalog refresh sink follows DDL.
+
+  The confirmation answers follow M3b:
+  - Execute all covers later calm confirmations, never a typed name, and covers nothing on
+    production.
+  - Skip and Skip all leave units unsent.
+  - "Don't ask again" only where the dialog offers it, reported back in the summary.
+  - Cancel stops the run.
+  - After a dialog, the context and state are read again. A change stops the run.
+- **Results, log and history.** No cursor is kept and no result tab is shown. Each unit's ticket
+  is dropped when the unit ends. The console's log gets the service's lines for each unit, in its
+  10,000-line ring. History gets one summary row (R-M4b-24): origin `File`, the file's name as its
+  text, the run's outcome. HV-EXEC-12's per-unit rows are not written. The row has no field for
+  the statement count, which is in the outcome's summary.
+- **Errors and Stop.** Every `ErrorPolicy` stops at the first failure. A streamed run asks no
+  question per unit: R-M3-61's dialog needs units still waiting in the same run. Stop is checked
+  before every chunk and unit, and a unit in flight is cancelled through the session. A
+  transaction left open stays open. The session's state carries it to the M3 transaction UI, and
+  the summary's `tx_open` says so.
+- **Memory.** The splitter's own bound applies (T8: about 1 KiB held for an INSERT dump; at most
+  64 MiB held, about 287 MB RSS, on the adversarial shapes, which pass 1 refuses). On top of that:
+  - one 64 KiB piece being cut;
+  - the text from the last unit's start to the end of what was fed, for line numbers (at most
+    the held text plus a piece);
+  - the pass record;
+  - the session's per-unit buffers.
+
+  So an INSERT dump runs in constant memory, and an adversarial shape costs up to the T8 bound
+  plus 64 MiB before its refusal.
+- **Words.** Refusals and stops carry Fluent IDs (`hacivat-core.ftl` block `m4b-t12-script-run`)
+  and the statement number and line. T18 shows them.
