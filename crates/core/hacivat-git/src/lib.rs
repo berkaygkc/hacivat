@@ -192,6 +192,12 @@ pub enum UnknownWhy {
     /// Not a regular file, link or folder (an untracked FIFO, socket or device; m5).
     NotAFile,
     // ## m4b-t07-git
+    // ## m4b-cifix-2-index-paths (review C2, R-CI2-2)
+    /// The index names it with a component that is not a plain name (a separator, a drive or
+    /// UNC prefix, `.`/`..`, an NTFS stream or reserved name, `.git`): the path is never
+    /// joined, looked up or compared on disk.
+    UnsafePath,
+    // ## m4b-cifix-2-index-paths
 }
 
 /// Bounds of one status call.
@@ -236,7 +242,10 @@ pub mod testing {
 
     /// [`status`](super::status), with `dataless` (library-relative, `/`-separated) treated as
     /// cloud placeholders in addition to the ones the file flags name. Entries may name files
-    /// inside the repository's `.git` when the library is the worktree (`.git/HEAD`). The hook
+    /// inside the repository's `.git` when the library is the worktree (`.git/HEAD`). An
+    /// absolute entry (a path outside the library) is matched exactly, so it must be spelled
+    /// as the status resolves it: `std::fs::canonicalize`, verbatim `\\?\` on Windows
+    /// (m4b-cifix-2). The hook
     /// can only add `Unknown(Dataless)` answers, index-copy removals and the
     /// `Unavailable(Dataless)` refusal; it cannot remove one, so it cannot weaken the status.
     pub fn status_treating_as_dataless(

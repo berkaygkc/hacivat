@@ -4692,12 +4692,13 @@ hv-scripts-a11y-outside = kitaplığın dışını gösteriyor
 hv-scripts-a11y-dataless = indirilmedi
 # Surface 1 (Scripts node). The "?" badge's text alternative for the reasons hv-scripts-git-unknown-tip does not cover.
 # Variables:
-#   $reason (String) - selector: the reason; one of case, notafile, submodule (anything else: the default).
+#   $reason (String) - selector: the reason; one of case, notafile, submodule, unsafepath (anything else: the default).
 # Review: PO
 hv-scripts-git-unknown-other-tip =
     { $reason ->
         [submodule] Git durumu bilinmiyor: bu bir alt modül ve Hacivat alt modül açmaz.
         [case] Git durumu bilinmiyor: depo bu adı başka büyük/küçük harflerle yazıyor.
+        [unsafepath] Git durumu bilinmiyor: depo bu dosyayı Hacivat'ın izlemediği bir adla tanımlıyor.
        *[notafile] Git durumu bilinmiyor: normal bir dosya değil.
     }
 # Surface 1 (Scripts node). The Scripts node's child row when the library folder can't be listed.

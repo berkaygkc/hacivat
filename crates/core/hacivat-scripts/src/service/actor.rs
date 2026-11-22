@@ -560,7 +560,7 @@ struct PendingAttach {
     db: Option<LogicalDb>,
     write_manifest: bool,
     root: Option<LibraryRoot>,
-    identity: Option<(u64, u64)>,
+    identity: Option<crate::fileio::FolderIdentity>,
     reply: oneshot::Sender<Result<LibraryId, AttachError>>,
 }
 
@@ -920,7 +920,7 @@ impl Actor {
         // F1: no file-system call here. The worker resolved the folder and made the guard's
         // checks; overlap is checked against the canonical paths this actor holds.
         let others = self.known_roots(None);
-        let inode = resolved.identity.map(|(_, ino)| ino);
+        let inode = resolved.identity.map(|i| i.ino);
         let root = match self.registry.add_resolved(
             &pa.path,
             &resolved.root.canonical,
@@ -1130,7 +1130,7 @@ impl Actor {
         let (Some(canonical), None) = (lib.session.canonical.clone(), &lib.reg.canonical) else {
             return;
         };
-        let (id, inode) = (lib.id(), lib.session.identity.map(|(_, ino)| ino));
+        let (id, inode) = (lib.id(), lib.session.identity.map(|i| i.ino));
         if self.registry.set_resolved(id, &canonical, inode) {
             if self.registry.save().is_err() {
                 self.reload_registry();

@@ -1217,6 +1217,151 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
   - **m12:** the name field is re-anchored to its row on every frame.
   - The contributor's generation also moves when a catalog lands (shared-ness can change).
   - The row tooltip is one line, its facts joined by ` · `. A newline in it panicked GPUI's text layout on hover; the m7 hover shot found it.
+
+## m4b-cifix-2 — a root's identity includes its birth time
+
+- **Finding (CI 44990057141, Linux only).**
+  - `a_root_with_a_new_identity_is_refused` timed out waiting for `RootChanged` on `ubuntu-24.04` and in `turkey-test`.
+  - The test hints the root itself through the fake source, so no OS event was missing. The service re-validated the root and found the same identity.
+  - ext4 gives a freed inode to the next `mkdir` in the same block group. So a root deleted and made again at the same path usually keeps its inode, and its device.
+  - The in-session I3 check compared only `(dev, ino)`, and adopted the new folder. APFS never reuses an inode number, which is why macOS passed.
+- **Decision.**
+  - The session identity, `fileio::FolderIdentity`, is now the device, the inode and the birth time.
+  - The birth time comes from `Metadata::created()`: `statx` `btime` on Linux, `st_birthtime` on macOS. It goes through `std`, so there is no `unsafe` and no new dependency.
+  - A rename keeps the birth time. A root that goes missing and comes back by a rename is still the same library.
+  - A folder made again is born later. It is `RootChanged`, with `RootRefused(IdentityChanged)`.
+  - Where the file system reports no birth time, `born` is `None` on both sides, and the check is the old `(dev, ino)`.
+- **The Linux event path is sound; no watch was added.**
+  - Each folder has its own non-recursive watch (R-T9-4). notify adds `IN_DELETE_SELF` and `IN_MOVE_SELF` to every non-recursive watch.
+  - A replaced root therefore yields one hint on the root itself: notify's `Remove(Folder)` or `Modify(Name(From))` on the watched path. The debouncer drops the child events queued under a removed path.
+  - That hint makes the watcher scan. The service's patch, manifest and full-scan paths each re-check the identity.
+  - If the hint is handled while the folder is gone, the library is `Missing`. The folder made again sends nothing, since no watch is left. The 2 s re-check of an unavailable root then refuses it.
+  - No recursive watch and no parent watch were added.
+- **Residuals.**
+  - **Same clock tick.** Linux stamps a new inode's birth time from the coarse clock, one tick of 1 to 4 ms. A delete and a `mkdir` inside one tick, on an inode the allocator hands back, keep the same identity.
+    - The inode generation (`FS_IOC_GETVERSION`) would close this gap. It needs an `ioctl`, which means `unsafe` outside `hacivat-ui-core/src/platform/**`.
+    - Accepted: such a folder sits at the registered path, is a real folder and not a link, and passes the same checks as at attach. It is not a path outside the library.
+  - **Across sessions.** `libraries.toml` still keeps only the inode (`m-a`). On ext4, a root deleted and made again between sessions can be adopted at the next launch. Persisting the birth time is a T3 schema change, so it is carried.
+- **Tests.**
+  - `a_root_with_a_new_identity_is_refused` now waits, on a condition, until the birth clock has passed the old root's.
+  - `a_root_made_again_unheard_after_its_removal_is_refused`: the hint arrives while the root is gone, and the new folder sends nothing.
+  - `fileio::tests::folder_identity_tells_a_folder_made_again_from_a_renamed_one`.
+  - `watch::tests::the_roots_own_removal_and_move_are_hints_on_the_root`.
+
+## m4b-cifix-2 — the debouncer never cancels a path (macOS folder deletes)
+
+- **Finding (CI 44990057141, macOS `build-test`).**
+  - `folder_delete_is_seen` saw nothing in 10 s. `per_directory_source_sees_new_and_removed_folders` saw the create and the edit, but not the removal.
+  - FSEvents reports a path's recent history in each event's flags. Deleting a folder a few seconds after it was written arrives as `ItemCreated | ItemRemoved` on the folder and on each file. A local probe showed this even 1.5 s after the write.
+  - notify splits those flags into `Create`, then `Remove` (`fsevent.rs` `translate_flags`).
+  - notify-debouncer-full's `push_remove_event` treats a queue that starts with `Create` as "created, then removed: nothing happened" and drops it. A removed folder also drops its children's queues.
+  - Nothing reached the watcher, so the delete was invisible until a full scan. macOS has no backstop (it is Windows only), so in practice that wait has no bound.
+  - A desktop Mac usually adds an extended-attribute flag. Its `Modify(Metadata)` comes after the `Remove` and refills the queue, which is why the tests passed locally. The CI runner has no such flag.
+  - **A product bug:** a deleted folder stayed listed on macOS.
+- **Decision.**
+  - The debouncer is built over `NoCancel<RecommendedWatcher>`. This wrapper hands every `Create` to the debouncer as `Modify(Any)`, keeping its paths, flags and attributes. So no queue ever starts with a `Create`, and no path is cancelled.
+  - The reconciler takes only paths from a hint, never kinds (alg/28 C3), so nothing is lost. The cost: a file made and deleted within one window, which nothing ever listed, now costs one look or one scan.
+  - The wrapper builds its inner watcher with `watcher_config()`, whatever config the debouncer passes (R-T0-2). The `#[expect(clippy::disallowed_methods)]` on it names that reason.
+  - It applies on every platform. inotify and `ReadDirectoryChangesW` send real `Create`s, and for them the change only turns "made and gone within 150 ms" into one more hint.
+- **Why the per-folder source runs on macOS.**
+  - `OsEventSource::per_directory()` is public so that the per-folder logic (R-T9-4) is tested on every runner. On macOS, notify implements `NonRecursive` by filtering a recursive FSEvents stream down to the path and its direct children.
+  - Each `watch` or `unwatch` there stops and restarts the stream from "now", so events in the gap are lost. The product never uses it there: `OsEventSource::new()` is per-folder only on Linux.
+  - Its CI failure had the same cause as `folder_delete_is_seen`, not the per-folder mode.
+- **Tests.**
+  - `watch::tests::a_delete_whose_flags_still_say_created_reaches_the_root` drives the real debouncer with a scripted backend that sends the runner's sequence.
+    - The control: the bare backend routes nothing.
+    - Through `NoCancel`, the folder's path reaches the root.
+- **Found while stress-testing; not caused by this change, and not fixed (carries).** Interleaved A/B runs of the binary before and after, under a busy machine, fail at the same rate:
+  - **`git_checkout_2000_is_one_rescan`:** 6/80 before and 5/80 after. When FSEvents pauses for a window during the checkout, the first few hundred files form their own burst below the 1,000-path limit, so each is reported `Changed` before the rest overflow into the `Rescan`. The events are true, but the "one rescan" promise of the burst rule is broken. This is the burst rule's quiet-window heuristic.
+  - **`folder_move_is_seen_as_renames_for_known_contents`:** when run alone or in a small group (`watch_real folder`), it fails about 9 times in 10, before and after, with an extra `PossiblyChanged(reports/d.sql)`. The whole binary passes. The move happens within R-T9-3's 2 s racy window of the fixture's writes, and a late FSEvents history hint on `d.sql` makes the ruled `PossiblyChanged`, so the test's expectation depends on how long the other tests take.
+
+## m4b-cifix-2 — Windows: n2's library-folder alias, and the dataless hook's spelling
+
+- **n2 on Windows (product).**
+  - `non_ascii_case_only_library_rename_is_case_mismatch` answered `New` on Windows. The badge claimed that a tracked, modified file was untracked.
+  - `map::same_file` was Unix-only (`(dev, ino)`), since `std` has no stable file id on Windows.
+  - It now compares the final paths the system reports for open handles (`canonicalize`). Those spell every component as the disk does, so `Çal` and `çal` resolve alike under case folding. A link or junction on either side is never equal (like `lstat` on Unix).
+  - It opens a handle on each candidate folder and reads no file. It runs once per distinct leading index folder that does not already match the library ASCII-case-insensitively.
+  - The file-level case-only residual (n3) is unchanged.
+- **The dataless hook (test).**
+  - `dataless_layout_files_and_split_index_are_unavailable` answered `Ready` for the linked worktree's `commondir` on Windows. The status resolves a gitfile's target and the alternates with `canonicalize`, which gives the verbatim `\\?\C:\…` form, and the testing hook matches paths exactly.
+  - The test built its absolute entries from its own `canonical`, which strips `\\?\`.
+  - The product's placeholder test reads file attributes and never compares spellings, so this was a test bug.
+  - The test now spells absolute entries with `std::fs::canonicalize`. The hook's doc says so.
+
+## m4b-cifix-2 — fix round (review C1, C2, I1, I2; rulings R-CI2-1 to R-CI2-3)
+
+- **C1 (R-CI2-1): the birth time is part of a root's identity on Linux only.**
+  - On APFS and HFS+, setting a folder's modification time earlier than its birth time moves the birth time back. `rsync -a` or `tar -x` into the root (a `./` entry), `cp -Rp` and `touch -t` all do it.
+  - With the birth time in the identity on macOS, an unchanged library was refused (`RootChanged`, `IdentityChanged`) after a restore. The reviewer's probe showed this end to end.
+  - Linux userland cannot set `btime`, and ext4's inode reuse is what needs it. APFS never reuses an object id, and HFS+ CNIDs only grow, so macOS keeps `(dev, ino)`.
+  - **Residual:** a network or FUSE mount on Linux may report a settable birth time (an NFSv4 `time_create`, an SMB server's creation time). A restore into such a root can still refuse the library. Such libraries are polled; accepted.
+  - The cross-session check stays inode only (`m-a`, a T3 carry); with this fix it matters on Linux only.
+  - Tests:
+    - `a_root_whose_time_is_set_back_stays_the_same_library`: `touch -t 200001010000 <root>`, then a new file is listed and the library stays `Watching`. It failed with the birth time on macOS.
+    - The unit test asserts that a set-back time keeps the identity.
+- **C2 (R-CI2-2): index paths are never resolved unless they are plain, on every OS.**
+  - The n2 alias loop joined the first components of an **index entry** (untrusted repository content) to the worktree and resolved them. On Windows, `Path::join` with a `\\host\share` component replaces the base, so `canonicalize` would contact the host and answer its NTLM challenge.
+  - The same class already existed on Unix: an absolute `/net/<host>` head made `lstat` start macOS's automounter.
+  - Now `map::is_plain_index_path` requires every `/`-separated component to pass `gix::validate::path::component` with the Windows, NTFS and HFS protections on (`Options::default()`), and to be one `Normal` path component. That refuses:
+    - empty, `.` and `..` components;
+    - `\` anywhere, and drive, UNC, verbatim and device prefixes;
+    - NTFS streams and reserved device names (`aux.sql` too);
+    - a trailing dot or space;
+    - every spelling of `.git` (`GIT~1`, `.GIT`);
+    - control bytes, and non-UTF-8.
+  - `map::alias_candidate` also refuses 8.3 short-name components (`~` and a digit), since an alias is for a case-only rename. It checks that the joined path stays under the worktree, component for component.
+  - Where it applies:
+    - before n2's `same_file`;
+    - at every index entry: an entry that is not plain leaves the index copy, so gix never stats it, and inside the library it is `Unknown(UnsafePath)`, a new `UnknownWhy` with the highest precedence;
+    - in `into_library`, where such a path is keyed as the index spells it and never looked up;
+    - in `Lister::on_disk`, before any call.
+  - **Consequence:** on Unix a tracked name that Windows cannot hold (`a:b.sql`, `x?.sql`, `aux.sql`, a trailing dot) is now `Unknown(UnsafePath)` rather than compared. It is never a wrong badge.
+  - Tests:
+    - `hostile_index_paths_are_never_candidates`: UNC, drive, verbatim, device, `..` in each form, absolute `/net/x`, empty components, NTFS streams, reserved names, trailing dot and space, `.git`/`GIT~1`/`.GIT`, NUL, non-UTF-8, and 8.3 names (plain, but never an alias);
+    - `an_unsafe_index_path_is_unknown_and_never_looked_up`.
+- **I1 (R-CI2-3): a repository operation is one burst.**
+  - The quiet-window rule split a checkout whose events paused for one window into a burst under the limit, which settled one file at a time, and the rest. That is how `git_checkout_2000_is_one_rescan` failed under load.
+  - A hint on `.git/index.lock` makes the reconciler `lstat` it. It looks only at the library's own `.git`, which must be a real folder, never a link or gitfile. If the lock is held:
+    - `Debouncer::begin_operation` starts an operation, bounded by `REPO_OP_MAX` = 30 s;
+    - the burst does not end on a quiet window, and its distinct paths count across the whole operation;
+    - nothing settles but open files (R-T9-6);
+    - an overflow's rescan waits for the operation's end.
+  - The lock is looked at again once per window, so a removal no hint reports is still seen within a window.
+  - When the lock goes, an overflowed operation falls back to the ordinary rule from that moment: one `Rescan` once the hints are quiet for a window. So what FSEvents still delivers after the unlock is swallowed too. An operation under the limit releases its held looks one window later.
+  - A lock that outlives the bound is stale. The operation ends there (one `Rescan` if it overflowed), and no new operation starts, and no per-window look continues, until the lock has been seen gone.
+  - A repository above the library root gives no lock signal, and keeps the ordinary rule.
+  - Tests:
+    - `a_checkout_that_pauses_mid_way_is_one_rescan_while_the_index_is_locked`: 1,200 files with a 340 ms pause mid-checkout give `[Rescan]`, and only the open file is reported while the lock is held. The no-lock control reports 1,200 files one by one.
+    - `a_small_operation_releases_its_files_when_the_lock_goes_unheard`.
+    - `a_stale_index_lock_holds_at_most_once_for_the_bound`.
+    - All three fail when the lock hint is ignored.
+- **I2.** `watch_real`'s fixtures are an hour old, so no fixture file is racy when a watcher starts. `folder_move_is_seen_as_renames_for_known_contents` run alone: 0/20 failures (before: about 9 in 10).
+- **m1.** `NoCancel` does not forward `Watcher::configure` or `paths_mut`. The defaults apply, so the inner watcher can never be reconfigured, link following included. Its doc says so.
+- **A lock held for minutes** (`git commit -a` with the editor open holds `index.lock` for the whole message edit) delays unopened files' reports once, by up to `REPO_OP_MAX` = 30 s. After that the lock counts as stale until it has been seen gone. Accepted.
+
+## m4b-cifix-2 — fix round 2 (re-review N1, N2; ruling R-CI2-4)
+
+- **N1: no index-derived path is walked through an on-disk link (completes R-CI2-2).**
+  - `map::Lister::on_disk` checked each component's name but still `read_dir`ed a listed folder that was a link: a library folder `link -> /net/<host>` (macOS automount) or `-> \\host\share` (Windows, NTLM), plus a crafted index entry `lib/link/x.sql`, listed the outside folder.
+  - The dataless check `lstat`ed `worktree.join(index path)`, which follows every leading component.
+  - Now each listing keeps every entry's `file_type()` from `read_dir`. That type follows nothing; on Windows it covers symlinks and junctions, and an unreadable type counts as a link.
+  - `on_disk` never descends into a link: every component but the last must be a listed non-link, or, found only by case folding, one whose `lstat` is not a link.
+  - The dataless check goes through the same walk (`Lister::lstat_under`) and `lstat`s only the last component.
+  - gix's own worktree walk already refuses linked leading folders (`SymlinkCheck`).
+  - Listings now index names and NFC forms, so the walk does no scan per lookup.
+  - Test: `an_index_path_under_a_linked_folder_never_leaves_the_library`. Its counting seam records every path listed or `lstat`ed. The test also covers the case-only spelling `LINK/x.sql` and the badge path through `into_library`. It fails when the link check is removed.
+- **N2 (R-CI2-4): the name rules are the host's, as git applies them.**
+  - On every OS, a component must be:
+    - one `Normal` path component of valid UTF-8;
+    - not empty, `.` or `..`;
+    - without `/` or NUL;
+    - never a `.git` spelling.
+  - The Windows and NTFS protections (`\`, drive, UNC and verbatim prefixes, streams, reserved device names, trailing dot or space, `GIT~1`) apply on Windows only, and the HFS+ `.git` spellings on macOS only.
+  - The fix round's consequence for Unix is gone: `con.sql`, `aux.sql` and `a:b.sql` keep their true badge on Linux and macOS, and are `Unknown(UnsafePath)` on Windows (`windows_only_names_keep_their_badge_off_windows`).
+  - A backslash is an ordinary character on Unix and cannot reach a UNC path there.
+- **N3 (monorepo lock signal): carried to T20, not done here.**
+
 ## m4b-t14 — script tabs
 
 Task 14 fills `scripts::{tabs,open,save,disk_bars,restore,unsaved_prompt}` and the named lines it needs in the console host, the exec orchestrator, the close and quit prompts, the shell and the explorer. The one rule: **a script tab runs only on the (connection, database) it was opened under, for its whole life.**

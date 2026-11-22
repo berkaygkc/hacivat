@@ -1525,6 +1525,19 @@ fn dataless_state(repo: &Repo, flagged: &str) -> GitState {
     )
 }
 
+// ## m4b-cifix-2-hook-spelling
+/// An absolute path outside the library as the status itself spells it, for the dataless hook,
+/// which matches paths exactly: `std::fs::canonicalize`, unstripped. On Windows that is the
+/// verbatim `\\?\C:\…` form with the disk's own case, which is how the status resolves a
+/// gitfile's target and the alternates (`trust::resolve`). The test's [`canonical`] strips the
+/// verbatim prefix for the CLI, so a hook entry built from it named no path the status checks
+/// (CI 44990057141, Windows: the `commondir` case answered `Ready`). The product's own
+/// placeholder test reads the file's attributes and never compares spellings.
+fn as_the_status_spells_it(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).expect("the flagged file exists")
+}
+// ## m4b-cifix-2-hook-spelling
+
 fn is_dataless(st: &GitState) -> bool {
     matches!(st, GitState::Unavailable(GitError::Dataless))
 }
@@ -1632,9 +1645,10 @@ fn too_many_loose_objects_is_unavailable() {
 fn dataless_layout_files_and_split_index_are_unavailable() {
     // Linked worktree: its git dir's `commondir` and `gitdir`.
     let main = build_fixture("linked-worktree");
-    let wt_git = canonical(main.root().join(".git/worktrees/wt").as_path());
+    let wt_git = main.root().join(".git").join("worktrees").join("wt");
     for f in ["commondir", "gitdir"] {
-        let st = dataless_state(&main, wt_git.join(f).to_str().unwrap());
+        let flagged = as_the_status_spells_it(&wt_git.join(f));
+        let st = dataless_state(&main, flagged.to_str().unwrap());
         assert!(is_dataless(&st), "linked worktree {f}: {st:?}");
     }
     // A shared clone: its alternates file, and a loose object in the alternate.
@@ -1652,7 +1666,8 @@ fn dataless_layout_files_and_split_index_are_unavailable() {
         in_alternate.is_file(),
         "the source repository holds HEAD loose"
     );
-    let st = dataless_state(&clone, in_alternate.to_str().unwrap());
+    let flagged = as_the_status_spells_it(&in_alternate);
+    let st = dataless_state(&clone, flagged.to_str().unwrap());
     assert!(is_dataless(&st), "alternate's loose object: {st:?}");
     // A split index: `sharedindex.<sha>`.
     let repo = build_fixture("worktree-modified");

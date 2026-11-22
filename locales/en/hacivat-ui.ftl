@@ -4874,11 +4874,12 @@ hv-scripts-a11y-outside = points outside the library
 hv-scripts-a11y-dataless = not downloaded
 # Surface 1 (Scripts node). The "?" badge's text alternative for the reasons hv-scripts-git-unknown-tip does not cover.
 # Variables:
-#   $reason (String) - selector: the reason; one of case, notafile, submodule (anything else: the default).
+#   $reason (String) - selector: the reason; one of case, notafile, submodule, unsafepath (anything else: the default).
 hv-scripts-git-unknown-other-tip =
     { $reason ->
         [submodule] Git status unknown: it is a submodule, and Hacivat never opens one.
         [case] Git status unknown: the repository spells this name with other capitals.
+        [unsafepath] Git status unknown: the repository names this file in a way Hacivat does not follow.
        *[notafile] Git status unknown: it isn't a regular file.
     }
 # Surface 1 (Scripts node). The Scripts node's child row when the library folder can't be listed.
