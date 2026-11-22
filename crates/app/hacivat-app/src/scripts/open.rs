@@ -370,54 +370,15 @@ fn open_sqlite(
 /// (R-M4b-6), except the tab's own. Production is listed like any other; the chooser never
 /// preselects it (R-M4b-9, Task 15).
 pub fn other_places(tab: &ScriptTab, cx: &App) -> Vec<(ProfileId, DatabaseName)> {
-    let (Some(service), Some(m)) = (service(cx), cx.try_global::<ConnectionsModel>()) else {
-        return Vec::new();
-    };
-    let snap = service.snapshot();
-    let mut out = Vec::new();
-    for p in m.profiles() {
-        let Some(db) = resolve_database(p, cx) else {
-            continue;
-        };
-        if tab.profile == Some(p.id) && tab.database.as_ref() == Some(&db) {
-            continue;
-        }
-        if session_plan(p, &db, cx).is_err() {
-            continue;
-        }
-        let logical = match database_level(p.engine) {
-            DbLevel::File => sqlite_stem(p),
-            _ => hacivat_scripts::LogicalDb::parse(db.as_str()).ok(),
-        };
-        let Some(logical) = logical else { continue };
-        let node = hacivat_scripts::DbNode {
-            profile: p.id,
-            database: db.clone(),
-            logical,
-        };
-        let libs: Vec<hacivat_scripts::LibrarySnapshot> =
-            snap.libraries.iter().map(|l| (**l).clone()).collect();
-        if !hacivat_scripts::resolve(&node, &libs, &snap.mappings).contains(&tab.library) {
-            continue;
-        }
-        let shown = snap
-            .view(p.environment)
-            .library(tab.library)
-            .and_then(|l| l.entry(&tab.rel))
-            .is_some();
-        if shown {
-            out.push((p.id, db));
-        }
-    }
-    out
-}
-
-/// The logical name of a SQLite profile: its file's stem (R-M4b-3, R-M4b-32).
-fn sqlite_stem(p: &Profile) -> Option<hacivat_scripts::LogicalDb> {
-    let hacivat_session::profile::ProfileEndpoint::File { path, .. } = &p.endpoint else {
-        return None;
-    };
-    hacivat_scripts::LogicalDb::parse(path.file_stem()?.to_str()?).ok()
+    // ## m4b-t15-goto (named exception): the chooser's candidates (the explorer's places too,
+    // R-M4b-31), so the notice's button is enabled exactly when the chooser has a row.
+    let exclude = tab
+        .profile
+        .zip(tab.database.as_ref().map(DatabaseName::as_str));
+    crate::scripts::chooser::candidates(tab.library, &tab.rel, exclude, cx)
+        .into_iter()
+        .map(|c| (c.profile, c.database))
+        .collect()
 }
 
 /// A hook Task 15's chooser fills: "Open under another connection…" of a script tab. Without

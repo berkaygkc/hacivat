@@ -1227,18 +1227,46 @@ pub(crate) fn shown_under_another_connection(
     rel: &hacivat_scripts::RelPath,
     cx: &App,
 ) -> bool {
+    // ## m4b-t15-goto (named exception): the chooser's own candidates, so the menu item is
+    // enabled exactly when the chooser it opens has a row.
+    !super::chooser::candidates(
+        library,
+        rel,
+        Some((place.profile, place.database.as_str())),
+        cx,
+    )
+    .is_empty()
+}
+
+// ## m4b-t15-goto (named exception)
+/// One place a script can be opened under: a profile, a database of it and the libraries
+/// bound there.
+pub(crate) struct ScriptPlace {
+    pub profile: Arc<Profile>,
+    pub database: String,
+    pub libraries: Vec<LibraryId>,
+}
+
+/// Every place a script can be opened under (R-M4b-31): for each profile, the databases the
+/// explorer asked the contributor about (C-M4-3; PostgreSQL limited as R-M4b-25) plus its
+/// configured database (`main` on SQLite), each with the libraries bound there (binding and
+/// local mappings, HV-SCRIPT-02). Empty without a library service.
+pub(crate) fn script_places(cx: &App) -> Vec<ScriptPlace> {
     let Some(inner) = host(cx) else {
-        return false;
+        return Vec::new();
     };
     let Some(snap) = inner.snapshot() else {
-        return false;
+        return Vec::new();
     };
+    // The libraries cached for an older snapshot are dropped first.
+    inner.sync();
     let profiles: Vec<Arc<Profile>> = cx
         .try_global::<ConnectionsModel>()
         .map(|m| m.profiles().to_vec())
         .unwrap_or_default();
-    profiles.iter().any(|q| {
-        let mut dbs = asked_databases(q, cx);
+    let mut out = Vec::new();
+    for q in profiles {
+        let mut dbs = asked_databases(&q, cx);
         let configured = match database_level(q.engine) {
             DbLevel::File => Some("main".to_string()),
             _ => q.database.clone(),
@@ -1248,16 +1276,30 @@ pub(crate) fn shown_under_another_connection(
         {
             dbs.push(db);
         }
-        dbs.iter().any(|db| {
-            (q.id, db.as_str()) != (place.profile, place.database.as_str())
-                && libraries_at(&inner, q, db, &snap, cx).contains(&library)
-                && snap
-                    .view(q.environment)
-                    .library(library)
-                    .is_some_and(|l| l.entry(rel).is_some())
-        })
-    })
+        for db in dbs {
+            let libraries = libraries_at(&inner, &q, &db, &snap, cx);
+            if !libraries.is_empty() {
+                out.push(ScriptPlace {
+                    profile: q.clone(),
+                    database: db,
+                    libraries,
+                });
+            }
+        }
+    }
+    out
 }
+
+/// The display order of the UI language (connection names in the chooser).
+pub(crate) fn name_order(cx: &App) -> Rc<NameOrder> {
+    match host(cx) {
+        Some(inner) => inner.order(cx),
+        None => Rc::new(NameOrder::new(
+            &ui_language(cx).map(|l| l.to_string()).unwrap_or_default(),
+        )),
+    }
+}
+// ## m4b-t15-goto
 
 /// The environment a place's connection has now.
 pub(crate) fn env_of(place: &Place, cx: &App) -> Option<EnvTag> {

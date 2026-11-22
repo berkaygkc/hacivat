@@ -5117,3 +5117,7 @@ hv-scripts-open-under-chooser = Open it from the Scripts node of the connection 
 hv-scripts-unsaved-subtitle = { $env } · { $conn } · { $database }
 # Surface 6b (Unsaved changes): the subtitle of a tab with no connection.
 hv-scripts-unsaved-subtitle-unbound = No connection
+
+## m4b-t15-goto
+# Surface 7 (Go to script). Palette title of the tree row's "Open under another connection…" (the chooser without the row's connection); no default chord.
+hv-cmd-scripts-open-under = Open script under another connection…

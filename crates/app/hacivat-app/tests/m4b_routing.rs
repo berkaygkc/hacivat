@@ -131,6 +131,16 @@ const M4B_ROWS: &[Row] = &[
         None,
     ),
     // ## m4b-t13-explorer
+    // ## m4b-t15-goto (named exception): the tree row's "Open under another connection…"
+    // (menu and palette only).
+    (
+        "scripts.open_under",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    // ## m4b-t15-goto
 ];
 
 /// `chord` in the keymap's canonical spelling.
@@ -296,7 +306,8 @@ fn m4b_stub_commands_are_disabled_and_out_of_the_palette(cx: &mut TestAppContext
     let stubs: Vec<&str> = scripts::STUB_COMMANDS.to_vec();
     // ## m4b-t13-explorer (named exception): `scripts.reveal` and `scripts.rename` are filled.
     // ## m4b-t14-tabs (named exception): `file.save` and `file.save_all` are filled.
-    assert_eq!(stubs.len(), 2);
+    // ## m4b-t15-goto (named exception): `scripts.goto` is filled.
+    assert_eq!(stubs.len(), 1);
     let (enabled, listed) = vcx.cx.read(|cx| {
         let reg = cx.global::<ActionRegistry>();
         let enabled: Vec<&'static str> = reg
@@ -388,9 +399,22 @@ fn every_m4b_title_id_exists_in_en_and_tr() {
         en_t13, tr_t13,
         "EN and TR hold the same ids, in the same order"
     );
+    // ## m4b-t15-goto (named exception): or in Task 15's own block (`scripts.open_under`), in
+    // English and Turkish alike.
+    let t15 = |ftl: &str| -> Vec<String> {
+        let (_, after) = ftl
+            .split_once("\n## m4b-t15-goto\n")
+            .expect("Task 15's block");
+        message_ids_in(after.split("\n## ").next().unwrap_or(after))
+    };
+    let (en_t15, tr_t15) = (t15(EN_UI), t15(TR_UI));
+    assert_eq!(en_t15, tr_t15);
     for (id, ..) in M4B_ROWS {
         let title = format!("hv-cmd-{}", id.replace(['.', '_'], "-"));
-        assert!(en.contains(&title) || en_t13.contains(&title), "{title}");
+        assert!(
+            en.contains(&title) || en_t13.contains(&title) || en_t15.contains(&title),
+            "{title}"
+        );
     }
 }
 
@@ -821,6 +845,8 @@ fn scripts_contributor_stub_adds_no_node_so_m4_shots_hold(cx: &mut TestAppContex
     assert!(menu.iter().all(|m| !m.action.starts_with("scripts.")));
 }
 
+// ## m4b-t15-goto (named exception): the stub's test, on the filled layer with no library
+// attached (Task 15's `tests/scripts_goto.rs` covers its rows and the chooser).
 #[gpui::test]
 fn goto_script_stub_lists_nothing(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
@@ -828,12 +854,11 @@ fn goto_script_stub_lists_nothing(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert_eq!(layer_ids(vcx), [goto::GOTO_LAYER]);
     let host = vcx.cx.read(goto::open_host).expect("the layer's host");
-    let palette = vcx.cx.read(|cx| host.read(cx).palette().clone());
-    assert!(vcx.cx.read(|cx| palette.read(cx).items().is_empty()));
+    assert!(vcx.cx.read(|cx| host.read(cx).result_rows().is_empty()));
     // Typing finds nothing.
     vcx.simulate_input("orders");
     vcx.run_until_parked();
-    assert!(vcx.cx.read(|cx| palette.read(cx).items().is_empty()));
+    assert!(vcx.cx.read(|cx| host.read(cx).result_rows().is_empty()));
     // A second open keeps the one layer.
     in_window(vcx, goto::open);
     vcx.run_until_parked();

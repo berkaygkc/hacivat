@@ -30,6 +30,7 @@
 //!   for it (m4), so Task 15 queries one index from one thread (off the UI thread past 2,000
 //!   entries).
 
+use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
@@ -203,6 +204,37 @@ impl ScriptIndex {
         })
     }
 
+    // ## m4b-t15-goto (named exception: Task 15)
+    /// [`query_for`](Self::query_for) with an environment list per library: each library's
+    /// scripts are offered when they are shown under one of `scopes[library]` (the environments
+    /// of the connections the library is shown under, Go to script's candidates), and a library
+    /// with no list (or an empty one) offers what an unbound tab sees (`None`: unscoped files).
+    /// So a `@production` file of a library only staging shows is never offered, even when
+    /// another library is shown under production (R-M4b-6).
+    pub fn query_scoped(
+        &self,
+        q: &str,
+        opts: SearchOpts,
+        limit: usize,
+        scopes: &HashMap<LibraryId, Vec<Option<EnvTag>>>,
+    ) -> Vec<Hit> {
+        const UNBOUND: [Option<EnvTag>; 1] = [None];
+        self.query_where(q, opts, limit, &|e| {
+            let envs = scopes
+                .get(&e.library)
+                .filter(|v| !v.is_empty())
+                .map_or(&UNBOUND[..], Vec::as_slice);
+            envs.iter().any(|env| envscope::visible(&e.entry, *env))
+        })
+    }
+
+    /// Whether a query should run off the UI thread (Task 15: past 2,000 offered scripts, the
+    /// plan's threshold). A yes or no, never a count (fix round 1, m2).
+    pub fn is_large(&self) -> bool {
+        self.libs.iter().map(|l| l.entries.len()).sum::<usize>() > LARGE_INDEX
+    }
+    // ## m4b-t15-goto
+
     /// The ranked hits over the entries `keep` accepts.
     pub(crate) fn query_where(
         &self,
@@ -263,6 +295,10 @@ impl ScriptIndex {
 
 /// The longest query matched, in characters (fix round 1, m3).
 pub const MAX_QUERY_CHARS: usize = 256;
+
+// ## m4b-t15-goto (named exception)
+/// Past this many offered scripts a query runs off the UI thread ([`ScriptIndex::is_large`]).
+pub const LARGE_INDEX: usize = 2_000;
 
 fn cap(q: &str) -> &str {
     q.char_indices()
