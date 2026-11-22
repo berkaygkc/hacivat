@@ -1641,8 +1641,35 @@ pub(crate) fn run_gate(console: ConsoleId, rerun: Box<dyn FnOnce(&mut App)>, cx:
     let Some(doc) = doc_of_console(console, cx) else {
         return !is_script_console(console, cx);
     };
-    doc.update(cx, |d, cx| d.gate(console, rerun, cx))
+    doc.update(cx, |d, cx| d.gate(console, rerun, false, cx))
 }
+
+// ## m4b-t18-run-as-script (named exception; R-M4b-27, R-T14-2)
+/// [`run_gate`] for Run as script (`scripts::run_as_script`, between its two passes): the same
+/// check on the tab's own session, except that a T2 preview is what it streams. A pass inserts
+/// the check's context generation, which [`take_checked_generation`] hands to the runner.
+pub(crate) fn run_gate_streamed(
+    console: ConsoleId,
+    rerun: Box<dyn FnOnce(&mut App)>,
+    cx: &mut App,
+) -> bool {
+    let Some(doc) = doc_of_console(console, cx) else {
+        return !is_script_console(console, cx);
+    };
+    doc.update(cx, |d, cx| d.gate(console, rerun, true, cx))
+}
+
+/// The context generation console `console`'s last passed check read on `session` (taken:
+/// one check, one run); `None` when no check passed there, or its generation is unknown.
+pub(crate) fn take_checked_generation(
+    console: ConsoleId,
+    session: hacivat_session::session::SessionId,
+    cx: &mut App,
+) -> Option<u64> {
+    let (on, generation) = cx.default_global::<RunChecks>().0.remove(&console)?;
+    (on == session).then_some(generation).flatten()
+}
+// ## m4b-t18-run-as-script
 
 /// Whether `console` is a script tab's (registered with its source), whatever its doc.
 fn is_script_console(console: ConsoleId, cx: &App) -> bool {
@@ -1654,6 +1681,8 @@ impl ScriptDoc {
         &mut self,
         console: ConsoleId,
         rerun: Box<dyn FnOnce(&mut App)>,
+        // ## m4b-t18-run-as-script (named exception): Run as script streams a T2 preview.
+        streamed: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.load != Load::Ready || self.plan.is_err() {
@@ -1668,7 +1697,7 @@ impl ScriptDoc {
             toast(msg(cx, "hv-scripts-run-md", Vec::new()), cx);
             return false;
         }
-        if self.tier == SizeTier::Preview {
+        if self.tier == SizeTier::Preview && !streamed {
             toast(msg(cx, "hv-scripts-preview-no-run", Vec::new()), cx);
             return false;
         }

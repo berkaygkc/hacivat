@@ -4989,3 +4989,25 @@ hv-scripts-unsaved-subtitle-unbound = Bağlantı yok
 #   $path (String) - the database file's path (data), e.g. "/Volumes/data/orders.db".
 # Review: PO
 hv-scripts-sqlite-remounted = Veritabanı dosyası artık başka bir birimde; { $path } üzerinde çalıştırılıyor.
+
+## m4b-t18-run-as-script
+# Review: PO
+hv-scripts-run-checking = Dosyanın tamamı çalıştırılmadan önce denetleniyor
+# Variables:
+#   $n (Number) - the statement's position in the file, e.g. 1205.
+# Review: PO
+hv-scripts-run-declined = { $n }. ifadede durduruldu: onaylamadınız. Önceki ifadeler çalıştı ve uygulanmış olarak kalıyor; ondan sonrası gönderilmedi.
+# Review: PO
+hv-scripts-run-close = Kapat
+# Variables:
+#   $env (String) - the connection's environment word (an hv-conn-env-* message), e.g. "staging".
+# Review: PO
+hv-scripts-confirm-open-ended = Tümünü çalıştır, dosyada bu bağlantıda ({ $env }) onay isteyecek sonraki her ifadeyi sormadan çalıştırır; adının yazılması gereken bir ifade yine sorar. Tümünü atla, onay isteyecek sonraki her ifadeyi atlar.
+# Variables:
+#   $env (String) - the connection's environment word (an hv-conn-env-* message), e.g. "production".
+# Review: PO
+hv-scripts-confirm-open-ended-skip = Tümünü atla, dosyada bu bağlantıda ({ $env }) onay isteyecek sonraki her ifadeyi atlar.
+# Review: PO
+hv-scripts-pasted-name = Yapıştırılan metin
+# Review: PO
+hv-scripts-paste-preview-unbound = Önizleme olarak yapıştırma bu konsolun bağlantısında açılır ve konsolun bağlantısı yok.

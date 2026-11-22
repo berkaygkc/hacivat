@@ -54,6 +54,8 @@ use hacivat_ui_core::gpui_surface::{Role, StatefulInteractiveElement as _};
 use hacivat_ui_core::theme::{Theme, TypeStyle};
 
 use crate::l10n_global::{text_fn, tr};
+// ## m4b-t18-run-as-script
+use crate::l10n_global::text_fn_id;
 use crate::shell::keymap_state::shortcut_label;
 
 /// The run state the toolbar shows.
@@ -135,16 +137,33 @@ pub fn build_for(
     };
     // ## m3c-t41-chrome (N1): icon-only in a narrow pane.
     let (narrow_model, na) = (model.clone(), actions.clone());
-    bar = bar.item(
-        ToolbarItem::pinned(
-            item(move |_, cx| run_button(&run_model, &a, false, cx)),
-            run_label,
-        )
-        .narrow(item(move |_, cx| run_button(&narrow_model, &na, true, cx))),
-    );
+    // ## m4b-t18-run-as-script (named exception; NOTES surface 9, ruling 8): on a T2 preview
+    // the slot is Run as script, the toolbar's one Primary; plain Run is absent. While it runs
+    // the strip shows the run, so the session's per-statement run state is not shown here.
+    let script = console.filter(|c| crate::scripts::run_as_script::offered(*c, cx));
+    if let Some(c) = script {
+        bar = bar.item(
+            ToolbarItem::pinned(
+                item(move |_, cx| crate::scripts::run_as_script::toolbar_button(c, false, cx)),
+                text_fn_id("hv-scripts-run-as-script"),
+            )
+            .narrow(item(move |_, cx| {
+                crate::scripts::run_as_script::toolbar_button(c, true, cx)
+            })),
+        );
+    } else {
+        bar = bar.item(
+            ToolbarItem::pinned(
+                item(move |_, cx| run_button(&run_model, &a, false, cx)),
+                run_label,
+            )
+            .narrow(item(move |_, cx| run_button(&narrow_model, &na, true, cx))),
+        );
+    }
+    // ## m4b-t18-run-as-script
 
     // The run state.
-    if model.run != RunUx::Idle {
+    if model.run != RunUx::Idle && script.is_none() {
         let run = model.run;
         let label: TextFn = match run {
             RunUx::Cancelling => text_fn(ids::hv::CONSOLE_CANCELLING),

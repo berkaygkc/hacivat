@@ -152,6 +152,10 @@ pub struct ConfirmContext {
     pub later_asks: u32,
     /// This unit and every unit Execute all answers only lock rows (Execute all is Default).
     pub all_warn: bool,
+    // ## m4b-t18-run-as-script (named exception; the T12 review's m4)
+    /// A streamed run (Run as script) asks: the later units are not known yet, so Execute all
+    /// (off production) and Skip all are offered with open-ended words instead of a count.
+    pub open_ended: bool,
 }
 
 impl ConfirmContext {
@@ -812,11 +816,19 @@ impl ConfirmDialog {
     fn shows_execute_all(&self) -> bool {
         // ## m3b-t29-shots (named exception; T29 review m4): never on production, whatever the
         // context says (the port may raise `production` after the plan's context was made).
-        self.ctx.covered > 0 && !self.q.production
+        // ## m4b-t18-run-as-script (named exception): or a streamed run's open-ended one.
+        (self.ctx.covered > 0 || self.open_ended()) && !self.q.production
     }
 
     fn shows_skip_all(&self) -> bool {
-        self.ctx.later_asks > 0
+        // ## m4b-t18-run-as-script (named exception)
+        self.ctx.later_asks > 0 || self.open_ended()
+    }
+
+    // ## m4b-t18-run-as-script (named exception)
+    /// A streamed run with statements after this one.
+    fn open_ended(&self) -> bool {
+        self.ctx.open_ended && self.q.index < self.q.total
     }
 
     fn shows_suppress(&self) -> bool {
@@ -1127,7 +1139,21 @@ impl Render for ConfirmDialog {
             }
             body = body.child(block);
         }
-        if self.shows_execute_all() {
+        // ## m4b-t18-run-as-script (named exception; the T12 review's m4): a streamed run
+        // words Execute all and Skip all for the later statements it has not read yet.
+        if self.open_ended() {
+            let env = crate::connections::capsule::env_word(cx, self.ctx.env_of(q.production));
+            let id = if self.shows_execute_all() {
+                "hv-scripts-confirm-open-ended"
+            } else {
+                "hv-scripts-confirm-open-ended-skip"
+            };
+            body = body.child(note(
+                &theme,
+                message(cx, id, vec![("env", ArgValue::Text(env.to_string()))]),
+                "confirm-open-ended-scope",
+            ));
+        } else if self.shows_execute_all() {
             // ## m3b-po-env (PO M3b-26): the line names the connection's real environment
             // (`staging`, …, `no environment`), never "production".
             let env = crate::connections::capsule::env_word(cx, self.ctx.env_of(q.production));
@@ -1667,6 +1693,8 @@ enum PortRequest {
         console: Option<ConsoleId>,
         question: ConfirmQuestion,
         reply: oneshot::Sender<ConfirmAnswer>,
+        // ## m4b-t18-run-as-script (named exception)
+        open_ended: bool,
     },
     Commit {
         console: Option<ConsoleId>,
@@ -1687,6 +1715,8 @@ pub struct AppConfirmPort {
     console: Option<ConsoleId>,
     requests: Option<mpsc::UnboundedSender<PortRequest>>,
     runs: Arc<Runs>,
+    // ## m4b-t18-run-as-script (named exception): a streamed run's port.
+    open_ended: bool,
 }
 
 impl std::fmt::Debug for PortRequest {
@@ -1707,6 +1737,21 @@ impl AppConfirmPort {
             console: Some(console),
             requests: Some(requests),
             runs: Arc::default(),
+            open_ended: false,
+        })
+    }
+
+    // ## m4b-t18-run-as-script (named exception; the T12 review's m4)
+    /// The port of a streamed run (Run as script) on console `console`: as
+    /// [`AppConfirmPort::for_console`], and its dialogs offer Execute all (off production) and
+    /// Skip all for the later statements of the file with open-ended words.
+    pub fn for_script_run(console: ConsoleId, cx: &mut App) -> Arc<AppConfirmPort> {
+        let requests = install(cx);
+        Arc::new(AppConfirmPort {
+            console: Some(console),
+            requests: Some(requests),
+            runs: Arc::default(),
+            open_ended: true,
         })
     }
 
@@ -1718,6 +1763,8 @@ impl AppConfirmPort {
             console: None,
             requests: Some(requests),
             runs: Arc::default(),
+            // ## m4b-t18-run-as-script (named exception)
+            open_ended: false,
         })
     }
 
@@ -1769,6 +1816,8 @@ impl ConfirmPort for AppConfirmPort {
             console: self.console,
             question: q,
             reply,
+            // ## m4b-t18-run-as-script (named exception)
+            open_ended: self.open_ended,
         });
         match sent {
             Ok(()) => rx,
@@ -1855,8 +1904,11 @@ fn route(request: PortRequest, cx: &mut App) {
             console,
             mut question,
             reply,
+            // ## m4b-t18-run-as-script (named exception)
+            open_ended,
         } => {
             let mut ctx = ConfirmContext::for_question(&question);
+            ctx.open_ended = open_ended;
             if let Some(console) = console {
                 let Some(facts) = console_facts(cx, console) else {
                     let _ = reply.send(ConfirmAnswer::Cancel);

@@ -738,6 +738,85 @@ pub(crate) fn start_run_capped(
     .detach();
 }
 
+// ## m4b-t18-run-as-script (named hook beside `start_run_capped`; R-M4b-27, HV-SCRIPT-12)
+/// What a streamed run (Run as script, `scripts::run_as_script`) of console `console` needs,
+/// after the checks Run makes before it starts: no read-only reconnect pending, no other run
+/// or preparation, a script tab that runs somewhere, a live session (else the profile's
+/// connect starts and nothing runs, R-M3-45), and its SQL context read (else "still reading").
+/// Task 14's per-Run database check is not here: it runs between the stream's two passes, on
+/// the tab's own session, bound to the context generation the first unit is sent under.
+pub(crate) fn script_run_parts(
+    console: ConsoleId,
+    cx: &mut App,
+) -> Option<crate::scripts::run_as_script::Parts> {
+    if crate::exec_ui::pending_read_only(console, cx) {
+        say(console, "hv-exec-pending-read-only", cx);
+        return None;
+    }
+    if preparing(console, cx)
+        || console_exec(cx, console).is_some_and(|e| e.run.as_ref().is_some_and(|r| !r.ended))
+    {
+        return None;
+    }
+    if crate::scripts::tabs::runs_nowhere(console, cx) {
+        crate::scripts::tabs::say_runs_nowhere(cx);
+        return None;
+    }
+    let profile = profile_of(cx, console)?;
+    let Some(session) = live_session(cx, console) else {
+        connect_first(&profile, cx);
+        return None;
+    };
+    let (dialect, modes_known) = match console_exec(cx, console).map(|e| e.context) {
+        Some(SqlContext::Known(c)) => (c, true),
+        Some(SqlContext::Unknown(c)) => (c, false),
+        Some(SqlContext::Pending) | None => {
+            say(console, "hv-editor-describe-pending", cx);
+            return None;
+        }
+    };
+    let log = Consoles::get(cx, console)?.log.clone();
+    let history = history_meta(console, &profile, cx);
+    let refresh = crate::explorer::refresh_prompt::catalog_run(
+        console,
+        profile.id,
+        profile.engine,
+        Vec::new(),
+        cx,
+    )
+    .map(|c| c.inbox);
+    Some(crate::scripts::run_as_script::Parts {
+        session,
+        dialect,
+        modes_known,
+        suppressed: cx.default_global::<RunPrep>().suppressed.clone(),
+        history,
+        history_sink: history_sink(cx),
+        confirm_unsafe_where: cx
+            .try_global::<crate::AppState>()
+            .is_none_or(|s| s.settings.exec.confirm_unsafe_where),
+        log,
+        runner: hacivat_exec::ScriptRunner::new(exec_service(cx), classifier(cx)),
+        refresh,
+        profile,
+    })
+}
+
+/// A streamed run of console `console` ended: its "don't ask again" answers join the console's
+/// (as Run's do), the SQL context is read again (a script may have changed it), and the
+/// explorer's refresh follows as after a run.
+pub(crate) fn script_run_ended(console: ConsoleId, suppress: &[u64], cx: &mut App) {
+    let prep = cx.default_global::<RunPrep>();
+    for key in suppress {
+        prep.suppressed.insert(console.0, *key);
+    }
+    if Consoles::get(cx, console).is_some() {
+        probe_context(console, cx);
+        crate::explorer::refresh_prompt::run_ended(console, cx);
+    }
+}
+// ## m4b-t18-run-as-script
+
 // ## m3b-t24-exec-ui
 /// Sends `prepared` as one run of console `console` with the answered `plan`, marks the units at
 /// `version` and follows the run's status, result tabs and questions.

@@ -1821,3 +1821,19 @@ exec-script-reconnected = The connection was reset, so the script stopped after 
 exec-script-split-changed = Stopped at line { NUMBER($line, useGrouping: "false") }: the file read differently the second time. The statements before it ran.
 exec-script-decode-failed-mid = Stopped: the rest of the file isn't valid text in its encoding. The statements before it ran.
 exec-script-read-failed-mid = Stopped: the rest of the file couldn't be read. The statements before it ran.
+
+## m4b-t18-run-as-script
+# Run as script (HV-SCRIPT-12) in the app: the T12 re-review's wording (n1, n3, n5) and the
+# tab's database check before anything runs (R-M4b-27).
+# The item cap (R-T8-3): a line with too many statements and no line break.
+# Variables:
+#   $line (Number) - the 1-based line in the file, e.g. 12.
+exec-script-no-boundary-items = Nothing in the file was run: too many statements without a line break (more than 65,536 statements on line { NUMBER($line, useGrouping: "false") }). Split the file, or open it and use Run.
+# The connection's lexing modes could not be read, and the file splits differently under some of them.
+exec-script-modes-unknown = Nothing in the file was run: Hacivat couldn't read the connection's settings for quotes and escapes, and the file reads differently under the settings this server may have.
+# The check before the run: the session must be on the database the tab was opened under.
+exec-script-database-check = Nothing in the file was run: the connection isn't on this tab's database, or Hacivat couldn't check which database it's on.
+# The run's view of the connection's events fell behind, so it can't tell whether the connection was reset.
+# Variables:
+#   $n (Number) - how many statements of the file were handled before the stop, e.g. 41.
+exec-script-lost-track = Hacivat lost track of the connection's state, so the script stopped after statement { NUMBER($n, useGrouping: "false") }. Nothing after it was sent.

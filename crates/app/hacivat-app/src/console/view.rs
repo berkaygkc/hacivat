@@ -666,7 +666,14 @@ impl ConsoleHost {
             this.set_binding(profile, cx);
             match take_fresh(cx, profile) {
                 Some(None) => this.open_editor(String::new(), Some(None), true, window, cx),
-                Some(Some(text)) => this.open_editor(text, None, false, window, cx),
+                Some(Some(text)) => {
+                    this.open_editor(text, None, false, window, cx);
+                    // ## m4b-t18-run-as-script (named exception): a pasted preview's tab.
+                    if let (Some(console), Some(editor)) = (this.console(), this.editor().cloned())
+                    {
+                        crate::scripts::run_as_script::adopt_pending(tab, console, &editor, cx);
+                    }
+                }
                 None => this.restore(window, cx),
             }
         }
@@ -1130,7 +1137,7 @@ impl ConsoleHost {
         &mut self,
         editor: &Entity<EditorView>,
         event: &EditorEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // The editor counts failed paints; the app logs each new one (never their text).
@@ -1159,6 +1166,16 @@ impl ConsoleHost {
                 if let Some(doc) = &self.script {
                     let version = *version;
                     doc.update(cx, |d, cx| d.on_reloaded(version, cx));
+                }
+            }
+            // ## m4b-t18-run-as-script (named exception; Task 11's question, R-T11-2): a
+            // 20-100 MB paste asks; "Paste as preview" opens the document as a preview tab.
+            EditorEvent::PasteNeedsConfirm { bytes, total } => {
+                crate::scripts::run_as_script::ask_paste(editor, *bytes, *total, window, cx);
+            }
+            EditorEvent::PasteAsPreview { text } => {
+                if let Some(console) = self.console() {
+                    crate::scripts::run_as_script::open_pasted(console, text, window, cx);
                 }
             }
             _ => {}
@@ -1685,6 +1702,8 @@ impl ConsoleHost {
         }
         // ## m3c-t33-find (named exception)
         crate::console::find_bar::console_closed(console, cx);
+        // ## m4b-t18-run-as-script (named exception): its run stops, its pasted text goes.
+        crate::scripts::run_as_script::console_closed(console, cx);
         // ## m3c-t41-chrome: the editor's key context leaves with the console (its handle may
         // outlive the tab, held by a pending task).
         let handle = editor.read(cx).focus_handle(cx);
@@ -1758,6 +1777,12 @@ impl Render for ConsoleHost {
                 self.script
                     .as_ref()
                     .and_then(|doc| crate::scripts::disk_bars::render(doc, cx)),
+            )
+            // ## m4b-t18-run-as-script (named exception; NOTES surface 9): the Run-as-script
+            // strip, under the notices (never over a trust signal).
+            .children(
+                self.console()
+                    .and_then(|c| crate::scripts::run_as_script::strip(c, cx)),
             )
             // ## m3c-t33-find (named exception): the find bar, a row under the toolbar
             // (design/m3b-safe surface 16, M3c-9).
@@ -1854,6 +1879,9 @@ fn editor_config(cx: &App) -> EditorConfig {
             hacivat_settings::CaretBlinkPref::System => CaretBlink::System,
             hacivat_settings::CaretBlinkPref::Off => CaretBlink::Off,
         },
+        // ## m4b-t18-run-as-script (named exception; carries-w1 T11/T18): the host takes the
+        // 20-100 MB paste question (`run_as_script::ask_paste`).
+        confirm_large_paste: true,
         ..EditorConfig::default()
     }
 }

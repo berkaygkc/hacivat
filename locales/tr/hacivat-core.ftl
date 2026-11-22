@@ -1244,3 +1244,13 @@ exec-script-split-changed = { NUMBER($line, useGrouping: "false") }. satırda du
 exec-script-decode-failed-mid = Durduruldu: dosyanın geri kalanı kendi kodlamasında geçerli bir metin değil. Önceki ifadeler çalıştı.
 # Review: PO
 exec-script-read-failed-mid = Durduruldu: dosyanın geri kalanı okunamadı. Önceki ifadeler çalıştı.
+
+## m4b-t18-run-as-script
+# Review: PO
+exec-script-no-boundary-items = Dosyadaki hiçbir şey çalıştırılmadı: satır sonu olmadan çok fazla ifade var ({ NUMBER($line, useGrouping: "false") }. satırda 65.536'dan fazla ifade). Dosyayı bölün ya da açıp Çalıştır'ı kullanın.
+# Review: PO
+exec-script-modes-unknown = Dosyadaki hiçbir şey çalıştırılmadı: Hacivat bağlantının tırnak ve kaçış ayarlarını okuyamadı ve dosya bu sunucunun olası ayarlarında farklı okunuyor.
+# Review: PO
+exec-script-database-check = Dosyadaki hiçbir şey çalıştırılmadı: bağlantı bu sekmenin veritabanında değil ya da Hacivat hangi veritabanında olduğunu denetleyemedi.
+# Review: PO
+exec-script-lost-track = Hacivat bağlantının durumunu izleyemedi; betik { NUMBER($n, useGrouping: "false") }. ifadeden sonra durdu. Sonrasında hiçbir şey gönderilmedi.

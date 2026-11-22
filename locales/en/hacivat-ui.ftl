@@ -5123,3 +5123,25 @@ hv-scripts-unsaved-subtitle-unbound = No connection
 # Variables:
 #   $path (String) - the database file's path (data), e.g. "/Volumes/data/orders.db".
 hv-scripts-sqlite-remounted = The database file is on a different volume now; running on { $path }.
+
+## m4b-t18-run-as-script
+# Surface 9 (Large files): the strip while pass 1 reads the whole file and runs nothing (R-M4b-47).
+hv-scripts-run-checking = Checking the whole file before it runs
+# Surface 9 (Large files): the user answered No (or Cancel) to a statement's confirmation (R-T12-2).
+# Variables:
+#   $n (Number) - the statement's position in the file, e.g. 1205.
+hv-scripts-run-declined = Stopped at statement { $n }: you didn't confirm it. The statements before it ran and stay applied; nothing after it was sent.
+# Surface 9 (Large files): the strip's button once the run ended.
+hv-scripts-run-close = Close
+# Surface 9 (Large files): the confirmation of a statement in Run as script (T12 m4): the run has not read the later statements yet, so Execute all and Skip all name no count.
+# Variables:
+#   $env (String) - the connection's environment word (an hv-conn-env-* message), e.g. "staging".
+hv-scripts-confirm-open-ended = Execute all also runs, without asking, every later statement in the file that would ask on this connection ({ $env }); a statement that needs its name typed still asks. Skip all skips every later statement that would ask.
+# Surface 9 (Large files): as hv-scripts-confirm-open-ended where Execute all is not offered (production).
+# Variables:
+#   $env (String) - the connection's environment word (an hv-conn-env-* message), e.g. "production".
+hv-scripts-confirm-open-ended-skip = Skip all skips every later statement in the file that would ask on this connection ({ $env }).
+# Surface 9 (Large files): the name a pasted preview's run goes by (the strip, the history row).
+hv-scripts-pasted-name = Pasted text
+# Surface 9 (Large files): "Paste as preview" in a console with no connection (the preview opens on the console's connection).
+hv-scripts-paste-preview-unbound = Paste as preview opens on this console's connection, and it has none.
