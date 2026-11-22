@@ -24,7 +24,7 @@ use gpui::{Entity, FocusHandle, TestAppContext, VisualTestContext};
 use hacivat_app::connections::ConnectionsModel;
 use hacivat_app::connections::explorer as conn_explorer;
 use hacivat_app::explorer::adapter;
-use hacivat_app::scripts::goto::{self, GotoHost};
+use hacivat_app::scripts::goto::{self, GotoHost, Seen};
 use hacivat_app::scripts::open::{open_script, open_under_another};
 use hacivat_app::scripts::tabs::{self, Load, ScriptTab};
 use hacivat_app::scripts::{DatabaseName, LibraryId, RelPath, projection};
@@ -1476,5 +1476,63 @@ fn a_refresh_keeps_the_active_result(cx: &mut TestAppContext) {
         h.active_result().map(|a| h.result_rows()[a].clone())
     });
     assert_eq!(now.as_deref(), Some("c_report.sql · orders"));
+    r.finish();
+}
+
+// ## m4b-t15-goto fix round 2 (I-fr1-1, R-T15-2 for clicks)
+
+/// A click carries the identity of the row it was painted for. Driven through the handler's
+/// own entry point (`GotoHost::activate`) with a stale identity, so the test window's redraw
+/// after every update cannot hide the race: a staging row gone since its frame, and "Open
+/// without a connection" painted before a candidate appeared, open nothing, and never the
+/// row the preselection rule picks now (the focused production connection).
+#[gpui::test]
+fn a_click_with_a_stale_row_identity_opens_nothing(cx: &mut TestAppContext) {
+    let (r, _root, prod, before) = h1_setup(cx);
+    let staging = profile_id(r.vcx, "orders-staging");
+    let h = host(r.vcx);
+    let click = |seen: Seen| {
+        in_window(r.vcx, |window, cx| {
+            h.update(cx, |h, cx| h.activate(seen, window, cx));
+        });
+        r.vcx.run_until_parked();
+    };
+    // The staging row, as it was painted (now unbound: its alias is gone).
+    click(Seen::Row(
+        staging,
+        DatabaseName::new("orders_s"),
+        Some(EnvTag::Staging),
+    ));
+    assert_eq!(tab_count(r.vcx), before, "nothing opened");
+    assert!(is_open(r.vcx), "the chooser stays");
+    let rows = chooser(r.vcx).unwrap();
+    assert_eq!(names(&rows), ["orders-prod"], "redrawn with the live rows");
+    assert_eq!(
+        active_name(&rows),
+        Some("orders-prod"),
+        "the focused connection"
+    );
+    // "Open without a connection", painted before a candidate appeared.
+    click(Seen::Unbound);
+    assert_eq!(tab_count(r.vcx), before, "nothing opened");
+    // The production row with an environment it no longer has: not the same row.
+    click(Seen::Row(
+        prod,
+        DatabaseName::new("orders"),
+        Some(EnvTag::Staging),
+    ));
+    assert_eq!(tab_count(r.vcx), before, "nothing opened");
+    let (spec, _) = active_spec(r.vcx).unwrap();
+    assert_eq!(spec.rel.as_str(), "b.sql", "a.sql opened nowhere");
+    // The row as it is now opens.
+    click(Seen::Row(
+        prod,
+        DatabaseName::new("orders"),
+        Some(EnvTag::Production),
+    ));
+    wait_until(r.vcx, "a.sql opens under prod", |vcx| {
+        active_spec(vcx)
+            .is_some_and(|(s, ready)| ready && s.rel.as_str() == "a.sql" && s.profile == Some(prod))
+    });
     r.finish();
 }

@@ -114,9 +114,10 @@ struct Choose {
 }
 
 // ## m4b-t15-goto fix round 1 (I1, R-T15-2)
-/// What the chooser showed as active when the user pressed Enter or clicked.
+/// What the user activated in the chooser, as it was drawn: the row a click was painted for,
+/// or the row the last frame showed active for Enter (fix round 2, I-fr1-1, m-fr1-1).
 #[derive(Debug, Clone, PartialEq)]
-enum Seen {
+pub enum Seen {
     /// A row: its connection, database and environment.
     Row(ProfileId, DatabaseName, Option<EnvTag>),
     /// "Open without a connection" (no candidate, and an unbound tab can show the file).
@@ -126,6 +127,11 @@ enum Seen {
 }
 
 impl Seen {
+    /// The identity of candidate row `c`.
+    fn row(c: &Candidate) -> Seen {
+        Seen::Row(c.profile, c.database.clone(), c.env)
+    }
+
     fn of(ch: &Choose, cx: &App) -> Seen {
         if ch.rows.is_empty() {
             return if chooser::opens_unbound(ch.library, &ch.rel, cx) {
@@ -135,7 +141,7 @@ impl Seen {
             };
         }
         match ch.active.and_then(|a| ch.rows.get(a)) {
-            Some(c) => Seen::Row(c.profile, c.database.clone(), c.env),
+            Some(c) => Seen::row(c),
             None => Seen::Nothing,
         }
     }
@@ -151,6 +157,8 @@ pub struct GotoHost {
     hits: Vec<Hit>,
     /// The query `hits` answer.
     hits_query: String,
+    /// What the chooser's last frame drew as active (Enter acts on it; fix round 2, m-fr1-1).
+    painted: Option<Seen>,
     /// Whether the results answer the current query and snapshot (no "No script matches"
     /// before they do).
     loaded: bool,
@@ -204,6 +212,7 @@ impl GotoHost {
             query: String::new(),
             hits: Vec::new(),
             hits_query: String::new(),
+            painted: None,
             loaded: false,
             active: None,
             first: 0,
@@ -453,17 +462,18 @@ impl GotoHost {
         }
     }
 
-    /// Enter in the chooser. ## m4b-t15-goto fix round 1 (I1, R-T15-2): the rows are checked
-    /// against the live state first, and only the row the user saw highlighted opens, only if
-    /// it survived the check unchanged (same connection, database and environment; the file is
-    /// the chooser's). Anything else redraws and opens nothing: the preselection rule is never
-    /// applied at activation time, so a row the user never saw never opens. "Open without a
-    /// connection" opens only while there is still no candidate.
-    fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let seen = match &self.mode {
-            Mode::Choose(ch) => Seen::of(ch, cx),
-            Mode::Results => return,
-        };
+    /// Activates `seen` in the chooser: Enter passes the row the last frame drew as active, a
+    /// click the row it was painted for (## m4b-t15-goto fix rounds 1 and 2: I1, I-fr1-1,
+    /// m-fr1-1, R-T15-2). The rows are checked against the live state first, and only that
+    /// identity opens, only if it is still a candidate (same connection, database and
+    /// environment; the file is the chooser's). Anything else redraws and opens nothing: the
+    /// current active row and the preselection rule are never used at activation time, so a
+    /// row the user never saw never opens. "Open without a connection" opens only while there
+    /// is still no candidate.
+    pub fn activate(&mut self, seen: Seen, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.mode, Mode::Results) {
+            return;
+        }
         self.recompute_rows(cx);
         let Mode::Choose(ch) = &mut self.mode else {
             return;
@@ -479,6 +489,7 @@ impl GotoHost {
                     return;
                 };
                 ch.active = Some(ix);
+                ch.picked = Some((profile, database.clone(), env));
                 close(window, cx);
                 super::open_script(cx, library, rel, Some(profile), Some(database));
             }
@@ -501,15 +512,21 @@ impl GotoHost {
         }
     }
 
-    /// A click on chooser row `ix`.
-    fn click_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Mode::Choose(ch) = &mut self.mode
-            && let Some(c) = ch.rows.get(ix)
-        {
-            ch.picked = Some((c.profile, c.database.clone(), c.env));
-            ch.active = Some(ix);
-        }
-        self.choose(window, cx);
+    /// Records what the chooser shows active now: called while drawing, and after the user's
+    /// own ↑/↓ (their move is what Enter should act on, even before the next frame; a refresh
+    /// never calls it, so a row the rule chose after the last frame is never recorded).
+    fn note_painted(&mut self, cx: &App) {
+        self.painted = match &self.mode {
+            Mode::Choose(ch) => Some(Seen::of(ch, cx)),
+            Mode::Results => None,
+        };
+    }
+
+    /// Enter in the chooser: the row the last frame drew as active (never one a refresh
+    /// chose after it).
+    fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let seen = self.painted.clone().unwrap_or(Seen::Nothing);
+        self.activate(seen, window, cx);
     }
 
     /// Escape in the chooser: back to the results it came from, else close.
@@ -544,8 +561,14 @@ impl GotoHost {
         }
         let choosing = matches!(self.mode, Mode::Choose(_));
         match event.keystroke.key.as_str() {
-            "up" => self.move_active(false),
-            "down" => self.move_active(true),
+            "up" => {
+                self.move_active(false);
+                self.note_painted(cx);
+            }
+            "down" => {
+                self.move_active(true);
+                self.note_painted(cx);
+            }
             // In the results these come from the field (`Submitted`, `Cancelled`).
             "enter" if choosing => self.choose(window, cx),
             "escape" if choosing => self.back(window, cx),
@@ -668,6 +691,9 @@ fn folder_env(rel: &RelPath) -> Option<EnvTag> {
 
 impl Render for GotoHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // ## m4b-t15-goto fix round 2 (m-fr1-1): what this frame shows active is what Enter
+        // acts on until the next frame.
+        self.note_painted(cx);
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = t.colors;
@@ -901,9 +927,14 @@ impl Render for GotoHost {
                                     crate::connections::capsule::env_word(cx, cand.env),
                                     super::tabs::display_name(cand.database.as_str())
                                 )))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.click_row(ix, window, cx);
-                                }))
+                                // ## m4b-t15-goto fix round 2 (I-fr1-1): the click carries the
+                                // identity of the row it was painted for, never an index.
+                                .on_click({
+                                    let seen = Seen::row(cand);
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.activate(seen.clone(), window, cx);
+                                    })
+                                })
                                 .child(env_swatch_on_raised(
                                     crate::connections::capsule::env_kind(cand.env),
                                     &theme,
@@ -965,7 +996,7 @@ impl Render for GotoHost {
                             row(("scripts-choose-unbound", 0), unbound)
                                 .when(unbound, |el| {
                                     el.on_click(cx.listener(|this, _, window, cx| {
-                                        this.choose(window, cx);
+                                        this.activate(Seen::Unbound, window, cx);
                                     }))
                                 })
                                 .child(Icon::new(IconName::Unplug).size(IconSize::Chrome))

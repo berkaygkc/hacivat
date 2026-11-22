@@ -12,8 +12,9 @@
 //!   configured one) whose binding includes the file's library, whose environment shows the
 //!   file (`view(env)`, the tree's own rule, R-M4b-6), and where the script may run
 //!   (`open::session_plan`, R-M4b-25), so a row never opens a refusal. The connection a tab or
-//!   row is under is left out, every database of it (R-M4b-4; fix round 1, R-T15-1). They are computed from the live snapshot and profiles each
-//!   time the chooser is drawn up and again on every Enter (never a stale list).
+//!   row is under is left out, every database of it (R-M4b-4; fix round 1, R-T15-1). They are
+//!   computed from the live snapshot and profiles each time the chooser is drawn up and again
+//!   on every activation (never a stale list).
 //! - **Order** ([`order`]): the active tab's connection first (its own database first), then
 //!   local, dev, test, staging, production (the reverse of `EnvTag::severity_rank`), then
 //!   untagged, then the connection's name in the UI language's order, then the database.
