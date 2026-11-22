@@ -97,3 +97,8 @@ pub use script_run::{
     ChunkError, RefuseReason as ScriptRefuseReason, ScriptChunks, ScriptRunOutcome,
     ScriptRunRequest, ScriptRunSummary, ScriptRunner, StopReason as ScriptStopReason, run_file,
 };
+// ## m4b-t12-script-run: the filled seam's further types (re-exports only).
+pub use script_run::{
+    SCRIPT_CHUNK_BYTES, ScriptGate, ScriptHistory, ScriptPhase, ScriptPosition, ScriptProgress,
+    ScriptRefusal, ScriptStop,
+};
