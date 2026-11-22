@@ -175,11 +175,65 @@ pub(crate) fn watcher_config() -> notify::Config {
     notify::Config::default().with_follow_symlinks(false)
 }
 
+// ## m4b-cifix-2-create-history
+/// The platform watcher, whose `Create` events reach the debouncer as `Modify(Any)`, so that
+/// the debouncer never cancels a path.
+///
+/// `notify-debouncer-full` drops a path whose queue starts with a `Create` when a `Remove`
+/// follows (`push_remove_event`: "created, then removed: nothing happened"), and a removed
+/// folder takes its children's queues with it. FSEvents reports a path's recent history in each
+/// event's flags: deleting a folder made a few seconds earlier arrives as `ItemCreated |
+/// ItemRemoved` on the folder and on each file, which notify splits into `Create` then
+/// `Remove` (`fsevent.rs` `translate_flags`). The debouncer then hides the whole delete: on the
+/// macOS CI runner `folder_delete_is_seen` saw nothing in 10 s (CI 44990057141). A desktop Mac
+/// usually adds an extended-attribute flag (`Modify(Metadata)`) after the `Remove`, which is
+/// why the delete was seen locally.
+///
+/// The reconciler takes only paths from a hint, never kinds (alg/28 C3), so the rewrite loses
+/// nothing. It can only add hints: a file made and deleted within one window, which nothing
+/// ever listed, costs one look or scan.
+struct NoCancel<W>(W);
+
+impl<W: notify::Watcher> notify::Watcher for NoCancel<W> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "R-T0-2: the wrapped watcher is built with watcher_config() (follow_symlinks(false)), whatever config the debouncer hands in"
+    )]
+    fn new<F: notify::EventHandler>(handler: F, _config: notify::Config) -> notify::Result<Self> {
+        let mut handler = handler;
+        let forward = move |e: notify::Result<notify::Event>| {
+            handler.handle_event(e.map(no_create));
+        };
+        W::new(forward, watcher_config()).map(NoCancel)
+    }
+
+    fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+        self.0.watch(path, mode)
+    }
+
+    fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+        self.0.unwatch(path)
+    }
+
+    fn kind() -> notify::WatcherKind {
+        W::kind()
+    }
+}
+
+/// `e` with a `Create` kind turned into `Modify(Any)`; its paths, flags and attributes kept.
+fn no_create(mut e: notify::Event) -> notify::Event {
+    if matches!(e.kind, notify::EventKind::Create(_)) {
+        e.kind = notify::EventKind::Modify(notify::event::ModifyKind::Any);
+    }
+    e
+}
+// ## m4b-cifix-2-create-history
+
 /// The OS event source: one debouncer over the platform's recommended watcher.
 pub struct OsEventSource {
     // ## m4b-t09-watcher: `Option` so that `Drop` can stop it (joining its thread), and the
     // per-root sinks its handler routes to.
-    debouncer: Option<notify_debouncer_full::Debouncer<RecommendedWatcher, NoCache>>,
+    debouncer: Option<notify_debouncer_full::Debouncer<NoCancel<RecommendedWatcher>, NoCache>>,
     sinks: Sinks,
     // ## m4b-t09-watcher fix round 1 (I5, R-T9-4): with `per_dir`, every folder is its own
     // non-recursive watch, added only for folders the watcher's walk verified.
@@ -206,8 +260,10 @@ impl OsEventSource {
 
     fn build(per_dir: bool) -> Result<Self, WatchError> {
         // ## m4b-t09-watcher: the handler routes each debounced batch to its root's sink.
+        // ## m4b-cifix-2-create-history: the watcher is wrapped in `NoCancel`, so a delete whose
+        // FSEvents flags still say "created" is never cancelled by the debouncer.
         let sinks = Sinks::default();
-        let debouncer = new_debouncer_opt::<_, RecommendedWatcher, NoCache>(
+        let debouncer = new_debouncer_opt::<_, NoCancel<RecommendedWatcher>, NoCache>(
             DEBOUNCE,
             None,
             handler(sinks.clone()),
@@ -2105,6 +2161,108 @@ mod tests {
             vec![vec![RawHint::Path("/lib/inner/b.sql".into())]]
         );
     }
+
+    // ## m4b-cifix-2-create-history
+    /// The scripted backend's handler, which the debouncer handed to `Scripted::new`.
+    type ScriptedHandler = Box<dyn FnMut(notify::Result<Event>) + Send>;
+    static SCRIPTED: Mutex<Option<ScriptedHandler>> = Mutex::new(None);
+
+    /// A watcher whose events the test sends by hand through [`SCRIPTED`].
+    struct Scripted;
+
+    impl notify::Watcher for Scripted {
+        fn new<F: notify::EventHandler>(handler: F, _: notify::Config) -> notify::Result<Self> {
+            let mut handler = handler;
+            *lock(&SCRIPTED) = Some(Box::new(move |e| handler.handle_event(e)));
+            Ok(Scripted)
+        }
+        fn watch(&mut self, _: &Path, _: RecursiveMode) -> notify::Result<()> {
+            Ok(())
+        }
+        fn unwatch(&mut self, _: &Path) -> notify::Result<()> {
+            Ok(())
+        }
+        fn kind() -> notify::WatcherKind {
+            notify::WatcherKind::NullWatcher
+        }
+    }
+
+    /// The hints the real debouncer, over backend `W`, routes to `/lib` for `events`, up to the
+    /// sentinel `/lib/zz.sql` sent after them (events settle in order, so anything still
+    /// missing then was dropped).
+    fn routed_through<W: notify::Watcher>(events: Vec<Event>) -> Vec<RawHint> {
+        let root = Path::new("/lib");
+        let (sinks, got) = sinks_for(root);
+        let debouncer = new_debouncer_opt::<_, W, NoCache>(
+            DEBOUNCE,
+            None,
+            handler(sinks),
+            NoCache,
+            watcher_config(),
+        )
+        .unwrap();
+        let sentinel = RawHint::Path("/lib/zz.sql".into());
+        {
+            let mut send = lock(&SCRIPTED);
+            let send = send.as_mut().unwrap();
+            for e in events {
+                send(Ok(e));
+            }
+            send(Ok(Event::new(EventKind::Modify(
+                notify::event::ModifyKind::Data(notify::event::DataChange::Content),
+            ))
+            .add_path("/lib/zz.sql".into())));
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let hints = loop {
+            let hints: Vec<RawHint> = lock(&got).iter().flatten().cloned().collect();
+            if hints.contains(&sentinel) {
+                break hints;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the sentinel never came: {hints:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        debouncer.stop();
+        hints.into_iter().filter(|h| *h != sentinel).collect()
+    }
+
+    /// CI 44990057141 (macOS): `rm -r reports` seconds after `reports/c.sql` was written, as
+    /// FSEvents reports it on the runner (flags `ItemCreated | ItemRemoved`, which notify
+    /// splits into `Create` then `Remove`). The plain debouncer cancels every path (the
+    /// control); through `NoCancel` the folder still reaches the root, and the reconciler's
+    /// scan then finds what went.
+    #[test]
+    fn a_delete_whose_flags_still_say_created_reaches_the_root() {
+        use notify::event::{CreateKind, RemoveKind};
+        let rm_r = || {
+            vec![
+                Event::new(EventKind::Create(CreateKind::File))
+                    .add_path("/lib/reports/c.sql".into()),
+                Event::new(EventKind::Remove(RemoveKind::File))
+                    .add_path("/lib/reports/c.sql".into()),
+                Event::new(EventKind::Create(CreateKind::Folder)).add_path("/lib/reports".into()),
+                Event::new(EventKind::Remove(RemoveKind::Folder)).add_path("/lib/reports".into()),
+            ]
+        };
+        // The control: the bare backend loses the whole delete.
+        assert_eq!(routed_through::<Scripted>(rm_r()), []);
+        assert_eq!(
+            routed_through::<NoCancel<Scripted>>(rm_r()),
+            [RawHint::Path("/lib/reports".into())]
+        );
+        // A `Create` with nothing after it still names its path; flags and paths are kept.
+        let made = Event::new(EventKind::Create(CreateKind::File))
+            .add_path("/lib/new.sql".into())
+            .set_flag(Flag::Rescan);
+        let kept = no_create(made);
+        assert_eq!(kept.kind, EventKind::Modify(notify::event::ModifyKind::Any));
+        assert_eq!(kept.paths, [PathBuf::from("/lib/new.sql")]);
+        assert!(kept.need_rescan());
+    }
+    // ## m4b-cifix-2-create-history
 
     // ## m4b-cifix-2-root-birth
     /// A per-folder inotify watch reports its own folder's removal and move

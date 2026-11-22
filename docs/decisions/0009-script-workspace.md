@@ -1190,3 +1190,30 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
   - `a_root_made_again_unheard_after_its_removal_is_refused`: the hint arrives while the root is gone, and the new folder sends nothing.
   - `fileio::tests::folder_identity_tells_a_folder_made_again_from_a_renamed_one`.
   - `watch::tests::the_roots_own_removal_and_move_are_hints_on_the_root`.
+
+## m4b-cifix-2 — the debouncer never cancels a path (macOS folder deletes)
+
+- **Finding (CI 44990057141, macOS `build-test`).**
+  - `folder_delete_is_seen` saw nothing in 10 s. `per_directory_source_sees_new_and_removed_folders` saw the create and the edit, but not the removal.
+  - FSEvents reports a path's recent history in each event's flags. Deleting a folder a few seconds after it was written arrives as `ItemCreated | ItemRemoved` on the folder and on each file. A local probe showed this even 1.5 s after the write.
+  - notify splits those flags into `Create`, then `Remove` (`fsevent.rs` `translate_flags`).
+  - notify-debouncer-full's `push_remove_event` treats a queue that starts with `Create` as "created, then removed: nothing happened" and drops it. A removed folder also drops its children's queues.
+  - Nothing reached the watcher, so the delete was invisible until a full scan. macOS has no backstop (it is Windows only), so in practice that wait has no bound.
+  - A desktop Mac usually adds an extended-attribute flag. Its `Modify(Metadata)` comes after the `Remove` and refills the queue, which is why the tests passed locally. The CI runner has no such flag.
+  - **A product bug:** a deleted folder stayed listed on macOS.
+- **Decision.**
+  - The debouncer is built over `NoCancel<RecommendedWatcher>`. This wrapper hands every `Create` to the debouncer as `Modify(Any)`, keeping its paths, flags and attributes. So no queue ever starts with a `Create`, and no path is cancelled.
+  - The reconciler takes only paths from a hint, never kinds (alg/28 C3), so nothing is lost. The cost: a file made and deleted within one window, which nothing ever listed, now costs one look or one scan.
+  - The wrapper builds its inner watcher with `watcher_config()`, whatever config the debouncer passes (R-T0-2). The `#[expect(clippy::disallowed_methods)]` on it names that reason.
+  - It applies on every platform. inotify and `ReadDirectoryChangesW` send real `Create`s, and for them the change only turns "made and gone within 150 ms" into one more hint.
+- **Why the per-folder source runs on macOS.**
+  - `OsEventSource::per_directory()` is public so that the per-folder logic (R-T9-4) is tested on every runner. On macOS, notify implements `NonRecursive` by filtering a recursive FSEvents stream down to the path and its direct children.
+  - Each `watch` or `unwatch` there stops and restarts the stream from "now", so events in the gap are lost. The product never uses it there: `OsEventSource::new()` is per-folder only on Linux.
+  - Its CI failure had the same cause as `folder_delete_is_seen`, not the per-folder mode.
+- **Tests.**
+  - `watch::tests::a_delete_whose_flags_still_say_created_reaches_the_root` drives the real debouncer with a scripted backend that sends the runner's sequence.
+    - The control: the bare backend routes nothing.
+    - Through `NoCancel`, the folder's path reaches the root.
+- **Found while stress-testing; not caused by this change, and not fixed (carries).** Interleaved A/B runs of the binary before and after, under a busy machine, fail at the same rate:
+  - **`git_checkout_2000_is_one_rescan`:** 6/80 before and 5/80 after. When FSEvents pauses for a window during the checkout, the first few hundred files form their own burst below the 1,000-path limit, so each is reported `Changed` before the rest overflow into the `Rescan`. The events are true, but the "one rescan" promise of the burst rule is broken. This is the burst rule's quiet-window heuristic.
+  - **`folder_move_is_seen_as_renames_for_known_contents`:** when run alone or in a small group (`watch_real folder`), it fails about 9 times in 10, before and after, with an extra `PossiblyChanged(reports/d.sql)`. The whole binary passes. The move happens within R-T9-3's 2 s racy window of the fixture's writes, and a late FSEvents history hint on `d.sql` makes the ruled `PossiblyChanged`, so the test's expectation depends on how long the other tests take.
