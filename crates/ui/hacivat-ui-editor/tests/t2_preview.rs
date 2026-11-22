@@ -242,13 +242,19 @@ fn preview_is_read_only_and_announces_it(cx: &mut TestAppContext) {
         .vcx
         .read(|cx| large_file::description(large_file::state(o.editor.read(cx)), cx));
     let d = plain(&description.expect("a preview describes itself"));
-    assert!(d.contains("Read-only preview: this file is 148.0 MB."), "{d}");
+    assert!(
+        d.contains("Read-only preview: this file is 148.0 MB."),
+        "{d}"
+    );
     assert!(
         d.contains("The editor shows its first 2.5 MB. Run as script sends the whole file."),
         "{d}"
     );
     // Find says it searches the preview only.
-    assert!(o.vcx.read(|cx| o.editor.read(cx).find_status().preview_only));
+    assert!(
+        o.vcx
+            .read(|cx| o.editor.read(cx).find_status().preview_only)
+    );
 }
 
 /// The host's configuration cannot make a preview editable again, and an edit by the host
@@ -282,10 +288,20 @@ fn the_preview_draws_the_t2_banner(cx: &mut TestAppContext) {
     );
     assert!(t1.is_none(), "no T1 banner on a preview");
     let banner = t2.expect("the T2 banner is drawn");
-    let text_top = o
-        .vcx
-        .read(|cx| o.editor.read(cx).last_layout().unwrap().rows().bounds.origin.y);
-    assert!(banner.bottom() <= text_top, "{banner:?} above the text at {text_top:?}");
+    let text_top = o.vcx.read(|cx| {
+        o.editor
+            .read(cx)
+            .last_layout()
+            .unwrap()
+            .rows()
+            .bounds
+            .origin
+            .y
+    });
+    assert!(
+        banner.bottom() <= text_top,
+        "{banner:?} above the text at {text_top:?}"
+    );
 }
 
 /// UI-EDIT-23 step 1: the preview is cut at the last line break at or before its size, never
@@ -412,10 +428,23 @@ fn the_confirmation_dialog_is_safe_by_default(cx: &mut TestAppContext) {
     assert_eq!(spec.primary, PASTE_CONFIRM_CANCEL);
     assert_eq!(spec.cancel, PASTE_CONFIRM_CANCEL);
     assert_eq!(spec.buttons[PASTE_CONFIRM_CANCEL].kind, ButtonKind::Primary);
-    assert_eq!(spec.buttons[PASTE_CONFIRM_PREVIEW].kind, ButtonKind::Default);
-    assert_eq!(clipboard::paste_answer(PASTE_CONFIRM_PREVIEW), PasteAnswer::AsPreview);
-    assert_eq!(clipboard::paste_answer(PASTE_CONFIRM_CANCEL), PasteAnswer::Cancel);
-    assert_eq!(clipboard::paste_answer(7), PasteAnswer::Cancel, "fail closed");
+    assert_eq!(
+        spec.buttons[PASTE_CONFIRM_PREVIEW].kind,
+        ButtonKind::Default
+    );
+    assert_eq!(
+        clipboard::paste_answer(PASTE_CONFIRM_PREVIEW),
+        PasteAnswer::AsPreview
+    );
+    assert_eq!(
+        clipboard::paste_answer(PASTE_CONFIRM_CANCEL),
+        PasteAnswer::Cancel
+    );
+    assert_eq!(
+        clipboard::paste_answer(7),
+        PasteAnswer::Cancel,
+        "fail closed"
+    );
     o.vcx.read(|cx| {
         assert_eq!(plain(&(spec.title)(cx)), "Paste 42.6 MB?");
         assert_eq!(
@@ -427,6 +456,9 @@ fn the_confirmation_dialog_is_safe_by_default(cx: &mut TestAppContext) {
             (spec.buttons[PASTE_CONFIRM_PREVIEW].label)(cx).as_ref(),
             "Paste as preview"
         );
-        assert_eq!((spec.buttons[PASTE_CONFIRM_CANCEL].label)(cx).as_ref(), "Cancel");
+        assert_eq!(
+            (spec.buttons[PASTE_CONFIRM_CANCEL].label)(cx).as_ref(),
+            "Cancel"
+        );
     });
 }

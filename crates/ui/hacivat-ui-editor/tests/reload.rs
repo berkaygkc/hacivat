@@ -32,12 +32,9 @@ impl Render for Host {
         self.renders.set(self.renders.get() + 1);
         let body = div().w(px(800.0)).h(px(600.0));
         if self.cached {
-            div().child(
-                body.child(
-                    AnyView::from(self.editor.clone())
-                        .cached(StyleRefinement::default().size_full()),
-                ),
-            )
+            div().child(body.child(
+                AnyView::from(self.editor.clone()).cached(StyleRefinement::default().size_full()),
+            ))
         } else {
             div().child(body.child(self.editor.clone()))
         }
@@ -150,7 +147,9 @@ fn set_caret(o: &mut Opened<'_>, (line, col): (usize, usize)) {
 }
 
 fn reload(o: &mut Opened<'_>, disk: &str) -> Result<(), ReloadRefused> {
-    let got = o.editor.update(o.vcx, |v, cx| v.replace_from_disk(disk, cx));
+    let got = o
+        .editor
+        .update(o.vcx, |v, cx| v.replace_from_disk(disk, cx));
     o.vcx.run_until_parked();
     got
 }
@@ -247,8 +246,7 @@ fn reload_maps_the_selection(cx: &mut TestAppContext) {
 #[gpui::test]
 fn reload_is_one_change_and_clears_undo(cx: &mut TestAppContext) {
     let mut o = open(cx, "SELECT 1;\n");
-    o.editor
-        .update(o.vcx, |v, cx| v.select_range(9..9, cx));
+    o.editor.update(o.vcx, |v, cx| v.select_range(9..9, cx));
     o.vcx.run_until_parked();
     type_text(&mut o, " -- a");
     // A move away seals the group: the next edit is a group of its own.
@@ -292,7 +290,11 @@ fn reload_is_held_during_a_composition_and_applied_after(cx: &mut TestAppContext
     assert!(composing(&o));
     o.events.borrow_mut().clear();
     let disk = "-- reloaded\nSELECT 1;\nSELECT 2;\n";
-    assert_eq!(reload(&mut o, disk), Ok(()), "accepted: the host never retries");
+    assert_eq!(
+        reload(&mut o, disk),
+        Ok(()),
+        "accepted: the host never retries"
+    );
     assert_eq!(text(&o), "SELECT 1;\nSELECT 2;か\n", "nothing replaced yet");
     assert!(composing(&o), "the composition is intact");
     assert_eq!(reloaded(&o), Vec::<Option<u64>>::new(), "not applied yet");
@@ -321,8 +323,7 @@ fn reload_is_held_during_a_composition_and_applied_after(cx: &mut TestAppContext
 #[gpui::test]
 fn reload_of_identical_text_is_a_no_op(cx: &mut TestAppContext) {
     let mut o = open(cx, "SELECT 1;\n");
-    o.editor
-        .update(o.vcx, |v, cx| v.select_range(9..9, cx));
+    o.editor.update(o.vcx, |v, cx| v.select_range(9..9, cx));
     o.vcx.run_until_parked();
     type_text(&mut o, "x");
     let disk = text(&o);
@@ -340,8 +341,7 @@ fn reload_of_identical_text_is_a_no_op(cx: &mut TestAppContext) {
 #[gpui::test]
 fn an_edit_before_the_diff_lands_keeps_the_text(cx: &mut TestAppContext) {
     let o = open(cx, "SELECT 1;\n");
-    o.editor
-        .update(o.vcx, |v, cx| v.select_range(9..9, cx));
+    o.editor.update(o.vcx, |v, cx| v.select_range(9..9, cx));
     o.vcx.run_until_parked();
     o.events.borrow_mut().clear();
     o.editor.update_in(o.vcx, |v, window, cx| {
@@ -381,7 +381,8 @@ fn reload_never_splits_a_crlf_or_a_multibyte_character(cx: &mut TestAppContext) 
         for (text, r) in [(old, &e.old), (new, &e.new)] {
             for at in [r.start, r.end] {
                 assert!(text.is_char_boundary(at), "{old:?} → {new:?}: {e:?}");
-                let crlf = at > 0 && text.as_bytes()[at - 1] == b'\r' && text[at..].starts_with('\n');
+                let crlf =
+                    at > 0 && text.as_bytes()[at - 1] == b'\r' && text[at..].starts_with('\n');
                 assert!(!crlf, "{old:?} → {new:?} splits a CRLF at {at}: {e:?}");
             }
         }
@@ -413,7 +414,11 @@ fn a_reload_maps_run_marks_and_stales_the_ones_it_touches(cx: &mut TestAppContex
     let (s2, s3) = (10..18, 20..28);
     let v0 = version(&o);
     o.editor.update(o.vcx, |v, cx| {
-        v.add_exec_marks(v0, vec![(MarkKey(2), s2.clone()), (MarkKey(3), s3.clone())], cx);
+        v.add_exec_marks(
+            v0,
+            vec![(MarkKey(2), s2.clone()), (MarkKey(3), s3.clone())],
+            cx,
+        );
         for k in [2, 3] {
             v.set_exec_state(
                 MarkKey(k),
@@ -432,7 +437,11 @@ fn a_reload_maps_run_marks_and_stales_the_ones_it_touches(cx: &mut TestAppContex
     reload(&mut o, "SELECT 1;\nSELECT 2;\nSELECT 4;\n").unwrap();
     let (stale2, stale3, r2) = o.vcx.read(|cx| {
         let m = o.editor.read(cx).marks();
-        (m.is_stale(MarkKey(2)), m.is_stale(MarkKey(3)), m.range(MarkKey(2)))
+        (
+            m.is_stale(MarkKey(2)),
+            m.is_stale(MarkKey(3)),
+            m.range(MarkKey(2)),
+        )
     });
     assert!(!stale2 && stale3, "{stale2} {stale3}");
     assert_eq!(r2, Some(s2.clone()));
@@ -460,9 +469,15 @@ fn reload_in_preview_tier_is_refused(cx: &mut TestAppContext) {
         )
     });
     o.vcx.run_until_parked();
-    assert_eq!(o.vcx.read(|cx| o.editor.read(cx).status().tier), Tier::Preview);
+    assert_eq!(
+        o.vcx.read(|cx| o.editor.read(cx).status().tier),
+        Tier::Preview
+    );
     let before = version(&o);
-    assert_eq!(reload(&mut o, "SELECT 2;\n"), Err(ReloadRefused::PreviewTier));
+    assert_eq!(
+        reload(&mut o, "SELECT 2;\n"),
+        Err(ReloadRefused::PreviewTier)
+    );
     assert_eq!(text(&o), "SELECT 1;\n");
     assert_eq!(version(&o), before);
 }
@@ -498,7 +513,10 @@ fn reload_redraws_the_cached_editor(cx: &mut TestAppContext) {
         (l.version(), l.painted_lines())
     });
     assert_eq!(painted, version(&o), "the frame is of the reloaded text");
-    assert!(lines.contains(&2), "the new third line is painted: {lines:?}");
+    assert!(
+        lines.contains(&2),
+        "the new third line is painted: {lines:?}"
+    );
     // The frame was the editor's own request: nothing refreshed the window, and the root (which
     // renders once per drawn frame) drew exactly that one frame.
     assert_eq!(o.renders.get(), frames + 1);

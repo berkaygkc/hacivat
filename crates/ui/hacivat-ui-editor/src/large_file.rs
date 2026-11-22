@@ -435,7 +435,11 @@ pub fn banner(
 ) -> Option<AnyElement> {
     let (title, body) = lines(s, cx)?;
     // ## m4b-t11-editor: the T2 banner has its own ids (the T1 ones stay as they were).
-    let ids = if s.tier == Tier::Preview { &T2_IDS } else { &T1_IDS };
+    let ids = if s.tier == Tier::Preview {
+        &T2_IDS
+    } else {
+        &T1_IDS
+    };
     let theme = *Theme::get(cx);
     let t = theme.tokens;
     let c = &t.colors;
@@ -467,8 +471,7 @@ pub fn banner(
                     .debug_selector(move || ids.title_box.to_string())
                     .flex_none()
                     .child(
-                        paragraph(title, TextSource::Fluent, style, c.text.to_hsla())
-                            .id(ids.title),
+                        paragraph(title, TextSource::Fluent, style, c.text.to_hsla()).id(ids.title),
                     ),
             )
             .child(
@@ -479,8 +482,7 @@ pub fn banner(
                     .overflow_y_scroll()
                     .child(scroll_viewport())
                     .child(
-                        paragraph(body, TextSource::Fluent, style, c.text_2.to_hsla())
-                            .id(ids.body),
+                        paragraph(body, TextSource::Fluent, style, c.text_2.to_hsla()).id(ids.body),
                     ),
             );
         return Some(

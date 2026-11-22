@@ -208,11 +208,7 @@ fn land(v: &mut EditorView, version: u64, landed: Landed, cx: &mut Context<Edito
     // As `set_text` does: the longest line is the new text's, and the width is measured again.
     v.longest_line = landed.longest;
     v.scroll.known_width = 0.0;
-    let mut ann = v.annotations(
-        UserEvent::Command("reload_from_disk"),
-        Origin::Program,
-        cx,
-    );
+    let mut ann = v.annotations(UserEvent::Command("reload_from_disk"), Origin::Program, cx);
     // Outside the history (the stored groups are rebased, then dropped below).
     ann.add_to_history = false;
     let committed = v.commit(
@@ -357,12 +353,16 @@ mod tests {
         for round in 0..20 {
             let disk = if round % 2 == 0 { &disk } else { &text };
             let t = Instant::now();
-            e.update(vcx, |v, cx| v.replace_from_disk(disk, cx)).unwrap();
+            e.update(vcx, |v, cx| v.replace_from_disk(disk, cx))
+                .unwrap();
             let call = t.elapsed();
             // The background half, outside the measure.
             let (version, landed) = vcx.read(|cx| {
                 let v = e.read(cx);
-                (v.model.version(), diff(v.model.buffer(), Arc::from(disk.as_str())))
+                (
+                    v.model.version(),
+                    diff(v.model.buffer(), Arc::from(disk.as_str())),
+                )
             });
             e.update(vcx, |v, _| v.reload = None);
             let t = Instant::now();
@@ -375,7 +375,10 @@ mod tests {
                 disk.len()
             );
         }
-        println!("HV-FACT m4b-t11 reload_ui_share_2mb_worst_us={}", worst.as_micros());
+        println!(
+            "HV-FACT m4b-t11 reload_ui_share_2mb_worst_us={}",
+            worst.as_micros()
+        );
         assert!(worst.as_micros() < 1_000, "{worst:?}");
     }
 
@@ -391,7 +394,12 @@ mod tests {
         for (a, b) in samples {
             let (a, b) = (a.as_bytes(), b.as_bytes());
             let p = a.iter().zip(b).take_while(|(x, y)| x == y).count();
-            let s = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count();
+            let s = a
+                .iter()
+                .rev()
+                .zip(b.iter().rev())
+                .take_while(|(x, y)| x == y)
+                .count();
             assert_eq!(common_prefix(a, b), p);
             assert_eq!(common_suffix(a, b), s);
         }

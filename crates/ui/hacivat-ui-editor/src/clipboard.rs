@@ -47,8 +47,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_text::{
-    ChangeSet, LineEnding, Origin, SelectionRange, SelectionSet, TextBuffer, Transaction,
-    UserEvent,
+    ChangeSet, LineEnding, Origin, SelectionRange, SelectionSet, TextBuffer, Transaction, UserEvent,
 };
 use hacivat_ui::actions::ActionFn;
 // ## m4b-t11-editor
@@ -1431,7 +1430,9 @@ mod t27_tests {
         });
         vcx.run_until_parked();
         assert_eq!(*docs.borrow(), ["SELECT abcdefghijkl1"]);
-        e.update(vcx, |v, cx| paste_text_at(v, 7, "abcdefghijkl".to_string(), cx));
+        e.update(vcx, |v, cx| {
+            paste_text_at(v, 7, "abcdefghijkl".to_string(), cx)
+        });
         vcx.run_until_parked();
         e.update(vcx, |v, cx| {
             v.select_range(0..0, cx);
