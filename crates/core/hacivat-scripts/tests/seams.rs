@@ -117,24 +117,26 @@ fn secret_scanner_seam_reports_values_only() {
 
 // ## m4b-t10-service (named exception): the service is Task 10's now. `save_stub_writes_nothing`,
 // `service_open_publishes_an_unavailable_empty_snapshot` and the attach/detach/map/read/stream
-// half of the test below moved to `tests/service.rs` as the real behaviour. The file operations
-// (create, rename, Move to Trash) stay fail-closed stubs until their task (T13):
+// half of the test below moved to `tests/service.rs` as the real behaviour.
+// ## m4b-t13-explorer (named exception): the file operations are Task 13's now
+// (`tests/file_ops.rs`); on a library that is not registered they still refuse and touch no
+// file.
 #[tokio::test]
-async fn file_operation_stubs_refuse_and_touch_no_file() {
+async fn file_operations_on_an_unregistered_library_refuse_and_touch_no_file() {
     let (s, app, dir) = service_with_library();
     let before = tree(dir.path());
     let id = LibraryId::new();
     assert_eq!(
-        s.create(id, &rel("c.sql"), EntryKind::Sql).await,
-        Err(FileOpError::NotImplemented)
+        s.create(id, &rel("c.sql"), EntryKind::Sql, None).await,
+        Err(FileOpError::Unavailable)
     );
     assert_eq!(
-        s.rename(id, &rel("b.sql"), &rel("d.sql")).await,
-        Err(FileOpError::NotImplemented)
+        s.rename(id, &rel("b.sql"), &rel("d.sql"), None).await,
+        Err(FileOpError::Unavailable)
     );
     assert_eq!(
-        s.trash(id, &rel("b.sql")).await,
-        Err(FileOpError::NotImplemented)
+        s.trash(id, &rel("b.sql"), None).await,
+        Err(FileOpError::Unavailable)
     );
     assert_eq!(tree(dir.path()), before);
     assert!(

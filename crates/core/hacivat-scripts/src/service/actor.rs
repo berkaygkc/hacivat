@@ -236,6 +236,13 @@ pub(super) enum Msg {
         token: u64,
         result: Result<(), manifest::WriteError>,
     },
+    // ## m4b-t13-explorer (named exception)
+    /// The tree's Refresh, or a file operation that changed the library: rescan it and refresh
+    /// its repository status.
+    Rescan {
+        id: LibraryId,
+    },
+    // ## m4b-t13-explorer
     #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     Settled {
         reply: oneshot::Sender<()>,
@@ -818,6 +825,14 @@ impl Actor {
                     }
                 }
             }
+            // ## m4b-t13-explorer (named exception)
+            Msg::Rescan { id } => {
+                if let Some(i) = self.index(id) {
+                    self.libs[i].want.scan = true;
+                    self.git_trigger(i);
+                }
+            }
+            // ## m4b-t13-explorer
             Msg::Settled { reply } => self.waiters.push(reply),
             #[cfg(any(test, feature = "test-support"))]
             Msg::InjectWatch { id, stale, batch } => {

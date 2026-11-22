@@ -60,6 +60,15 @@ pub(crate) fn is_link(meta: &Metadata) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Identity(u64, u64);
 
+// ## m4b-t13-explorer fix round 1 (named exception, ruling R-T13-1)
+impl Identity {
+    /// Whether this names a file at all: `Identity(0, 0)` (every file off Unix) is unknown, and
+    /// two unknown identities never prove the same file.
+    pub(crate) fn known(self) -> bool {
+        self != Identity(0, 0)
+    }
+}
+// ## m4b-t13-explorer
 #[cfg(unix)]
 pub(crate) fn identity(meta: &Metadata) -> Identity {
     use std::os::unix::fs::MetadataExt;
@@ -427,6 +436,13 @@ impl Dir {
     pub(crate) fn remove_file(&self, name: &str) -> Result<(), FsError> {
         self.write_checked(|| fs::remove_file(self.child(name)))
     }
+
+    // ## m4b-t13-explorer (named exception): New folder in the Scripts tree.
+    /// A new folder `name` (`mkdir`: never an existing name, never through a link).
+    pub(crate) fn create_dir(&self, name: &str) -> Result<(), FsError> {
+        self.write_checked(|| fs::create_dir(self.child(name)))
+    }
+    // ## m4b-t13-explorer
 
     /// Flushes the folder's entries (Unix; best effort: the file is already in place).
     pub(crate) fn sync(&self) {

@@ -54,6 +54,8 @@ pub mod encoding;
 pub mod envscope;
 pub mod events;
 pub mod fileio;
+// ## m4b-t13-explorer (named exception): the Scripts tree's file operations.
+pub(crate) mod fileops;
 pub mod index;
 pub mod manifest;
 pub mod names;

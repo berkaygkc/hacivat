@@ -4857,6 +4857,132 @@ hv-scripts-dataless-row-tip = Kept in the cloud, not downloaded. Opening it down
 # Surface 1 (Scripts node).
 hv-scripts-downloading-row-tip = Downloading… The tab shows the text when the download ends.
 
+## m4b-t13-explorer
+# Surface 1 (Scripts node). What assistive technology reads for a file's git badge.
+hv-scripts-a11y-modified = modified
+# Surface 1 (Scripts node).
+hv-scripts-a11y-new = new
+# Surface 1 (Scripts node).
+hv-scripts-a11y-conflicted = conflicted
+# Surface 1 (Scripts node).
+hv-scripts-a11y-unknown = git status unknown
+# Surface 1 (Scripts node). A folder that holds changed files.
+hv-scripts-a11y-contains = contains changes
+# Surface 1 (Scripts node).
+hv-scripts-a11y-outside = points outside the library
+# Surface 1 (Scripts node).
+hv-scripts-a11y-dataless = not downloaded
+# Surface 1 (Scripts node). The "?" badge's text alternative for the reasons hv-scripts-git-unknown-tip does not cover.
+# Variables:
+#   $reason (String) - selector: the reason; one of case, notafile, submodule (anything else: the default).
+hv-scripts-git-unknown-other-tip =
+    { $reason ->
+        [submodule] Git status unknown: it is a submodule, and Hacivat never opens one.
+        [case] Git status unknown: the repository spells this name with other capitals.
+       *[notafile] Git status unknown: it isn't a regular file.
+    }
+# Surface 1 (Scripts node). The Scripts node's child row when the library folder can't be listed.
+# Variables:
+#   $reason (String) - selector: why; one of moved, responding, unreadable (anything else: the default).
+hv-scripts-unavailable-row =
+    { $reason ->
+        [responding] The folder isn't answering
+        [moved] The folder was moved or replaced
+       *[unreadable] The folder can't be read
+    }
+# Surface 11 (Diagnostics). The problems the other diagnostics messages do not cover.
+# Variables:
+#   $what (String) - selector: the problem; one of badname, hidden, linkscope, manifest, moved, noname, rootenv, suppressed, unreadable (anything else: the default).
+#   $n (Number) - a count, e.g. 3.
+#   $folder (String) - the library's folder name (data), e.g. "orders-scripts".
+hv-scripts-diag-other =
+    { $what ->
+        [badname] Some names break the naming rules, so those files aren't listed.
+        [unreadable] A folder can't be read, so its files aren't listed.
+        [linkscope] A link points into another environment's folder, so it isn't listed anywhere.
+        [suppressed] { $n } more problems aren't listed.
+        [hidden] { $n } more problems concern files this connection doesn't show.
+        [noname] Neither .hacivat/workspace.toml nor the folder name { $folder } is a database name, so the library shows only where it is mapped.
+        [rootenv] The library folder is inside an environment folder, so nothing in it is listed.
+        [moved] The library folder was moved or replaced, so nothing in it is listed.
+       *[manifest] .hacivat/workspace.toml can't be used, so the library binds by its folder name, { $folder }.
+    }
+# Surface 2 (Context menus). The reasons hv-scripts-name-err does not cover, under the name field.
+# Variables:
+#   $reason (String) - selector: the reason; one of chars, hidden, long (anything else: the default).
+hv-scripts-name-err-more =
+    { $reason ->
+        [long] A name can be at most 255 bytes.
+        [hidden] A name can't start with a dot, and node_modules isn't listed.
+       *[chars] A name can't contain < > : " | ? * or control characters.
+    }
+# Surface 2 (Context menus). The toast's title when a file operation was refused.
+# Variables:
+#   $op (String) - selector: the operation; one of create, rename, trash (anything else: the default).
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+#   $name (String) - the file or folder name (data), e.g. "orders_report.sql".
+hv-scripts-op-failed-title =
+    { $op ->
+        [create] Couldn't create { $name }
+        [rename] Couldn't rename { $name }
+       *[trash]
+            { $os ->
+                [windows] Couldn't move { $name } to the Recycle Bin
+               *[other] Couldn't move { $name } to the Trash
+            }
+    }
+# Surface 2 (Context menus). The toast's body: why, in plain words; nothing was changed.
+# Variables:
+#   $reason (String) - selector: the reason; one of changed, exists, gone, hidden, io, large, listed, name, nohardlinks, path, scope, trash, unavailable (anything else: the default).
+hv-scripts-op-failed =
+    { $reason ->
+        [exists] Something in this folder already has that name. Nothing was changed.
+        [scope] This would change which connections see these files. Nothing was changed; rename it in your file manager if that is what you want.
+        [large] This folder is too large to check; remove it in your file manager.
+        [nohardlinks] This drive can't rename without risking a file of the same name. Nothing was changed; rename it in your file manager.
+        [changed] It went to the trash, but a folder on the way changed meanwhile. Check the trash.
+        [gone] It isn't in the library any more. Nothing was changed.
+        [listed] This connection doesn't show that folder, so Hacivat won't change it from here.
+        [hidden] The folder holds files this connection doesn't show, so Hacivat won't move them from here.
+        [name] That name can't be used here. Nothing was changed.
+        [path] A folder on the way changed or became a link, so Hacivat stopped. Nothing was changed.
+        [unavailable] The library folder isn't available right now. Nothing was changed.
+        [trash] The system's trash refused it. The file is where it was.
+       *[io] The system refused it. Nothing was changed.
+    }
+# Surface 2 (Context menus). Palette title.
+hv-cmd-scripts-open = Open script
+# Surface 2 (Context menus). Palette title.
+hv-cmd-scripts-new-script = New script
+# Surface 2 (Context menus). Palette title.
+hv-cmd-scripts-new-folder = New script folder
+# Surface 2 (Context menus). Palette title; no default chord (controller ruling c).
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+hv-cmd-scripts-trash =
+    { $os ->
+        [windows] Move script to the Recycle Bin
+       *[other] Move script to the Trash
+    }
+# Surface 2 (Context menus). Palette title.
+hv-cmd-scripts-copy-path = Copy script path
+# Surface 2 (Context menus). Palette title.
+hv-cmd-scripts-copy-relative-path = Copy script relative path
+# Surface 2 (Context menus). Palette title.
+hv-cmd-scripts-refresh = Refresh script library
+# Surface 2 (Context menus). Under the name field when the name holds invisible or bidi characters, shown escaped.
+# Variables:
+#   $name (String) - the name with invisible characters written as <U+XXXX> (data), e.g. "a<U+202E>lqs.sql".
+hv-scripts-name-hidden-chars = This name holds hidden characters: { $name }
+# Surface 2 (Context menus). Moved to Trash, but a folder on the way changed meanwhile.
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+#   $name (String) - the file or folder name (data), e.g. "orders_report.sql".
+hv-scripts-trashed-changed =
+    { $os ->
+        [windows] Moved { $name } to the Recycle Bin, but a folder on the way changed meanwhile. Check the Recycle Bin.
+       *[other] Moved { $name } to the Trash, but a folder on the way changed meanwhile. Check the Trash.
+    }
 ## m4b-t14-tabs
 
 # Surface 5 (Script tab): the tab while its file is read.

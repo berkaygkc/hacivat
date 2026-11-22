@@ -130,7 +130,19 @@ pub fn command_entries(cx: &App) -> Vec<CommandEntry> {
         .filter(|d| !hacivat_ui_grid::commands::hidden_in_palette(d.id))
         .map(|d| CommandEntry {
             id: d.id,
-            title: global.l10n.t_dynamic(d.title_id, Vec::new()).into(),
+            // ## m4b-t13-explorer (named exception, carries-w1 T13 m9): titles that differ per
+            // host (`hv-cmd-scripts-reveal`, `hv-cmd-scripts-trash`) select on `$os`; every
+            // other title ignores the argument.
+            title: global
+                .l10n
+                .t_dynamic(
+                    d.title_id,
+                    vec![(
+                        "os",
+                        hacivat_l10n::ArgValue::Text(crate::scripts::file_ops::host_os().into()),
+                    )],
+                )
+                .into(),
             english_title: global.l10n.t_english(d.title_id).into(),
             keys: shortcut_label(cx, d.id).map(Into::into),
         })

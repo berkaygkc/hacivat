@@ -525,7 +525,15 @@ fn action_provider_stub_contributes_nothing(cx: &mut TestAppContext) {
         for surface in [ActionSurface::ExplorerMenu, ActionSurface::DdlViewToolbar] {
             assert!(provided_actions(&node, surface, cx).is_empty());
         }
-        assert!(contributors(cx).is_empty());
+        // ## m4b-t13-explorer (named exception, review m5): M4 registers none; M4b's Scripts
+        // contributor (`scripts::install`) is the only one, and without a library service it
+        // lists nothing.
+        let list = contributors(cx);
+        assert_eq!(list.len(), 1);
+        assert!(
+            list.iter()
+                .all(|c| c.database_children(node.profile, "app", cx).is_empty())
+        );
         // `database_rows` (M5, M4b) lists nothing until Task 24.
         assert!(database_rows(node.profile, cx).is_empty());
         // The explorer model stub shows nothing and claims nothing about a key.
