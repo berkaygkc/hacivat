@@ -1161,6 +1161,18 @@ jobs:
         run: cargo test --locked --release -p sql-safety --test mutation_props
         env:
           PROPTEST_CASES: "100000"
+      # ## m4b-t08-splitter
+      # The eager stream's cap rule at the real 64 MiB cap (R-T8-1, R-T8-4): the re-review
+      # repros in eight chunkings, and the cap property at nightly cases.
+      - name: Eager stream cap rule at the real cap
+        run: cargo test --locked --release -p sql-split --test stream -- --ignored the_cap_refusal_does_not_depend_on_the_chunking_at_the_real_cap --nocapture
+        env:
+          HACIVAT_PERF: "1"
+      - name: Eager stream properties (nightly cases)
+        run: cargo test --locked --release -p sql-split --test stream -- the_cap_decision eager_is_exact_off_mysql eager_stream_equals
+        env:
+          PROPTEST_CASES: "100000"
+      # ## m4b-t08-splitter
       - name: bench-sql
         run: cargo xtask bench-sql --out target/bench/bench-sql.json
       - name: Upload bench-sql JSON (regression signal only, not authoritative)

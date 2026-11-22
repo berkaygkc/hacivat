@@ -1982,3 +1982,190 @@ field since `fb98cf1`).
 - a direct catalog write the classifier does not see as a statement's own target: inside a
   data-modifying CTE, a routine or a trigger (a top-level `UPDATE pg_catalog.pg_class …` or
   SQLite `UPDATE sqlite_master …` is opaque, above).
+
+## m4b-t08 — stream hold
+
+Closes the M3 open item "the stream holds unbounded text on MySQL/MariaDB" (m3b-t05 fix round 1;
+M3 ledger MUST-FIX for "Run as script"). Rulings: R-M4b-46 (the eager policy) and **R-M4b-47**
+(two passes), which replaces R-M4b-46's trade-off (controller ruling U-3).
+
+**Why the hold could not simply be lifted.** The stray-`END` backstop refuses every statement
+back to the last block-tracked one (or to the script's start), after the fact. M3 built it for
+blocks the splitter cannot see. M3's corpus names such blocks: `R1-my-stray-end`, and MariaDB
+`sql_mode=ORACLE` anonymous blocks and routines, which are valid SQL. The default stream equals
+the whole split for every chunking only because it holds that far back. A run that has already
+sent a statement cannot take it back, so a constant-memory stream cannot equal the whole split
+on such a script.
+
+**Decision: an opt-in policy; the default is unchanged.**
+- The types are `StreamPolicy::{Exact, Eager}` (`sql_split::stream`) and
+  `StreamSplitter::with_policy(ctx, flavor, policy)`.
+- `new` is `Exact`, and `Exact` keeps the M3 code path, the same items for every feed, and the
+  equality property (`tests/stream.rs`, unchanged, plus `exact_policy_is_unchanged`). The T8
+  review compared it feed by feed against the base build over 200,000 cases.
+- Every M3 caller, and the editor, keep `Exact`.
+
+**`Eager`, on MySQL/MariaDB.**
+- **No block hold.** Items before the latest anchor are given out whether or not a
+  block-tracked statement is held. The executable-comment and psql `\if` rules stay.
+- **It stops at the first block mismatch.**
+  - When the pass over the held text finds an `UnknownBlock`, the text before the anchor is
+    split on its own.
+  - If that pass has no mismatch, the one found lies in text still held, and its refusal of
+    earlier statements is the backstop's reach-back. The items before the anchor go out from
+    the clean pass. This costs one more pass per feed while the mismatch stays in the unsettled
+    tail.
+  - If that pass has a mismatch too, the stream binary-searches over prefixes that end where an
+    item starts. The search always lands on a prefix with a mismatch whose predecessor has
+    none. The stream gives out the items of that predecessor's pass, then one
+    `StreamItem::Ambiguous { offset, reason: UnknownBlock }` at the mismatch, and stops.
+    Nothing after it is given out. The search runs at most once per stream: O(n log n) on the
+    held text, and then the stream ends.
+
+**`Eager` differs from `Exact` on MySQL/MariaDB only (R-T8-4, fix round 3).**
+- On PostgreSQL (every flavor), SQLite and Generic, `with_policy(Eager)` takes the `Exact`
+  code path. It has the same items for every feed, `Exact`'s `STREAM_STATEMENT_MAX` `TooLong`,
+  no caps and no extra anchors. `Exact` already gives out what is settled there, since only
+  MySQL/MariaDB has the block hold.
+- The property `eager_is_exact_off_mysql` compares the two feed by feed. It runs PostgreSQL
+  with psql and none, with `standard_conforming_strings` off, SQLite and Generic, over the
+  re-review's `COPY … FROM STDIN` pieces with lone `\r`s.
+- This closes C-fr2-1, where a lone-`\r` anchor on a `COPY` line made a data row
+  (`DELETE FROM users`) a statement. `a_copy_row_after_a_lone_cr_is_never_a_statement` pins it:
+  every split into two chunks, eight-byte chunks, and a 64 KiB-padded version.
+- The memory bound below is MySQL/MariaDB's. Elsewhere memory is `Exact`'s: bounded wherever
+  line-start anchors come, but not on one-line scripts.
+
+**`Eager` on MySQL/MariaDB: bounded memory (fix rounds 1 to 3; T8 review I2, re-reviews
+I-fr1-1 and I-fr2-1; rulings R-T8-1, R-T8-2, R-T8-4).**
+- **Anchors.**
+  - An anchor is the line start of an item, after a `\n` only. A lone `\r` never ends a line
+    for the anchor (R-T8-4): lone-`\r` anchoring and its check are gone.
+  - Anchors are looked for among all the items held (`Exact` looks at the last 256 only). The
+    item's strict start, after leading comments, must lie within the *span* of its line: a
+    sixteenth of the byte cap, 4 MiB.
+  - One function, `anchor_status`, decides for each item, both while streaming and at the end.
+    It reads only the text before the item's strict start. The one exception is the last item
+    while the text goes on: unterminated and shorter than 16 bytes, it is pending, because its
+    first token could still become a comment.
+- **The cap rule (R-T8-1).**
+  - The stream refuses where two consecutive anchors are more than `STREAM_HELD_MAX` bytes
+    apart, or hold more than `STREAM_HELD_ITEMS_MAX` items. Anchors here include the stream's
+    start and the end of the text, and the count includes text already given out.
+  - It gives out what precedes the first anchor of the first such gap, then one
+    `StreamItem::NoBoundary { offset }` at that anchor, and stops.
+  - A gap is decided only once the text seen proves it. The next anchor lies at the pending
+    item's line, or no earlier than the span plus 16 bytes before the end of the text held.
+  - A statement longer than the cap is such a gap, so it gives `NoBoundary` too; `TooLong`
+    would need its end. Under `Eager` no statement over the cap is given out.
+- **What is proven about chunking, and what is not.**
+  - The rule depends on the text alone by construction. It is *tested*, not proven:
+    - The property `the_cap_decision_does_not_depend_on_the_chunking` uses small caps (8–4,000
+      bytes, 1–39 items, through `with_caps`). It compares random, one-byte, 3/1/17 and
+      whole-text chunks for identical items, in the 24 contexts.
+    - `the_cap_decision_regressions` keeps the six inputs it shrank to.
+    - `the_cap_refusal_does_not_depend_on_the_chunking` runs the re-review repros at a 4 MiB
+      test cap (fr1) and at caps 736 / 1 (fr2, MySQL-adapted). Each runs in eight chunkings:
+      1 B, 4 KiB, 64 KiB, 1 MiB, alternating, mixed 65,536 / 4,093 / 1,000,003, seeded random,
+      and the whole file.
+    - `the_cap_refusal_does_not_depend_on_the_chunking_at_the_real_cap` runs both repros at
+      64 MiB in seven of those chunkings (all but 1 B). It is `#[ignore = "perf"]` and gated on
+      `HACIVAT_PERF=1`. CI's nightly `sql-differential` job runs it in release, with the
+      properties at 100,000 cases (`# ## m4b-t08-splitter`).
+  - So **Task 12's rule that pass 2 is fed the same chunk sequence as pass 1 is mandatory**, not
+    belt and braces. Same fixed blocks, every read filled. A clean pass 1 implies a clean pass 2
+    only for the same chunks. That they agree for other chunks is tested, not proven.
+- **The caps (R-T8-2).**
+  - `STREAM_HELD_MAX` = `STREAM_STATEMENT_MAX` = 64 MiB, so every statement `Exact` runs fits,
+    such as a mysqldump row with a large `--hex-blob` value.
+  - `STREAM_HELD_ITEMS_MAX` = 65,536. A pass costs a few hundred bytes per item, and one line of
+    16 MiB of short statements measured about 600 MB of RSS without this cap.
+  - `with_caps` exists only under `cfg(test)` or sql-split's `test-support` feature, which only
+    the crate's own tests turn on.
+- **The bound.** Held text is at most the byte cap, plus the span and the split interval past
+  the cap (a sixteenth each), plus 16 bytes and the chunk being fed. That is 72 MiB at 64 KiB
+  chunks.
+- **Measured peak RSS at the real caps** (fix round 2; debug build, macOS `/usr/bin/time -l`,
+  one process per shape, `rss_shapes`). Each input is fed in 64 KiB chunks until 66 MiB or
+  until it stops. Nothing comes near 1 GB; the maximum is 287 MB, on `--` comment lines. With
+  lone-`\r` anchors gone (fix round 3, re-measured), the lone-`\r` shapes stop instead of
+  settling: short lone-`\r` statements at the item cap (2,031,616 bytes held, 58 MB), 1 KiB
+  lone-`\r` dump lines at the byte cap (69.2 MB held, 135 MB), and `--` comment lines ending
+  in lone `\r`s at the byte cap (76 MB). One line of short statements stops at the item cap after
+  983,040 bytes (44 MB). The 150 MB dump of 1 KiB `INSERT` lines holds 1,024 bytes (4.6 MB).
+- **What the caps refuse on MySQL/MariaDB that `Exact` runs.** All of these fail closed with
+  `NoBoundary`:
+  - a statement longer than 64 MiB (`Exact` gives `TooLong` for it as well);
+  - more than 64 MiB of text, or more than 65,536 items, between two line-start statement
+    boundaries: one very long line of statements, a minified script, or 64 MiB of comments or
+    blank lines with no statement;
+  - **CR-only files and lines** (classic Mac line ends): a lone `\r` is no line end for the
+    anchor, so such a file or line refuses once it passes a cap. `Exact` holds it whole and
+    runs it.
+  - **Lines that start with a byte-order mark** are never anchors, as under `Exact`, where the
+    rule comes from `incremental::anchor`. A file concatenated from UTF-8 files with BOMs can
+    put a gap over the cap.
+  - a statement with more than 4 MiB of leading comments, whose line is then no anchor.
+
+  Task 12 reports `NoBoundary` as "no statement boundary within 64 MiB from line N; the file
+  was not run". A `COPY … FROM STDIN` block over 64 MiB, such as a pg_dump plain-format table,
+  is PostgreSQL, so `Exact` handles it now. T12 needs no message for it here.
+
+**R-M4b-47: how "Run as script" uses it (Task 12).**
+- On MySQL/MariaDB, "Run as script" reads the file twice.
+  - **Pass 1** streams the whole file through `Eager` and executes nothing. If any item refuses,
+    the whole file is refused, as M3's whole split refuses it.
+    - An item refuses when `StreamItem::refuses` is true: an `Ambiguous`, a `TooLong`, a
+      `NoBoundary`, or a statement that is not `Exact`.
+    - `stream::any_refuses(&items)` checks a batch, and pass 1 checks every `feed` and the
+      `finish`.
+    - `StreamSplitter::stopped()` is **not** enough. A missing `;` mid-file gives an
+      `Ambiguous` and a `Heuristic` statement, and the stream goes on
+      (`a_refusal_mid_file_does_not_stop_the_stream`).
+  - **Pass 2** runs only after a clean pass 1. It re-reads the file and streams it through
+    `Eager` **in the same chunk sequence** (mandatory, above) to execute. Task 12 checks the
+    file's stamp before pass 2 and for every chunk.
+- **What this rests on.** For every input, the eager stream either gives out an item that
+  refuses, or equals the whole split exactly. Off MySQL/MariaDB it is the whole split, because
+  `Exact` is. It refuses exactly when the whole split does, except past the caps, where it
+  refuses on its own.
+  - So no statement of a script that M3 would refuse is ever executed. That includes the body
+    `DELETE` of a block the splitter missed, which the stop alone would have given out first.
+  - Memory stays constant on MySQL/MariaDB.
+- **The cost.** A file is read twice. A MySQL file past the caps is refused with a clear reason
+  (see "What the caps refuse").
+
+**What holds, and how it is tested (`tests/stream.rs`, `## m4b-t08-stream-hold`).**
+- **`check_eager`** holds these invariants for every chunking and in one chunk:
+  - the stream is the same for every chunking;
+  - it gives out a stop or equals the whole split;
+  - it refuses exactly when the whole split refuses;
+  - without a block mismatch, or off MySQL/MariaDB, it equals the whole split and the default
+    stream;
+  - with a mismatch, it ends with its only `UnknownBlock`, which the whole split reports too,
+    and its statements and client commands are a prefix of the whole split's.
+- **Where it runs:**
+  - the property over generated scripts (blocks, `DELIMITER` changes and `DELIMITER` in
+    comments, stray and matched `END`s, ORACLE blocks set in the script, lone `\r`, quoting)
+    under 24 contexts: MySQL and MariaDB with default modes, `no_backslash_escapes`,
+    `ansi_quotes` and `mariadb_oracle_mode`, MySQL 5.7, MariaDB 10.3, with and without the mysql
+    client, and the other families;
+  - the corpora, in 6 chunkings: the split cases, the MySQL and MariaDB profile fixtures,
+    `FX-SPLIT-MY-01..05`, the read corpora, `lex/mysql.toml` under each case's own modes, and
+    the datagrip MySQL rows. Of these, 650 texts equal the whole split and 18 stop.
+- **`a_misread_block_is_a_stop_or_the_whole_split`** pins R-M4b-47's property on
+  `R1-my-stray-end`, `R2-stray-end-refuses-to-start`, and an ORACLE anonymous block and routine,
+  with ORACLE mode both set by the session and set by the script. It runs in 28 chunkings and
+  simulates pass 1.
+- **The cap rule** is covered by the tests above, `every_memory_shape_is_bounded` (12 MySQL
+  shapes at a 4 MiB test cap, each measuring `held_len()` after every feed) and
+  `a_lone_cr_is_no_anchor`.
+
+**Interfaces for Task 12.** These are reached through `sql_split::stream` (the crate root's
+re-export list is not in this task's files):
+- `StreamPolicy`;
+- `any_refuses`;
+- `STREAM_HELD_MAX`;
+- `STREAM_HELD_ITEMS_MAX`.
+
+`StreamItem::NoBoundary` is new. `held_len()` is `#[doc(hidden)]`; `with_caps()` is test-only.
