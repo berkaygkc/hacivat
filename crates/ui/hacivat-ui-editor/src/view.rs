@@ -236,6 +236,15 @@ pub struct EditorView {
     /// The reload from disk whose diff runs on the background executor (`reload.rs`);
     /// dropping it cancels it.
     pub(crate) reload: Option<Task<()>>,
+    // ## m4b-t11-editor (fix round 1, I2, m1; named items)
+    /// The commit being fanned out was measured off the UI thread (`longest_line` is already
+    /// the new text's): the fan-out skips `longest_touched`.
+    pub(crate) longest_measured: bool,
+    /// Lines `longest_touched` measured on the UI thread since the editor was made
+    /// ([`EditorView::ui_work`]).
+    pub(crate) lines_measured: u64,
+    /// `reload_preview` is replacing a preview's text: `set_text` lets it through.
+    pub(crate) preview_text_allowed: bool,
     /// The snapshot the fan-out last saw (the scroll rebase and the reveal rule read it).
     fanned: Snapshot,
     /// `commit` marked the probe's input before its dispatch; the fan-out does not mark again.
@@ -373,6 +382,9 @@ impl EditorView {
             longest_line: longest_line(text),
             // ## m4b-t11-editor
             reload: None,
+            longest_measured: false,
+            lines_measured: 0,
+            preview_text_allowed: false,
             fanned,
             input_marked: false,
             context_point: None,
@@ -423,6 +435,11 @@ impl EditorView {
     /// Replaces the whole text (`Origin::Program`, one undo group): a restored console. While a
     /// composition is open it waits until the composition ends (Task 27, R-M3-7).
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // ## m4b-t11-editor (fix round 1, m1; named item): a T2 preview is the file's first
+        // part; only the host's `reload_preview` replaces it.
+        if self.tier.tier == Tier::Preview && !self.preview_text_allowed {
+            return;
+        }
         // ## m3a-t27-ime-clipboard (named exception, R-M3-7 corrected): held while composing.
         if ime::defer_while_composing(self, ime::AppEdit::SetText(text.to_string())) {
             return;
@@ -647,6 +664,17 @@ impl EditorView {
         self.cache.stats()
     }
 
+    // ## m4b-t11-editor (fix round 1, I2; named item)
+    /// The text work the UI thread did for this editor's commits since it was made: bytes
+    /// edited in the rope in place, and lines measured for the long-line rule. A reload from
+    /// disk adds neither (its text is built and measured off the UI thread), whatever its size.
+    pub fn ui_work(&self) -> UiWork {
+        UiWork {
+            rope_edit_bytes: self.model.rope_edit_bytes(),
+            lines_measured: self.lines_measured,
+        }
+    }
+
     /// The chooser's hover override of the preview band (`None` clears it).
     pub fn set_preview_override(
         &mut self,
@@ -850,6 +878,30 @@ impl EditorView {
         Some(self.apply_committed(committed, event, cx))
     }
 
+    // ## m4b-t11-editor (fix round 1, I2; named item)
+    /// [`EditorView::commit`] with `after`, the text `tr` makes, built off the UI thread
+    /// (`ImeCore::dispatch_prebuilt`): the reload from disk's landing.
+    pub(crate) fn commit_prebuilt(
+        &mut self,
+        tr: Transaction,
+        after: TextBuffer,
+        cx: &mut Context<Self>,
+    ) -> Option<Committed> {
+        let event = tr.ann.user_event;
+        self.mark_input(cx);
+        self.input_marked = true;
+        let was_composing = self.ime.is_composing();
+        let result = self.ime.dispatch_prebuilt(&mut self.model, tr, after);
+        if was_composing && !self.ime.is_composing() {
+            self.composition_changed(false, cx);
+        }
+        let Ok(committed) = result else {
+            self.input_marked = false;
+            return None;
+        };
+        Some(self.apply_committed(committed, event, cx))
+    }
+
     /// Runs `editor.context_menu` for a right click at `at` (window coordinates): the pointer
     /// is readable through [`EditorView::context_menu_point`] while the command runs, so the
     /// menu opens there even when the click fell inside the selection, far from the caret.
@@ -1001,10 +1053,13 @@ impl EditorView {
             let text_len = snap.buffer.len_bytes() as u64;
             // Nothing per keystroke is O(document): the longest line grows with the lines an
             // edit touched (bounded by the edit, not the document).
-            if let Some(dirty) = &committed.dirty {
-                self.longest_line = self
-                    .longest_line
-                    .max(longest_touched(&snap.buffer, dirty.clone()));
+            // ## m4b-t11-editor (fix round 1, I2): not for a text measured off the UI thread.
+            if let Some(dirty) = &committed.dirty
+                && !std::mem::take(&mut self.longest_measured)
+            {
+                let (longest, lines) = longest_touched(&snap.buffer, dirty.clone());
+                self.lines_measured += lines;
+                self.longest_line = self.longest_line.max(longest);
             }
             // ## m3a-f4-ime (EDIT-2): no line is longer than the document.
             self.longest_line = self.longest_line.min(text_len);
@@ -1068,13 +1123,25 @@ fn reveals(prev: &Snapshot, snap: &Snapshot, committed: &Committed, text_changed
 }
 
 /// The longest line, in bytes, among the lines `dirty` touches (O(touched lines)).
-fn longest_touched(buf: &TextBuffer, dirty: Range<usize>) -> u64 {
+/// ## m4b-t11-editor (fix round 1): with the number of lines it measured.
+fn longest_touched(buf: &TextBuffer, dirty: Range<usize>) -> (u64, u64) {
     let first = buf.byte_to_line(dirty.start);
     let last = buf.byte_to_line(dirty.end);
-    (first..=last)
+    let longest = (first..=last)
         .map(|l| buf.line_range(l, false).len() as u64)
         .max()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    (longest, (last - first + 1) as u64)
+}
+
+// ## m4b-t11-editor (fix round 1, I2)
+/// What [`EditorView::ui_work`] counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiWork {
+    /// Bytes deleted plus inserted in the rope in place on the UI thread.
+    pub rope_edit_bytes: u64,
+    /// Lines the fan-out measured for the long-line rule.
+    pub lines_measured: u64,
 }
 
 impl Focusable for EditorView {

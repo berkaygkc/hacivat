@@ -42,6 +42,9 @@ const T2_TOTAL: u64 = 148 << 20;
 /// The paste the question is about (42.6 MB) and the document it would make (61.0 MB).
 const PASTE_BYTES: u64 = 44_669_747;
 const PASTE_TOTAL: u64 = 63_963_136;
+/// The script the paste question is over.
+const PASTED_INTO: &str =
+    "-- müşteri raporu\nSELECT id, city, total\nFROM orders\nWHERE city = 'İzmir';\n";
 
 impl M4b {
     pub(super) fn name(self) -> &'static str {
@@ -113,23 +116,44 @@ impl M4b {
                     },
                 ),
             ],
-            M4b::PasteConfirm => vec![step(
-                |window, cx| {
-                    let Some(ws) = window.root::<Workspace>().flatten() else {
-                        return;
-                    };
-                    let spec = clipboard::paste_confirm_dialog(PASTE_BYTES, PASTE_TOTAL);
-                    assert_eq!(spec.size, DialogSize::Standard, "the 420 px card");
-                    let dialog = ws.update(cx, |ws, cx| ws.open_dialog(spec, window, cx));
-                    dialog.update(cx, |d, _| d.set_role(Role::AlertDialog));
-                },
-                |window, cx| {
-                    window
-                        .root::<Workspace>()
-                        .flatten()
-                        .is_some_and(|ws| ws.read(cx).layer_ids().contains(&"dialog"))
-                },
-            )],
+            // ## m4b-t11-editor (fix round 1, review m8): the question over the editor being
+            // pasted into (a console over the dump's first lines, focused), as the mock shows.
+            M4b::PasteConfirm => vec![
+                step(
+                    |window, cx| {
+                        let Some(id) = profile_named(cx, DEV) else {
+                            return;
+                        };
+                        console_fixtures::open(id, PASTED_INTO, window, cx);
+                    },
+                    |window, cx| {
+                        editor_in(window, cx).is_some_and(|e| {
+                            e.read(cx).snapshot().buffer.len_bytes() == PASTED_INTO.len()
+                        })
+                    },
+                ),
+                step(
+                    |window, cx| {
+                        if let Some(editor) = editor_in(window, cx) {
+                            let focus = editor.read(cx).focus_handle(cx);
+                            window.focus(&focus, cx);
+                        }
+                        let Some(ws) = window.root::<Workspace>().flatten() else {
+                            return;
+                        };
+                        let spec = clipboard::paste_confirm_dialog(PASTE_BYTES, PASTE_TOTAL);
+                        assert_eq!(spec.size, DialogSize::Standard, "the 420 px card");
+                        let dialog = ws.update(cx, |ws, cx| ws.open_dialog(spec, window, cx));
+                        dialog.update(cx, |d, _| d.set_role(Role::AlertDialog));
+                    },
+                    |window, cx| {
+                        window
+                            .root::<Workspace>()
+                            .flatten()
+                            .is_some_and(|ws| ws.read(cx).layer_ids().contains(&"dialog"))
+                    },
+                ),
+            ],
         }
     }
 }

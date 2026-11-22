@@ -608,3 +608,53 @@ fn typing_into_20_mb_is_not_o_document() {
         "a keystroke took {each:?}"
     );
 }
+
+// ## m4b-t11-editor (fix round 1, I2): a text built off the UI thread is swapped in.
+
+/// The prebuilt text replaces the buffer: the same result as applying the change, the
+/// selection mapped through it, one version, and no bytes edited in place.
+#[test]
+fn dispatch_prebuilt_swaps_the_text_in() {
+    let mut m = EditorModel::new("SELECT 1;\nSELECT 2;\n", ModelConfig::default());
+    m.dispatch(select_tr(&m, SelectionSet::cursor(15))).unwrap();
+    let tr = replace_tr(&m, 0..9, "-- top\nSELECT 10;");
+    let mut after = m.buffer().clone();
+    tr.changes.apply(&mut after);
+    let before = (m.version(), m.rope_edit_bytes());
+    let c = m.dispatch_prebuilt(tr, after).unwrap();
+    assert_eq!(text(&m), "-- top\nSELECT 10;\nSELECT 2;\n");
+    assert_eq!(c.version, before.0 + 1);
+    assert_eq!(m.rope_edit_bytes(), before.1, "nothing applied in place");
+    assert_eq!(
+        m.selection().main().head,
+        15 + 8,
+        "the caret maps through the change"
+    );
+    // A change applied in place counts its bytes.
+    let tr = replace_tr(&m, 0..6, "");
+    m.dispatch(tr).unwrap();
+    assert_eq!(m.rope_edit_bytes(), before.1 + 6);
+}
+
+/// A prebuilt text of the wrong length is vetoed and changes nothing; with a filter that
+/// rewrites the change, the change is applied in place instead (the prebuilt text no longer
+/// matches it).
+#[test]
+fn dispatch_prebuilt_fails_closed() {
+    let mut m = EditorModel::new("abc", ModelConfig::default());
+    let tr = insert_tr(m.buffer(), 3, "d");
+    let wrong = TextBuffer::from_str("abcde");
+    assert!(m.dispatch_prebuilt(tr, wrong).is_err());
+    assert_eq!((text(&m), m.version()), ("abc".to_string(), 0));
+    m.add_filter(Box::new(TabsToSpaces));
+    let tr = insert_tr(m.buffer(), 3, "\t");
+    let mut after = m.buffer().clone();
+    tr.changes.apply(&mut after);
+    m.dispatch_prebuilt(tr, after).unwrap();
+    assert_eq!(
+        text(&m),
+        "abc    ",
+        "the filter's rewrite, not the prebuilt text"
+    );
+    assert_eq!(m.rope_edit_bytes(), 4);
+}

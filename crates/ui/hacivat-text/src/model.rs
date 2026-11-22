@@ -162,6 +162,10 @@ pub struct EditorModel {
     // ## m3c-t31-multi: the selection-only history and the commit count.
     selections: SelectionHistory,
     commits: u64,
+    // ## m4b-t11-editor (fix round 1, I2)
+    /// Bytes deleted plus inserted by edits applied to `buffer` in place (a prebuilt buffer
+    /// swapped in adds none): the thread that owns the model pays for these.
+    rope_edit_bytes: u64,
 }
 
 // ## m3c-t31-multi
@@ -282,16 +286,47 @@ impl EditorModel {
             next_bracket: 0,
             selections: SelectionHistory::default(),
             commits: 0,
+            rope_edit_bytes: 0,
         }
     }
 
     /// Applies `tr`, then whatever the observers queue (the module docs).
     pub fn dispatch(&mut self, tr: Transaction) -> Result<Committed, Veto> {
-        self.run(tr, Action::Edit)
+        self.run(tr, Action::Edit, None)
     }
 
-    fn run(&mut self, tr: Transaction, action: Action) -> Result<Committed, Veto> {
-        let (first, changes) = match self.commit(tr, action) {
+    // ## m4b-t11-editor (fix round 1, I2; named item)
+    /// [`EditorModel::dispatch`] with `after`, the text `tr.changes` makes from the current
+    /// text, built elsewhere (off the UI thread, from a snapshot of this very version): it is
+    /// swapped in instead of applying the change in place, so the commit costs O(sections), not
+    /// O(bytes changed). The caller guarantees `after`'s content; the model checks its length.
+    /// A change the checks or the filters rewrite is applied in place as usual (correct, only
+    /// slower). A wrong length is vetoed (`editor-veto-stale-change`): nothing changes.
+    pub fn dispatch_prebuilt(
+        &mut self,
+        tr: Transaction,
+        after: TextBuffer,
+    ) -> Result<Committed, Veto> {
+        if after.len_bytes() != tr.changes.len_new() {
+            return Err(Veto("editor-veto-stale-change"));
+        }
+        self.run(tr, Action::Edit, Some(after))
+    }
+
+    /// Bytes deleted plus inserted by text changes applied in place on this model since it was
+    /// made; [`EditorModel::dispatch_prebuilt`] adds none. The cost the model's thread paid for
+    /// its edits, for tests that bound it.
+    pub fn rope_edit_bytes(&self) -> u64 {
+        self.rope_edit_bytes
+    }
+
+    fn run(
+        &mut self,
+        tr: Transaction,
+        action: Action,
+        prebuilt: Option<TextBuffer>,
+    ) -> Result<Committed, Veto> {
+        let (first, changes) = match self.commit(tr, action, prebuilt) {
             Ok(done) => done,
             Err(v) => {
                 self.queue.pending.clear();
@@ -331,7 +366,7 @@ impl EditorModel {
             if !fits {
                 continue;
             }
-            if let Ok((c, cs)) = self.commit(tr, Action::Edit)
+            if let Ok((c, cs)) = self.commit(tr, Action::Edit, None)
                 && c.buffer_changed
             {
                 applied.push((c.version, cs));
@@ -356,7 +391,14 @@ impl EditorModel {
     }
 
     /// One transaction through steps 1–7; the change set as applied.
-    fn commit(&mut self, tr: Transaction, action: Action) -> Result<(Committed, ChangeSet), Veto> {
+    fn commit(
+        &mut self,
+        tr: Transaction,
+        action: Action,
+        prebuilt: Option<TextBuffer>,
+    ) -> Result<(Committed, ChangeSet), Veto> {
+        // ## m4b-t11-editor: a prebuilt text stands only for the change exactly as given.
+        let given = prebuilt.as_ref().map(|_| tr.changes.desc());
         // Filters judge the change as it will apply, so it is checked and snapped first.
         let mut tr = self.checked(tr)?;
         if !self.filters.is_empty() {
@@ -376,7 +418,25 @@ impl EditorModel {
             return Err(Veto("editor-veto-history-rewritten"));
         }
         let old = self.buffer.clone();
-        tr.changes.apply(&mut self.buffer);
+        // ## m4b-t11-editor (fix round 1, I2): swap in a prebuilt text when the change is the
+        // one it was built for; otherwise apply in place.
+        match prebuilt {
+            Some(after)
+                if self.filters.is_empty()
+                    && given.as_ref() == Some(&tr.changes.desc())
+                    && after.len_bytes() == tr.changes.len_new() =>
+            {
+                self.buffer = after;
+            }
+            _ => {
+                self.rope_edit_bytes += tr
+                    .changes
+                    .edits()
+                    .map(|(r, ins)| (r.len() + ins.len()) as u64)
+                    .sum::<u64>();
+                tr.changes.apply(&mut self.buffer);
+            }
+        }
         let desc = tr.changes.desc();
         let changed = !tr.changes.is_identity();
         let after = fit_selection(
@@ -515,7 +575,7 @@ impl EditorModel {
                 origin: Origin::User,
             },
         };
-        self.run(tr, action).ok()
+        self.run(tr, action, None).ok()
     }
 
     // ## m3a-t25-editor-commands (review round 1, named exception): the Edit menu's labels

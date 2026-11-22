@@ -44,6 +44,8 @@
 //!   requested. A composition scrolled out of view is revealed.
 
 use std::ops::Range;
+// ## m4b-t11-editor
+use std::sync::Arc;
 
 use hacivat_text::{
     Committed, Origin, RangeKind, Rebased, SelectionRange, SelectionSet, TextBuffer, Transaction,
@@ -99,15 +101,23 @@ pub(crate) enum AppEdit {
     Paste(Pasted),
     // ## m4b-t01b-seams (named line, R-M4b-38): the text read from disk again, held like
     // `SetText` while a composition is open (`EditorView::replace_from_disk` makes it).
-    ReplaceFromDisk(String),
+    // ## m4b-t11-editor (fix round 1, C1): with the clean version it was asked at; the flush
+    // drops it when the text moved meanwhile.
+    ReplaceFromDisk {
+        text: Arc<str>,
+        version: u64,
+    },
 }
 
 /// A held app edit.
 #[derive(Debug)]
 enum Held {
     SetText(String),
-    // ## m4b-t01b-seams (R-M4b-38)
-    ReplaceFromDisk(String),
+    // ## m4b-t01b-seams (R-M4b-38); ## m4b-t11-editor (fix round 1, C1): the clean version.
+    ReplaceFromDisk {
+        text: Arc<str>,
+        version: u64,
+    },
     /// `version`: the model version `range` is for, rebased at the flush (review I1); `None`
     /// when a held `set_text` comes first, whose text the range is for.
     Select {
@@ -155,6 +165,25 @@ impl EditorView {
     }
 }
 
+// ## m4b-t11-editor (fix round 1, m6)
+/// Ends an open composition by removing its text (an empty mark cancels it), as the app: the
+/// platform is told to drop its copy on the next frame. For `set_preview`: a preview's text is
+/// the file's, and marked text is not. Nothing happens without a composition.
+pub(crate) fn discard_composition(v: &mut EditorView, cx: &mut Context<EditorView>) {
+    if !v.ime.is_composing() {
+        return;
+    }
+    let now = cx.background_executor().now();
+    if let Ok(c) = v.ime.mark(&mut v.model, None, "", None, now) {
+        v.apply_committed(c, UserEvent::InputTypeCompose, cx);
+    }
+    if v.ime.is_composing() {
+        // A veto kept it: end it, keeping its text (the read-only frame would anyway).
+        v.ime.unmark(&mut v.model);
+    }
+    v.composition_changed(false, cx);
+}
+
 /// App edits must wait now: a composition is open, or held edits have not been applied yet
 /// (so an older held edit never lands after a newer direct one, review M3).
 pub(crate) fn must_hold(v: &EditorView) -> bool {
@@ -194,9 +223,9 @@ pub(crate) fn hold(v: &mut EditorView, edit: AppEdit) {
         AppEdit::Paste(p) => Held::Paste(p),
         // ## m4b-t01b-seams (R-M4b-38): queued in order. ## m4b-t11-editor: the newest disk
         // text replaces an older one still held (it is the file as it is now).
-        AppEdit::ReplaceFromDisk(text) => {
-            queue.retain(|h| !matches!(h, Held::ReplaceFromDisk(_)));
-            Held::ReplaceFromDisk(text)
+        AppEdit::ReplaceFromDisk { text, version } => {
+            queue.retain(|h| !matches!(h, Held::ReplaceFromDisk { .. }));
+            Held::ReplaceFromDisk { text, version }
         }
     };
     v.input.deferred.push(held);
@@ -377,8 +406,10 @@ fn flush(v: &mut EditorView, cx: &mut Context<EditorView>) {
             // ## m4b-t01b-seams (R-M4b-38): started when the composition ends, against the text
             // it left. ## m4b-t11-editor: a refusal now (the editor became a preview meanwhile)
             // is told to the host, who heard `Ok` when it was held.
-            Held::ReplaceFromDisk(text) => {
-                if v.replace_from_disk(&text, cx).is_err() {
+            // ## m4b-t11-editor (fix round 1, C1): `replace_from_disk` refuses when anything
+            // held before it (a composition's commit, a paste) changed the text: dropped.
+            Held::ReplaceFromDisk { text, version } => {
+                if v.replace_from_disk(text, version, cx).is_err() {
                     cx.emit(crate::view::EditorEvent::Reloaded { version: None });
                 }
             }

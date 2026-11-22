@@ -1,9 +1,10 @@
 //! M4b Task 11: reload from disk (HV-SCRIPT-08, UI-EDIT-04 step 9, UI-EDIT-12; R-M4b-16,
-//! R-M4b-38). One `Origin::Program` change from the common prefix and suffix, carets and
-//! selections mapped through it, the undo history cleared, held while an IME composition is
-//! open and applied once it ends, refused on a T2 preview, and the cached editor redrawn by
-//! its own notification. The diff runs on the background executor: every test waits on a
-//! condition (`run_until_parked`), never on a clock.
+//! R-M4b-38 as amended by R-T11-1). One `Origin::Program` change from the common prefix and
+//! suffix, carets and selections mapped through it, the undo history cleared; only at the
+//! host's clean version (never over unsaved text, a composition's included: fix round 1, C1
+//! and I1), held while an empty composition waits; refused on a T2 preview; built off the UI
+//! thread and swapped in (I2); the cached editor redrawn by its own notification. Every test
+//! waits on a condition (`run_until_parked`), never on a clock.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -146,12 +147,30 @@ fn set_caret(o: &mut Opened<'_>, (line, col): (usize, usize)) {
     select(o, at..at);
 }
 
+/// A reload by a host whose clean version is the editor's current one (the tab is clean).
 fn reload(o: &mut Opened<'_>, disk: &str) -> Result<(), ReloadRefused> {
+    let clean = version(o);
+    reload_at(o, disk, clean)
+}
+
+/// A reload by a host whose clean version is `clean`.
+fn reload_at(o: &mut Opened<'_>, disk: &str, clean: u64) -> Result<(), ReloadRefused> {
     let got = o
         .editor
-        .update(o.vcx, |v, cx| v.replace_from_disk(disk, cx));
+        .update(o.vcx, |v, cx| v.replace_from_disk(disk, clean, cx));
     o.vcx.run_until_parked();
     got
+}
+
+fn composing(o: &Opened<'_>) -> bool {
+    o.vcx.read(|cx| o.editor.read(cx).status().composing)
+}
+
+fn mark(o: &mut Opened<'_>, s: &str) {
+    o.editor.update_in(o.vcx, |v, window, cx| {
+        v.replace_and_mark_text_in_range(None, s, None, window, cx);
+    });
+    o.vcx.run_until_parked();
 }
 
 fn run(o: &mut Opened<'_>, id: &str) {
@@ -232,13 +251,13 @@ fn reload_maps_the_selection(cx: &mut TestAppContext) {
     reload(&mut o, disk).unwrap();
     assert_eq!(selection(&o), (moved, moved + "müşteri".len()));
     // The one change runs from the first byte that differs to the last: edits above and below
-    // at once make it cover the selection, which then ends where the change does (the
-    // documented limit of a prefix and suffix diff, ADR 0007 m4b-t11).
+    // at once make it cover the selection. ## fix round 1 (review m5): the selection keeps its
+    // offsets inside the change (the user stays where they were reading), snapped onto
+    // characters, instead of collapsing at the change's end.
     let disk = "-- top\nSELECT 1;\nSELECT müşteri FROM t;\nSELECT 5;\n";
     reload(&mut o, disk).unwrap();
     assert_eq!(text(&o), disk);
-    let end = disk.len() - ";\n".len();
-    assert_eq!(selection(&o), (end, end));
+    assert_eq!(selection(&o), (moved, moved + "müşteri".len()));
 }
 
 /// One change, one `Changed`, one version, and nothing left to undo or redo
@@ -276,47 +295,117 @@ fn reload_is_one_change_and_clears_undo(cx: &mut TestAppContext) {
     assert!(!can_undo(&o));
 }
 
-/// R-M4b-38: while a composition is open the reload is held (accepted, nothing replaced, the
-/// composition intact); when it ends the disk text is applied once, with the carets mapped.
+/// Ruling R-T11-1 (amends R-M4b-38): a composition's marked text is buffer text, so the tab is
+/// no longer at the host's clean version: the reload is refused, the composed text survives,
+/// and the host shows its "Changed on disk" bar.
 #[gpui::test]
-fn reload_is_held_during_a_composition_and_applied_after(cx: &mut TestAppContext) {
+fn a_reload_is_refused_while_a_composition_holds_text(cx: &mut TestAppContext) {
     let mut o = open(cx, "SELECT 1;\nSELECT 2;\n");
     set_caret(&mut o, (1, 9));
-    o.editor.update_in(o.vcx, |v, window, cx| {
-        v.replace_and_mark_text_in_range(None, "か", None, window, cx);
-    });
-    o.vcx.run_until_parked();
-    let composing = |o: &Opened<'_>| o.vcx.read(|cx| o.editor.read(cx).status().composing);
+    let clean = version(&o);
+    mark(&mut o, "か");
     assert!(composing(&o));
     o.events.borrow_mut().clear();
     let disk = "-- reloaded\nSELECT 1;\nSELECT 2;\n";
     assert_eq!(
-        reload(&mut o, disk),
-        Ok(()),
-        "accepted: the host never retries"
+        reload_at(&mut o, disk, clean),
+        Err(ReloadRefused::Edited {
+            version: version(&o)
+        })
     );
-    assert_eq!(text(&o), "SELECT 1;\nSELECT 2;か\n", "nothing replaced yet");
     assert!(composing(&o), "the composition is intact");
-    assert_eq!(reloaded(&o), Vec::<Option<u64>>::new(), "not applied yet");
-    // A second disk event while it waits: only the newest text is applied.
-    assert_eq!(reload(&mut o, disk), Ok(()));
-    // The composition ends with its commit; then the disk text lands, once.
     o.editor.update_in(o.vcx, |v, window, cx| {
         v.replace_text_in_range(None, "仮", window, cx);
     });
     o.vcx.run_until_parked();
+    assert_eq!(
+        text(&o),
+        "SELECT 1;\nSELECT 2;仮\n",
+        "the composed text survives"
+    );
+    assert!(reloaded(&o).is_empty());
+    // Unsaved typing is refused the same way.
+    type_text(&mut o, "x");
+    assert!(matches!(
+        reload_at(&mut o, disk, clean),
+        Err(ReloadRefused::Edited { .. })
+    ));
+    assert_eq!(text(&o), "SELECT 1;\nSELECT 2;仮x\n");
+}
+
+/// Review C1 (the reviewer's probe): a composition that opens while the background diff runs
+/// is never replaced; the reload is dropped at the landing (`Reloaded { version: None }`), and
+/// the committed text and its undo stay.
+#[gpui::test]
+fn a_composition_opened_while_the_diff_ran_survives(cx: &mut TestAppContext) {
+    let o = open(cx, "SELECT 1;\n");
+    o.editor.update(o.vcx, |v, cx| v.select_range(9..9, cx));
+    o.vcx.run_until_parked();
+    o.events.borrow_mut().clear();
+    let clean = version(&o);
+    o.editor.update_in(o.vcx, |v, window, cx| {
+        v.replace_from_disk("SELECT 2;\n", clean, cx).unwrap();
+        v.replace_and_mark_text_in_range(None, "か", None, window, cx);
+    });
+    o.vcx.run_until_parked();
+    assert_eq!(text(&o), "SELECT 1;か\n", "mid");
+    assert_eq!(reloaded(&o), [None], "dropped at the landing");
+    o.editor.update_in(o.vcx, |v, window, cx| {
+        v.replace_text_in_range(None, "仮", window, cx);
+    });
+    o.vcx.run_until_parked();
+    assert_eq!(text(&o), "SELECT 1;仮\n");
+    assert_eq!(reloaded(&o), [None], "nothing lands after the commit");
+    assert!(can_undo(&o), "the composition is undoable");
+}
+
+/// R-M4b-38 as amended: a reload asked while a composition is open at the host's clean
+/// version is held, with that version. When the composition ends with new text (its commit)
+/// the flush drops it; when it ends keeping the clean text (`end_composition` keeps the marked
+/// text, which the host had taken for clean) the disk text is applied once.
+#[gpui::test]
+fn reload_is_held_during_a_composition_and_applied_after(cx: &mut TestAppContext) {
+    let mut o = open(cx, "SELECT 1;\nSELECT 2;\n");
+    set_caret(&mut o, (1, 9));
+    mark(&mut o, "か");
+    let disk = "-- reloaded\nSELECT 1;\nSELECT 2;\n";
+    // Held: accepted, nothing replaced, the composition intact.
+    o.events.borrow_mut().clear();
+    let at = version(&o);
+    assert_eq!(
+        reload_at(&mut o, disk, at),
+        Ok(()),
+        "accepted: never retried"
+    );
+    assert_eq!(text(&o), "SELECT 1;\nSELECT 2;か\n");
+    assert!(composing(&o));
+    assert!(reloaded(&o).is_empty(), "not applied yet");
+    // The commit changes the text: the held reload is dropped at the flush.
+    o.editor.update_in(o.vcx, |v, window, cx| {
+        v.replace_text_in_range(None, "仮", window, cx);
+    });
+    o.vcx.run_until_parked();
+    assert_eq!(text(&o), "SELECT 1;\nSELECT 2;仮\n");
+    assert_eq!(reloaded(&o), [None]);
+    // Held again (a newer disk event replaces an older held one), then the composition ends
+    // with its text kept: the text is still the clean one, so the disk text lands, once.
+    mark(&mut o, "な");
+    o.events.borrow_mut().clear();
+    let at = version(&o);
+    assert_eq!(reload_at(&mut o, "older\n", at), Ok(()));
+    assert_eq!(reload_at(&mut o, disk, at), Ok(()));
+    o.editor
+        .update_in(o.vcx, |v, window, cx| v.end_composition(window, cx));
+    o.vcx.run_until_parked();
     assert!(!composing(&o));
     assert_eq!(text(&o), disk);
-    let landed = reloaded(&o);
-    assert_eq!(landed.len(), 1, "applied once: {landed:?}");
-    assert_eq!(landed[0], Some(version(&o)));
-    // The caret was after the committed text at the end of line 1; that text is gone, and
-    // the caret maps to where it stood, on the line the header pushed down.
-    assert_eq!(caret(&o).0, 2);
-    // Nothing more lands later.
+    assert_eq!(
+        reloaded(&o),
+        [Some(version(&o))],
+        "applied once, the newest"
+    );
     o.vcx.run_until_parked();
     assert_eq!(reloaded(&o).len(), 1);
-    assert_eq!(text(&o), disk);
 }
 
 /// The same text again is no change: no new version, no `Changed`, the history kept.
@@ -344,8 +433,9 @@ fn an_edit_before_the_diff_lands_keeps_the_text(cx: &mut TestAppContext) {
     o.editor.update(o.vcx, |v, cx| v.select_range(9..9, cx));
     o.vcx.run_until_parked();
     o.events.borrow_mut().clear();
+    let clean = version(&o);
     o.editor.update_in(o.vcx, |v, window, cx| {
-        v.replace_from_disk("SELECT 2;\n", cx).unwrap();
+        v.replace_from_disk("SELECT 2;\n", clean, cx).unwrap();
         // Typed before the background diff came back.
         v.replace_text_in_range(None, "x", window, cx);
     });
@@ -503,8 +593,9 @@ fn reload_past_the_reduced_limit_is_refused(cx: &mut TestAppContext) {
 fn reload_redraws_the_cached_editor(cx: &mut TestAppContext) {
     let o = open_with(cx, "SELECT 1;\n", true);
     let frames = o.renders.get();
+    let clean = version(&o);
     o.editor.update(o.vcx, |v, cx| {
-        v.replace_from_disk("SELECT 1;\nSELECT 2;\nSELECT 3;\n", cx)
+        v.replace_from_disk("SELECT 1;\nSELECT 2;\nSELECT 3;\n", clean, cx)
             .unwrap()
     });
     o.vcx.run_until_parked();
@@ -520,4 +611,45 @@ fn reload_redraws_the_cached_editor(cx: &mut TestAppContext) {
     // The frame was the editor's own request: nothing refreshed the window, and the root (which
     // renders once per drawn frame) drew exactly that one frame.
     assert_eq!(o.renders.get(), frames + 1);
+}
+
+// ## m4b-t11-editor (fix round 1, I2)
+
+/// The UI thread's share of a reload does not grow with the change: the new text is built and
+/// measured off the UI thread and swapped in, so the landing edits no rope bytes in place and
+/// measures no line, for a 2 MB script changed in its middle or at its first and last bytes
+/// (one change over the whole file). The counters are live: a typed character counts.
+#[gpui::test]
+fn the_landing_never_edits_or_scans_the_change(cx: &mut TestAppContext) {
+    let line = "SELECT id, total FROM orders WHERE id = 1;\n";
+    let src = line.repeat((2 << 20) / line.len() + 1);
+    let mut o = open(cx, &src);
+    let mut middle = src.clone();
+    let at = src[..src.len() / 2].rfind('\n').unwrap() + 1;
+    middle.replace_range(at..at + 6, "UPDATE");
+    let mut ends = src.clone();
+    ends.replace_range(0..6, "UPDATE");
+    let n = ends.len();
+    ends.replace_range(n - 2..n - 1, ")");
+    for disk in [&middle, &ends, &src] {
+        let before = o.vcx.read(|cx| o.editor.read(cx).ui_work());
+        reload(&mut o, disk).unwrap();
+        assert_eq!(text(&o).len(), disk.len());
+        assert_eq!(
+            o.vcx
+                .read(|cx| o.editor.read(cx).snapshot().buffer.to_string()),
+            *disk
+        );
+        let after = o.vcx.read(|cx| o.editor.read(cx).ui_work());
+        assert_eq!(
+            after, before,
+            "no rope bytes edited, no lines measured on the UI thread"
+        );
+    }
+    let before = o.vcx.read(|cx| o.editor.read(cx).ui_work());
+    o.editor.update(o.vcx, |v, cx| v.select_range(0..0, cx));
+    type_text(&mut o, "x");
+    let after = o.vcx.read(|cx| o.editor.read(cx).ui_work());
+    assert_eq!(after.rope_edit_bytes, before.rope_edit_bytes + 1);
+    assert!(after.lines_measured > before.lines_measured);
 }

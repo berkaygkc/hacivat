@@ -1418,3 +1418,50 @@ read-only preview and the 20–100 MB paste confirmation. `hacivat-text` gains
   never comes (no silent weakening). *Open for Task 18:* where a pasted preview's whole text
   lives (Run as script streams a file; a console has none) and what a console's autosave does
   with it.
+- *Fix round 1 (review: C1, I1–I3, m1–m9; controller rulings R-T11-1, R-T11-2).* These points
+  supersede the paragraphs above where they differ.
+  - **R-T11-1 (amends R-M4b-38): the editor itself never overwrites unsaved text.** The call is
+    `replace_from_disk(text, clean_version, cx)`. It is refused with `ReloadRefused::Edited {
+    version }` when the text is not at the host's clean version: typed text, or a composition's
+    marked text, which is buffer text. The plan's composition test asserted the opposite
+    ("that text is gone"); it is overturned. A composition's text survives, and the host
+    shows its "Changed on disk" bar.
+  - **C1: the version is checked first at the landing.** If a composition opened while the
+    diff ran, or anything else changed the text, the reload is dropped with `Reloaded {
+    version: None }`. A held reload carries its clean version
+    (`AppEdit::ReplaceFromDisk { text, version }`), and the flush drops it when the text
+    moved meanwhile: a composition's commit, or a held paste applied before it. It is held
+    only while a composition or held edits wait at the clean version, and it is applied only
+    when they end without changing the text (`end_composition` keeps the marked text).
+  - **I2: the UI share does not grow with the change.** The new text is built on the
+    background executor: the rope clone with the change applied. The landing swaps it in
+    through `EditorModel::dispatch_prebuilt` / `ImeCore::dispatch_prebuilt`, which is
+    O(sections); a change the checks or filters rewrite falls back to applying in place. The
+    fan-out skips `longest_touched`, because the background pass measured the longest line.
+    The history is cleared before the commit (m4). `EditorView::ui_work()` counts rope bytes
+    edited in place and lines measured on the UI thread. An always-on test,
+    `the_landing_never_edits_or_scans_the_change`, checks that both counts stay at 0 for a
+    2 MB reload changed in the middle and at both ends. The wall-clock gate stays
+    `#[ignore = "perf"]`, now with the both-ends case, and prints a SKIP fact without
+    `HACIVAT_PERF` (m3). `replace_from_disk` takes `impl Into<Arc<str>>`, so a host that
+    hands it an `Arc` does not copy the text on the UI thread.
+  - **R-T11-2: nothing editable above 20 MB enters the editor** (R-M3-49).
+    - For 20–100 MB the answers are Cancel and "Paste as preview".
+    - `PasteAnswer::Paste` pastes only if the document would now be within 20 MB, because it
+      shrank meanwhile; otherwise it is refused, and the toast names 20 MB. The `confirmed`
+      escape is gone.
+    - The size guard measures before building anything: the line count is taken off the UI
+      thread when the paste is prepared, and `measure` works in O(carets). A paste that asks
+      splits no lines on the UI thread (a test counts the splits).
+    - "Paste as preview" builds its pieces and the document on the background executor, and
+      emits only if the editor still takes pastes (m7).
+  - **m1:** `set_text` leaves a preview alone. `reload_preview(text, spec)` is the host's way
+    to replace a preview's text, refused past `preview_bytes`.
+  - **m5:** a caret or selection end inside the one change keeps its offset, clamped into the
+    new bytes and snapped onto a character, instead of jumping to the change's end.
+  - **m6:** `set_preview` discards an open composition (an empty mark) instead of committing
+    it into the file's text.
+  - **m2:** the sizes stay with the app's formatter. They follow the format locale, which
+    follows the region (L15(d)); a tr-TR test expects "42,6 MB". The mock's `nf()` is noted in
+    NOTES §9 as a mock error.
+  - **m8:** the paste question's shot is staged over a console with a script.

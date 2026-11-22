@@ -1,32 +1,35 @@
 //! Reload from disk and the T2 preview tier (HV-SCRIPT-08, -12; UI-EDIT-04 step 9, UI-EDIT-12,
-//! UI-EDIT-23; R-M4b-16, R-M4b-38).
+//! UI-EDIT-23; R-M4b-16, R-M4b-38 as amended by ruling R-T11-1).
 //!
 //! ## m4b-t11-editor
 //!
-//! **Reload** ([`EditorView::replace_from_disk`]): the host read the file again and the tab is
-//! clean (the editor has no notion of "dirty": the host compares versions and never calls it
-//! on a tab with unsaved edits).
+//! **Reload** ([`EditorView::replace_from_disk`]): the host read the file again. It passes the
+//! version it last loaded, reloaded or saved (its clean version); the editor itself refuses
+//! when its text is at any other version (`ReloadRefused::Edited`), so no host can overwrite
+//! unsaved edits through this API (R-T11-1).
 //! - **One change.** The disk text replaces the bytes between the common prefix and the
 //!   common suffix ([`disk_edit`]), as one `Origin::Program` transaction outside the history,
-//!   so carets, selections and anchors map through it (a line added above the caret moves it
-//!   down, at its column); then the undo history is cleared (UI-EDIT-04 step 9). The change
-//!   never starts or ends inside a UTF-8 sequence or between a CR and its LF, in either text.
-//!   The same text again changes nothing (no version, the history kept).
-//! - **Off the UI thread.** The prefix and suffix scan, the slice of new text and the longest
-//!   line run on the background executor; the UI thread clones the rope (O(1)) and applies the
-//!   one change. The answer applies only to the version it was computed for: an edit that
-//!   landed first makes the tab dirty, and a dirty tab never reloads, so nothing is replaced
-//!   (`EditorEvent::Reloaded { version: None }`; the host shows its "Changed on disk" bar). A
-//!   newer reload replaces an older one still running.
-//! - **Composition.** While an IME composition is open (or held app edits wait) the reload is
-//!   held (`ime::AppEdit::ReplaceFromDisk`, like `set_text`) and starts when the composition
-//!   ends, against the text as the composition left it; held reloads coalesce to the newest.
-//!   `Ok(())` means accepted, so the host never retries. A diff that comes back while a
-//!   composition is open is held the same way.
+//!   after the history is cleared (UI-EDIT-04 step 9). Anchors and marks map through it (a line
+//!   added above the caret moves it down, at its column); a caret or selection end inside the
+//!   change keeps its offset, clamped into the new bytes (so a file changed at both ends keeps
+//!   the caret where the user was). The change never starts or ends inside a UTF-8 sequence or
+//!   between a CR and its LF, in either text. The same text again changes nothing (no version,
+//!   the history kept).
+//! - **Off the UI thread.** The prefix and suffix scan, the new text (the rope clone with the
+//!   change applied) and the longest line are the background executor's; the UI thread moves an
+//!   `Arc`, clones the rope (O(1)) and, at the landing, swaps the new text in
+//!   (`EditorModel::dispatch_prebuilt`): its work does not grow with the change (review I2;
+//!   `EditorView::ui_work` counts it).
+//! - **Never over unsaved text (review C1).** The landing checks the version first: anything
+//!   that changed the text since the call (typing, a composition's marked text, a held paste)
+//!   drops the reload (`EditorEvent::Reloaded { version: None }`; the host shows its "Changed on
+//!   disk" bar). Only while the text is still clean, an empty composition or held app edits make
+//!   it wait (`ime::AppEdit::ReplaceFromDisk`, with the version), and the flush drops it if they
+//!   changed the text. A newer reload replaces an older one.
 //! - **Refusals.** A T2 preview is reopened by the host, never replaced
 //!   ([`ReloadRefused::PreviewTier`]); a disk text past T1's 20 MB is refused
-//!   ([`ReloadRefused::TooLarge`]: nothing above 20 MB enters the editor, R-M3-49; the host
-//!   opens such a file as a preview).
+//!   ([`ReloadRefused::TooLarge`]: nothing above 20 MB enters the editor, R-M3-49); a text not at
+//!   the clean version is refused ([`ReloadRefused::Edited`]).
 //! - **The host hears** `EditorEvent::Changed` (from the commit) and then
 //!   `EditorEvent::Reloaded { version }`, the version at which the text is the disk text: its
 //!   new clean version. The editor notifies itself (the commit's fan-out does), so a cached
@@ -37,12 +40,16 @@
 //! It becomes `Tier::Preview` for good: read-only (`set_config` cannot undo it), the T2 banner
 //! with the file's and the preview's sizes (design/m4b-scripts surface 9) whose text is also
 //! the accessible description, the status's tier, and find marked "preview only". The host
-//! hears `TierChanged(Preview)`. A pending paste question and a running reload are dropped.
+//! hears `TierChanged(Preview)`. A pending paste question and a running reload are dropped, and
+//! an open composition is discarded. Its text changes only through
+//! [`EditorView::reload_preview`]: `set_text` leaves a preview alone.
 
 use std::ops::Range;
 use std::sync::Arc;
 
-use hacivat_text::{ChangeSet, Origin, TextBuffer, Transaction, UserEvent};
+use hacivat_text::{
+    ChangeSet, Origin, SelectionRange, SelectionSet, TextBuffer, Transaction, UserEvent,
+};
 use hacivat_ui_core::gpui_surface::Context;
 
 use crate::config::Tier;
@@ -55,8 +62,13 @@ pub enum ReloadRefused {
     /// A T2 preview is reopened by the host, never replaced in place.
     PreviewTier,
     /// The disk text is past T1's 20 MB (`TierLimits::reduced_max_bytes`): the host opens it
-    /// as a preview (R-M3-49).
+    /// as a preview (R-M3-49). For `reload_preview`: past `TierLimits::preview_bytes`.
     TooLarge { bytes: u64 },
+    // ## m4b-t11-editor (fix round 1, R-T11-1)
+    /// The text is at `version`, not the host's clean version: it has unsaved edits (a
+    /// composition's text included), which a reload never overwrites. The host shows its
+    /// "Changed on disk" bar.
+    Edited { version: u64 },
 }
 
 /// A T2 read-only preview (UI-EDIT-23 step 1): the first `shown_bytes` of a file of
@@ -138,12 +150,23 @@ pub fn disk_edit(old: &str, new: &str) -> Option<DiskEdit> {
     })
 }
 
+/// The change a reload makes, built off the UI thread.
+struct Plan {
+    edit: DiskEdit,
+    changes: ChangeSet,
+    /// The editor's text with `changes` applied: swapped in at the landing
+    /// (`EditorModel::dispatch_prebuilt`), so the UI thread never edits the rope.
+    after: TextBuffer,
+}
+
 /// What the background half hands back.
 struct Landed {
-    /// The whole disk text (kept to hold the reload again if a composition opened meanwhile).
+    /// The whole disk text (kept to hold the reload if an empty composition is open).
     text: Arc<str>,
-    /// The change and its new bytes; `None` when the texts are equal.
-    edit: Option<(Range<usize>, Arc<str>)>,
+    /// `None` with `identical`: the texts are equal; `None` without: no change could be built
+    /// (fail closed).
+    plan: Option<Plan>,
+    identical: bool,
     /// The disk text's longest line, in bytes (the tier's long-line rule).
     longest: u64,
 }
@@ -153,14 +176,38 @@ fn longest_line(text: &str) -> u64 {
     text.split(['\n', '\r']).map(str::len).max().unwrap_or(0) as u64
 }
 
-/// The background half: `old` (the editor's text when the reload started) against `text`.
-fn diff(old: &TextBuffer, text: Arc<str>) -> Landed {
+/// The background half: `old` (the editor's text when the reload started) against `text`: the
+/// edit, its change set and the text it makes, and the longest line. O(document), so never on
+/// the UI thread.
+fn diff(old: TextBuffer, text: Arc<str>) -> Landed {
+    let longest = longest_line(&text);
     let current = old.slice(0..old.len_bytes());
-    let edit = disk_edit(&current, &text).map(|e| (e.old, Arc::from(&text[e.new])));
+    let Some(edit) = disk_edit(&current, &text) else {
+        return Landed {
+            text,
+            plan: None,
+            identical: true,
+            longest,
+        };
+    };
+    drop(current);
+    let insert: Arc<str> = Arc::from(&text[edit.new.clone()]);
+    let plan = ChangeSet::from_edits(old.len_bytes(), [(edit.old.clone(), insert)])
+        .ok()
+        .map(|changes| {
+            let mut after = old;
+            changes.apply(&mut after);
+            Plan {
+                edit,
+                changes,
+                after,
+            }
+        });
     Landed {
-        longest: longest_line(&text),
-        edit,
         text,
+        plan,
+        identical: false,
+        longest,
     }
 }
 
@@ -170,7 +217,7 @@ fn start(v: &mut EditorView, text: Arc<str>, cx: &mut Context<EditorView>) {
     let old = v.model.buffer().clone();
     let work = cx
         .background_executor()
-        .spawn(async move { diff(&old, text) });
+        .spawn(async move { diff(old, text) });
     v.reload = Some(cx.spawn(async move |this, cx| {
         let landed = work.await;
         let _ = this.update(cx, |v, cx| {
@@ -180,47 +227,85 @@ fn start(v: &mut EditorView, text: Arc<str>, cx: &mut Context<EditorView>) {
     }));
 }
 
-/// The UI half: applies `landed`, computed at `version`, when it is still current.
+/// Where byte `at` of the old text lands in the new one (m5): before the change it stays,
+/// after it it moves with the change's end, inside it it keeps its offset, clamped into the
+/// new bytes (the model then snaps it onto a character boundary, out of any CRLF), so a caret
+/// in the middle of a file whose both ends changed stays where the user was reading.
+fn map_into(at: usize, e: &DiskEdit) -> usize {
+    if at <= e.old.start {
+        at
+    } else if at >= e.old.end {
+        at - e.old.end + e.new.end
+    } else {
+        at.min(e.new.end)
+    }
+}
+
+/// The UI half: applies `landed`, computed at `version`, only while the text is still that
+/// version. O(sections + carets): the new text was built off the UI thread and is swapped in.
 fn land(v: &mut EditorView, version: u64, landed: Landed, cx: &mut Context<EditorView>) {
     if v.tier.tier == Tier::Preview {
         cx.emit(EditorEvent::Reloaded { version: None });
         return;
     }
-    // A composition opened while the diff ran: held like any app edit, then started again.
-    if ime::defer_while_composing(v, AppEdit::ReplaceFromDisk(landed.text.to_string())) {
-        return;
-    }
+    // ## m4b-t11-editor (fix round 1, C1): the version first. Anything that changed the text
+    // since the call (typing, a composition's marked text, a held paste) made the tab dirty,
+    // and a dirty tab never reloads.
     if v.model.version() != version {
         cx.emit(EditorEvent::Reloaded { version: None });
         return;
     }
-    let Some((range, insert)) = landed.edit else {
-        cx.emit(EditorEvent::Reloaded {
-            version: Some(version),
-        });
+    // The text is the clean one, but a composition (with no text yet) or held edits wait: the
+    // reload waits behind them and is dropped at the flush if they changed the text.
+    if ime::defer_while_composing(
+        v,
+        AppEdit::ReplaceFromDisk {
+            text: landed.text.clone(),
+            version,
+        },
+    ) {
         return;
+    }
+    let plan = match landed.plan {
+        Some(plan) => plan,
+        None => {
+            let version = landed.identical.then_some(version);
+            cx.emit(EditorEvent::Reloaded { version });
+            return;
+        }
     };
-    let len = v.model.buffer().len_bytes();
-    let Ok(changes) = ChangeSet::from_edits(len, [(range, insert)]) else {
-        cx.emit(EditorEvent::Reloaded { version: None });
-        return;
-    };
-    // As `set_text` does: the longest line is the new text's, and the width is measured again.
+    // ## m4b-t11-editor (fix round 1, m4): the history goes first, so the commit has no group
+    // to rebase.
+    v.model.clear_history();
+    // As `set_text` does: the longest line is the new text's (measured off the UI thread, so
+    // the fan-out does not scan the change, I2), and the width is measured again.
     v.longest_line = landed.longest;
+    v.longest_measured = true;
     v.scroll.known_width = 0.0;
+    let sel = v.model.selection();
+    let ranges: Vec<SelectionRange> = sel
+        .ranges()
+        .iter()
+        .map(|r| SelectionRange {
+            anchor: map_into(r.anchor, &plan.edit),
+            head: map_into(r.head, &plan.edit),
+            goal_x: None,
+            assoc: r.assoc,
+        })
+        .collect();
+    let selection = SelectionSet::normalized(ranges, sel.main_index());
     let mut ann = v.annotations(UserEvent::Command("reload_from_disk"), Origin::Program, cx);
-    // Outside the history (the stored groups are rebased, then dropped below).
     ann.add_to_history = false;
-    let committed = v.commit(
+    let committed = v.commit_prebuilt(
         Transaction {
-            changes,
-            // The old selection mapped through the change.
-            selection: None,
+            changes: plan.changes,
+            selection: Some(selection),
             ann,
         },
+        plan.after,
         cx,
     );
-    v.model.clear_history();
+    v.longest_measured = false;
     cx.emit(EditorEvent::Reloaded {
         version: committed.map(|c| c.version),
     });
@@ -228,39 +313,56 @@ fn land(v: &mut EditorView, version: u64, landed: Landed, cx: &mut Context<Edito
 }
 
 impl EditorView {
-    /// Replaces the text with `text`, read from disk again (R-M4b-38; the module docs): one
-    /// change from the common prefix and suffix, computed off the UI thread, carets and
-    /// selections mapped through it, the undo history cleared. Held while an IME composition is
-    /// open and started when it ends (`Ok(())`: accepted). The host hears
+    /// Replaces the text with `text`, read from disk again (R-M4b-38, ruling R-T11-1; the module
+    /// docs), when the text is still the host's clean version `clean_version` (the version
+    /// after its load, reload or save): one change from the common prefix and suffix, built off
+    /// the UI thread, carets and selections mapped through it, the undo history cleared.
+    /// Refused (`Edited`) when the text is at another version, so unsaved edits, a composition's
+    /// text included, are never overwritten. Held while an empty composition or held edits wait,
+    /// and dropped when they change the text. `Ok(())`: accepted; the host hears
     /// `EditorEvent::Reloaded` when it is done.
     pub fn replace_from_disk(
         &mut self,
-        text: &str,
+        text: impl Into<Arc<str>>,
+        clean_version: u64,
         cx: &mut Context<Self>,
     ) -> Result<(), ReloadRefused> {
         if self.tier.tier == Tier::Preview {
             return Err(ReloadRefused::PreviewTier);
         }
+        let text: Arc<str> = text.into();
         let bytes = text.len() as u64;
         if bytes > self.config.tiers.reduced_max_bytes {
             return Err(ReloadRefused::TooLarge { bytes });
         }
+        let version = self.model.version();
+        if version != clean_version {
+            return Err(ReloadRefused::Edited { version });
+        }
         // A newer reload replaces one still running.
         self.reload = None;
-        if ime::defer_while_composing(self, AppEdit::ReplaceFromDisk(text.to_string())) {
+        if ime::defer_while_composing(
+            self,
+            AppEdit::ReplaceFromDisk {
+                text: text.clone(),
+                version,
+            },
+        ) {
             return Ok(());
         }
-        start(self, Arc::from(text), cx);
+        start(self, text, cx);
         Ok(())
     }
 
     /// Shows the text as a T2 preview of a larger file (the module docs): read-only for good,
-    /// the T2 banner and description, the tier in the status, find limited to the preview.
+    /// the T2 banner and description, the tier in the status, find limited to the preview. An
+    /// open composition is discarded, not committed (m6): its text is not the file's.
     pub fn set_preview(&mut self, spec: PreviewSpec, cx: &mut Context<Self>) {
         if self.reload.take().is_some() {
             cx.emit(EditorEvent::Reloaded { version: None });
         }
         self.paste.pending = None;
+        ime::discard_composition(self, cx);
         self.config.read_only = true;
         // The host passes the tier on to the language service when it hears it, as for T1.
         let moved = crate::large_file::enter_preview(&mut self.tier, spec);
@@ -269,6 +371,27 @@ impl EditorView {
         }
         cx.emit(EditorEvent::StatusChanged);
         cx.notify();
+    }
+
+    /// Replaces a preview's text and sizes (the host read the file's first part again): the one
+    /// way to change a preview's text (`set_text` leaves a preview alone, m1). Refused past
+    /// `TierLimits::preview_bytes`; it makes the editor a preview when it was not one.
+    pub fn reload_preview(
+        &mut self,
+        text: &str,
+        spec: PreviewSpec,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ReloadRefused> {
+        let bytes = text.len() as u64;
+        if bytes > self.config.tiers.preview_bytes {
+            return Err(ReloadRefused::TooLarge { bytes });
+        }
+        self.preview_text_allowed = true;
+        self.set_text(text, cx);
+        self.preview_text_allowed = false;
+        self.model.clear_history();
+        self.set_preview(spec, cx);
+        Ok(())
     }
 
     /// The preview this editor shows (`None` unless `set_preview` made it one).
@@ -332,14 +455,18 @@ mod tests {
         line.repeat((2 << 20) / line.len() + 1)
     }
 
-    /// The UI thread's share of a reload of a 2 MB script with one line changed in its middle:
-    /// the call (a rope clone and a spawn) and the apply of the landed diff (one change and its
-    /// fan-out); the diff itself is the background executor's. Under 1 ms (perf-gated: a
-    /// wall-clock check, `HACIVAT_PERF=1`, release build).
+    /// The UI thread's share of reloading a 2 MB script: the call (an `Arc` move, a rope clone
+    /// and a spawn) and the landing (the swap and its fan-out); the diff and the new text are
+    /// the background executor's. Two cases: one line changed in the middle, and the first and
+    /// last bytes changed (one change over the whole file, review I2). Under 1 ms each
+    /// (a wall-clock check: `--ignored`, `HACIVAT_PERF=1`, release build; without the variable
+    /// it says so and checks nothing, review m3). The bound on the work itself is
+    /// `the_landing_never_edits_or_scans_the_change` (always on).
     #[gpui::test]
     #[ignore = "perf"]
     fn reload_ui_share_under_1ms_on_2mb(cx: &mut TestAppContext) {
         if std::env::var_os("HACIVAT_PERF").is_none() {
+            println!("HV-FACT m4b-t11 reload_ui_share=SKIP reason=HACIVAT_PERF_unset");
             return;
         }
         let text = two_mb();
@@ -347,39 +474,40 @@ mod tests {
         vcx.run_until_parked();
         let mid = text.len() / 2;
         let line = text[..mid].rfind('\n').unwrap() + 1;
-        let mut disk = text.clone();
-        disk.replace_range(line..line + 6, "UPDATE");
-        let mut worst = std::time::Duration::ZERO;
-        for round in 0..20 {
-            let disk = if round % 2 == 0 { &disk } else { &text };
-            let t = Instant::now();
-            e.update(vcx, |v, cx| v.replace_from_disk(disk, cx))
-                .unwrap();
-            let call = t.elapsed();
-            // The background half, outside the measure.
-            let (version, landed) = vcx.read(|cx| {
-                let v = e.read(cx);
-                (
-                    v.model.version(),
-                    diff(v.model.buffer(), Arc::from(disk.as_str())),
-                )
-            });
-            e.update(vcx, |v, _| v.reload = None);
-            let t = Instant::now();
-            e.update(vcx, |v, cx| land(v, version, landed, cx));
-            let apply = t.elapsed();
-            vcx.run_until_parked();
-            worst = worst.max(call + apply);
-            assert_eq!(
-                vcx.read(|cx| e.read(cx).snapshot().buffer.len_bytes()),
-                disk.len()
+        let mut middle = text.clone();
+        middle.replace_range(line..line + 6, "UPDATE");
+        let mut ends = text.clone();
+        ends.replace_range(0..6, "UPDATE");
+        let n = ends.len();
+        ends.replace_range(n - 2..n - 1, ")");
+        for (case, disk) in [("middle", middle), ("both_ends", ends)] {
+            let mut worst = std::time::Duration::ZERO;
+            for round in 0..20 {
+                let disk: Arc<str> = Arc::from(if round % 2 == 0 { &disk } else { &text }.as_str());
+                let clean = vcx.read(|cx| e.read(cx).model.version());
+                let t = Instant::now();
+                e.update(vcx, |v, cx| v.replace_from_disk(disk.clone(), clean, cx))
+                    .unwrap();
+                let call = t.elapsed();
+                // The background half, outside the measure.
+                let landed = vcx.read(|cx| diff(e.read(cx).model.buffer().clone(), disk.clone()));
+                e.update(vcx, |v, _| v.reload = None);
+                let t = Instant::now();
+                e.update(vcx, |v, cx| land(v, clean, landed, cx));
+                let apply = t.elapsed();
+                vcx.run_until_parked();
+                worst = worst.max(call + apply);
+                assert_eq!(
+                    vcx.read(|cx| e.read(cx).snapshot().buffer.len_bytes()),
+                    disk.len()
+                );
+            }
+            println!(
+                "HV-FACT m4b-t11 reload_ui_share_2mb case={case} worst_us={}",
+                worst.as_micros()
             );
+            assert!(worst.as_micros() < 1_000, "{case}: {worst:?}");
         }
-        println!(
-            "HV-FACT m4b-t11 reload_ui_share_2mb_worst_us={}",
-            worst.as_micros()
-        );
-        assert!(worst.as_micros() < 1_000, "{worst:?}");
     }
 
     #[test]
@@ -409,5 +537,19 @@ mod tests {
         b.replace_range(300..301, "y");
         assert_eq!(common_prefix(a.as_bytes(), b.as_bytes()), 300);
         assert_eq!(common_suffix(a.as_bytes(), b.as_bytes()), 299);
+    }
+
+    #[test]
+    fn a_position_inside_the_change_keeps_its_offset() {
+        let e = DiskEdit {
+            old: 10..100,
+            new: 10..50,
+        };
+        assert_eq!(map_into(5, &e), 5);
+        assert_eq!(map_into(10, &e), 10);
+        assert_eq!(map_into(30, &e), 30);
+        assert_eq!(map_into(70, &e), 50, "clamped into the new bytes");
+        assert_eq!(map_into(100, &e), 50);
+        assert_eq!(map_into(120, &e), 70);
     }
 }

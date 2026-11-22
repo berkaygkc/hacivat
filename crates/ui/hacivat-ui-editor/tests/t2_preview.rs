@@ -268,13 +268,61 @@ fn a_preview_stays_a_preview(cx: &mut TestAppContext) {
     assert!(o.vcx.read(|cx| o.editor.read(cx).config().read_only));
     o.vcx.simulate_input("x");
     assert_eq!(text(&o), "SELECT 1;\n");
+    // ## fix round 1 (review m1): `set_text` leaves a preview alone (a restore path cannot push
+    // a whole large file into it); the host's `reload_preview` is the one way in.
     o.editor
         .update(o.vcx, |v, cx| v.set_text("SELECT 2;\n", cx));
     o.vcx.run_until_parked();
+    assert_eq!(text(&o), "SELECT 1;\n");
+    let spec = PreviewSpec {
+        shown_bytes: 10,
+        total_bytes: 31 * MB,
+    };
+    o.editor
+        .update(o.vcx, |v, cx| v.reload_preview("SELECT 3;\n", spec, cx))
+        .unwrap();
+    o.vcx.run_until_parked();
+    assert_eq!(text(&o), "SELECT 3;\n");
+    assert_eq!(o.vcx.read(|cx| o.editor.read(cx).preview()), Some(spec));
     assert_eq!(
         o.vcx.read(|cx| o.editor.read(cx).status().tier),
         Tier::Preview
     );
+    assert!(o.vcx.read(|cx| o.editor.read(cx).config().read_only));
+    // A text past the preview's size is refused.
+    let big = "x".repeat(2_621_441);
+    assert!(
+        o.editor
+            .update(o.vcx, |v, cx| v.reload_preview(&big, spec, cx))
+            .is_err()
+    );
+    assert_eq!(text(&o), "SELECT 3;\n");
+}
+
+/// Review m6: a composition open when the editor becomes a preview is discarded, never
+/// committed into the file's text; a preview takes no new composition.
+#[gpui::test]
+fn a_preview_discards_a_composition_and_takes_none(cx: &mut TestAppContext) {
+    let mut o = open(cx, "SELECT 1;\n");
+    move_to(&mut o, 9);
+    o.editor.update_in(o.vcx, |v, window, cx| {
+        v.replace_and_mark_text_in_range(None, "か", None, window, cx);
+    });
+    o.vcx.run_until_parked();
+    assert_eq!(text(&o), "SELECT 1;か\n");
+    preview(&mut o, 10, 30 * MB);
+    assert_eq!(
+        text(&o),
+        "SELECT 1;\n",
+        "the marked text is gone, not committed"
+    );
+    assert!(!o.vcx.read(|cx| o.editor.read(cx).status().composing));
+    o.editor.update_in(o.vcx, |v, window, cx| {
+        v.replace_and_mark_text_in_range(None, "な", None, window, cx);
+    });
+    o.vcx.run_until_parked();
+    assert_eq!(text(&o), "SELECT 1;\n");
+    assert!(!o.vcx.read(|cx| o.editor.read(cx).status().composing));
 }
 
 /// The banner (NOTES §9): drawn above the text with its own ids, never the T1 ones.
@@ -328,7 +376,7 @@ fn the_preview_cut_ends_at_a_line_break() {
 
 /// A paste that makes the document between 20 and 100 MB asks the host first and changes
 /// nothing until the answer; Cancel drops it, Paste as preview hands the host the document
-/// as the paste would make it (the editor's own text stays), and Paste pastes.
+/// as the paste would make it (the editor's own text stays), and Paste is refused past 20 MB.
 #[gpui::test]
 fn paste_between_20_and_100_mb_asks(cx: &mut TestAppContext) {
     let mut o = open_with(cx, "SELECT 1;\n", asking());
@@ -360,20 +408,21 @@ fn paste_between_20_and_100_mb_asks(cx: &mut TestAppContext) {
     assert_eq!(docs[0].len() as u64, total);
     assert!(docs[0].starts_with("SELECT 1;\naaaa") && docs[0].ends_with("aaaa"));
     assert_eq!(text(&o), "SELECT 1;\n", "the editor's own text stays");
-    // Paste: the host chose to edit it in reduced mode.
+    // ## fix round 1 (ruling R-T11-2): "Paste" (not offered by the dialog) puts no editable
+    // text past 20 MB into the editor: refused, the toast naming 20 MB.
     paste(&mut o, big);
     o.editor
         .update(o.vcx, |v, cx| v.confirm_paste(PasteAnswer::Paste, cx));
     o.vcx.run_until_parked();
-    assert_eq!(text(&o).len() as u64, total);
-    assert_eq!(
-        o.vcx.read(|cx| o.editor.read(cx).status().tier),
-        Tier::Reduced
-    );
+    assert_eq!(refused(&o), [21 << 20]);
+    assert_eq!(text(&o), "SELECT 1;\n");
+    assert_eq!(o.vcx.read(|cx| o.editor.read(cx).status().tier), Tier::Full);
     // An answer with nothing waiting does nothing.
     o.editor
         .update(o.vcx, |v, cx| v.confirm_paste(PasteAnswer::Paste, cx));
-    assert_eq!(text(&o).len() as u64, total);
+    o.vcx.run_until_parked();
+    assert_eq!(text(&o), "SELECT 1;\n");
+    assert_eq!(refused(&o).len(), 1);
 }
 
 /// Past 100 MB a paste is refused even when the host would ask, with the refusal toast.
