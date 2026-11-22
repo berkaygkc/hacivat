@@ -200,7 +200,9 @@ pub(crate) fn install(cx: &mut App) {
     .detach();
 }
 
-/// The recovery copies a quit's "Don't save" is removing (fix round 2, m-fr1-5).
+/// The recovery copies a quit's "Don't save" is removing (fix round 2, m-fr1-5). Its futures
+/// are `!Send`: only `unsaved_prompt::quit_guard` pushes to it, when the quit goes on, and the
+/// quit hook in [`install`] drains it (fix round 3, m-fr2-3); nothing else may.
 #[derive(Default)]
 struct QuitDiscards(Vec<std::pin::Pin<Box<dyn Future<Output = ()>>>>);
 
@@ -861,6 +863,11 @@ impl ScriptDoc {
             base: self.stamp,
             secret_suspected: false,
             damaged: false,
+            // ## m4b-t14-tabs fix round 3 (m-fr2-1): the SQLite file the tab is bound to.
+            db_file: sqlite_file(self.id, cx).map(|f| hacivat_scripts::recovery::DbFile {
+                path: f.path,
+                dev_ino: f.id,
+            }),
         };
         let old = self
             .recovered
@@ -1557,10 +1564,38 @@ struct RestoredAtLaunch(std::collections::HashSet<u64>);
 impl Global for RestoredAtLaunch {}
 
 /// Marks handle `id` as restored at launch (the layout, launch recovery): its first read waits
-/// for the library's first listing.
+/// for the library's first listing, and its first Run may follow a remounted SQLite file
+/// (fix round 3, R-T14-5).
 pub(crate) fn mark_restored(id: ScriptTabId, cx: &mut App) {
     cx.default_global::<RestoredAtLaunch>().0.insert(id.0);
+    cx.default_global::<FirstRunAfterRestore>().0.insert(id.0);
 }
+
+// ## m4b-t14-tabs fix round 3 (m-fr2-2, R-T14-5)
+/// The handles restored at launch that have not been run since.
+#[derive(Default)]
+struct FirstRunAfterRestore(std::collections::HashSet<u64>);
+
+impl Global for FirstRunAfterRestore {}
+
+/// Whether this is handle `id`'s first Run check since it was restored at launch (taken).
+fn take_first_run(id: ScriptTabId, cx: &mut App) -> bool {
+    cx.has_global::<FirstRunAfterRestore>()
+        && cx.default_global::<FirstRunAfterRestore>().0.remove(&id.0)
+}
+
+/// Marks handle `id` as restored at launch (tests).
+#[cfg(feature = "test-support")]
+pub fn mark_restored_for_tests(id: ScriptTabId, cx: &mut App) {
+    mark_restored(id, cx);
+}
+
+/// Records `file` as the SQLite file handle `id` was opened on (tests: a remount).
+#[cfg(feature = "test-support")]
+pub fn set_sqlite_file_for_tests(id: ScriptTabId, file: SqliteFile, cx: &mut App) {
+    set_sqlite_file(id, file, cx);
+}
+// ## m4b-t14-tabs fix round 3
 
 /// Whether handle `id` was restored at launch and has not read yet (taken).
 fn take_restored(id: ScriptTabId, cx: &mut App) -> bool {
@@ -1753,10 +1788,26 @@ impl ScriptDoc {
             // ## m4b-t14-tabs fix round 2 (m-fr1-2): a tab without its file takes the profile's
             // file now (as a fresh open would); after a remount (same path and inode, another
             // device number) the tab follows its file.
+            //
+            // ## m4b-t14-tabs fix round 3 (m-fr2-2, R-T14-5): a remount is followed only on the
+            // first Run after a launch restore, and said; mid-session a device change refuses
+            // (FAT/exFAT inodes are synthesized, so another stick can match; ADR 0009).
             let stored = sqlite_file(self.id, cx);
+            let first_after_restore = take_first_run(self.id, cx);
             let adopted = match (&stored, &found.profile) {
                 (None, Some(now)) => Some(now.clone()),
-                (Some(was), Some(now)) if remounted(was, now) => Some(now.clone()),
+                (Some(was), Some(now)) if first_after_restore && remounted(was, now) => {
+                    let path = display_name(&now.path);
+                    toast(
+                        msg(
+                            cx,
+                            "hv-scripts-sqlite-remounted",
+                            vec![("path", ArgValue::Text(path))],
+                        ),
+                        cx,
+                    );
+                    Some(now.clone())
+                }
                 _ => None,
             };
             if let Some(file) = adopted.clone() {

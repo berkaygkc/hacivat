@@ -5118,3 +5118,8 @@ hv-scripts-open-under-chooser = Open it from the Scripts node of the connection 
 hv-scripts-unsaved-subtitle = { $env } · { $conn } · { $database }
 # Surface 6b (Unsaved changes): the subtitle of a tab with no connection.
 hv-scripts-unsaved-subtitle-unbound = No connection
+# m4b-t14-tabs fix round 3 (R-T14-5): the first Run after a launch restore follows a SQLite
+# file that is now on another volume (same path and inode).
+# Variables:
+#   $path (String) - the database file's path (data), e.g. "/Volumes/data/orders.db".
+hv-scripts-sqlite-remounted = The database file is on a different volume now; running on { $path }.

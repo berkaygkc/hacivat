@@ -74,7 +74,9 @@ pub struct RecoveryKey {
 }
 
 /// What a copy records besides its text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+// ## m4b-t14-tabs (named exception, fix round 3 m-fr2-1): no longer `Copy` (it may carry the
+// SQLite file's path).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CopyMeta {
     /// How the file is saved (encoding, BOM, dominant line ending).
     pub meta: FileMeta,
@@ -85,6 +87,18 @@ pub struct CopyMeta {
     /// The text of a save that failed and could not restore the file
     /// (`SaveError::Damaged`): the file on disk is not what it was.
     pub damaged: bool,
+    /// ## m4b-t14-tabs (named exception, fix round 3 m-fr2-1): the database file a SQLite
+    /// script tab was bound to when the copy was written, so a copy recovered after the profile
+    /// was repointed is never silently run on the new file.
+    pub db_file: Option<DbFile>,
+}
+
+/// A database file as a SQLite script tab is bound to it: its canonical path and, where the
+/// platform has them, its device and inode numbers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DbFile {
+    pub path: String,
+    pub dev_ino: Option<(u64, u64)>,
 }
 
 /// A recovery copy offered back. Its `Debug` never shows the text.
@@ -591,6 +605,14 @@ fn read_one(dir: &Path, lib: LibraryId, meta_path: &Path) -> Option<RecoveryEntr
         },
         secret_suspected: sidecar.secret_suspected,
         damaged: sidecar.damaged,
+        // ## m4b-t14-tabs (fix round 3): an unreadable identity keeps the path alone.
+        db_file: sidecar.db_file_path.map(|path| DbFile {
+            path,
+            dev_ino: sidecar.db_file_id.as_deref().and_then(|t| {
+                let (d, i) = t.split_once(':')?;
+                Some((d.parse().ok()?, i.parse().ok()?))
+            }),
+        }),
     };
     Some(RecoveryEntry {
         key,
@@ -627,6 +649,11 @@ struct Sidecar {
     saved_at_nanos: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base: Option<BaseStamp>,
+    // ## m4b-t14-tabs (named exception, fix round 3 m-fr2-1): lenient, absent before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_file_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -676,6 +703,12 @@ impl Sidecar {
                     hash: format!("{:032x}", b.hash),
                 })
             }),
+            db_file_path: copy.db_file.as_ref().map(|f| f.path.clone()),
+            db_file_id: copy
+                .db_file
+                .as_ref()
+                .and_then(|f| f.dev_ino)
+                .map(|(d, i)| format!("{d}:{i}")),
         }
     }
 }

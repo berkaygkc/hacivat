@@ -1423,3 +1423,17 @@ Task 14 fills `scripts::{tabs,open,save,disk_bars,restore,unsaved_prompt}` and t
 - **m-fr1-6:** `open_script` always answers `None` for SQLite, because its tab opens once the file identity is read. Task 15 must find the tab by its binding (`tabs::doc_of_script`), never through this return value. This is documented on `open_script`.
 - **m-fr1-7: only restored tabs wait.** The bounded "listed" wait runs only for a handle restored at launch, from the layout or from launch recovery (`tabs::mark_restored`). A tab opened from a listed row reads at once.
 - **m-fr1-8:** the shot-harness flake (`marks-awaiting`, `fold-failed`) is carried to T21.
+
+### Fix round 3 (re-review fr2 minors: m-fr2-1 to m-fr2-3; ruling R-T14-5)
+
+- **m-fr2-2, R-T14-5: a remount is followed only on the first Run after a launch restore.** "Remount" means the same canonical path and inode, but another device number.
+  - On a tab restored at launch (from the layout or from launch recovery), the first Run may follow the remounted file. It shows "The database file is on a different volume now; running on <path>." and records the file again.
+  - On any other Run, a device change refuses like any other identity change ("Run refused"), until the tab is reopened.
+  - **Caveat 1, FAT and exFAT:** these file systems have no stable inode. The OS synthesizes the number from the file's directory position, so two different sticks with the same layout can match on path and inode. An APFS clone also keeps its inode number.
+  - **Residual:** a swapped volume at the same mount path can therefore be followed on that one first Run, but never mid-session. The notice names the path, so the user can see it.
+  - **Caveat 2, Windows:** it compares paths only, as recorded in fix round 1.
+- **m-fr2-1: a recovery copy records the SQLite file.** The copy's sidecar now stores the bound SQLite file's canonical path and `dev:ino` (`db_file_path`, `db_file_id`). Both fields are lenient: absent in older copies and for other engines. To carry them, `CopyMeta` gained `db_file` and is no longer `Copy`; this is a named exception in `hacivat-scripts`.
+  - When launch recovery opens a SQLite tab that has no file of its own, the tab takes the copy's file.
+  - If the profile was repointed between the crash and the relaunch, Run refuses with the "Run refused" notice naming both files; it never adopts the new file silently.
+  - A copy written before this change still takes the profile's file at the first Run (fix round 2's rule).
+- **m-fr2-3:** a comment on `QuitDiscards` now says that only the quit guard pushes to it (when the quit goes on) and only the quit hook drains it. Its futures are `!Send`.

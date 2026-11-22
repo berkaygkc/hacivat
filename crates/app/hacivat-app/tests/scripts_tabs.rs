@@ -2167,6 +2167,96 @@ fn sqlite_tab_without_its_file_takes_the_profiles_file_at_run(cx: &mut TestAppCo
 }
 // ## m4b-t14-tabs fix round 2
 
+// ## m4b-t14-tabs fix round 3
+
+/// The tab's SQLite file as if its volume were mounted again (same path and inode, another
+/// device number).
+fn on_another_volume(r: &Rig, tab: TabId) -> tabs::SqliteFile {
+    let id = r.spec_id(tab);
+    let mut file = r.vcx.cx.read(|cx| tabs::sqlite_file(id, cx)).unwrap();
+    if let Some((dev, ino)) = file.id {
+        file.id = Some((dev.wrapping_add(1), ino));
+    }
+    file
+}
+
+/// m-fr2-2 (R-T14-5): mid-session, a device change refuses; on the first Run after a launch
+/// restore the tab follows its remounted file and says so.
+#[gpui::test]
+fn sqlite_remount_is_followed_only_on_the_first_run_after_a_restore(cx: &mut TestAppContext) {
+    let dir = temp_root();
+    let first = dir.join("orders.db");
+    std::fs::write(&first, b"").unwrap();
+    let (r, tab) = sqlite_rig(cx, &first, &first);
+    let id = r.spec_id(tab);
+    let real = r.vcx.cx.read(|cx| tabs::sqlite_file(id, cx)).unwrap();
+    if real.id.is_none() {
+        return; // No device numbers on this platform: nothing to remount.
+    }
+    let moved = on_another_volume(&r, tab);
+    r.vcx
+        .cx
+        .update(|cx| tabs::set_sqlite_file_for_tests(id, moved.clone(), cx));
+    r.run(tab);
+    wait_until(r.vcx, "mid-session: refused", |_| {
+        r.notices(tab).iter().any(|n| {
+            matches!(n, Notice::RunRefused(RunRefused::Edited { bound, current })
+                if bound == "orders.db" && current == "orders.db")
+        })
+    });
+    assert!(queries(&r.fakes[0]).is_empty(), "nothing was sent");
+    // The first Run after a launch restore follows it, with the notice.
+    r.vcx.cx.update(|cx| {
+        tabs::set_sqlite_file_for_tests(id, moved, cx);
+        tabs::mark_restored_for_tests(id, cx);
+    });
+    r.run(tab);
+    wait_until(r.vcx, "it ran on the remounted file", |_| {
+        queries(&r.fakes[0]) == ["SELECT 1"]
+    });
+    let said = format!(
+        "The database file is on a different volume now; running on {}.",
+        real.path
+    );
+    assert!(
+        toast_texts(r.vcx).contains(&said),
+        "{:?}",
+        toast_texts(r.vcx)
+    );
+    assert_eq!(r.vcx.cx.read(|cx| tabs::sqlite_file(id, cx)), Some(real));
+}
+
+/// m-fr2-1: a SQLite tab's recovery copy records the file it is bound to.
+#[gpui::test]
+fn a_sqlite_tabs_recovery_copy_records_its_file(cx: &mut TestAppContext) {
+    let dir = temp_root();
+    let first = dir.join("orders.db");
+    std::fs::write(&first, b"").unwrap();
+    let (r, tab) = sqlite_rig(cx, &first, &first);
+    r.type_text(tab, " -- unsaved");
+    r.vcx
+        .executor()
+        .advance_clock(tabs::RECOVERY_IDLE + Duration::from_millis(10));
+    let copies = paths(r.vcx)
+        .script_recovery_dir(&r.lib.to_string())
+        .unwrap();
+    let canonical = std::fs::canonicalize(&first).unwrap();
+    let recorded = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x != "sql"))
+                    .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                    .any(|t| {
+                        t.contains("db_file_path") && t.contains(&*canonical.to_string_lossy())
+                    })
+            })
+            .unwrap_or(false)
+    };
+    wait_until(r.vcx, "the copy names the file", |_| recorded(&copies));
+}
+// ## m4b-t14-tabs fix round 3
+
 /// I3 (R-T14-3): a MySQL script tab never shares a session; a profile that cannot give it one
 /// of its own refuses it at open.
 #[gpui::test]

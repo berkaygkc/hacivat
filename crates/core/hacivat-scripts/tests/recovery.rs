@@ -152,6 +152,11 @@ fn recovery_round_trip_and_discard() {
         base: Some(stamp()),
         secret_suspected: true,
         damaged: false,
+        // ## m4b-t14-tabs (fix round 3 m-fr2-1): a SQLite tab's file round-trips.
+        db_file: Some(hacivat_scripts::recovery::DbFile {
+            path: "/data/orders.db".into(),
+            dev_ino: Some((16_777_232, 4_242)),
+        }),
     };
     store(&paths, &crashed, &key("a.sql"), "SELECT 'ğüş';\r\n", &tr).unwrap();
     store(&paths, &crashed, &key("@dev/b.md"), "notes", &plain()).unwrap();
