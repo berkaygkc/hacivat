@@ -201,6 +201,20 @@ impl ImeCore {
         m.dispatch(tr)
     }
 
+    // ## m4b-t11-editor (fix round 1, I2; named item)
+    /// [`ImeCore::dispatch`] with a text built elsewhere
+    /// ([`EditorModel::dispatch_prebuilt`]): a reload from disk swaps it in.
+    pub fn dispatch_prebuilt(
+        &mut self,
+        m: &mut EditorModel,
+        tr: Transaction,
+        after: crate::TextBuffer,
+    ) -> Result<Committed, Veto> {
+        self.sync(m);
+        self.end(m);
+        m.dispatch_prebuilt(tr, after)
+    }
+
     /// The text of the UTF-16 range `r16`, snapped outward and clamped ([`utf16_to_bytes`]);
     /// `adjusted` gets the UTF-16 range actually returned.
     pub fn text_for_range(

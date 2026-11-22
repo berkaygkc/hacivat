@@ -313,12 +313,24 @@ fn every_m4b_title_id_exists_in_en_and_tr() {
             "{id}"
         );
     }
-    for id in message_ids_in(EN_HUI) {
-        assert!(
-            !id.starts_with("hui-editor-t2-") && !id.starts_with("hui-editor-paste-confirm-"),
-            "{id} is Task 11's"
-        );
-    }
+    // ## m4b-t11-editor (named exception): Task 11 added them; they live in its own block only,
+    // in English and Turkish alike.
+    let t11 = |ftl: &str| -> (Vec<String>, Vec<String>) {
+        let (before, after) = ftl
+            .split_once("\n## m4b-t11-editor\n")
+            .expect("Task 11's hui.ftl block");
+        let block = after.split("\n## ").next().unwrap_or(after);
+        (message_ids_in(before), message_ids_in(block))
+    };
+    let is_t11 = |id: &String| {
+        id.starts_with("hui-editor-t2-") || id.starts_with("hui-editor-paste-confirm-")
+    };
+    let (en_before, en_t11) = t11(EN_HUI);
+    let (tr_before, tr_t11) = t11(include_str!("../../../../locales/tr/hui.ftl"));
+    assert!(!en_before.iter().chain(&tr_before).any(is_t11));
+    assert_eq!(en_t11.len(), 6);
+    assert!(en_t11.iter().all(is_t11), "{en_t11:?}");
+    assert_eq!(en_t11, tr_t11);
     // Every M4b command's title is in the block.
     for (id, ..) in M4B_ROWS {
         let title = format!("hv-cmd-{}", id.replace(['.', '_'], "-"));

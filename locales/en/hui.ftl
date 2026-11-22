@@ -159,3 +159,25 @@ hui-grid-selection-summary = { $cells ->
     }
 # The grid's accessible description while the result may have more rows than were fetched.
 hui-grid-a11y-more-rows = More rows are available
+
+## m4b-t11-editor
+
+# The first line of the notice above a T2 preview: a file over 20 MB opens read-only (design/m4b-scripts surface 9).
+# Variables:
+#   $size (String) - the whole file's size (an hui-editor-t1-size message), e.g. "148.0 MB".
+hui-editor-t2-title = Read-only preview: this file is { $size }.
+# The second line of the T2 preview's notice.
+# Variables:
+#   $preview (String) - how much of the file the editor shows (an hui-editor-t1-size message), e.g. "2.5 MB".
+hui-editor-t2-body = The editor shows its first { $preview }. Run as script sends the whole file.
+# Title of the question before a paste that would make the document 20–100 MB.
+# Variables:
+#   $size (String) - the pasted text's size (an hui-editor-t1-size message), e.g. "42.6 MB".
+hui-editor-paste-confirm-title = Paste { $size }?
+# Variables:
+#   $total (String) - the document's size after the paste (an hui-editor-t1-size message), e.g. "61.0 MB".
+hui-editor-paste-confirm-body = That makes this document { $total }, too large to edit. Paste it as a read-only preview, or cancel.
+# Button of the paste question: paste, and show the result as a read-only preview.
+hui-editor-paste-confirm-preview = Paste as preview
+# Button of the paste question: paste nothing (the initial focus; Escape answers it).
+hui-editor-paste-confirm-cancel = Cancel
