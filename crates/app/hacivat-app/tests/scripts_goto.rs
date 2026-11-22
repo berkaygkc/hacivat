@@ -120,9 +120,24 @@ impl Rig {
 
     /// [`Rig::library`], with the library's folder.
     fn library_at(&self, name: &str, files: &[&str]) -> (LibraryId, PathBuf) {
+        self.library_with(name, files, None)
+    }
+
+    /// [`Rig::library_at`], with `.hacivat/workspace.toml` holding `manifest` (fix round 1: the
+    /// reviewer's alias probes).
+    fn library_with(
+        &self,
+        name: &str,
+        files: &[&str],
+        manifest: Option<&str>,
+    ) -> (LibraryId, PathBuf) {
         let dir = temp_root().join(name);
         std::fs::create_dir_all(&dir).unwrap();
         write_files(&dir, files);
+        if let Some(text) = manifest {
+            std::fs::create_dir_all(dir.join(".hacivat")).unwrap();
+            std::fs::write(dir.join(".hacivat/workspace.toml"), text).unwrap();
+        }
         let dir = std::fs::canonicalize(&dir).unwrap();
         let svc = self.svc.clone();
         let root = dir.clone();
@@ -291,6 +306,17 @@ fn strip(s: &str) -> String {
 
 /// The tree row of file `label` under `profile`'s Scripts node of database `db`.
 fn file_row(vcx: &VisualTestContext, profile: ProfileId, db: &str, label: &str) -> TreeKey {
+    file_row_under(vcx, profile, adapter::database_key(profile, db), label)
+}
+
+/// The tree row of file `label` under the Scripts node below `parent` (a database row, or a
+/// MySQL schema row) of `profile`.
+fn file_row_under(
+    vcx: &VisualTestContext,
+    profile: ProfileId,
+    parent: TreeKey,
+    label: &str,
+) -> TreeKey {
     let set_expanded = |key: TreeKey| {
         vcx.cx.update(|cx| {
             let tree = conn_explorer::tree(cx).expect("the tree");
@@ -298,7 +324,6 @@ fn file_row(vcx: &VisualTestContext, profile: ProfileId, db: &str, label: &str) 
         });
         vcx.run_until_parked();
     };
-    let parent = adapter::database_key(profile, db);
     set_expanded(adapter::profile_key(profile));
     set_expanded(parent);
     // The rows below `key` (its subtree), as shown.
@@ -1169,5 +1194,287 @@ fn a_sqlite_file_that_cannot_be_read_opens_nothing_and_says_why(cx: &mut TestApp
     });
     assert!(!is_open(r.vcx), "the layer closed");
     assert_eq!(tab_count(r.vcx), before, "no tab");
+    r.finish();
+}
+
+// ## m4b-t15-goto fix round 1: the review's probes (H1, H2) and minors.
+
+/// MySQL profile `name` on database `db`.
+fn mysql(name: &str, env: Option<EnvTag>, db: &str) -> Profile {
+    let mut p = prof(name, env, db);
+    p.engine = DbmsKind::MySql;
+    p
+}
+
+fn mysql_catalog(schemas: &[&str]) -> Arc<CatalogSnapshot> {
+    catalog(
+        DbmsKind::MySql,
+        schemas
+            .iter()
+            .map(|db| {
+                schema(
+                    DbmsKind::MySql,
+                    &[db],
+                    false,
+                    vec![table("t", None, &[("id", "int")])],
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Rewrites the library's manifest and waits until the snapshot reads `aliases` from it.
+fn rewrite_manifest(r: &Rig, root: &Path, text: &str, aliases: usize) {
+    std::fs::write(root.join(".hacivat/workspace.toml"), text).unwrap();
+    let batch = vec![hacivat_scripts::RawHint::Path(
+        root.join(".hacivat/workspace.toml"),
+    )];
+    assert!(r.fake.emit(root, batch), "the library is watched");
+    let svc = r.svc.clone();
+    poll_until("the snapshot reads the new manifest", || {
+        svc.snapshot()
+            .libraries
+            .first()
+            .is_some_and(|l| l.aliases.len() == aliases)
+    });
+}
+
+/// H2 (C1, R-T15-1): "Open under another connection…" from a MySQL production tab on `api`,
+/// whose library is also bound to `kampanya` through an alias, never offers `api-prod ·
+/// kampanya` (the connection it starts from, every database of it).
+#[gpui::test]
+fn open_under_another_from_a_mysql_tab_never_offers_its_own_connection(cx: &mut TestAppContext) {
+    let r = rig(
+        cx,
+        vec![
+            mysql("api-prod", Some(EnvTag::Production), "api"),
+            mysql("api-staging", Some(EnvTag::Staging), "api"),
+        ],
+    );
+    let (prod, staging) = (
+        profile_id(r.vcx, "api-prod"),
+        profile_id(r.vcx, "api-staging"),
+    );
+    show(r.vcx, prod, mysql_catalog(&["api", "kampanya"]));
+    let (lib, _) = r.library_with(
+        "api",
+        &["a.sql"],
+        Some("format = 1\ndatabase = \"api\"\naliases = [\"kampanya\"]\n"),
+    );
+    // Both databases of api-prod list the file.
+    let all = r.vcx.cx.read(|cx| {
+        hacivat_app::scripts::chooser::candidates(lib, &RelPath::parse("a.sql").unwrap(), None, cx)
+    });
+    assert!(
+        all.iter()
+            .any(|c| c.profile == prod && c.database.as_str() == "kampanya"),
+        "the fixture binds kampanya too: {all:?}"
+    );
+    r.open(lib, "a.sql", Some(prod), "api");
+    let spec = active_spec(r.vcx).unwrap().0;
+    r.vcx.cx.update(|cx| open_under_another(&spec, cx));
+    let rows = chooser(r.vcx).expect("the chooser");
+    assert_eq!(
+        rows.0,
+        [("api-staging".to_string(), "api".to_string())],
+        "no database of api-prod is offered"
+    );
+    assert_eq!(active_name(&rows), Some("api-staging"));
+    // The notice's button (T14's `other_places`) follows the same rule.
+    let others = r
+        .vcx
+        .cx
+        .read(|cx| hacivat_app::scripts::open::other_places(&spec, cx));
+    assert_eq!(others, [(staging, DatabaseName::new("api"))]);
+    press_key(r.vcx, "escape");
+    r.finish();
+}
+
+/// C1 from the tree: the row's whole connection is left out, and the menu item is disabled when
+/// only another database of that connection shows the file.
+#[gpui::test]
+fn tree_open_under_never_offers_another_database_of_the_rows_connection(cx: &mut TestAppContext) {
+    let r = rig(cx, vec![mysql("api-prod", Some(EnvTag::Production), "api")]);
+    let prod = profile_id(r.vcx, "api-prod");
+    show(r.vcx, prod, mysql_catalog(&["api", "kampanya"]));
+    r.library_with(
+        "api",
+        &["a.sql"],
+        Some("format = 1\ndatabase = \"api\"\naliases = [\"kampanya\"]\n"),
+    );
+    let parent = adapter::namespace_key(prod, &hacivat_meta::NsKey::schema(["api"]));
+    let row = file_row_under(r.vcx, prod, parent, "a.sql");
+    in_window(r.vcx, conn_explorer::focus_list);
+    put_cursor(r.vcx, row);
+    let menu = r
+        .vcx
+        .cx
+        .read(|cx| hacivat_app::explorer::node_menu(row, cx))
+        .expect("the row's menu");
+    let item = menu
+        .iter()
+        .find(|i| i.action == "scripts.open_under")
+        .expect("Open under another connection…");
+    assert!(item.disabled, "only api-prod (kampanya) shows it: disabled");
+    assert!(!run(r.vcx, "scripts.open_under"), "the command is disabled");
+    assert!(!is_open(r.vcx));
+    r.finish();
+}
+
+/// The H1 fixture: prod (`orders`) and staging (`orders_s`, bound through an alias); a prod tab
+/// active; the chooser for a.sql with the user moved onto staging.
+fn h1_setup(cx: &mut TestAppContext) -> (Rig, PathBuf, ProfileId, usize) {
+    let r = rig(
+        cx,
+        vec![
+            prof("orders-prod", Some(EnvTag::Production), "orders"),
+            prof("orders-staging", Some(EnvTag::Staging), "orders_s"),
+        ],
+    );
+    let prod = profile_id(r.vcx, "orders-prod");
+    let (lib, root) = r.library_with(
+        "orders",
+        &["a.sql", "b.sql"],
+        Some("format = 1\ndatabase = \"orders\"\naliases = [\"orders_s\"]\n"),
+    );
+    r.open(lib, "b.sql", Some(prod), "orders");
+    goto_query(r.vcx, "a.sql", "a.sql · orders");
+    press_key(r.vcx, "enter");
+    let rows = chooser(r.vcx).expect("the chooser");
+    assert_eq!(names(&rows), ["orders-prod", "orders-staging"]);
+    assert_eq!(active_name(&rows), Some("orders-prod"), "the active tab's");
+    press_key(r.vcx, "down");
+    assert_eq!(
+        active_name(&chooser(r.vcx).unwrap()),
+        Some("orders-staging")
+    );
+    let before = tab_count(r.vcx);
+    // The alias goes away on disk (a pull, a teammate's edit); the event has not reached the
+    // layer yet.
+    rewrite_manifest(
+        &r,
+        &root,
+        "format = 1\ndatabase = \"orders\"\naliases = []\n",
+        0,
+    );
+    (r, root, prod, before)
+}
+
+/// H1 (I1, R-T15-2): Enter opens only the highlighted row, and only if it survived the re-check
+/// unchanged; here staging was dropped, so nothing opens (never the focused production).
+#[gpui::test]
+fn enter_never_opens_a_row_the_user_did_not_highlight(cx: &mut TestAppContext) {
+    let (r, _root, prod, before) = h1_setup(cx);
+    in_window(r.vcx, |window, cx| {
+        window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), cx);
+    });
+    r.vcx.run_until_parked();
+    assert_eq!(tab_count(r.vcx), before, "nothing opened");
+    assert!(is_open(r.vcx), "the chooser stays, redrawn");
+    let rows = chooser(r.vcx).unwrap();
+    assert_eq!(names(&rows), ["orders-prod"], "the rows are redrawn");
+    // The active tab is still b.sql on prod; a.sql was not opened anywhere.
+    let (spec, _) = active_spec(r.vcx).unwrap();
+    assert_eq!(spec.rel.as_str(), "b.sql");
+    assert_eq!(spec.profile, Some(prod));
+    r.finish();
+}
+
+/// H1, a click: the clicked row is the one that must survive the re-check.
+#[gpui::test]
+fn a_click_never_opens_a_row_the_user_did_not_click(cx: &mut TestAppContext) {
+    let (r, _root, _prod, before) = h1_setup(cx);
+    // The layer still draws its old rows (no frame since the manifest changed): click staging,
+    // dispatched at once (no executor turn lets the service's event redraw the rows first).
+    let at = r
+        .vcx
+        .debug_bounds("scripts-choose-row-1")
+        .expect("the staging row is drawn")
+        .center();
+    in_window(r.vcx, |window, cx| {
+        use gpui::InputEvent as _;
+        window.dispatch_event(
+            gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 1,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 1,
+            }
+            .to_platform_input(),
+            cx,
+        );
+    });
+    r.vcx.run_until_parked();
+    assert_eq!(tab_count(r.vcx), before, "nothing opened");
+    let (spec, _) = active_spec(r.vcx).unwrap();
+    assert_eq!(spec.rel.as_str(), "b.sql", "a.sql opened nowhere");
+    r.finish();
+}
+
+/// Review minor 3: a file listed only where the script may not run (a single-session MySQL
+/// profile) says why on Enter (R-T14-3) instead of doing nothing.
+#[gpui::test]
+fn a_hit_only_a_single_session_profile_lists_says_why(cx: &mut TestAppContext) {
+    let mut one = mysql("api-one", Some(EnvTag::Dev), "api");
+    one.single_session = true;
+    let r = rig(cx, vec![one]);
+    r.library("api", &["@dev/d.sql"]);
+    let before = tab_count(r.vcx);
+    goto_query(r.vcx, "d.sql", "@dev/d.sql · api");
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "the refusal", |vcx| {
+        toast_texts(vcx)
+            .iter()
+            .any(|t| t.contains("This connection allows one session"))
+    });
+    assert!(!is_open(r.vcx));
+    assert_eq!(tab_count(r.vcx), before);
+    r.finish();
+}
+
+/// Review minor 6: a library event between a frame and Enter keeps the results' active file.
+#[gpui::test]
+fn a_refresh_keeps_the_active_result(cx: &mut TestAppContext) {
+    let r = rig(
+        cx,
+        vec![prof("orders-staging", Some(EnvTag::Staging), "orders")],
+    );
+    let (_, root) = r.library_at("orders", &["b_report.sql", "c_report.sql"]);
+    goto_query(r.vcx, "report", "c_report.sql · orders");
+    let h = host(r.vcx);
+    let rows = r.vcx.cx.read(|cx| h.read(cx).result_rows());
+    let ix = rows
+        .iter()
+        .position(|r| r == "c_report.sql · orders")
+        .unwrap();
+    for _ in 0..ix {
+        press_key(r.vcx, "down");
+    }
+    // A new file that sorts first lands.
+    std::fs::write(root.join("a_report.sql"), "SELECT 1;").unwrap();
+    assert!(r.fake.emit(
+        &root,
+        vec![hacivat_scripts::RawHint::Path(root.join("a_report.sql"))]
+    ));
+    wait_until(r.vcx, "the new file is listed", |vcx| {
+        vcx.cx
+            .read(|cx| h.read(cx).result_rows().len() == rows.len() + 1)
+    });
+    let now = r.vcx.cx.read(|cx| {
+        let h = h.read(cx);
+        h.active_result().map(|a| h.result_rows()[a].clone())
+    });
+    assert_eq!(now.as_deref(), Some("c_report.sql · orders"));
     r.finish();
 }

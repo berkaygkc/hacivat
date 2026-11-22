@@ -848,7 +848,7 @@ fn scripts_contributor_stub_adds_no_node_so_m4_shots_hold(cx: &mut TestAppContex
 // ## m4b-t15-goto (named exception): the stub's test, on the filled layer with no library
 // attached (Task 15's `tests/scripts_goto.rs` covers its rows and the chooser).
 #[gpui::test]
-fn goto_script_stub_lists_nothing(cx: &mut TestAppContext) {
+fn goto_script_without_a_library_lists_nothing(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
     in_window(vcx, goto::open);
     vcx.run_until_parked();

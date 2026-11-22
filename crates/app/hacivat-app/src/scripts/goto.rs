@@ -85,8 +85,9 @@ pub type ChooserRows = (Vec<(String, String)>, Option<usize>);
 /// A filled command's run and enabled functions.
 type Filled = (ActionFn, fn(&App) -> bool);
 
-/// A place the chooser leaves out: the connection and database a tab or row is under.
-type Exclude = Option<(ProfileId, String)>;
+/// The connection the chooser leaves out: the one a tab or tree row is under, every database
+/// of it (## m4b-t15-goto fix round 1, R-T15-1).
+type Exclude = Option<ProfileId>;
 
 /// What the layer shows.
 enum Mode {
@@ -112,6 +113,34 @@ struct Choose {
     picked: Option<(ProfileId, DatabaseName, Option<EnvTag>)>,
 }
 
+// ## m4b-t15-goto fix round 1 (I1, R-T15-2)
+/// What the chooser showed as active when the user pressed Enter or clicked.
+#[derive(Debug, Clone, PartialEq)]
+enum Seen {
+    /// A row: its connection, database and environment.
+    Row(ProfileId, DatabaseName, Option<EnvTag>),
+    /// "Open without a connection" (no candidate, and an unbound tab can show the file).
+    Unbound,
+    /// No active row.
+    Nothing,
+}
+
+impl Seen {
+    fn of(ch: &Choose, cx: &App) -> Seen {
+        if ch.rows.is_empty() {
+            return if chooser::opens_unbound(ch.library, &ch.rel, cx) {
+                Seen::Unbound
+            } else {
+                Seen::Nothing
+            };
+        }
+        match ch.active.and_then(|a| ch.rows.get(a)) {
+            Some(c) => Seen::Row(c.profile, c.database.clone(), c.env),
+            None => Seen::Nothing,
+        }
+    }
+}
+
 /// The layer view.
 pub struct GotoHost {
     input: Entity<TextInput>,
@@ -120,6 +149,8 @@ pub struct GotoHost {
     mode: Mode,
     query: String,
     hits: Vec<Hit>,
+    /// The query `hits` answer.
+    hits_query: String,
     /// Whether the results answer the current query and snapshot (no "No script matches"
     /// before they do).
     loaded: bool,
@@ -172,6 +203,7 @@ impl GotoHost {
             mode,
             query: String::new(),
             hits: Vec::new(),
+            hits_query: String::new(),
             loaded: false,
             active: None,
             first: 0,
@@ -285,8 +317,21 @@ impl GotoHost {
     }
 
     fn set_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
-        self.active = (!hits.is_empty()).then_some(0);
-        self.first = 0;
+        // ## m4b-t15-goto fix round 1 (review minor 6): a refresh of the same query keeps the
+        // file that was active (a library event between a frame and Enter never moves it).
+        let kept = (self.hits_query == self.query)
+            .then(|| self.active.and_then(|a| self.hits.get(a)))
+            .flatten()
+            .and_then(|was| {
+                hits.iter()
+                    .position(|h| h.library == was.library && h.rel == was.rel)
+            });
+        self.hits_query = self.query.clone();
+        self.active = kept.or((!hits.is_empty()).then_some(0));
+        self.first = scroll_to(
+            if kept.is_some() { self.first } else { 0 },
+            self.active.unwrap_or(0),
+        );
         self.hits = hits;
         self.loaded = true;
         cx.notify();
@@ -304,6 +349,13 @@ impl GotoHost {
                 super::open_script(cx, hit.library, hit.rel, Some(c.profile), Some(c.database));
             }
             Decision::Unbound if !chooser::opens_unbound(hit.library, &hit.rel, cx) => {
+                // ## m4b-t15-goto fix round 1 (review minor 3): listed only where the script may
+                // not run (a single-session MySQL profile, R-T14-3): `open_script` says why.
+                if let Some((p, db)) = chooser::refused_place(hit.library, &hit.rel, None, cx) {
+                    close(window, cx);
+                    super::open_script(cx, hit.library, hit.rel, Some(p), Some(db));
+                    return;
+                }
                 // The hit no longer shows anywhere (hidden or gone since it was listed).
                 self.run_query(cx);
             }
@@ -329,8 +381,7 @@ impl GotoHost {
     // ---- the chooser ------------------------------------------------------------------------
 
     fn choose_for(library: LibraryId, rel: RelPath, exclude: Exclude, cx: &App) -> Choose {
-        let ex = exclude.as_ref().map(|(p, d)| (*p, d.as_str()));
-        let (rows, focused) = chooser::ordered(library, &rel, ex, cx);
+        let (rows, focused) = chooser::ordered(library, &rel, exclude, cx);
         let active = chooser::preselect(&rows, focused.as_ref());
         Choose {
             library,
@@ -352,8 +403,7 @@ impl GotoHost {
         let Mode::Choose(ch) = &mut self.mode else {
             return;
         };
-        let ex = ch.exclude.as_ref().map(|(p, d)| (*p, d.as_str()));
-        let (rows, focused) = chooser::ordered(ch.library, &ch.rel, ex, cx);
+        let (rows, focused) = chooser::ordered(ch.library, &ch.rel, ch.exclude, cx);
         let kept = ch.picked.as_ref().and_then(|(p, d, env)| {
             rows.iter()
                 .position(|c| c.profile == *p && c.database == *d && c.env == *env)
@@ -403,26 +453,52 @@ impl GotoHost {
         }
     }
 
-    /// Enter in the chooser: checks the rows against the live state first, then opens the
-    /// active one (nothing without one); with no candidate, the unbound tab.
+    /// Enter in the chooser. ## m4b-t15-goto fix round 1 (I1, R-T15-2): the rows are checked
+    /// against the live state first, and only the row the user saw highlighted opens, only if
+    /// it survived the check unchanged (same connection, database and environment; the file is
+    /// the chooser's). Anything else redraws and opens nothing: the preselection rule is never
+    /// applied at activation time, so a row the user never saw never opens. "Open without a
+    /// connection" opens only while there is still no candidate.
     fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let seen = match &self.mode {
+            Mode::Choose(ch) => Seen::of(ch, cx),
+            Mode::Results => return,
+        };
         self.recompute_rows(cx);
-        let Mode::Choose(ch) = &self.mode else {
+        let Mode::Choose(ch) = &mut self.mode else {
             return;
         };
         let (library, rel) = (ch.library, ch.rel.clone());
-        if ch.rows.is_empty() {
-            if chooser::opens_unbound(library, &rel, cx) {
+        match seen {
+            Seen::Row(profile, database, env) => {
+                let Some(ix) = ch
+                    .rows
+                    .iter()
+                    .position(|c| c.profile == profile && c.database == database && c.env == env)
+                else {
+                    return;
+                };
+                ch.active = Some(ix);
                 close(window, cx);
-                super::open_script(cx, library, rel, None, None);
+                super::open_script(cx, library, rel, Some(profile), Some(database));
             }
-            return;
+            Seen::Unbound => {
+                if ch.rows.is_empty() && chooser::opens_unbound(library, &rel, cx) {
+                    close(window, cx);
+                    super::open_script(cx, library, rel, None, None);
+                }
+            }
+            // No row was active. With no candidate at all, a place where the script may not run
+            // (a single-session MySQL profile) says why (review minor 3).
+            Seen::Nothing => {
+                if ch.rows.is_empty()
+                    && let Some((p, db)) = chooser::refused_place(library, &rel, ch.exclude, cx)
+                {
+                    close(window, cx);
+                    super::open_script(cx, library, rel, Some(p), Some(db));
+                }
+            }
         }
-        let Some(c) = ch.active.and_then(|a| ch.rows.get(a)).cloned() else {
-            return;
-        };
-        close(window, cx);
-        super::open_script(cx, library, rel, Some(c.profile), Some(c.database));
     }
 
     /// A click on chooser row `ix`.
@@ -760,14 +836,16 @@ impl Render for GotoHost {
                 }
                 Mode::Choose(ch) => {
                     let file = super::tabs::display_name(super::file_name(&ch.rel));
-                    let header = if ch.rows.is_empty() {
-                        msg(cx, "hv-scripts-choose-none", Vec::new())
+                    // ## m4b-t15-goto fix round 1 (review minor 7): the file name in mono, as the
+                    // mock draws it: the message is split around its `$file` argument.
+                    let (before, file_part, after) = if ch.rows.is_empty() {
+                        (msg(cx, "hv-scripts-choose-none", Vec::new()), None, None)
                     } else {
-                        msg(
-                            cx,
-                            "hv-scripts-choose-title",
-                            vec![("file", ArgValue::Text(file))],
-                        )
+                        header_parts(cx, file)
+                    };
+                    let sans = |text: SharedString| {
+                        Label::new(text, TextSource::Fluent, ty.body_sm, c.text_2.to_hsla())
+                            .truncate(true)
                     };
                     let top = div()
                         .flex()
@@ -778,15 +856,30 @@ impl Render for GotoHost {
                         .min_w(px(0.0))
                         .child(Icon::new(IconName::FileCode).size(IconSize::Chrome))
                         .child(
-                            div().flex_shrink(1.0).min_w(px(0.0)).child(
-                                Label::new(
-                                    header,
-                                    TextSource::Fluent,
-                                    ty.body_sm,
-                                    c.text_2.to_hsla(),
-                                )
-                                .truncate(true),
-                            ),
+                            div()
+                                .flex()
+                                .items_center()
+                                .flex_shrink(1.0)
+                                .min_w(px(0.0))
+                                .when(!before.trim().is_empty(), |el| {
+                                    el.child(div().flex_none().child(sans(before.clone())))
+                                })
+                                .when_some(file_part, |el, f| {
+                                    el.child(
+                                        div().flex_shrink(1.0).min_w(px(0.0)).px(px(3.0)).child(
+                                            Label::new(
+                                                f,
+                                                TextSource::Data,
+                                                ty.mono_data,
+                                                c.text.to_hsla(),
+                                            )
+                                            .truncate(true),
+                                        ),
+                                    )
+                                })
+                                .when_some(after.filter(|a| !a.trim().is_empty()), |el, a| {
+                                    el.child(div().flex_none().child(sans(a)))
+                                }),
                         )
                         .into_any_element();
                     let focused = ch.focused.as_ref().map(|(p, _)| *p);
@@ -800,8 +893,12 @@ impl Render for GotoHost {
                             let active = ch.active == Some(ix);
                             let name = super::tabs::display_name(&cand.name);
                             row(("scripts-choose-row", ix), active)
+                                .debug_selector(move || format!("scripts-choose-row-{ix}"))
+                                // ## m4b-t15-goto fix round 1 (review minor 2): with the
+                                // environment word (the mark is the only other cue).
                                 .aria_label(SharedString::from(format!(
-                                    "{name} {}",
+                                    "{} {name} {}",
+                                    crate::connections::capsule::env_word(cx, cand.env),
                                     super::tabs::display_name(cand.database.as_str())
                                 )))
                                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -1033,11 +1130,12 @@ pub fn open(window: &mut Window, cx: &mut App) {
 }
 
 /// Opens the chooser for file `rel` of `library` ("Open under another connection…"), without
-/// the place `exclude` (the tab's or the tree row's). Escape closes it.
+/// the connection `exclude` (the tab's or the tree row's, every database of it, R-T15-1).
+/// Escape closes it.
 pub fn open_chooser(
     library: LibraryId,
     rel: RelPath,
-    exclude: Option<(ProfileId, String)>,
+    exclude: Option<ProfileId>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -1050,13 +1148,52 @@ pub fn open_host(cx: &App) -> Option<Entity<GotoHost>> {
     cx.try_global::<OpenGoto>()?.0.as_ref()?.upgrade()
 }
 
-/// Pops the layer when it is the topmost one (the focus goes back to where it was).
+/// Removes the layer (the focus goes back to where it was when it is the top one).
+// ## m4b-t15-goto fix round 1 (review minor 5): by its view, wherever it is in the stack, so a
+// script never opens while Go to script stays open under another layer.
 fn close(window: &mut Window, cx: &mut App) {
     let Some(ws) = window.root::<Workspace>().flatten() else {
         return;
     };
-    if ws.read(cx).layer_ids().last() == Some(&GOTO_LAYER) {
-        ws.update(cx, |ws, cx| ws.pop_layer(window, cx));
+    let Some(host) = open_host(cx) else {
+        return;
+    };
+    let view = host.entity_id();
+    ws.update(cx, |ws, cx| ws.remove_layer(view, window, cx));
+}
+
+/// "Open {file} under" split around the file: the words before it, the file, the words after
+/// it. A message whose argument cannot be found is drawn whole (`None` for the file).
+fn header_parts(
+    cx: &App,
+    file: String,
+) -> (SharedString, Option<SharedString>, Option<SharedString>) {
+    const MARK: &str = "\u{E000}";
+    let text = msg(
+        cx,
+        "hv-scripts-choose-title",
+        vec![("file", ArgValue::Text(MARK.to_string()))],
+    );
+    match text.split_once(MARK) {
+        Some((before, after)) => {
+            // Fluent wraps an argument in isolation marks (FSI ... PDI).
+            let before = before.trim_end_matches('\u{2068}');
+            let after = after.trim_start_matches('\u{2069}');
+            (
+                SharedString::from(before.to_string()),
+                Some(SharedString::from(file)),
+                Some(SharedString::from(after.to_string())),
+            )
+        }
+        None => (
+            msg(
+                cx,
+                "hv-scripts-choose-title",
+                vec![("file", ArgValue::Text(file))],
+            ),
+            None,
+            None,
+        ),
     }
 }
 

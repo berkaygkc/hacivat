@@ -1229,13 +1229,9 @@ pub(crate) fn shown_under_another_connection(
 ) -> bool {
     // ## m4b-t15-goto (named exception): the chooser's own candidates, so the menu item is
     // enabled exactly when the chooser it opens has a row.
-    !super::chooser::candidates(
-        library,
-        rel,
-        Some((place.profile, place.database.as_str())),
-        cx,
-    )
-    .is_empty()
+    // ## m4b-t15-goto fix round 1 (R-T15-1): another *connection*, none of `place`'s
+    // databases.
+    !super::chooser::candidates(library, rel, Some(place.profile), cx).is_empty()
 }
 
 // ## m4b-t15-goto (named exception)
@@ -1255,11 +1251,13 @@ pub(crate) fn script_places(cx: &App) -> Vec<ScriptPlace> {
     let Some(inner) = host(cx) else {
         return Vec::new();
     };
+    // The libraries cached for an older snapshot are dropped first. ## m4b-t15-goto fix round 1
+    // (review minor 1): before the snapshot is read, as every other caller does, so libraries
+    // of an older snapshot are never cached under a newer generation.
+    inner.sync();
     let Some(snap) = inner.snapshot() else {
         return Vec::new();
     };
-    // The libraries cached for an older snapshot are dropped first.
-    inner.sync();
     let profiles: Vec<Arc<Profile>> = cx
         .try_global::<ConnectionsModel>()
         .map(|m| m.profiles().to_vec())

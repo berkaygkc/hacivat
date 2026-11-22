@@ -30,7 +30,6 @@
 //!   for it (m4), so Task 15 queries one index from one thread (off the UI thread past 2,000
 //!   entries).
 
-use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
@@ -216,7 +215,7 @@ impl ScriptIndex {
         q: &str,
         opts: SearchOpts,
         limit: usize,
-        scopes: &HashMap<LibraryId, Vec<Option<EnvTag>>>,
+        scopes: &std::collections::HashMap<LibraryId, Vec<Option<EnvTag>>>,
     ) -> Vec<Hit> {
         const UNBOUND: [Option<EnvTag>; 1] = [None];
         self.query_where(q, opts, limit, &|e| {
@@ -228,10 +227,13 @@ impl ScriptIndex {
         })
     }
 
+    /// Past this many offered scripts a query runs off the UI thread ([`Self::is_large`]).
+    pub const LARGE_INDEX: usize = 2_000;
+
     /// Whether a query should run off the UI thread (Task 15: past 2,000 offered scripts, the
-    /// plan's threshold). A yes or no, never a count (fix round 1, m2).
+    /// plan's threshold). A yes or no, never a count (T10 fix round 1, m2).
     pub fn is_large(&self) -> bool {
-        self.libs.iter().map(|l| l.entries.len()).sum::<usize>() > LARGE_INDEX
+        self.libs.iter().map(|l| l.entries.len()).sum::<usize>() > Self::LARGE_INDEX
     }
     // ## m4b-t15-goto
 
@@ -295,10 +297,6 @@ impl ScriptIndex {
 
 /// The longest query matched, in characters (fix round 1, m3).
 pub const MAX_QUERY_CHARS: usize = 256;
-
-// ## m4b-t15-goto (named exception)
-/// Past this many offered scripts a query runs off the UI thread ([`ScriptIndex::is_large`]).
-pub const LARGE_INDEX: usize = 2_000;
 
 fn cap(q: &str) -> &str {
     q.char_indices()

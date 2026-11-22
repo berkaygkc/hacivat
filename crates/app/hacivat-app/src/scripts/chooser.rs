@@ -11,8 +11,8 @@
 //!   (`projection::script_places`: the databases the explorer asked about plus each profile's
 //!   configured one) whose binding includes the file's library, whose environment shows the
 //!   file (`view(env)`, the tree's own rule, R-M4b-6), and where the script may run
-//!   (`open::session_plan`, R-M4b-25), so a row never opens a refusal. The place a tab or row is
-//!   under is left out (R-M4b-4). They are computed from the live snapshot and profiles each
+//!   (`open::session_plan`, R-M4b-25), so a row never opens a refusal. The connection a tab or
+//!   row is under is left out, every database of it (R-M4b-4; fix round 1, R-T15-1). They are computed from the live snapshot and profiles each
 //!   time the chooser is drawn up and again on every Enter (never a stale list).
 //! - **Order** ([`order`]): the active tab's connection first (its own database first), then
 //!   local, dev, test, staging, production (the reverse of `EnvTag::severity_rank`), then
@@ -82,22 +82,30 @@ fn opens(entry: &hacivat_scripts::ScriptEntry) -> bool {
         && matches!(entry.link, LinkState::Plain | LinkState::InsideLink)
 }
 
-/// Every place where file `rel` of `library` can be opened, except `exclude` (the place a tab
-/// or tree row is under), unordered. Empty without a library service.
-pub fn candidates(
+/// Every place where file `rel` of `library` is listed (binding and environment scope), on a
+/// connection other than `exclude`, whether or not the script may run there.
+// ## m4b-t15-goto fix round 1 (C1, R-T15-1): `exclude` is the whole connection a tab or tree
+// row is under (every database of its profile), as NOTES cross-cutting 6 and the mock say.
+fn listed_places(
     library: LibraryId,
     rel: &RelPath,
-    exclude: Option<(ProfileId, &str)>,
+    exclude: Option<ProfileId>,
     cx: &App,
-) -> Vec<Candidate> {
+) -> Vec<(
+    std::sync::Arc<hacivat_session::profile::Profile>,
+    DatabaseName,
+)> {
     let Some(service) = super::open::service(cx) else {
         return Vec::new();
     };
     let snap = service.snapshot();
-    let mut out: Vec<Candidate> = Vec::new();
+    let mut out: Vec<(
+        std::sync::Arc<hacivat_session::profile::Profile>,
+        DatabaseName,
+    )> = Vec::new();
     for place in projection::script_places(cx) {
         let p = &place.profile;
-        if exclude == Some((p.id, place.database.as_str())) || !place.libraries.contains(&library) {
+        if exclude == Some(p.id) || !place.libraries.contains(&library) {
             continue;
         }
         let shown = snap
@@ -105,29 +113,50 @@ pub fn candidates(
             .library(library)
             .and_then(|l| l.entry(rel))
             .is_some_and(opens);
-        if !shown {
-            continue;
-        }
         let database = DatabaseName::new(&place.database);
-        if super::open::session_plan(p, &database, cx).is_err() {
-            continue;
+        if shown && !out.iter().any(|(q, d)| q.id == p.id && *d == database) {
+            out.push((p.clone(), database));
         }
-        if out
-            .iter()
-            .any(|c| c.profile == p.id && c.database == database)
-        {
-            continue;
-        }
-        out.push(Candidate {
+    }
+    out
+}
+
+/// Every place where file `rel` of `library` can be opened, on a connection other than
+/// `exclude` (the connection a tab or tree row is under: none of its databases is offered,
+/// R-T15-1), unordered. Empty without a library service.
+pub fn candidates(
+    library: LibraryId,
+    rel: &RelPath,
+    exclude: Option<ProfileId>,
+    cx: &App,
+) -> Vec<Candidate> {
+    listed_places(library, rel, exclude, cx)
+        .into_iter()
+        .filter(|(p, db)| super::open::session_plan(p, db, cx).is_ok())
+        .map(|(p, database)| Candidate {
             profile: p.id,
             database,
             name: p.name.clone(),
             env: p.environment,
             engine: p.engine,
-        });
-    }
-    out
+        })
+        .collect()
 }
+
+/// A place that lists the file but where the script may not run (a single-session MySQL
+/// profile, R-T14-3): Go to script says why there instead of doing nothing (review minor 3).
+pub fn refused_place(
+    library: LibraryId,
+    rel: &RelPath,
+    exclude: Option<ProfileId>,
+    cx: &App,
+) -> Option<(ProfileId, DatabaseName)> {
+    listed_places(library, rel, exclude, cx)
+        .into_iter()
+        .find(|(p, db)| super::open::session_plan(p, db, cx).is_err())
+        .map(|(p, db)| (p.id, db))
+}
+// ## m4b-t15-goto fix round 1
 
 /// Whether an unbound tab (no connection, `None` environment) can show file `rel` of
 /// `library`: "Open without a connection" is offered only then.
@@ -212,7 +241,7 @@ pub fn decide(rows: &[Candidate]) -> Decision {
 pub fn ordered(
     library: LibraryId,
     rel: &RelPath,
-    exclude: Option<(ProfileId, &str)>,
+    exclude: Option<ProfileId>,
     cx: &App,
 ) -> (Vec<Candidate>, Option<(ProfileId, Option<DatabaseName>)>) {
     let focused = focused_place(cx);
@@ -230,11 +259,11 @@ pub fn ordered(
 // ---- "Open under another connection…" ---------------------------------------------------------
 
 /// The tree row's command (`ExplorerTree`, menu and palette only): the chooser for the cursor's
-/// file, without the place the row is under.
+/// file, without the connection the row is under (R-T15-1).
 pub const OPEN_UNDER: &str = "scripts.open_under";
 
-/// The cursor's file row: its library, path and place.
-fn cursor_file(cx: &App) -> Option<(LibraryId, RelPath, ProfileId, String)> {
+/// The cursor's file row: its library, path and connection.
+fn cursor_file(cx: &App) -> Option<(LibraryId, RelPath, ProfileId)> {
     let (_, place) = projection::cursor_place(cx)?;
     let Node::Entry { library, entry, .. } = &place.node else {
         return None;
@@ -243,18 +272,18 @@ fn cursor_file(cx: &App) -> Option<(LibraryId, RelPath, ProfileId, String)> {
         return None;
     }
     let rel = RelPath::parse(entry.rel.as_str()).ok()?;
-    Some((*library, rel, place.profile, place.database.clone()))
+    Some((*library, rel, place.profile))
 }
 
 fn can_open_under(cx: &App) -> bool {
-    cursor_file(cx).is_some_and(|(library, rel, profile, database)| {
-        !candidates(library, &rel, Some((profile, &database)), cx).is_empty()
+    cursor_file(cx).is_some_and(|(library, rel, profile)| {
+        !candidates(library, &rel, Some(profile), cx).is_empty()
     })
 }
 
 fn open_under_command(window: &mut hacivat_ui_core::gpui_surface::Window, cx: &mut App) {
-    if let Some((library, rel, profile, database)) = cursor_file(cx) {
-        super::goto::open_chooser(library, rel, Some((profile, database)), window, cx);
+    if let Some((library, rel, profile)) = cursor_file(cx) {
+        super::goto::open_chooser(library, rel, Some(profile), window, cx);
     }
 }
 
@@ -272,10 +301,8 @@ pub(crate) fn install(cx: &mut App) {
     super::open::set_open_under_another(
         Rc::new(|tab, _places, cx| {
             // The chooser computes its own rows (the explorer's places too), without the tab's
-            // own place; it never rebinds the tab.
-            let exclude = tab
-                .profile
-                .zip(tab.database.as_ref().map(|d| d.as_str().to_owned()));
+            // own connection (R-T15-1); it never rebinds the tab.
+            let exclude = tab.profile;
             let (library, rel) = (tab.library, tab.rel.clone());
             crate::exec_ui::in_workspace_window(cx, move |_, window, cx| {
                 super::goto::open_chooser(library, rel, exclude, window, cx);

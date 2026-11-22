@@ -377,9 +377,8 @@ fn open_sqlite(
 pub fn other_places(tab: &ScriptTab, cx: &App) -> Vec<(ProfileId, DatabaseName)> {
     // ## m4b-t15-goto (named exception): the chooser's candidates (the explorer's places too,
     // R-M4b-31), so the notice's button is enabled exactly when the chooser has a row.
-    let exclude = tab
-        .profile
-        .zip(tab.database.as_ref().map(DatabaseName::as_str));
+    // ## m4b-t15-goto fix round 1 (R-T15-1): none of the tab's connection's databases.
+    let exclude = tab.profile;
     crate::scripts::chooser::candidates(tab.library, &tab.rel, exclude, cx)
         .into_iter()
         .map(|c| (c.profile, c.database))
