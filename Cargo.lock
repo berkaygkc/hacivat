@@ -9592,6 +9592,7 @@ dependencies = [
  "sql-dialect",
  "sql-lexer",
  "sql-oracle-pg",
+ "sql-split",
  "sql-testkit",
  "sql-text",
  "twox-hash",

@@ -1049,18 +1049,19 @@ fn memory_shape(name: &str) -> (DialectCtx, LineFn) {
     (ctx, f)
 }
 
-/// What a shape gives: `None` when it settles (no refusal), or its one stop item.
+/// What a shape gives: `None` when it settles (no refusal), or its one stop item. A lone `\r`
+/// is no line end for the anchor (R-T8-4), so the lone-`\r` shapes stop at the cap.
 fn shape_outcome(name: &str) -> Option<StreamItem> {
     match name {
-        "cr-only" | "long-lines" | "cr-only-dump" => None,
+        "long-lines" => None,
         "open-string" => Some(StreamItem::NoBoundary { offset: 10 }),
         _ => Some(StreamItem::NoBoundary { offset: 0 }),
     }
 }
 
-const SHAPES: [&str; 13] = [
+/// The MySQL memory shapes (`Eager` is `Exact` on the other dialects, R-T8-4).
+const SHAPES: [&str; 12] = [
     "one-line-short",
-    "one-line-short-pg",
     "one-line-4k",
     "cr-only",
     "long-lines",
@@ -1099,10 +1100,9 @@ fn every_memory_shape_is_bounded() {
         );
         match name {
             // The item cap stops these long before the byte cap.
-            "one-line-short" | "one-line-short-pg" | "bare-semicolons" => {
+            "one-line-short" | "bare-semicolons" => {
                 assert!(fed.peak <= 2 << 20, "{name}: held {}", fed.peak);
             }
-            "cr-only" | "cr-only-dump" => assert!(fed.peak <= 2_048 + (64 << 10)),
             "long-lines" => assert!(fed.peak <= 12_000 + (64 << 10)),
             "open-string" => assert_eq!(fed.statements, 1),
             _ => {}
@@ -1111,13 +1111,16 @@ fn every_memory_shape_is_bounded() {
 }
 
 #[test]
-fn lone_cr_line_ends_settle_and_equal_the_whole_split() {
+fn a_lone_cr_is_no_anchor() {
+    // R-T8-4: on MySQL a lone `\r` never starts a line for the anchor. Under the cap a CR-only
+    // script is held and given out whole at the end, equal to the whole split; past the cap
+    // it stops with `NoBoundary` at its start, in every chunking.
     let small: String = (0..2_000)
         .map(|i| format!("/* n {i} */\rINSERT INTO t VALUES ({i});\r"))
         .collect();
     let mut s = eager();
-    s.feed(&small[..small.len() / 2]);
-    assert!(s.held_len() < 1_000, "held {}", s.held_len());
+    assert_eq!(s.feed(&small[..small.len() / 2]), []);
+    assert_eq!(s.held_len(), small.len() / 2);
     for lens in CHUNKINGS {
         assert_eq!(
             eager_mysql(&small, lens),
@@ -1125,6 +1128,19 @@ fn lone_cr_line_ends_settle_and_equal_the_whole_split() {
             "chunks of {lens:?}"
         );
     }
+    let caps = (small.len() / 2, STREAM_HELD_ITEMS_MAX);
+    for lens in [&[1usize][..], &[7], &[1 << 16], &mixed()] {
+        assert_eq!(
+            eager_capped(&small, mysql(), ClientFlavor::MySqlCli, caps, lens),
+            [StreamItem::NoBoundary { offset: 0 }],
+            "chunks of {lens:?}"
+        );
+    }
+}
+
+/// The re-review's mixed chunking (fr2): 65,536, 4,093 and 1,000,003 bytes in turn.
+fn mixed() -> Vec<usize> {
+    vec![65_536, 4_093, 1_000_003]
 }
 
 #[test]
@@ -1160,68 +1176,106 @@ fn random_lens(n: usize) -> Vec<usize> {
         .collect()
 }
 
+/// The re-review's fr1 repro: `SELECT 1;`, one line of 4 KB statements totalling `cap` and
+/// 20 KB, then `SELECT 2;`.
+fn fr1_repro(cap: usize) -> String {
+    let pad = "x".repeat(4_000);
+    let mut text = String::from("SELECT 1;\n");
+    let mut i = 0;
+    while text.len() < 10 + cap + 20_000 {
+        text.push_str(&format!("INSERT INTO t VALUES ({i}, '{pad}'); "));
+        i += 1;
+    }
+    text.push_str("\nSELECT 2;\n");
+    text
+}
+
+/// The re-review's fr2 repro (I-fr2-1), MySQL: an open string after `SELECT 1;`, then a lone
+/// `\r`, `SELECT 2` and trailing blanks; `body` and `tail` bytes long.
+fn fr2_repro(body: usize, tail: usize) -> String {
+    format!(
+        "SELECT 1;\n'{}';\r SELECT 2{}",
+        " ".repeat(body),
+        " ".repeat(tail)
+    )
+}
+
+/// The chunkings of the repro tests: one byte, 4 KiB, 64 KiB, 1 MiB, alternating, mixed,
+/// seeded random and the whole text at once.
+fn repro_chunkings(len: usize) -> Vec<Vec<usize>> {
+    vec![
+        vec![1],
+        vec![4 << 10],
+        vec![64 << 10],
+        vec![1 << 20],
+        vec![64 << 10, 4 << 10],
+        mixed(),
+        random_lens(4_096),
+        vec![len.max(1)],
+    ]
+}
+
 #[test]
 fn the_cap_refusal_does_not_depend_on_the_chunking() {
-    // The re-review's repro (I-fr1-1): `SELECT 1;`, one line of 4 KB statements totalling the
-    // cap and 20 KB, then `SELECT 2;`. The two anchors around the long line are more than the
-    // cap apart, so every chunking gives out `SELECT 1` and stops there, whether or not a
-    // chunk reaches `SELECT 2` when the cap is passed. Six chunkings at the test cap; at the
-    // real cap, the two chunkings that ran the file whole before this fix.
-    let repro = |cap: usize| {
-        let pad = "x".repeat(4_000);
-        let mut text = String::from("SELECT 1;\n");
-        let mut i = 0;
-        while text.len() < 10 + cap + 20_000 {
-            text.push_str(&format!("INSERT INTO t VALUES ({i}, '{pad}'); "));
-            i += 1;
-        }
-        text.push_str("\nSELECT 2;\n");
-        text
-    };
+    // R-T8-1 at the test cap, in eight chunkings each. The fr1 repro: the two anchors around
+    // the long line are more than the cap apart, so every chunking gives out `SELECT 1` and
+    // stops there, whether or not a chunk reaches `SELECT 2` when the cap is passed. The fr2
+    // repro (caps 736 / 1): the line after the lone `\r` is no anchor, so the gap from the
+    // string's line runs to the end in every chunking.
+    let text = fr1_repro(TEST_CAP);
+    let caps = (TEST_CAP, STREAM_HELD_ITEMS_MAX);
     let want = [stmt("SELECT 1", 0), StreamItem::NoBoundary { offset: 10 }];
-    let run = |text: &str, cap: usize, lens: &[usize]| {
-        let mut s = eager().with_caps(cap, STREAM_HELD_ITEMS_MAX);
-        let mut out = Vec::new();
-        let (mut at, mut k) = (0, 0);
-        while at < text.len() {
-            let end = (at + lens[k % lens.len()]).min(text.len());
-            out.extend(s.feed(&text[at..end]));
-            at = end;
-            k += 1;
-        }
-        out.extend(s.finish());
-        out
-    };
-    let small = repro(TEST_CAP);
-    let random = random_lens(4_096);
-    let chunkings: [&[usize]; 6] = [
-        &[1],
-        &[4 << 10],
-        &[64 << 10],
-        &[1 << 20],
-        &[64 << 10, 4 << 10],
-        &random,
-    ];
-    for lens in chunkings {
-        let got = run(&small, TEST_CAP, lens);
+    for lens in repro_chunkings(text.len()) {
+        let got = eager_capped(&text, mysql(), ClientFlavor::MySqlCli, caps, &lens);
         assert_eq!(got, want, "chunks of {:?}", &lens[..lens.len().min(4)]);
     }
-    let real = repro(STREAM_HELD_MAX);
-    for lens in [&[64usize << 10][..], &[1 << 20]] {
-        assert_eq!(
-            run(&real, STREAM_HELD_MAX, lens),
-            want,
-            "real cap, chunks of {lens:?}"
-        );
+    let text = fr2_repro(640, 160);
+    for lens in repro_chunkings(text.len()) {
+        let got = eager_capped(&text, mysql(), ClientFlavor::MySqlCli, (736, 1), &lens);
+        assert_eq!(got, want, "fr2, chunks of {:?}", &lens[..lens.len().min(4)]);
     }
 }
 
-/// Small caps for the property (bytes, items).
-fn small_caps() -> impl Strategy<Value = (usize, usize)> {
-    (8usize..400, 1usize..12)
+/// The same at the real caps (64 MiB): perf, run by CI's `sql-differential` job.
+#[test]
+#[ignore = "perf"]
+fn the_cap_refusal_does_not_depend_on_the_chunking_at_the_real_cap() {
+    if std::env::var("HACIVAT_PERF").as_deref() != Ok("1") {
+        println!("HACIVAT_PERF is not 1: skipped");
+        return;
+    }
+    let caps = (STREAM_HELD_MAX, STREAM_HELD_ITEMS_MAX);
+    let want = [stmt("SELECT 1", 0), StreamItem::NoBoundary { offset: 10 }];
+    let fr1 = fr1_repro(STREAM_HELD_MAX);
+    let fr2 = fr2_repro(STREAM_HELD_MAX - 4_096, (4 << 20) + (1 << 20));
+    for (name, text) in [("fr1", &fr1), ("fr2", &fr2)] {
+        for lens in repro_chunkings(text.len()) {
+            if lens == [1] {
+                continue;
+            }
+            let got = eager_capped(text, mysql(), ClientFlavor::MySqlCli, caps, &lens);
+            assert_eq!(
+                got,
+                want,
+                "{name}, chunks of {:?}",
+                &lens[..lens.len().min(4)]
+            );
+            println!(
+                "HV-FACT m4b-t08 real_cap_repro={name} chunks={:?} stop=10",
+                &lens[..lens.len().min(3)]
+            );
+        }
+    }
 }
 
-/// Long lines and comment runs, so that small caps are reached.
+/// Small caps for the property (bytes, items): up to 4,000 bytes, so the span leaves its
+/// 16-byte floor.
+fn small_caps() -> impl Strategy<Value = (usize, usize)> {
+    (8usize..4_000, 1usize..40)
+}
+
+/// Long lines, blank runs, comment runs and the re-review's `COPY` pieces, so that small caps
+/// are reached.
 const CAP_PIECES: &[&str] = &[
     "SELECT 1; SELECT 2; SELECT 3; SELECT 4; ",
     "SELECT 'a long string literal on one line'; ",
@@ -1230,57 +1284,143 @@ const CAP_PIECES: &[&str] = &[
     "\n",
     "\r",
     "  ",
+    "                                                                ",
     "SELECT 1;\n",
+    "'",
+    "COPY t FROM STDIN;\r-- c\rSELECT 6;\r\nDELETE FROM users;\n\\.\n",
+    "COPY t FROM STDIN;\rSELECT 7;\r\nDROP TABLE t;\n\\.\n",
 ];
+
+fn cap_doc() -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        prop_oneof![
+            2 => prop::sample::select(CAP_PIECES),
+            1 => prop::sample::select(MY_PIECES),
+            1 => prop::sample::select(PIECES),
+        ],
+        0..96,
+    )
+    .prop_map(|v| v.concat())
+}
 
 proptest! {
     #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
 
-    /// R-T8-1: the cap decision reads the text alone. With small caps, any chunking gives the
-    /// same items as one chunk and as one-byte chunks: the same refusal, at the same place,
-    /// after the same items. And the stream still gives out a refusing item or equals the
-    /// whole split; before a cap stop, its boundaries are the whole split's.
+    /// R-T8-1: the cap decision reads the text alone. With small caps, random chunks, one-byte
+    /// chunks, the mixed chunking and the whole text at once give the same items: the same
+    /// refusal, at the same place, after the same items. And the stream still gives out a
+    /// refusing item or equals the whole split; before a cap stop, its boundaries are the
+    /// whole split's.
     #[test]
     fn the_cap_decision_does_not_depend_on_the_chunking(
-        doc in prop::collection::vec(
-            prop_oneof![
-                2 => prop::sample::select(CAP_PIECES),
-                1 => prop::sample::select(MY_PIECES),
-                1 => prop::sample::select(PIECES),
-            ],
-            0..48,
-        ).prop_map(|v| v.concat()),
+        doc in cap_doc(),
         cuts in chunking(),
         (ctx, flavor) in eager_setups(),
-        (bytes, items) in small_caps(),
+        caps in small_caps(),
     ) {
-        let run = |lens: &[usize]| {
-            let mut s = StreamSplitter::with_policy(ctx, flavor, StreamPolicy::Eager)
-                .with_caps(bytes, items);
-            let mut out = Vec::new();
-            let (mut at, mut k) = (0, 0);
-            while at < doc.len() {
-                let mut end = (at + lens[k % lens.len()]).min(doc.len());
-                while !doc.is_char_boundary(end) {
-                    end += 1;
-                }
-                out.extend(s.feed(&doc[at..end]));
-                at = end;
-                k += 1;
-            }
-            out.extend(s.finish());
-            out
-        };
-        let one = run(&[1 << 16]);
-        prop_assert_eq!(&run(&cuts), &one);
-        prop_assert_eq!(&run(&[1]), &one);
+        let whole = eager_capped(&doc, ctx, flavor, caps, &[doc.len().max(1)]);
+        prop_assert_eq!(&eager_capped(&doc, ctx, flavor, caps, &cuts), &whole);
+        prop_assert_eq!(&eager_capped(&doc, ctx, flavor, caps, &[1]), &whole);
+        prop_assert_eq!(&eager_capped(&doc, ctx, flavor, caps, &[3, 1, 17]), &whole);
         let want = expected(&doc, &ctx, flavor);
-        prop_assert!(any_refuses(&one) || one == want, "{:?}\nwhole {:?}", one, want);
-        if let Some(StreamItem::NoBoundary { .. } | StreamItem::TooLong { .. }) = one.last() {
-            let given = boundaries(&one);
-            prop_assert!(boundaries(&want).starts_with(&given), "{:?}\nwhole {:?}", one, want);
+        prop_assert!(any_refuses(&whole) || whole == want, "{:?}\nwhole {:?}", whole, want);
+        if let Some(StreamItem::NoBoundary { .. } | StreamItem::TooLong { .. }) = whole.last() {
+            let given = boundaries(&whole);
+            prop_assert!(boundaries(&want).starts_with(&given), "{:?}\nwhole {:?}", whole, want);
         }
     }
+
+    /// R-T8-4: off MySQL/MariaDB, `Eager` is `Exact`, feed by feed, whatever the caps.
+    #[test]
+    fn eager_is_exact_off_mysql(
+        doc in cap_doc(),
+        cuts in chunking(),
+        k in 0usize..5,
+        caps in small_caps(),
+    ) {
+        let mut pg_off = DialectCtx::new(DialectId::Postgres, None);
+        pg_off.modes.standard_conforming_strings = false;
+        let (ctx, flavor) = [
+            (DialectCtx::new(DialectId::Postgres, None), ClientFlavor::Psql),
+            (DialectCtx::new(DialectId::Postgres, None), ClientFlavor::None),
+            (pg_off, ClientFlavor::Psql),
+            (DialectCtx::new(DialectId::Sqlite, None), ClientFlavor::Sqlite3),
+            (DialectCtx::new(DialectId::Generic, None), ClientFlavor::None),
+        ][k];
+        let mut exact = StreamSplitter::new(ctx, flavor);
+        let mut eager = StreamSplitter::with_policy(ctx, flavor, StreamPolicy::Eager)
+            .with_caps(caps.0, caps.1);
+        let (mut at, mut i) = (0, 0);
+        while at < doc.len() {
+            let mut end = (at + cuts[i % cuts.len()]).min(doc.len());
+            while !doc.is_char_boundary(end) {
+                end += 1;
+            }
+            prop_assert_eq!(eager.feed(&doc[at..end]), exact.feed(&doc[at..end]));
+            prop_assert_eq!(eager.held_len(), exact.held_len());
+            at = end;
+            i += 1;
+        }
+        prop_assert_eq!(eager.finish(), exact.finish());
+    }
+}
+
+#[test]
+fn a_copy_row_after_a_lone_cr_is_never_a_statement() {
+    // C-fr2-1: on PostgreSQL/psql the data row `DELETE FROM users` follows a `COPY … FROM
+    // STDIN` line with lone `\r`s. `Eager` is `Exact` there, so it is data in every chunking:
+    // every split into two chunks, eight-byte chunks, and the version padded so that a 64 KiB
+    // chunk boundary falls in the same place.
+    let pg = DialectCtx::new(DialectId::Postgres, None);
+    let text =
+        "SELECT 0;\nCOPY t FROM STDIN;\r-- c\rSELECT 6;\r\nDELETE FROM users;\n\\.\nSELECT 3;\n";
+    let want = expected(text, &pg, ClientFlavor::Psql);
+    assert!(
+        !statements(&want).contains(&"DELETE FROM users"),
+        "{want:?}"
+    );
+    let run = |text: &str, cuts: &[usize]| {
+        let mut s = StreamSplitter::with_policy(pg, ClientFlavor::Psql, StreamPolicy::Eager);
+        let mut out = Vec::new();
+        let mut at = 0;
+        for &c in cuts.iter().chain(std::iter::once(&text.len())) {
+            let c = c.min(text.len()).max(at);
+            out.extend(s.feed(&text[at..c]));
+            at = c;
+        }
+        out.extend(s.finish());
+        out
+    };
+    for split in 0..=text.len() {
+        assert_eq!(run(text, &[split]), want, "split at {split}");
+    }
+    let eights: Vec<usize> = (8..text.len()).step_by(8).collect();
+    assert_eq!(run(text, &eights), want);
+    let mut padded = String::new();
+    let mut n = 0;
+    while padded.len() + 70 < 64 << 10 {
+        padded.push_str(&format!("SELECT {n};\n"));
+        n += 1;
+    }
+    let head = padded.len();
+    padded.push_str(text);
+    let want = expected(&padded, &pg, ClientFlavor::Psql);
+    for shift in 60..80 {
+        let cut = (64 << 10) - shift;
+        if cut > head && cut < padded.len() {
+            assert_eq!(run(&padded, &[cut]), want, "64 KiB boundary at {cut}");
+        }
+    }
+    assert_eq!(
+        streamed_with(
+            StreamPolicy::Eager,
+            &padded,
+            pg,
+            ClientFlavor::Psql,
+            &[64 << 10]
+        ),
+        want
+    );
 }
 
 #[test]

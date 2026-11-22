@@ -23,21 +23,21 @@
 //!
 //! All of the above is the default policy, [`StreamPolicy::Exact`].
 //!
-//! [`StreamPolicy::Eager`] is for M4b "Run as script" (R-M4b-46, R-M4b-47; ADR 0005
-//! `m4b-t08`), which must run in constant memory:
-//! - on MySQL/MariaDB, statements are given out without the block hold, and the stream stops
-//!   at the first block mismatch with one `UnknownBlock` item instead of refusing back;
-//! - an anchor is looked for at every line start, after a lone `\r` too;
+//! [`StreamPolicy::Eager`] is for M4b "Run as script" (R-M4b-46, R-M4b-47, R-T8-4; ADR 0005
+//! `m4b-t08`), which must run in constant memory. It differs from `Exact` on MySQL/MariaDB
+//! only; on every other dialect it is `Exact`, code path and items alike. On MySQL/MariaDB:
+//! - statements are given out without the block hold, and the stream stops at the first block
+//!   mismatch with one `UnknownBlock` item instead of refusing back;
+//! - an anchor is looked for at every line start after a `\n` (never after a lone `\r`);
 //! - two consecutive anchors may lie at most [`STREAM_HELD_MAX`] bytes and
 //!   [`STREAM_HELD_ITEMS_MAX`] items apart (so about that much is held at most): past either
-//!   the stream stops with `NoBoundary`. The rule reads the text alone, so where it stops does
-//!   not depend on the chunking.
+//!   the stream stops with `NoBoundary`. The rule reads the text alone.
 //!
 //! Every eager stream either gives out an item that refuses ([`StreamItem::refuses`]) or
-//! equals the default stream, which is the whole split, and gives out the same items for
-//! every chunking. R-M4b-47's first pass relies on it: "Run as script" streams the file once
-//! without running anything, refuses the file if any item refuses ([`any_refuses`]), and only
-//! then streams it again to run it.
+//! equals the default stream, which is the whole split. R-M4b-47's first pass relies on it:
+//! "Run as script" streams the file once without running anything, refuses the file if any
+//! item refuses ([`any_refuses`]), and only then streams it again, in the same chunks, to run
+//! it.
 
 use std::sync::Arc;
 
@@ -75,7 +75,7 @@ pub enum StreamItem {
         offset: u64,
     },
     // ## m4b-t08-stream-hold
-    /// Under [`StreamPolicy::Eager`]: the next anchor after `offset` lies more than
+    /// Under [`StreamPolicy::Eager`] on MySQL/MariaDB: the next anchor after `offset` lies more than
     /// [`STREAM_HELD_MAX`] bytes (or [`STREAM_HELD_ITEMS_MAX`] items) away (statements with no
     /// line start between them, an open comment, comments only, a statement longer than the
     /// cap). The stream stops here.
@@ -135,11 +135,11 @@ pub enum StreamPolicy {
     /// statement.
     #[default]
     Exact,
-    /// Constant memory: no block hold on MySQL/MariaDB, where the stream stops at the first
-    /// block mismatch; anchors at every line start; consecutive anchors at most
-    /// [`STREAM_HELD_MAX`] bytes and [`STREAM_HELD_ITEMS_MAX`] items apart. The stream either
-    /// gives out an item that refuses or equals the whole split, and what it gives out does not
-    /// depend on the chunking.
+    /// Constant memory on MySQL/MariaDB (module documentation): no block hold, a stop at the
+    /// first block mismatch, anchors at every line start after a `\n`, consecutive anchors at
+    /// most [`STREAM_HELD_MAX`] bytes and [`STREAM_HELD_ITEMS_MAX`] items apart. The stream
+    /// either gives out an item that refuses or equals the whole split. On every other dialect
+    /// it is `Exact`.
     Eager,
 }
 // ## end m4b-t08-stream-hold
@@ -202,7 +202,9 @@ impl StreamSplitter {
         }
     }
 
-    /// The splitter with other eager caps (tests reach the cap rule with small texts).
+    /// The splitter with other eager caps (tests reach the cap rule with small texts; never in
+    /// product code: the feature is the test suite's alone).
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn with_caps(mut self, held_max: usize, items_max: usize) -> Self {
         self.held_max = held_max.max(1);
@@ -230,8 +232,9 @@ impl StreamSplitter {
         if self.stopped {
             return Vec::new();
         }
-        // ## m4b-t08-stream-hold: the eager policy has its own path; the rest is `Exact`.
-        if self.policy == StreamPolicy::Eager {
+        // ## m4b-t08-stream-hold: the eager policy on MySQL/MariaDB has its own path; the rest
+        // (every other dialect under either policy) is `Exact`.
+        if self.eager_blocks() {
             return self.feed_eager(chunk);
         }
         // ## end m4b-t08-stream-hold
@@ -269,8 +272,8 @@ impl StreamSplitter {
         if self.stopped {
             return Vec::new();
         }
-        // ## m4b-t08-stream-hold: the eager policy has its own path.
-        if self.policy == StreamPolicy::Eager {
+        // ## m4b-t08-stream-hold: the eager policy on MySQL/MariaDB has its own path.
+        if self.eager_blocks() {
             return self.finish_eager();
         }
         // ## end m4b-t08-stream-hold
@@ -316,17 +319,9 @@ impl StreamSplitter {
     }
 
     // ## m4b-t08-stream-hold
-    /// Whether the block rules of the eager policy apply (MySQL/MariaDB under `Eager`).
+    /// Whether the eager path applies (MySQL/MariaDB under `Eager`; R-T8-4).
     fn eager_blocks(&self) -> bool {
         self.policy == StreamPolicy::Eager && split_profile(&self.ctx).family == BlockFamily::MySql
-    }
-
-    /// The longest statement given out as a statement (a longer one is `TooLong`).
-    fn statement_max(&self) -> usize {
-        match self.policy {
-            StreamPolicy::Exact => STREAM_STATEMENT_MAX,
-            StreamPolicy::Eager => self.held_max,
-        }
     }
 
     /// [`Self::feed`] under [`StreamPolicy::Eager`] (see [`Self::eager_check`]). The held text
@@ -373,7 +368,7 @@ impl StreamSplitter {
     /// of the text) are more than the byte cap apart or hold more than the item cap of items,
     /// counting text already given out. It stops at the first anchor of the first such gap.
     ///
-    /// Only anchors whose status no later text can change count ([`Self::eager_anchors`]). A
+    /// Only anchors whose status no later text can change count ([`Self::anchor_status`]). A
     /// gap is decided once the text seen proves it, by a bound on where the next anchor can
     /// lie: at the last item's line if that item is still pending, or else no earlier than
     /// [`Self::span`] (plus a token's margin) before the end of the text held, since an
@@ -406,76 +401,72 @@ impl StreamSplitter {
         Check::Cut(anchors.last().map(|(x, _)| *x))
     }
 
-    /// How far an anchor's item may run from its line before its status is known: its strict
-    /// start (after leading comments) and, after a lone `\r`, its end must lie within this span
-    /// of the line (a sixteenth of the byte cap, 4 MiB).
+    /// How far an anchor's item may start from its line (after leading comments and blanks)
+    /// before the line is no anchor: a sixteenth of the byte cap, 4 MiB. It bounds where a
+    /// later anchor can lie, so a gap is decided without waiting for the end of the text.
     fn span(&self) -> usize {
         (self.held_max / 16).max(ESTABLISHED)
     }
 
     /// The anchors of `a` whose status is final, in text order, as (line start, item index),
-    /// and where the last item's line starts if its status is still pending.
-    ///
-    /// An item starts a line when only blanks stand between it and a `\n` (then [`anchor`]
-    /// decides) or a lone `\r` ([`Self::cr_anchor`]), and its strict start lies within
-    /// [`Self::span`] of that line; the anchor must also lie before any executable comment with
-    /// an ambiguous end, outside a psql `\if`. Its status is final when a later item has
-    /// started or the text has ended; for the last item, after a `\n` once it is terminated or
-    /// 16 bytes long (its first token can no longer become a comment), after a `\r` once it is
-    /// terminated (and never an anchor once it runs past the span).
+    /// and where the last item's line starts if its status is still pending. Each item's
+    /// status comes from [`Self::anchor_status`], the one rule for streaming and the end alike.
     fn eager_anchors(&self, a: &Analysis, at_end: bool) -> (Vec<(usize, usize)>, Option<usize>) {
+        let (mut anchors, mut pending) = (Vec::new(), None);
+        for j in 1..a.items.len() {
+            match self.anchor_status(a, j, at_end) {
+                Status::Anchor(x) => anchors.push((x, j)),
+                Status::Pending(q) => pending = Some(q),
+                Status::Not => {}
+            }
+        }
+        (anchors, pending)
+    }
+
+    /// Whether item `j`'s line is an anchor (R-T8-4: after a `\n` only, never after a lone
+    /// `\r`):
+    /// - only blanks stand between the item and a `\n`, and [`anchor`] accepts the line (the
+    ///   text before the item is read to its end; no byte-order mark starts the line);
+    /// - the item's strict start lies within [`Self::span`] of the line;
+    /// - the line lies before any executable comment with an ambiguous end, outside a psql
+    ///   `\if`.
+    ///
+    /// All of it reads the text before the item's strict start. The one thing later text can
+    /// change is whether the last item is an item at all (its first token may still become a
+    /// comment), so while the text goes on, an unterminated last item shorter than 16 bytes is
+    /// `Pending`; at the end, and in every other case, the same rule gives the same answer.
+    fn anchor_status(&self, a: &Analysis, j: usize, at_end: bool) -> Status {
         let text = &self.held;
         let b = text.as_bytes();
-        let n = text.len();
-        let span = self.span();
-        let cp = client_profile(self.flavor);
+        let mut q = usize::from(item_start(&a.items[j]));
+        while q > 0 && matches!(b[q - 1], b' ' | b'\t') {
+            q -= 1;
+        }
+        let start = match &a.items[j] {
+            RawItem::Stmt(s) => usize::from(s.strict.start()),
+            RawItem::Empty(r) => usize::from(r.start()),
+        };
+        if q == 0 || b[q - 1] != b'\n' || start - q > self.span() {
+            return Status::Not;
+        }
+        let open = !at_end
+            && j + 1 == a.items.len()
+            && matches!(&a.items[j], RawItem::Stmt(s) if s.terminator.is_none());
+        if open && text.len() - start < ESTABLISHED {
+            return Status::Pending(q);
+        }
         let ambiguous = a
             .ambiguous
             .iter()
             .find(|x| x.reason == AmbiguityReason::AmbiguousCommentEnd)
             .map_or(usize::MAX, |x| usize::from(x.at.start()));
-        let last = a.items.len().saturating_sub(1);
-        let (mut anchors, mut pending) = (Vec::new(), None);
-        for j in 1..a.items.len() {
-            let mut q = usize::from(item_start(&a.items[j]));
-            while q > 0 && matches!(b[q - 1], b' ' | b'\t') {
-                q -= 1;
+        let cp = client_profile(self.flavor);
+        match anchor(text, a, j) {
+            Some(x) if x <= ambiguous && if_depth(text, cp, &a.client, x) == Some(0) => {
+                Status::Anchor(x)
             }
-            let start = match &a.items[j] {
-                RawItem::Stmt(s) => usize::from(s.strict.start()),
-                RawItem::Empty(r) => usize::from(r.start()),
-            };
-            let open = !at_end
-                && j == last
-                && matches!(&a.items[j], RawItem::Stmt(s) if s.terminator.is_none());
-            let x = match q.checked_sub(1).map(|p| b[p]) {
-                _ if start - q > span => None,
-                Some(b'\n') => {
-                    if open && n - start < ESTABLISHED {
-                        pending = Some(q);
-                        continue;
-                    }
-                    anchor(text, a, j)
-                }
-                Some(b'\r') => {
-                    if open {
-                        if n - q <= span {
-                            pending = Some(q);
-                        }
-                        continue;
-                    }
-                    self.cr_anchor(a, j, q)
-                }
-                _ => None,
-            };
-            if let Some(x) = x
-                && x <= ambiguous
-                && if_depth(text, cp, &a.client, x) == Some(0)
-            {
-                anchors.push((x, j));
-            }
+            _ => Status::Not,
         }
-        (anchors, pending)
     }
 
     /// The stream stops at `at`, an anchor of `a`, where a gap breaks a cap: what precedes
@@ -491,72 +482,11 @@ impl StreamSplitter {
         self.held = String::new();
     }
 
-    /// Whether `line`, which a lone `\r` (classic Mac line ends) starts before item `j`, is an
-    /// anchor. Client commands count only at a `\n` line start (and whether a comment ends at a
-    /// `\r` is the lexer profile's `line_ends_at_cr`), so a pass that starts at `line` sees a
-    /// line start the whole text does not have. `line` is an anchor only when:
-    /// - nothing the pass read runs past the break (only white space since the last item,
-    ///   client command or `COPY` data), and no byte-order mark starts the line;
-    /// - item `j` is complete (within [`Self::span`] of the line: `eager_anchors`);
-    /// - a pass over the text from `line` to item `j`'s end gives the same statements and
-    ///   client commands there ([`shape`]) and leaves the same delimiter.
-    ///
-    /// All of it depends on the text up to item `j`'s end only.
-    fn cr_anchor(&self, a: &Analysis, j: usize, line: usize) -> Option<usize> {
-        let text = &self.held;
-        let b = text.as_bytes();
-        if b[line..].starts_with(BOM) {
-            return None;
-        }
-        let client = a
-            .client
-            .iter()
-            .filter(|c| usize::from(c.range.start()) < line)
-            .map(|c| usize::from(c.range.end()))
-            .max()
-            .unwrap_or(0);
-        let copy = a
-            .copies
-            .iter()
-            .filter(|(_, d)| usize::from(d.rows.start()) < line)
-            .map(|(_, d)| usize::from(d.end.map_or(d.rows.end(), |e| e.end())))
-            .max()
-            .unwrap_or(0);
-        let read = usize::from(item_end(&a.items[j - 1])).max(client).max(copy);
-        if read > line || !b[read..line].iter().all(u8::is_ascii_whitespace) {
-            return None;
-        }
-        let end = match &a.items[j] {
-            RawItem::Stmt(s) => usize::from(s.terminator.map_or(s.strict.end(), |t| t.end())),
-            RawItem::Empty(r) => usize::from(r.end()),
-        };
-        if end - line > self.span() {
-            return None;
-        }
-        let start = SplitStart {
-            lex: LexState::Initial,
-            delimiter: a.delimiter_at(size(line)),
-        };
-        let w = analyze(&text[line..end], None, &self.ctx, self.flavor, &start);
-        let max = self.statement_max();
-        let whole = shape(collect(a, text, 0, line, end, max));
-        let window = shape(collect(
-            &w,
-            &text[line..end],
-            line as u64,
-            0,
-            end - line,
-            max,
-        ));
-        (whole == window && w.delimiter_at(size(end - line)) == a.delimiter_at(size(end)))
-            .then_some(line)
-    }
-
     /// Gives out the items of `a` before `upto` as the policy allows: under
     /// [`StreamPolicy::Exact`] all of them ([`Self::give_out`]).
     ///
-    /// Under [`StreamPolicy::Eager`] a `TooLong` statement stops the stream after it. On
-    /// MySQL/MariaDB a block mismatch (`UnknownBlock`) may also refuse statements already given
+    /// Under [`StreamPolicy::Eager`] (MySQL/MariaDB) a `TooLong` statement stops the stream
+    /// after it, and a block mismatch (`UnknownBlock`) may also refuse statements already given
     /// out (the stray-`END` backstop refuses back to the last block-tracked statement, which is
     /// no longer held). So when `a` has one, the text before `upto` is split on its own: without
     /// one there (the mismatch lies in the text still held, and its refusal of earlier
@@ -660,16 +590,61 @@ impl StreamSplitter {
 
     /// Gives out every item of `a` that starts before `upto` and drops the text before it.
     fn give_out(&mut self, a: &Analysis, upto: usize, out: &mut Vec<StreamItem>) {
-        // ## m4b-t08-stream-hold: the item list is `collect`'s (shared with `cr_anchor`).
-        out.extend(collect(
-            a,
-            &self.held,
-            self.base,
-            0,
-            upto,
-            self.statement_max(),
-        ));
-        // ## end m4b-t08-stream-hold
+        let text = &self.held;
+        let base = self.base;
+        let off = |p: TextSize| base + u64::from(u32::from(p));
+        let split = a.to_split(text, SplitMode::Execution);
+        let mut items: Vec<(u64, u8, StreamItem)> = Vec::new();
+        for c in split
+            .client
+            .iter()
+            .filter(|c| usize::from(c.range.start()) < upto)
+        {
+            items.push((
+                off(c.range.start()),
+                0,
+                StreamItem::Client {
+                    text: text[c.range].to_owned(),
+                    offset: off(c.range.start()),
+                    supported: c.supported,
+                },
+            ));
+        }
+        for s in split
+            .items
+            .iter()
+            .filter_map(Item::statement)
+            .filter(|s| usize::from(s.strict.start()) < upto)
+        {
+            let offset = off(s.strict.start());
+            let item = if usize::from(s.strict.len()) > STREAM_STATEMENT_MAX {
+                StreamItem::TooLong { offset }
+            } else {
+                StreamItem::Statement {
+                    text: text[s.strict].to_owned(),
+                    offset,
+                    confidence: s.confidence,
+                }
+            };
+            items.push((offset, 1, item));
+        }
+        for x in split
+            .ambiguous
+            .iter()
+            .filter(|x| usize::from(x.at.start()) < upto)
+        {
+            let offset = off(x.at.start());
+            items.push((
+                offset,
+                2,
+                StreamItem::Ambiguous {
+                    offset,
+                    reason: x.reason,
+                },
+            ));
+        }
+        items.sort_by_key(|(o, rank, _)| (*o, *rank));
+        out.extend(items.into_iter().map(|(_, _, it)| it));
         let cut = upto.min(self.held.len());
         self.delimiter = a.delimiter_at(size(cut));
         self.held.drain(..cut);
@@ -677,88 +652,15 @@ impl StreamSplitter {
     }
 }
 
-/// The items of `a` (the pass over `text`, which starts at stream offset `base`) that start in
-/// `from..upto`, in text order: by offset, then a client command before a statement before an
-/// uncertain boundary. A statement longer than `max` is `TooLong`.
-fn collect(
-    a: &Analysis,
-    text: &str,
-    base: u64,
-    from: usize,
-    upto: usize,
-    max: usize,
-) -> Vec<StreamItem> {
-    let off = |p: TextSize| base + u64::from(u32::from(p));
-    let within = |p: TextSize| (from..upto).contains(&usize::from(p));
-    let split = a.to_split(text, SplitMode::Execution);
-    let mut items: Vec<(u64, u8, StreamItem)> = Vec::new();
-    for c in split.client.iter().filter(|c| within(c.range.start())) {
-        items.push((
-            off(c.range.start()),
-            0,
-            StreamItem::Client {
-                text: text[c.range].to_owned(),
-                offset: off(c.range.start()),
-                supported: c.supported,
-            },
-        ));
-    }
-    for s in split
-        .items
-        .iter()
-        .filter_map(Item::statement)
-        .filter(|s| within(s.strict.start()))
-    {
-        let offset = off(s.strict.start());
-        let item = if usize::from(s.strict.len()) > max {
-            StreamItem::TooLong { offset }
-        } else {
-            StreamItem::Statement {
-                text: text[s.strict].to_owned(),
-                offset,
-                confidence: s.confidence,
-            }
-        };
-        items.push((offset, 1, item));
-    }
-    for x in split.ambiguous.iter().filter(|x| within(x.at.start())) {
-        let offset = off(x.at.start());
-        items.push((
-            offset,
-            2,
-            StreamItem::Ambiguous {
-                offset,
-                reason: x.reason,
-            },
-        ));
-    }
-    items.sort_by_key(|(o, rank, _)| (*o, *rank));
-    items.into_iter().map(|(_, _, it)| it).collect()
-}
-
 // ## m4b-t08-stream-hold
-/// A byte-order mark: a line that starts with one is never an anchor (as `incremental::anchor`).
-const BOM: &[u8] = b"\xEF\xBB\xBF";
-
-/// The boundaries of `items`: its statements (as `Exact`) and client commands, which is what
-/// `cr_anchor` compares. A pass that starts at a line the whole text does not have reads a
-/// different boundary there (a client command for a statement, or the reverse); uncertain
-/// boundaries and confidences are left out, since text after the window can change them (a
-/// block mismatch, `COPY` data, an executable comment's end), and the stream gives them out
-/// from the whole pass anyway.
-fn shape(items: Vec<StreamItem>) -> Vec<StreamItem> {
-    items
-        .into_iter()
-        .filter_map(|it| match it {
-            StreamItem::Statement { text, offset, .. } => Some(StreamItem::Statement {
-                text,
-                offset,
-                confidence: Confidence::Exact,
-            }),
-            StreamItem::Ambiguous { .. } => None,
-            other => Some(other),
-        })
-        .collect()
+/// What [`StreamSplitter::anchor_status`] says of an item's line.
+enum Status {
+    /// The line is an anchor, at this offset.
+    Anchor(usize),
+    /// The line is no anchor, whatever text comes later.
+    Not,
+    /// The last item may still turn out not to be an item: its line, if it is one.
+    Pending(usize),
 }
 
 /// Whether the pass found a block mismatch.
@@ -778,16 +680,6 @@ fn item_start(it: &RawItem) -> TextSize {
     }
 }
 
-/// Where item `it` ends: its smart range, terminator and trailing comments included.
-fn item_end(it: &RawItem) -> TextSize {
-    match it {
-        RawItem::Stmt(s) => s
-            .smart_end
-            .max(s.strict.end())
-            .max(s.terminator.map_or(s.strict.end(), |t| t.end())),
-        RawItem::Empty(r) => r.end(),
-    }
-}
 // ## end m4b-t08-stream-hold
 
 #[cfg(test)]
