@@ -9,6 +9,7 @@
 //! in [`LibraryDiag::HiddenProblems`].
 
 use std::collections::HashSet;
+use std::fmt;
 
 use hacivat_git::{FileStatus, GitError, GitState, UntrustReason};
 use hacivat_proto::EnvTag;
@@ -28,7 +29,7 @@ impl WorkspaceSnapshot {
 }
 
 /// [`WorkspaceSnapshot`] filtered for one environment.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct EnvView<'a> {
     snap: &'a WorkspaceSnapshot,
     env: Option<EnvTag>,
@@ -59,8 +60,30 @@ impl<'a> EnvView<'a> {
     }
 }
 
+// ## m4b-t10-service fix round 2 (m-b): counts only, never a path (H11).
+impl fmt::Debug for EnvView<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnvView")
+            .field("env", &self.env)
+            .field("libraries", &self.snap.libraries.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for LibraryView<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LibraryView")
+            .field("id", &self.lib.id)
+            .field("env", &self.env)
+            .field("state", &self.lib.state)
+            .field("files", &self.file_count())
+            .field("git", &self.git())
+            .finish()
+    }
+}
+
 /// One library as a connection sees it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct LibraryView<'a> {
     lib: &'a LibrarySnapshot,
     git: Option<&'a GitState>,

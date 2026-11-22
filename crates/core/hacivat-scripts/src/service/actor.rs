@@ -27,7 +27,6 @@ use super::{
     AttachError, LibraryDiag, LibrarySnapshot, LibraryState, MapError, PollReason, ServiceOptions,
     UnavailableReason, WorkspaceSnapshot, servable,
 };
-use crate::envscope;
 use crate::events::LibraryEvent;
 use crate::fileio::DiskStamp;
 use crate::manifest;
@@ -35,8 +34,8 @@ use crate::names::{DatabaseName, LogicalDb};
 use crate::pathsafe::{self, RelPath};
 use crate::recovery;
 use crate::registry::{
-    AttachGuard, LibraryId, LibraryRegistry, LibraryRoot, LocalMapping, RegisteredLibrary,
-    RegistryDiag, RegistryError,
+    LibraryId, LibraryRegistry, LibraryRoot, LocalMapping, RegisteredLibrary, RegistryDiag,
+    RegistryError,
 };
 use crate::scan::ScriptEntry;
 use crate::watch::{EventSource, HintSink, RawHint, WatchError};
@@ -164,16 +163,22 @@ pub(super) enum Msg {
     /// A library job came back.
     Refreshed {
         id: LibraryId,
+        job: u64,
         out: RefreshOut,
     },
     SettleDone {
         id: LibraryId,
+        job: u64,
         rel: RelPath,
         out: SettleOut,
     },
+    /// Fix round 2 (F2, R-T10-5): a job ran past `ServiceOptions::job_deadline`.
+    JobOverdue {
+        job: u64,
+    },
     AttachResolved {
         token: u64,
-        result: Result<(), AttachError>,
+        result: Result<work::Valid, AttachError>,
     },
     AttachWritten {
         token: u64,
@@ -209,14 +214,19 @@ pub(super) struct Wiring {
 pub(super) fn start(w: Wiring) {
     let rt = w.rt.clone();
     rt.spawn_blocking(move || {
-        let (registry, diags) = LibraryRegistry::load(&w.paths.libraries_toml());
+        // F1: the rows are compared by text; each root is validated by its own job.
+        let (registry, diags) = LibraryRegistry::load_text_only(&w.paths.libraries_toml());
         let mut app = vec![
             w.paths.config.clone(),
             w.paths.data.clone(),
             w.paths.cache.clone(),
         ];
         app.extend(w.paths.runtime.clone());
-        let rules = Arc::new(Rules::new(w.opts.fs.as_ref(), w.opts.home.as_deref(), &app));
+        // F1: as configured; a job resolves them (a home folder may be on a network mount).
+        let rules = Arc::new(Rules {
+            home: w.opts.home.clone(),
+            app,
+        });
         let actor = Actor {
             paths: w.paths,
             rt: w.rt,
@@ -239,6 +249,8 @@ pub(super) fn start(w: Wiring) {
             workspace_dirty: false,
             pending: Vec::new(),
             in_flight: 0,
+            jobs: HashMap::new(),
+            next_job_id: 0,
             next_lib: 0,
             next_token: 0,
             attaches: HashMap::new(),
@@ -304,6 +316,8 @@ struct Lib {
     git: GitRun,
     /// A job of this library is running.
     busy: bool,
+    /// Its id (F2: an answer from an abandoned job is ignored).
+    job: Option<u64>,
     want: Want,
     settles: HashMap<RelPath, Settle>,
     settle_due: VecDeque<RelPath>,
@@ -349,6 +363,7 @@ impl Lib {
             next_timer: 0,
             git: GitRun::default(),
             busy: false,
+            job: None,
             want: Want::default(),
             settles: HashMap::new(),
             settle_due: VecDeque::new(),
@@ -466,6 +481,7 @@ struct PendingAttach {
     db: Option<LogicalDb>,
     write_manifest: bool,
     root: Option<LibraryRoot>,
+    identity: Option<(u64, u64)>,
     reply: oneshot::Sender<Result<LibraryId, AttachError>>,
 }
 
@@ -505,8 +521,11 @@ struct Actor {
     workspace_dirty: bool,
     /// Events to send after the next publish.
     pending: Vec<LibraryEvent>,
-    /// Library jobs running (at most `opts.workers`).
+    /// Library jobs counted against the cap (at most `opts.workers`).
     in_flight: usize,
+    /// Running jobs, and whether each still counts (F2: abandoned and overdue ones do not).
+    jobs: HashMap<u64, bool>,
+    next_job_id: u64,
     /// Where the next round of `dispatch` starts (fairness).
     next_lib: usize,
     next_token: u64,
@@ -643,20 +662,17 @@ impl Actor {
             Msg::Backstop => self.backstop(),
             Msg::GitTick { id, seq } => self.git_tick(id, seq),
             Msg::GitDone { id, state } => self.git_done(id, state),
-            Msg::Refreshed { id, out } => {
-                self.in_flight = self.in_flight.saturating_sub(1);
-                if let Some(i) = self.index(id) {
-                    self.libs[i].busy = false;
+            Msg::Refreshed { id, job, out } => {
+                if let Some(i) = self.job_done(id, job) {
                     self.refreshed(i, out);
                 }
             }
-            Msg::SettleDone { id, rel, out } => {
-                self.in_flight = self.in_flight.saturating_sub(1);
-                if let Some(i) = self.index(id) {
-                    self.libs[i].busy = false;
+            Msg::SettleDone { id, job, rel, out } => {
+                if let Some(i) = self.job_done(id, job) {
                     self.settle_done(i, rel, out);
                 }
             }
+            Msg::JobOverdue { job } => self.job_overdue(job),
             Msg::Settled { reply } => self.waiters.push(reply),
             Msg::Shutdown => {}
         }
@@ -690,7 +706,7 @@ impl Actor {
         reply: oneshot::Sender<Result<LibraryId, AttachError>>,
     ) {
         let token = self.token();
-        let fs = self.opts.fs.clone();
+        let (fs, rules) = (self.opts.fs.clone(), self.rules.clone());
         let probe = path.clone();
         self.attaches.insert(
             token,
@@ -699,36 +715,45 @@ impl Actor {
                 db,
                 write_manifest,
                 root: None,
+                identity: None,
                 reply,
             },
         );
         self.spawn(move || Msg::AttachResolved {
             token,
-            result: work::resolve_attach(fs.as_ref(), &probe),
+            result: work::resolve_attach(fs.as_ref(), &probe, &rules),
         });
     }
 
-    fn attach_resolved(&mut self, token: u64, result: Result<(), AttachError>) {
+    fn attach_resolved(&mut self, token: u64, result: Result<work::Valid, AttachError>) {
         let Some(mut pa) = self.attaches.remove(&token) else {
             return;
         };
-        if let Err(e) = result {
-            let _ = pa.reply.send(Err(e));
-            return;
-        }
-        let guard = AttachGuard::new(&self.paths, self.opts.home.as_deref());
-        let root = match self.registry.add(&pa.path, &guard, SystemTime::now()) {
+        let resolved = match result {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = pa.reply.send(Err(e));
+                return;
+            }
+        };
+        // F1: no file-system call here. The worker resolved the folder and made the guard's
+        // checks; overlap is checked against the canonical paths this actor holds.
+        let others = self.known_roots(None);
+        let inode = resolved.identity.map(|(_, ino)| ino);
+        let root = match self.registry.add_resolved(
+            &pa.path,
+            &resolved.root.canonical,
+            inode,
+            &others,
+            SystemTime::now(),
+        ) {
             Ok(root) => root,
             Err(e) => {
                 let _ = pa.reply.send(Err(AttachError::Registry(e)));
                 return;
             }
         };
-        if let Some(name) = envscope::root_env_folder(&root.canonical) {
-            let _ = self.registry.remove(root.id);
-            let _ = pa.reply.send(Err(AttachError::RootInEnvFolder(name)));
-            return;
-        }
+        pa.identity = resolved.identity;
         if pa.write_manifest {
             let Some(db) = pa.db.clone().or_else(|| folder_db(&pa.path)) else {
                 let _ = self.registry.remove(root.id);
@@ -778,6 +803,7 @@ impl Actor {
         };
         let mut lib = Lib::new(reg);
         lib.session.canonical = Some(root.canonical.clone());
+        lib.session.identity = pa.identity;
         self.libs.push(lib);
         let i = self.libs.len() - 1;
         // I5: the watch starts before the first scan; the scan (which re-validates the root)
@@ -794,7 +820,11 @@ impl Actor {
     fn detach(&mut self, id: LibraryId) -> Result<(), RegistryError> {
         self.edit_registry(|reg| reg.remove(id))?;
         if let Some(i) = self.index(id) {
-            // A job still running for it is abandoned: its answer finds no library.
+            // A job still running for it is abandoned: its slot is freed now (F2, R-T10-5)
+            // and its late answer finds no library.
+            if let Some(job) = self.libs[i].job {
+                self.uncount(job);
+            }
             let mut lib = self.libs.remove(i);
             if let Some(root) = lib.watched.take() {
                 self.source.unwatch(&root);
@@ -893,8 +923,46 @@ impl Actor {
     }
 
     fn reload_registry(&mut self) {
-        let (registry, _) = LibraryRegistry::load(&self.paths.libraries_toml());
+        // F1: by text only; no library folder is touched.
+        let (registry, _) = LibraryRegistry::load_text_only(&self.paths.libraries_toml());
         self.registry = registry;
+    }
+
+    /// The canonical roots this actor knows (this session's, else the recorded one, else the
+    /// registered path), but `except`'s.
+    fn known_roots(&self, except: Option<usize>) -> Vec<(LibraryId, PathBuf)> {
+        self.libs
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| Some(j) != except)
+            .map(|(_, l)| {
+                let root = l
+                    .session
+                    .canonical
+                    .clone()
+                    .or_else(|| l.reg.canonical.clone())
+                    .unwrap_or_else(|| l.reg.path.clone());
+                (l.id(), root)
+            })
+            .collect()
+    }
+
+    /// m-a: records a root's first resolution in `libraries.toml`, for the next launch.
+    fn record_resolution(&mut self, i: usize) {
+        let lib = &self.libs[i];
+        let (Some(canonical), None) = (lib.session.canonical.clone(), &lib.reg.canonical) else {
+            return;
+        };
+        let (id, inode) = (lib.id(), lib.session.identity.map(|(_, ino)| ino));
+        if self.registry.set_resolved(id, &canonical, inode) {
+            if self.registry.save().is_err() {
+                self.reload_registry();
+                return;
+            }
+            if let Some(reg) = self.registry.library(id).cloned() {
+                self.libs[i].reg = reg;
+            }
+        }
     }
 
     // ---- jobs --------------------------------------------------------------------------------
@@ -996,21 +1064,69 @@ impl Actor {
     }
 
     fn run_job(&mut self, i: usize, job: Job) {
+        self.next_job_id += 1;
+        let job_id = self.next_job_id;
         let lib = &mut self.libs[i];
         lib.busy = true;
-        self.in_flight += 1;
+        lib.job = Some(job_id);
         let (id, tx) = (lib.id(), self.tx.clone());
+        self.in_flight += 1;
+        self.jobs.insert(job_id, true);
         self.rt.spawn_blocking(move || {
             let msg = match job {
-                Job::Refresh(job) => Msg::Refreshed { id, out: job.run() },
+                Job::Refresh(job) => Msg::Refreshed {
+                    id,
+                    job: job_id,
+                    out: job.run(),
+                },
                 Job::Settle(rel, job) => Msg::SettleDone {
                     id,
+                    job: job_id,
                     rel,
                     out: job.run(),
                 },
             };
             let _ = tx.blocking_send(msg);
         });
+        self.after(self.opts.job_deadline, Msg::JobOverdue { job: job_id });
+    }
+
+    /// Stops counting `job` against the worker cap (it was abandoned or is overdue).
+    fn uncount(&mut self, job: u64) {
+        if let Some(counted) = self.jobs.get_mut(&job)
+            && std::mem::take(counted)
+        {
+            self.in_flight = self.in_flight.saturating_sub(1);
+        }
+    }
+
+    /// A job came back: frees its slot (if it still held one) and answers its library, unless
+    /// the library is gone or this is not its job any more.
+    fn job_done(&mut self, id: LibraryId, job: u64) -> Option<usize> {
+        self.uncount(job);
+        self.jobs.remove(&job);
+        let i = self.index(id)?;
+        let lib = &mut self.libs[i];
+        if lib.job != Some(job) {
+            return None;
+        }
+        lib.busy = false;
+        lib.job = None;
+        Some(i)
+    }
+
+    /// F2 (R-T10-5): a job past its deadline stops counting against the cap, so a hung mount
+    /// cannot starve other libraries, and its library shows `Unavailable(NotResponding)`
+    /// until the job returns (it keeps the library's one job, so no second one piles up).
+    fn job_overdue(&mut self, job: u64) {
+        if !self.jobs.get(&job).copied().unwrap_or(false) {
+            return;
+        }
+        self.uncount(job);
+        let Some(i) = self.libs.iter().position(|l| l.job == Some(job)) else {
+            return;
+        };
+        self.make_unavailable(i, UnavailableReason::NotResponding, Vec::new());
     }
 
     fn refreshed(&mut self, i: usize, out: RefreshOut) {
@@ -1020,6 +1136,7 @@ impl Actor {
                 let lib = &mut self.libs[i];
                 lib.session.canonical = Some(v.root.canonical);
                 lib.session.identity = lib.session.identity.or(v.identity);
+                self.record_resolution(i);
                 // I5: the watch first, then the scan.
                 self.ensure_watch(i);
                 self.libs[i].want.scan = true;
@@ -1067,6 +1184,13 @@ impl Actor {
                 }
                 if changed {
                     self.dirty.insert(id);
+                }
+                self.record_resolution(i);
+                // A late answer after `NotResponding` (which unwatched it): watch again and
+                // look once more, since the watch starts after this scan.
+                if !was_up && self.libs[i].watched.is_none() && !self.libs[i].polling {
+                    self.ensure_watch(i);
+                    self.libs[i].want.scan = true;
                 }
                 self.announce(i, listing.changes, listing.renames);
                 if !was_up && self.libs[i].up() {

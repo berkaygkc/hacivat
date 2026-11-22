@@ -1376,15 +1376,23 @@ async fn h2_sweep_spares_a_live_instances_copies() {
     ready(&r).await;
     assert!(live.is_locked());
     assert!(dir.exists(), "a live instance's copy folder was swept");
-    // Once that instance is gone, the next launch sweeps the folder.
+    // Once that instance is gone, a later launch sweeps the folder. Fix round 2 (F3): under
+    // full parallel load a relaunch now and then still sees the dead instance's lock as held
+    // or untestable and keeps the folder, which is the fail-safe answer; so the test relaunches
+    // until the sweep happens, within the ceiling.
     drop(live);
     drop(r);
-    let r = rig_with(app.path(), opts());
-    ready(&r).await;
-    assert!(
-        !dir.exists(),
-        "a dead instance's old copies of an unregistered library stay"
-    );
+    let deadline = Instant::now() + CEILING;
+    let mut launches = 0;
+    while dir.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "a dead instance's old copies of an unregistered library stay ({launches} launches)"
+        );
+        let r = rig_with(app.path(), opts());
+        ready(&r).await;
+        launches += 1;
+    }
 }
 
 /// H3: a full inbox drops hint batches; the overflow flag rescans, so a file whose only hint
@@ -1875,5 +1883,401 @@ async fn a_view_never_names_what_its_connection_does_not_show() {
         s.entries()
             .iter()
             .all(|e| !e.rel.as_str().starts_with("@production"))
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 2: the re-review's probes H6b, H8, H9, H11, H12 (adopted) and F1's hung mount
+// ---------------------------------------------------------------------------------------------
+
+/// A file system on which every call under one of `stalled` blocks until the gate opens (a
+/// dead NFS or SMB mount: `lstat`, `realpath`, `readdir` and `readlink` all hang). Counts
+/// the calls that blocked.
+struct DeadMount {
+    stalled: Vec<PathBuf>,
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    entered: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DeadMount {
+    fn new(stalled: Vec<PathBuf>) -> Arc<Self> {
+        Arc::new(DeadMount {
+            stalled,
+            gate: Arc::default(),
+            entered: Arc::default(),
+        })
+    }
+
+    fn wait(&self, path: &Path) {
+        if !self.stalled.iter().any(|s| path.starts_with(s)) {
+            return;
+        }
+        let (lock, cvar) = &*self.gate;
+        let mut open = lock.lock().unwrap();
+        if !*open {
+            self.entered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        while !*open {
+            open = cvar.wait(open).unwrap();
+        }
+    }
+
+    fn release(&self) {
+        let (lock, cvar) = &*self.gate;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+    }
+
+    fn blocked(&self) -> usize {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The service's injected `Fs`, sharing one `DeadMount`.
+struct Mounted(Arc<DeadMount>);
+
+impl hacivat_scripts::scan::Fs for Mounted {
+    fn read_dir(&self, dir: &Path, cap: usize) -> std::io::Result<Vec<std::ffi::OsString>> {
+        self.0.wait(dir);
+        hacivat_scripts::scan::RealFs.read_dir(dir, cap)
+    }
+    fn symlink_metadata(&self, path: &Path) -> std::io::Result<hacivat_scripts::scan::Meta> {
+        self.0.wait(path);
+        hacivat_scripts::scan::RealFs.symlink_metadata(path)
+    }
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        self.0.wait(path);
+        hacivat_scripts::scan::RealFs.canonicalize(path)
+    }
+    fn read_link(&self, link: &Path) -> std::io::Result<PathBuf> {
+        self.0.wait(link);
+        hacivat_scripts::scan::RealFs.read_link(link)
+    }
+}
+
+/// Options with a short job deadline (F2), over `mount`.
+fn on_mount(mount: &Arc<DeadMount>) -> ServiceOptions {
+    ServiceOptions {
+        fs: Arc::new(Mounted(mount.clone())),
+        job_deadline: Duration::from_millis(300),
+        ..opts()
+    }
+}
+
+fn state_of(r: &Rig, id: LibraryId) -> Option<LibraryState> {
+    r.snap().library(id).map(|l| l.state.clone())
+}
+
+/// F1: a library on a hung mount blocks nothing at launch, at attach or on a registry reload.
+/// The actor itself never touches a library folder; only that library's own job waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_mount_never_blocks_launch_attach_or_reload() {
+    let app = tempfile::tempdir().unwrap();
+    let hung = tempfile::tempdir().unwrap();
+    let fine = tempfile::tempdir().unwrap();
+    let late = tempfile::tempdir().unwrap();
+    write_files(hung.path(), &["a.sql"]);
+    write_files(fine.path(), &["b.sql"]);
+    write_files(late.path(), &["c.sql"]);
+    let (hung_id, fine_id) = {
+        let r = rig_with(app.path(), opts());
+        ready(&r).await;
+        (attach(&r, hung.path()).await, attach(&r, fine.path()).await)
+    };
+    // The mount dies between sessions.
+    let mount = DeadMount::new(vec![canonical(hung.path())]);
+    let r = rig_with(app.path(), on_mount(&mount));
+    let all = tokio::time::timeout(CEILING, async {
+        ready(&r).await;
+        wait_until("the healthy library", || {
+            state_of(&r, fine_id) == Some(LibraryState::Watching)
+        })
+        .await;
+        wait_until("NotResponding", || {
+            state_of(&r, hung_id)
+                == Some(LibraryState::Unavailable(UnavailableReason::NotResponding))
+        })
+        .await;
+        // Attach while it hangs.
+        let id = attach(&r, late.path()).await;
+        assert_eq!(r.rels(id), ["c.sql"]);
+        // A command that saves the registry, and one whose save fails (the registry is then
+        // read back from the file, by text only).
+        let m = LocalMapping {
+            profile: ProfileId::new(),
+            database: DatabaseName::new("orders"),
+            library: fine_id,
+        };
+        r.svc.map(m, false).await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let config = r.paths.config.clone();
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o500)).unwrap();
+            // Running as root, a read-only folder is still writable: then there is no failure
+            // to provoke.
+            let probe = config.join(".hv-t10-probe");
+            let writable = std::fs::write(&probe, b"x").is_ok();
+            let _ = std::fs::remove_file(&probe);
+            if !writable {
+                assert!(r.svc.drop_profile(ProfileId::new()).await.is_err());
+            }
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        r.svc.detach(hung_id).await.unwrap();
+        assert!(r.snap().library(hung_id).is_none());
+    })
+    .await;
+    let blocked = mount.blocked();
+    mount.release();
+    all.expect("the service waited on the hung mount");
+    assert!(blocked >= 1, "the hung folder was never asked for");
+    r.svc.settled().await;
+}
+
+/// F2: a library that stops answering is `NotResponding` and comes back once it answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_library_that_stops_answering_comes_back() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    write_files(d.path(), &["a.sql"]);
+    let id = {
+        let r = rig_with(app.path(), opts());
+        ready(&r).await;
+        attach(&r, d.path()).await
+    };
+    let mount = DeadMount::new(vec![canonical(d.path())]);
+    let r = rig_with(app.path(), on_mount(&mount));
+    ready(&r).await;
+    wait_until("NotResponding", || {
+        state_of(&r, id) == Some(LibraryState::Unavailable(UnavailableReason::NotResponding))
+    })
+    .await;
+    assert!(r.rels(id).is_empty());
+    mount.release();
+    wait_until("the library to answer", || {
+        state_of(&r, id) == Some(LibraryState::Watching) && r.rels(id) == ["a.sql"]
+    })
+    .await;
+    assert_eq!(r.fake.watched(), [canonical(d.path())]);
+}
+
+/// H8 (F2, R-T10-5): 20 libraries, 8 of them on one dead mount: the 12 healthy ones come up,
+/// and the 8 are shown not responding.
+#[tokio::test(flavor = "multi_thread")]
+async fn h8_eight_hung_libraries_of_twenty_stall_only_themselves() {
+    let app = tempfile::tempdir().unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let mut dirs = Vec::new();
+    for k in 0..20 {
+        let p = base.path().join(format!("lib{k:02}"));
+        write_files(&p, &["a.sql"]);
+        dirs.push(canonical(&p));
+    }
+    // Only listings hang (the review's probe): the attach itself resolves the folder.
+    let mount = DeadMount::new(dirs[..8].to_vec());
+    let listings_only = ServiceOptions {
+        fs: Arc::new(ListingsOnly(mount.clone())),
+        job_deadline: Duration::from_millis(300),
+        ..opts()
+    };
+    let r = rig_with(app.path(), listings_only);
+    ready(&r).await;
+    let mut ids = Vec::new();
+    for d in &dirs {
+        ids.push(r.svc.attach(d.clone(), None, false).await.unwrap());
+    }
+    wait_until("the 12 healthy libraries", || {
+        ids[8..]
+            .iter()
+            .all(|id| state_of(&r, *id) == Some(LibraryState::Watching))
+    })
+    .await;
+    wait_until("the 8 hung ones shown not responding", || {
+        ids[..8].iter().all(|id| {
+            state_of(&r, *id) == Some(LibraryState::Unavailable(UnavailableReason::NotResponding))
+        })
+    })
+    .await;
+    print_fact(&format!("t10 h8 blocked={} fine_up=12/12", mount.blocked()));
+    mount.release();
+    r.svc.settled().await;
+}
+
+/// Listings under the dead mount hang; `lstat` and `realpath` answer (the review's H8/H9).
+struct ListingsOnly(Arc<DeadMount>);
+
+impl hacivat_scripts::scan::Fs for ListingsOnly {
+    fn read_dir(&self, dir: &Path, cap: usize) -> std::io::Result<Vec<std::ffi::OsString>> {
+        self.0.wait(dir);
+        hacivat_scripts::scan::RealFs.read_dir(dir, cap)
+    }
+    fn symlink_metadata(&self, path: &Path) -> std::io::Result<hacivat_scripts::scan::Meta> {
+        hacivat_scripts::scan::RealFs.symlink_metadata(path)
+    }
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        hacivat_scripts::scan::RealFs.canonicalize(path)
+    }
+    fn read_link(&self, link: &Path) -> std::io::Result<PathBuf> {
+        hacivat_scripts::scan::RealFs.read_link(link)
+    }
+}
+
+/// H9 (F2): detaching a hung library frees its worker at once, so a user who retries (detach,
+/// attach again) eight times still gets a healthy library scanned.
+#[tokio::test(flavor = "multi_thread")]
+async fn h9_detach_of_a_hung_library_releases_its_worker() {
+    let app = tempfile::tempdir().unwrap();
+    let hung = tempfile::tempdir().unwrap();
+    let fine = tempfile::tempdir().unwrap();
+    write_files(hung.path(), &["a.sql"]);
+    write_files(fine.path(), &["b.sql"]);
+    let mount = DeadMount::new(vec![canonical(hung.path())]);
+    let o = ServiceOptions {
+        fs: Arc::new(ListingsOnly(mount.clone())),
+        // A deadline far away: only the detach can free the workers here.
+        job_deadline: Duration::from_secs(3600),
+        ..opts()
+    };
+    let r = rig_with(app.path(), o);
+    ready(&r).await;
+    for k in 1..=8 {
+        let id = r.svc.attach(hung.path().into(), None, false).await.unwrap();
+        wait_until("the retry to hang", || mount.blocked() >= k).await;
+        let t = Instant::now();
+        r.svc.detach(id).await.unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2), "detach waited");
+    }
+    let other = attach(&r, fine.path()).await;
+    assert_eq!(r.rels(other), ["b.sql"]);
+    mount.release();
+    r.svc.settled().await;
+}
+
+/// H6b (m-a): a folder above the root replaced by a link between sessions (its target holds a
+/// folder of the same name) is refused at the next launch: the recorded canonical path differs.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn h6b_parent_replaced_by_a_link_between_sessions_is_refused() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("db").join("scripts");
+    write_files(&lib, &["a.sql"]);
+    let other = d.path().join("elsewhere");
+    write_files(&other, &["scripts/not_in_the_library.sql"]);
+    let id = {
+        let r = rig_with(app.path(), opts());
+        ready(&r).await;
+        let id = attach(&r, &lib).await;
+        assert_eq!(r.rels(id), ["a.sql"]);
+        id
+    };
+    let toml = std::fs::read_to_string(LocalPaths::under(app.path()).libraries_toml()).unwrap();
+    assert!(toml.contains("canonical = "), "{toml}");
+    std::fs::remove_dir_all(d.path().join("db")).unwrap();
+    std::os::unix::fs::symlink(&other, d.path().join("db")).unwrap();
+    let r = rig_with(app.path(), opts());
+    ready(&r).await;
+    wait_until("RootChanged", || {
+        state_of(&r, id) == Some(LibraryState::Unavailable(UnavailableReason::RootChanged))
+    })
+    .await;
+    assert!(r.rels(id).is_empty());
+    assert!(diags_in(&r.snap(), id, None).contains(&LibraryDiag::RootRefused(RootRefusal::Moved)));
+}
+
+/// H11 (m-b): `Debug` of a snapshot, a view or a library (a log line) names no file of any
+/// environment.
+#[tokio::test(flavor = "multi_thread")]
+async fn h11_debug_of_a_view_names_nothing_hidden() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    write_files(d.path(), &["@production/secret_plan.sql", "a.sql"]);
+    let r = rig_with(app.path(), opts());
+    ready(&r).await;
+    let id = attach(&r, d.path()).await;
+    let snap = r.snap();
+    let view = snap.view(Some(EnvTag::Staging));
+    let lv = view.library(id).unwrap();
+    assert_eq!(lv.file_count(), 1);
+    let index = hacivat_scripts::ScriptIndex::build(&snap);
+    let printed = format!("{snap:?} {view:?} {lv:?} {:?} {index:?}", lv.library());
+    assert!(!printed.contains("secret_plan"), "{printed}");
+    assert!(!printed.contains("a.sql"), "{printed}");
+    assert!(!index.is_empty_for(Some(EnvTag::Staging)));
+    assert!(!index.is_empty_for(None));
+}
+
+/// H12 (F4): pass 2 in another encoding than pass 1 is refused before it hands out any text.
+#[tokio::test(flavor = "multi_thread")]
+async fn h12_pass_two_in_another_encoding_is_refused() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("e.sql"), "SELECT 'é';\n".as_bytes()).unwrap();
+    let r = rig_with(app.path(), opts());
+    ready(&r).await;
+    let id = attach(&r, d.path()).await;
+    let e = rel("e.sql");
+    let mut p1 = r
+        .svc
+        .open_stream(id, &e, None, TextEncoding::UTF_8, None)
+        .await
+        .unwrap();
+    let mut t1 = String::new();
+    while let Some(c) = p1.next_chunk() {
+        t1.push_str(&c.unwrap());
+    }
+    let record = p1.record();
+    assert_eq!(record.encoding, TextEncoding::UTF_8);
+    assert_eq!(record.bom, Some(false));
+    let w1254 = hacivat_scripts::fileio::lookup_encoding("windows-1254").unwrap();
+    assert!(matches!(
+        r.svc
+            .open_stream(id, &e, None, w1254, Some(record.clone()))
+            .await,
+        Err(ReadError::Changed)
+    ));
+    // The same encoding passes.
+    let mut p2 = r
+        .svc
+        .open_stream(id, &e, None, TextEncoding::UTF_8, Some(record))
+        .await
+        .unwrap();
+    let mut t2 = String::new();
+    while let Some(c) = p2.next_chunk() {
+        t2.push_str(&c.unwrap());
+    }
+    assert_eq!(t2, t1);
+}
+
+/// F4: pass 1 dropped a BOM; a pass 2 whose file has none any more stops at its first block.
+#[tokio::test(flavor = "multi_thread")]
+async fn pass_two_without_pass_ones_bom_stops() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("b.sql"), "\u{feff}SELECT 1;\n".as_bytes()).unwrap();
+    let r = rig_with(app.path(), opts());
+    ready(&r).await;
+    let id = attach(&r, d.path()).await;
+    let b = rel("b.sql");
+    let mut p1 = r
+        .svc
+        .open_stream(id, &b, None, TextEncoding::UTF_8, None)
+        .await
+        .unwrap();
+    while p1.next_chunk().is_some() {}
+    let record = p1.record();
+    assert_eq!(record.bom, Some(true));
+    let mut forged = record;
+    forged.bom = Some(false);
+    let mut p2 = r
+        .svc
+        .open_stream(id, &b, None, TextEncoding::UTF_8, Some(forged))
+        .await
+        .unwrap();
+    assert_eq!(
+        p2.next_chunk(),
+        Some(Err(hacivat_scripts::ChunkError::Changed))
     );
 }

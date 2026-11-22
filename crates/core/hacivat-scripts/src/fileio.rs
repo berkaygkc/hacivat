@@ -498,10 +498,19 @@ pub fn open_stream(
 /// than pass 1 read). Pass 2 therefore sees exactly pass 1's bytes, chunked the same way, or
 /// nothing past the first difference. A record of an incomplete pass checks only the blocks it
 /// holds and then refuses to read further.
+///
+/// Fix round 2 (F4): the record binds the decoding too. Pass 2 is refused at open when its
+/// encoding is not pass 1's, and stops at its first block when the BOM pass 1 found (and
+/// dropped) is not there. The stream never decides a line ending (the text keeps the file's
+/// own), so there is no line-ending choice to bind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PassRecord {
     pub len: u64,
     pub mtime: SystemTime,
+    pub encoding: TextEncoding,
+    /// Whether the first block began with the encoding's BOM (dropped from the text); `None`
+    /// before the first block was read.
+    pub bom: Option<bool>,
     fingerprint: Fingerprint,
     blocks: Vec<u64>,
     complete: bool,
@@ -541,6 +550,8 @@ impl ScriptStream {
         PassRecord {
             len: self.0.at_open.len,
             mtime: self.0.at_open.mtime.unwrap_or(UNIX_EPOCH),
+            encoding: self.0.encoding,
+            bom: self.0.bom,
             fingerprint: self.0.at_open,
             blocks: self.0.blocks.clone(),
             complete: self.0.done && !self.0.failed,
@@ -566,7 +577,10 @@ pub fn open_stream_checked(
     let decoder = StreamDecoder::new(encoding).ok_or(ReadError::UnknownEncoding)?;
     let opened = open_for_read(root, rel, env)?;
     let at_open = Fingerprint::of(&opened.meta);
-    if expect.as_ref().is_some_and(|e| e.fingerprint != at_open) {
+    if expect
+        .as_ref()
+        .is_some_and(|e| e.fingerprint != at_open || e.encoding != encoding)
+    {
         return Err(ReadError::Changed);
     }
     Ok(ScriptStream(FileStream {
@@ -579,6 +593,9 @@ pub fn open_stream_checked(
         failed: false,
         hasher: twox_hash::XxHash3_64::new(),
         blocks: Vec::new(),
+        encoding,
+        bom: None,
+        expect_bom: expect.as_ref().and_then(|e| e.bom),
         expect: expect.map(|e| e.blocks),
     }))
 }
@@ -1576,6 +1593,10 @@ struct FileStream {
     blocks: Vec<u64>,
     /// Pass 1's running hashes, when this is pass 2.
     expect: Option<Vec<u64>>,
+    /// Fix round 2 (F4): the decoding bound by the record.
+    encoding: TextEncoding,
+    bom: Option<bool>,
+    expect_bom: Option<bool>,
     // ## m4b-t10-service
 }
 
@@ -1629,9 +1650,15 @@ impl ScriptChunks for FileStream {
                 let running = self.hasher.finish();
                 let at = self.blocks.len();
                 self.blocks.push(running);
-                let differs = self.expect.as_ref().is_some_and(|pass1| {
-                    pass1.get(at) != Some(&running) || (last && pass1.len() != at + 1)
-                });
+                if at == 0 {
+                    let bom = encoding::bom_of(self.encoding);
+                    self.bom = Some(!bom.is_empty() && buf[..n].starts_with(bom));
+                }
+                let bom_differs = at == 0 && self.expect_bom.is_some_and(|b| Some(b) != self.bom);
+                let differs = bom_differs
+                    || self.expect.as_ref().is_some_and(|pass1| {
+                        pass1.get(at) != Some(&running) || (last && pass1.len() != at + 1)
+                    });
                 if differs {
                     self.done = true;
                     self.failed = true;

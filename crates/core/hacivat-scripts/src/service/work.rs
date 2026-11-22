@@ -31,20 +31,43 @@ use crate::tree;
 /// The file system the workers use (tests inject one that stalls or counts).
 pub(crate) type SharedFs = Arc<dyn Fs + Send + Sync>;
 
-/// The folders no library may be (the attach checks, HV-SCRIPT-01 step 2), canonical, computed
-/// once when the actor starts.
+/// The folders no library may be (the attach checks, HV-SCRIPT-01 step 2), as configured. Fix
+/// round 2 (F1): they are resolved by the job that uses them, never on the actor, since a home
+/// folder can itself sit on a network mount.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Rules {
     pub home: Option<PathBuf>,
     pub app: Vec<PathBuf>,
 }
 
+/// [`Rules`] resolved by a worker.
+struct Resolved {
+    home: Option<PathBuf>,
+    app: Vec<PathBuf>,
+}
+
 impl Rules {
-    pub fn new(fs: &dyn Fs, home: Option<&Path>, app: &[PathBuf]) -> Self {
-        Rules {
-            home: home.map(|h| canonical_lenient(fs, h)),
-            app: app.iter().map(|d| canonical_lenient(fs, d)).collect(),
+    fn resolve(&self, fs: &dyn Fs) -> Resolved {
+        Resolved {
+            home: self.home.as_deref().map(|h| canonical_lenient(fs, h)),
+            app: self.app.iter().map(|d| canonical_lenient(fs, d)).collect(),
         }
+    }
+
+    /// The attach checks that need no registry: a filesystem root, the home folder, an app
+    /// folder (inside or around), an environment folder.
+    fn check(&self, fs: &dyn Fs, canonical: &Path) -> Result<(), RootRefusal> {
+        let r = self.resolve(fs);
+        if canonical.parent().is_none() {
+            return Err(RootRefusal::FilesystemRoot);
+        }
+        if r.home.as_deref() == Some(canonical) {
+            return Err(RootRefusal::HomeFolder);
+        }
+        if r.app.iter().any(|d| overlaps(canonical, d)) {
+            return Err(RootRefusal::AppFolder);
+        }
+        Ok(())
     }
 }
 
@@ -128,18 +151,12 @@ pub(super) fn validate(
     let canonical = fs
         .canonicalize(&reg.path)
         .map_err(|e| Refused::io(e.kind()))?;
-    if session.canonical.as_ref().is_some_and(|c| c != &canonical) {
+    // This session's resolution, else (fix round 2, m-a) the one `libraries.toml` recorded.
+    let expected = session.canonical.as_ref().or(reg.canonical.as_ref());
+    if expected.is_some_and(|c| c != &canonical) {
         return Err(Refused::changed(RootRefusal::Moved));
     }
-    if canonical.parent().is_none() {
-        return Err(Refused::changed(RootRefusal::FilesystemRoot));
-    }
-    if rules.home.as_ref() == Some(&canonical) {
-        return Err(Refused::changed(RootRefusal::HomeFolder));
-    }
-    if rules.app.iter().any(|d| overlaps(&canonical, d)) {
-        return Err(Refused::changed(RootRefusal::AppFolder));
-    }
+    rules.check(fs, &canonical).map_err(Refused::changed)?;
     if let Some((other, _)) = others.iter().find(|(_, p)| overlaps(&canonical, p)) {
         return Err(Refused::changed(RootRefusal::Overlaps(*other)));
     }
@@ -151,6 +168,12 @@ pub(super) fn validate(
     }
     let identity = fileio::folder_identity(&canonical);
     if session.identity.is_some() && identity != session.identity {
+        return Err(Refused::changed(RootRefusal::IdentityChanged));
+    }
+    // Across sessions only the inode is compared: a device number can change with a reboot.
+    if let (Some(inode), Some((_, now))) = (reg.inode, identity)
+        && inode != now
+    {
         return Err(Refused::changed(RootRefusal::IdentityChanged));
     }
     Ok(Valid {
@@ -581,12 +604,22 @@ impl SettleJob {
 
 /// The attach's first step, off the actor (I6): the chosen path must be a real folder, not a
 /// link (I3: a link root would be refused at the next launch).
-pub(super) fn resolve_attach(fs: &dyn Fs, path: &Path) -> Result<(), super::AttachError> {
+///
+/// Fix round 2 (F1): it also answers the folder's canonical path and identity, and makes the
+/// guard's checks, so the actor registers it with no file-system call
+/// (`LibraryRegistry::add_resolved`).
+pub(super) fn resolve_attach(
+    fs: &dyn Fs,
+    path: &Path,
+    rules: &Rules,
+) -> Result<Valid, super::AttachError> {
     use super::AttachError;
     use crate::registry::RegistryError;
-    let meta = fs
-        .symlink_metadata(path)
-        .map_err(|e| AttachError::Registry(RegistryError::Io(e.kind())))?;
+    let io = |e: io::Error| AttachError::Registry(RegistryError::Io(e.kind()));
+    if !path.is_absolute() {
+        return Err(AttachError::Registry(RegistryError::NotAbsolute));
+    }
+    let meta = fs.symlink_metadata(path).map_err(io)?;
     match meta.kind {
         MetaKind::Dir => {}
         MetaKind::Symlink => return Err(AttachError::RootIsLink),
@@ -594,9 +627,25 @@ pub(super) fn resolve_attach(fs: &dyn Fs, path: &Path) -> Result<(), super::Atta
             return Err(AttachError::Registry(RegistryError::NotAFolder));
         }
     }
-    fs.canonicalize(path)
-        .map(|_| ())
-        .map_err(|e| AttachError::Registry(RegistryError::Io(e.kind())))
+    let canonical = fs.canonicalize(path).map_err(io)?;
+    rules.check(fs, &canonical).map_err(|why| {
+        AttachError::Registry(match why {
+            RootRefusal::FilesystemRoot => RegistryError::FilesystemRoot,
+            RootRefusal::HomeFolder => RegistryError::HomeFolder,
+            _ => RegistryError::AppFolder,
+        })
+    })?;
+    if let Some(name) = envscope::root_env_folder(&canonical) {
+        return Err(AttachError::RootInEnvFolder(name));
+    }
+    Ok(Valid {
+        identity: fileio::folder_identity(&canonical),
+        root: LibraryRoot {
+            id: LibraryId(uuid::Uuid::nil()),
+            path: path.to_path_buf(),
+            canonical,
+        },
+    })
 }
 
 /// Writes a new manifest (only when absent, R-M4b-8).

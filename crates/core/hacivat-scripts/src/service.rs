@@ -96,7 +96,8 @@ const EVENT_CAPACITY: usize = 256;
 /// ## m4b-t10-service fix round 1 (m2)
 /// The per-path data (each library's entries and diagnostics, and the status maps) is read
 /// through [`view`](Self::view) for one connection's environment; it is not public here.
-#[derive(Debug, Clone)]
+/// Fix round 2 (m-b): its `Debug` prints counts, never a path.
+#[derive(Clone)]
 pub struct WorkspaceSnapshot {
     pub generation: u64,
     /// The service's own state: `Scanning` until the registry is read and its libraries are
@@ -131,8 +132,8 @@ impl WorkspaceSnapshot {
     // ## m4b-t10-service
 }
 
-/// One library as last scanned.
-#[derive(Debug, Clone)]
+/// One library as last scanned. Its `Debug` prints counts, never a path (fix round 2, m-b).
+#[derive(Clone)]
 pub struct LibrarySnapshot {
     pub generation: u64,
     pub id: LibraryId,
@@ -146,6 +147,34 @@ pub struct LibrarySnapshot {
     /// ## m4b-t10-service fix round 1 (m2): read through [`LibraryView::diagnostics`].
     pub(crate) diagnostics: Arc<[LibraryDiag]>,
 }
+
+// ## m4b-t10-service fix round 2 (m-b): a log line never names a file (or a root) of any
+// environment.
+impl fmt::Debug for WorkspaceSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WorkspaceSnapshot")
+            .field("generation", &self.generation)
+            .field("state", &self.state)
+            .field("libraries", &self.libraries)
+            .field("mappings", &self.mappings.len())
+            .field("git", &self.git.len())
+            .field("registry", &self.registry.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for LibrarySnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LibrarySnapshot")
+            .field("id", &self.id)
+            .field("generation", &self.generation)
+            .field("state", &self.state)
+            .field("entries", &self.entries.len())
+            .field("diagnostics", &self.diagnostics.len())
+            .finish_non_exhaustive()
+    }
+}
+// ## m4b-t10-service
 
 impl LibrarySnapshot {
     // ## m4b-t10-service fix round 1
@@ -205,6 +234,11 @@ pub enum UnavailableReason {
     /// The folder is (inside) an environment folder; scoping is relative to the root, so it is
     /// refused ([`LibraryDiag::RootInEnvFolder`] names the folder).
     InEnvFolder,
+    // ## m4b-t10-service
+    // ## m4b-t10-service fix round 2 (F2, R-T10-5)
+    /// The folder did not answer within `ServiceOptions::job_deadline` (a hung mount); shown so
+    /// until it answers.
+    NotResponding,
     // ## m4b-t10-service
 }
 
@@ -317,6 +351,9 @@ pub struct ServiceOptions {
     pub home: Option<PathBuf>,
     /// Fix round 1 (I6): how many library jobs run at once (one per library at most).
     pub workers: usize,
+    /// Fix round 2 (F2, R-T10-5): a job running longer stops counting against `workers`, and
+    /// its library is shown `Unavailable(NotResponding)` until it answers.
+    pub job_deadline: Duration,
     /// Fix round 1 (I6): the file system the workers list and `lstat` through (tests inject one
     /// that stalls).
     pub fs: Arc<dyn crate::scan::Fs + Send + Sync>,
@@ -331,6 +368,7 @@ impl fmt::Debug for ServiceOptions {
             .field("poll", &self.poll)
             .field("recheck", &self.recheck)
             .field("workers", &self.workers)
+            .field("job_deadline", &self.job_deadline)
             .finish_non_exhaustive()
     }
 }
@@ -348,6 +386,7 @@ impl Default for ServiceOptions {
             git: GitLimits::default(),
             home: std::env::home_dir(),
             workers: 8,
+            job_deadline: Duration::from_secs(10),
             fs: Arc::new(RealFs),
         }
     }

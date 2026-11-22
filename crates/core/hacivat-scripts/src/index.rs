@@ -30,6 +30,7 @@
 //!   for it (m4), so Task 15 queries one index from one thread (off the UI thread past 2,000
 //!   entries).
 
+use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
@@ -87,6 +88,15 @@ pub struct Hit {
     pub ranges: Vec<Range<usize>>,
 }
 
+// ## m4b-t10-service fix round 2 (m-b): counts only, never a path.
+impl fmt::Debug for ScriptIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScriptIndex")
+            .field("libraries", &self.libs.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// The keys of one entry.
 #[derive(Debug)]
 struct Keys {
@@ -105,7 +115,7 @@ struct Lib {
 
 /// The "Go to script" index of one snapshot. Cheap to share (`Arc` inside); querying it from
 /// another thread needs no lock.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ScriptIndex {
     libs: Arc<[Lib]>,
 }
@@ -150,11 +160,6 @@ impl ScriptIndex {
         ScriptIndex { libs }
     }
 
-    /// How many scripts are offered in all (every environment; crate-private, m2).
-    pub(crate) fn len(&self) -> usize {
-        self.libs.iter().map(|l| l.entries.len()).sum()
-    }
-
     // ## m4b-t10-service fix round 1 (m2): counts and hits are per environment.
     /// How many scripts a connection whose environment is `env` is offered.
     pub fn len_for(&self, env: Option<EnvTag>) -> usize {
@@ -165,8 +170,10 @@ impl ScriptIndex {
             .count()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    /// Whether a connection whose environment is `env` is offered no script (fix round 2, m-e:
+    /// there is no all-environment answer).
+    pub fn is_empty_for(&self, env: Option<EnvTag>) -> bool {
+        self.len_for(env) == 0
     }
 
     /// The best `limit` hits for `q` over the scripts shown under a connection whose
