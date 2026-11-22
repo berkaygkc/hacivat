@@ -2219,6 +2219,9 @@ fn config_arg_ok(args: &[SrcTok]) -> bool {
         tok_ident(args, i, WATCHER_CONFIG_FN)
             && tok_punct(args, i + 1, '(')
             && tok_punct(args, i + 2, ')')
+            // ## m4b-t09-watcher fix round 1 (m1, named exception): only the bare call, never
+            // a path (`alt::watcher_config()`) or a method of the same name.
+            && !(i > 0 && (tok_punct(args, i - 1, ':') || tok_punct(args, i - 1, '.')))
     });
     shared || says_no_follow(args)
 }
@@ -2370,6 +2373,63 @@ fn watcher_follows_links(t: &[SrcTok]) -> bool {
         || shared_fn
 }
 // ## m4b-t01a-fr1
+
+// ## m4b-t09-watcher (named exception in Task 1a's file; carries-w1 T9 "hardening m1")
+/// The one file where `fn watcher_config` may be defined.
+const WATCHER_CONFIG_HOME: &str = "crates/core/hacivat-scripts/src/watch/mod.rs";
+
+/// Whether the tokens define a stand-in for a name [`watcher_follows_links`] trusts, so that
+/// the per-call-site check would pass a following cache or config:
+///
+/// - `FileIdCache` named at all (a local cache, which could walk through links, needs it, by
+///   any import or rename; the crate's own `NoCache` never does);
+/// - any item, binding or rename named `NoCache` (`struct NoCache`, `type NoCache = …`,
+///   `use … as NoCache`, `let NoCache`), so the turbofish's `NoCache` is always the crate's;
+/// - `watcher_config` bound or renamed anywhere (`let`, `const`, `static`, `mut`, `as`, a
+///   parameter or a field), or defined as a `fn` outside [`WATCHER_CONFIG_HOME`].
+///
+/// `home` says whether the tokens are that file.
+fn watcher_decoys(t: &[SrcTok], home: bool) -> bool {
+    let binders = [
+        "struct", "enum", "union", "type", "trait", "fn", "mod", "const", "static", "let", "mut",
+        "as",
+    ];
+    let bound = |name: &str, allow_fn: bool| {
+        (0..t.len()).any(|i| {
+            if !tok_ident(t, i, name) || i == 0 {
+                return false;
+            }
+            let by_fn = tok_ident(t, i - 1, "fn");
+            if by_fn {
+                return !allow_fn;
+            }
+            binders.iter().any(|b| tok_ident(t, i - 1, b))
+                // A parameter, field or pattern binding: `name:` (but not a path `name::`).
+                || (tok_punct(t, i + 1, ':') && !tok_punct(t, i + 2, ':'))
+        })
+    };
+    let local_cache = t
+        .iter()
+        .any(|x| matches!(x, SrcTok::Ident(s) if s == "FileIdCache"));
+    // Fix round 1 (m1): exactly one definition in the home file, at brace depth 0 (a nested
+    // `mod alt { fn watcher_config() … }` is refused).
+    let mut depth = 0usize;
+    let mut defs = 0usize;
+    let mut nested = false;
+    for i in 0..t.len() {
+        if tok_punct(t, i, '{') {
+            depth += 1;
+        } else if tok_punct(t, i, '}') {
+            depth = depth.saturating_sub(1);
+        } else if tok_ident(t, i, "fn") && tok_ident(t, i + 1, WATCHER_CONFIG_FN) {
+            defs += 1;
+            nested |= depth > 0;
+        }
+    }
+    let home_extra = home && (defs > 1 || nested);
+    local_cache || bound("NoCache", false) || bound(WATCHER_CONFIG_FN, home) || home_extra
+}
+// ## m4b-t09-watcher
 
 /// Whether the backend path segment `seg` is one of `backends` (`gix_*` is a prefix).
 fn is_backend_segment(backends: &[&str], seg: &str) -> bool {
@@ -2629,6 +2689,13 @@ pub fn source_violations(workspace: &Path) -> Vec<Violation> {
                 }
                 // ## m4b-t01a-fr1 (I3): the one crate that may depend on `notify`.
                 if product_file && name == SCRIPTS && watcher_follows_links(&tokens) {
+                    found.insert((name.clone(), Rule::WatcherFollowsLinks, rel.clone()));
+                }
+                // ## m4b-t09-watcher: stand-ins for the names the rule above trusts.
+                if product_file
+                    && name == SCRIPTS
+                    && watcher_decoys(&tokens, rel == WATCHER_CONFIG_HOME)
+                {
                     found.insert((name.clone(), Rule::WatcherFollowsLinks, rel.clone()));
                 }
                 if let Some(b) = api_backends
@@ -5685,6 +5752,110 @@ mod tests {
             &ok,
         );
     }
+
+    // ## m4b-t09-watcher (named exception): carries-w1 T9 "hardening m1".
+    /// A local cache, or a stand-in for `NoCache` or `watcher_config`, would pass the per-call
+    /// check above; each is refused where it is defined.
+    #[test]
+    fn watcher_cache_and_config_stand_ins_are_flagged() {
+        let forms: [(&str, &str); 9] = [
+            (
+                "local_cache.rs",
+                "struct Walk;\nimpl notify_debouncer_full::FileIdCache for Walk { fn rescan(&mut self, r: &[(PathBuf, RecursiveMode)]) {} }",
+            ),
+            (
+                "local_cache_imported.rs",
+                "use notify_debouncer_full::FileIdCache as C;\nstruct W;\nimpl<X> C for W {}",
+            ),
+            (
+                "nocache_struct.rs",
+                "struct NoCache;\nfn w(h: H) { new_debouncer_opt::<_, RecommendedWatcher, NoCache>(D, None, h, NoCache, watcher_config()); }",
+            ),
+            ("nocache_alias.rs", "type NoCache = crate::walk::Walking;"),
+            ("nocache_rename.rs", "use crate::walk::Walking as NoCache;"),
+            (
+                "config_fn_elsewhere.rs",
+                "fn watcher_config() -> notify::Config { notify::Config::default().with_follow_symlinks(false) }",
+            ),
+            (
+                "config_let.rs",
+                "fn w(h: H, c: C) { let watcher_config = || c; PollWatcher::new(h, watcher_config()); }",
+            ),
+            (
+                "config_rename.rs",
+                "use crate::other::cfg as watcher_config;",
+            ),
+            (
+                "config_param.rs",
+                "fn w(h: H, watcher_config: fn() -> notify::Config) { RecommendedWatcher::new(h, watcher_config()); }",
+            ),
+        ];
+        let ok: [(&str, &str); 2] = [
+            (
+                "mod.rs",
+                "pub(crate) fn watcher_config() -> notify::Config {\n    notify::Config::default().with_follow_symlinks(false)\n}\n\
+                 use notify_debouncer_full::{NoCache, new_debouncer_opt};\n\
+                 pub struct S { d: Option<notify_debouncer_full::Debouncer<RecommendedWatcher, NoCache>> }\n\
+                 fn w(h: H) { new_debouncer_opt::<_, RecommendedWatcher, NoCache>(D, None, h, NoCache, watcher_config()); }\n\
+                 fn t() -> &'static str { std::any::type_name::<NoCache>() }",
+            ),
+            (
+                "poll.rs",
+                "use super::watcher_config;\nfn p() { let c = watcher_config(); let d = super::watcher_config(); }",
+            ),
+        ];
+        assert_forms(
+            Rule::WatcherFollowsLinks,
+            "crates/core/hacivat-scripts/src/watch/",
+            &forms,
+            &ok,
+        );
+    }
+
+    /// Fix round 1 (review m1): the home file holds exactly one top-level `watcher_config`,
+    /// and a constructor takes only the bare call, never another module's.
+    #[test]
+    fn watcher_config_is_one_top_level_fn_called_bare() {
+        let blessed = "pub(crate) fn watcher_config() -> notify::Config {\n    notify::Config::default().with_follow_symlinks(false)\n}\n";
+        let homes = [
+            format!(
+                "{blessed}mod alt {{ fn watcher_config() -> Config {{ let _ = Config::default().with_follow_symlinks(false); Default::default() }} }}"
+            ),
+            format!(
+                "{blessed}#[cfg(test)]\nfn watcher_config() -> notify::Config {{ notify::Config::default().with_follow_symlinks(false) }}"
+            ),
+        ];
+        for home in &homes {
+            assert_forms(
+                Rule::WatcherFollowsLinks,
+                "crates/core/hacivat-scripts/src/watch/",
+                &[("mod.rs", home.as_str())],
+                &[],
+            );
+        }
+        let calls: [(&str, &str); 2] = [
+            (
+                "path_call.rs",
+                "fn w(h: H) { new_debouncer_opt::<_, RecommendedWatcher, NoCache>(D, None, h, NoCache, alt::watcher_config()); }",
+            ),
+            (
+                "method_call.rs",
+                "fn w(h: H, x: X) { RecommendedWatcher::new(h, x.watcher_config()); }",
+            ),
+        ];
+        let ok: [(&str, &str); 1] = [(
+            "mod.rs",
+            "pub(crate) fn watcher_config() -> notify::Config {\n    notify::Config::default().with_follow_symlinks(false)\n}\n\
+             fn w(h: H) { new_debouncer_opt::<_, RecommendedWatcher, NoCache>(D, None, h, NoCache, watcher_config()); }",
+        )];
+        assert_forms(
+            Rule::WatcherFollowsLinks,
+            "crates/core/hacivat-scripts/src/watch/",
+            &calls,
+            &ok,
+        );
+    }
+    // ## m4b-t09-watcher
 
     /// M1: aliases and re-exports cannot hide a backend type; a backend trait implemented for
     /// a private type leaks nothing.
