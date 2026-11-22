@@ -38,8 +38,20 @@ impl Lib {
             canonical: dir.path().canonicalize().unwrap(),
         };
         let lib = Lib { _dir: dir, root };
+        // ## m4b-cifix-2-fixture-age (review I2): every fixture file is an hour old, so none
+        // is racily clean (R-T9-3's 2 s window) when a watcher starts. A late FSEvents history
+        // hint on a fixture file then finds an equal, old stamp and reports nothing; before,
+        // a test run alone could see `PossiblyChanged` for it
+        // (`folder_move_is_seen_as_renames_for_known_contents`).
+        let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(3_600);
         for (name, text) in files {
             lib.write(name, text);
+            fs::File::options()
+                .write(true)
+                .open(lib.path(name))
+                .unwrap()
+                .set_modified(an_hour_ago)
+                .unwrap();
         }
         lib
     }

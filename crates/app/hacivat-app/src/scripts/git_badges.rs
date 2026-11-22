@@ -34,6 +34,8 @@ fn unknown_text(why: UnknownWhy, cx: &App) -> SharedString {
         UnknownWhy::Submodule => ("hv-scripts-git-unknown-other-tip", "submodule"),
         UnknownWhy::CaseMismatch => ("hv-scripts-git-unknown-other-tip", "case"),
         UnknownWhy::NotAFile => ("hv-scripts-git-unknown-other-tip", "notafile"),
+        // ## m4b-cifix-2-merge (controller): R-CI2-2's reason, an index path never followed.
+        UnknownWhy::UnsafePath => ("hv-scripts-git-unknown-other-tip", "unsafepath"),
     };
     crate::explorer::live::text(cx, id, vec![("reason", ArgValue::Text(reason.into()))])
 }

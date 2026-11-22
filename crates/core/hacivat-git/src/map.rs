@@ -37,8 +37,66 @@ fn rank(s: FileStatus) -> u8 {
         FileStatus::Unknown(UnknownWhy::NotAFile) => 6,
         FileStatus::Unknown(UnknownWhy::Dataless) => 7,
         FileStatus::Unknown(UnknownWhy::Submodule) => 8,
+        // ## m4b-cifix-2-index-paths: the index path itself is not trusted.
+        FileStatus::Unknown(UnknownWhy::UnsafePath) => 9,
     }
 }
+
+// ## m4b-cifix-2-index-paths (review C2, R-CI2-2)
+/// Whether an index path (`/`-separated bytes, untrusted repository content) is made of plain
+/// names only, so that joining it under the worktree names a path inside the worktree.
+///
+/// On every OS each component is one `Normal` path component of valid UTF-8, not empty, `.` or
+/// `..`, with no `/` and no NUL, and never a spelling of `.git` (`gix_validate::path::component`).
+/// On Unix an absolute index path (`/net/x`) starts with an empty component.
+///
+/// ## m4b-cifix-2 fix round 2 (re-review N2, R-CI2-4): the host's own protections only, as git
+/// itself applies them. Windows adds the Windows and NTFS ones: no `\`, no drive (`C:`), UNC
+/// (`\\host\share`) or verbatim (`\\?\`) prefix, no NTFS stream (`a:b`), reserved device name
+/// (`con.sql`, `aux.sql`), trailing dot or space, `GIT~1`. macOS adds the HFS+ `.git`
+/// spellings with ignorable code points. Those names are ordinary files on Linux and macOS,
+/// where the OS gives them no meaning, so they keep their true badge there; a backslash cannot
+/// reach a UNC path on Unix. Nothing else in this crate joins an index path to a directory
+/// before this holds (T7's Unix automounter case, `/net/<host>`, included).
+pub(crate) fn is_plain_index_path(path: &[u8]) -> bool {
+    use gix::validate::path::component::Options;
+    let host = Options {
+        protect_windows: cfg!(windows),
+        protect_ntfs: cfg!(windows),
+        protect_hfs: cfg!(target_os = "macos"),
+    };
+    !path.is_empty()
+        && path.split(|b| *b == b'/').all(|c| {
+            !c.contains(&0)
+                && gix::validate::path::component(c.as_bstr(), None, host).is_ok()
+                && c.to_str().is_ok_and(|s| {
+                    let mut parts = Path::new(s).components();
+                    matches!(
+                        (parts.next(), parts.next()),
+                        (Some(std::path::Component::Normal(_)), None)
+                    )
+                })
+        })
+}
+
+/// An index folder spelling that n2 may compare with the library folder: plain
+/// ([`is_plain_index_path`]), with no 8.3 short-name component (`SCRIPT~1`: another spelling
+/// than a case-only rename, which the alias is for), joined under `worktree` and still under
+/// it, component for component. `None` means: never touched.
+pub(crate) fn alias_candidate(worktree: &Path, head: &str) -> Option<PathBuf> {
+    let short_name = |c: &str| {
+        c.as_bytes()
+            .windows(2)
+            .any(|w| w[0] == b'~' && w[1].is_ascii_digit())
+    };
+    if !is_plain_index_path(head.as_bytes()) || head.split('/').any(short_name) {
+        return None;
+    }
+    let joined = worktree.join(head);
+    let depth = worktree.components().count() + head.split('/').count();
+    (joined.starts_with(worktree) && joined.components().count() == depth).then_some(joined)
+}
+// ## m4b-cifix-2-index-paths
 
 /// The stronger of two badges.
 pub(crate) fn stronger(a: FileStatus, b: FileStatus) -> FileStatus {
@@ -92,6 +150,13 @@ impl Badges {
             let Some((rel, prefix_case)) = lib_relative(repo_path, prefix, icase, aliases) else {
                 continue;
             };
+            // ## m4b-cifix-2-index-paths (C2): keyed as the index spells it, never looked up.
+            if !is_plain_index_path(rel.as_bytes()) {
+                let s = FileStatus::Unknown(UnknownWhy::UnsafePath);
+                let e = out.entry(GitPath::new(&rel)).or_insert(s);
+                *e = stronger(*e, s);
+                continue;
+            }
             let Some(found) = lister.on_disk(library, &rel) else {
                 continue;
             };
@@ -142,8 +207,15 @@ pub(crate) fn lib_relative(
     }
 }
 
-/// Whether two paths are the same file system entry: `(dev, ino)` from `lstat` on Unix. Elsewhere
-/// `std` has no stable file id, so never (n2's alias match is Unix-only).
+/// Whether two paths are the same file system entry: `(dev, ino)` from `lstat` on Unix.
+///
+/// ## m4b-cifix-2-windows-alias: `std` has no stable file id on Windows, so there the entry is
+/// identified by the final path the system reports for an open handle (`canonicalize`,
+/// `GetFinalPathNameByHandleW`), which spells every component as the disk does. Two spellings
+/// of one folder (`Çal` and `çal` under case folding) resolve alike. Neither may be a link or
+/// junction, as on Unix where `lstat` does not follow the last component. It opens a handle on
+/// each folder and reads no file. Before this, n2's alias match was Unix-only and a non-ASCII
+/// case-only rename of the library folder showed its files as `New` (CI 44990057141).
 pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -155,8 +227,13 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = (a, b);
-        false
+        let real = |p: &Path| {
+            std::fs::symlink_metadata(p)
+                .ok()
+                .filter(|m| !m.file_type().is_symlink())
+                .and_then(|_| std::fs::canonicalize(p).ok())
+        };
+        matches!((real(a), real(b)), (Some(x), Some(y)) if x == y)
     }
 }
 
@@ -168,58 +245,128 @@ struct OnDisk {
     case_only: bool,
 }
 
-/// One listed name: as listed, its NFC form.
-type Listed = (String, String);
+/// One listed name: as listed, its NFC form, and whether it is a link (a symlink, or on Windows
+/// a junction or other name-surrogate reparse point) by the listing's own `file_type`, which
+/// follows nothing.
+type Listed = (String, String, bool);
 
 /// Directory listings, read once each (names only, never contents), and (Unix) each listing's
 /// file ids, read once on the first case-only lookup in it (n4: no `lstat` per name per path).
 #[derive(Default)]
-struct Lister {
-    dirs: HashMap<PathBuf, Vec<Listed>>,
+pub(crate) struct Lister {
+    dirs: HashMap<PathBuf, Listing>,
     #[cfg(unix)]
     ids: HashMap<PathBuf, HashMap<(u64, u64), String>>,
+    /// The tests' counting seam: every path this lister listed or `lstat`ed.
+    #[cfg(test)]
+    touched: Vec<PathBuf>,
+}
+
+/// One folder's names, and (fix round 2) their positions by listed name and by NFC form, so a
+/// lookup is no scan of the listing (the dataless check looks up every tracked path).
+#[derive(Default)]
+struct Listing {
+    names: Vec<Listed>,
+    exact: HashMap<String, usize>,
+    by_nfc: HashMap<String, usize>,
 }
 
 impl Lister {
     /// The names in `dir` with their NFC forms.
     fn names(&mut self, dir: &Path) -> Option<&[Listed]> {
+        self.listing(dir).map(|l| l.names.as_slice())
+    }
+
+    /// Records `p` in the tests' counting seam; nothing in a product build.
+    fn touch(&mut self, p: &Path) {
+        #[cfg(test)]
+        self.touched.push(p.to_path_buf());
+        #[cfg(not(test))]
+        let _ = p;
+    }
+
+    fn listing(&mut self, dir: &Path) -> Option<&Listing> {
         if !self.dirs.contains_key(dir) {
-            let names = std::fs::read_dir(dir)
+            self.touch(dir);
+            let names: Vec<Listed> = std::fs::read_dir(dir)
                 .ok()?
                 .filter_map(Result::ok)
-                .filter_map(|e| e.file_name().into_string().ok())
-                .map(|n| {
+                .filter_map(|e| {
+                    // An entry whose type cannot be read counts as a link: never entered.
+                    let link = e.file_type().map_or(true, |t| t.is_symlink());
+                    e.file_name().into_string().ok().map(|n| (n, link))
+                })
+                .map(|(n, link)| {
                     let f = nfc(&n);
-                    (n, f)
+                    (n, f, link)
                 })
                 .collect();
-            self.dirs.insert(dir.to_path_buf(), names);
+            let mut listing = Listing::default();
+            for (i, (n, f, _)) in names.iter().enumerate() {
+                listing.exact.insert(n.clone(), i);
+                listing.by_nfc.entry(f.clone()).or_insert(i);
+            }
+            listing.names = names;
+            self.dirs.insert(dir.to_path_buf(), listing);
         }
-        self.dirs.get(dir).map(Vec::as_slice)
+        self.dirs.get(dir)
+    }
+
+    // ## m4b-cifix-2 fix round 2 (re-review N1): the dataless check's walk.
+    /// The `lstat` of the index path `rel` under `base`, found by [`on_disk`](Self::on_disk)
+    /// (no link entered on the way, a non-plain component refused) and `lstat`ed only at its
+    /// last component; `None` when it is not there or not reachable without a link.
+    pub(crate) fn lstat_under(&mut self, base: &Path, rel: &str) -> Option<std::fs::Metadata> {
+        let found = self.on_disk(base, rel)?;
+        self.touch(&found.full);
+        std::fs::symlink_metadata(&found.full).ok()
     }
 
     /// `rel` (the index's spelling) as the disk spells it under `base`; `None` when the file
     /// system cannot find it.
+    ///
+    /// ## m4b-cifix-2 fix round 2 (re-review N1, R-CI2-2): it never descends into a link. Every
+    /// component but the last must be a listed name that is not a link (from the listing's own
+    /// `file_type`) or, found only by the file system's case folding, one whose `lstat` is not
+    /// a link. So no folder outside `base` is listed or looked into, whatever the index names
+    /// (`lib/link/x.sql` with `link -> /net/<host>` or `\\host\share`). The last component may
+    /// be a link; callers only `lstat` it.
     fn on_disk(&mut self, base: &Path, rel: &str) -> Option<OnDisk> {
         let mut dir = base.to_path_buf();
         let mut parts: Vec<String> = Vec::new();
         let mut case_only = false;
-        for comp in rel.split('/') {
-            if comp.is_empty() || comp == "." || comp == ".." {
+        let count = rel.split('/').count();
+        for (i, comp) in rel.split('/').enumerate() {
+            // ## m4b-cifix-2-index-paths (C2): no file-system call on a name that is not plain.
+            if !is_plain_index_path(comp.as_bytes()) {
                 return None;
             }
+            let last = i + 1 == count;
             let want = nfc(comp);
-            let names = self.names(&dir)?;
-            let exact = names
-                .iter()
-                .find(|(n, _)| n == comp)
-                .or_else(|| names.iter().find(|(_, f)| *f == want))
-                .map(|(n, _)| n.clone());
+            let listing = self.listing(&dir)?;
+            let exact = listing
+                .exact
+                .get(comp)
+                .or_else(|| listing.by_nfc.get(&want))
+                .map(|&i| {
+                    let (n, _, link) = &listing.names[i];
+                    (n.clone(), *link)
+                });
             let found = match exact {
-                Some(n) => n,
+                Some((n, link)) => {
+                    if link && !last {
+                        return None;
+                    }
+                    n
+                }
                 None => {
                     // The file system's own lookup (case folding): never dropped (R-T7-1).
-                    let md = std::fs::symlink_metadata(dir.join(comp)).ok()?;
+                    let probe = dir.join(comp);
+                    self.touch(&probe);
+                    let md = std::fs::symlink_metadata(&probe).ok()?;
+                    if md.file_type().is_symlink() && !last {
+                        return None;
+                    }
                     case_only = true;
                     self.same_entry(&dir, &md, &want)
                         .unwrap_or_else(|| comp.to_owned())
@@ -242,8 +389,10 @@ impl Lister {
         use std::os::unix::fs::MetadataExt as _;
         if !self.ids.contains_key(dir) {
             let mut table = HashMap::new();
-            for (n, _) in self.names(dir)?.to_vec() {
-                if let Ok(m) = std::fs::symlink_metadata(dir.join(&n)) {
+            for (n, _, _) in self.names(dir)?.to_vec() {
+                let p = dir.join(&n);
+                self.touch(&p);
+                if let Ok(m) = std::fs::symlink_metadata(&p) {
                     table.insert((m.dev(), m.ino()), n);
                 }
             }
@@ -259,9 +408,11 @@ impl Lister {
     #[cfg(not(unix))]
     fn same_entry(&mut self, dir: &Path, _md: &std::fs::Metadata, want: &str) -> Option<String> {
         let names = self.names(dir)?;
-        let mut hits = names.iter().filter(|(_, f)| f.eq_ignore_ascii_case(want));
+        let mut hits = names
+            .iter()
+            .filter(|(_, f, _)| f.eq_ignore_ascii_case(want));
         match (hits.next(), hits.next()) {
-            (Some((n, _)), None) => Some(n.clone()),
+            (Some((n, _, _)), None) => Some(n.clone()),
             _ => None,
         }
     }
@@ -446,4 +597,222 @@ mod tests {
         std::fs::write(&p, b"select 1;\n").unwrap();
         assert!(!is_dataless(&std::fs::symlink_metadata(&p).unwrap()));
     }
+
+    // ## m4b-cifix-2-index-paths (review C2, R-CI2-2)
+    /// Hostile index spellings are never joined to a directory: not as an n2 alias head, not as
+    /// a path. The structural cases are refused on every OS; fix round 2 (N2, R-CI2-4): the
+    /// names only Windows interprets are refused on Windows, and are ordinary names elsewhere.
+    #[test]
+    fn hostile_index_paths_are_never_candidates() {
+        let wt = Path::new(if cfg!(windows) {
+            r"C:\w\repo"
+        } else {
+            "/w/repo"
+        });
+        // Every OS.
+        let structural = [
+            "..",      // the parent
+            "../x",    // the parent, then a name
+            "a/../b",  // a parent in the middle
+            ".",       // the folder itself
+            "/net/x",  // absolute (macOS's automounter)
+            "/abs",    // absolute
+            "a//b",    // an empty component
+            "a/",      // a trailing empty component
+            ".git",    // the repository itself
+            ".GIT",    // its case-folded spelling
+            "a\u{0}b", // a NUL
+        ];
+        // Only where Windows gives them a meaning.
+        let windows = [
+            r"\\host\share",   // UNC: Windows would contact the host
+            r"\\host\share/x", // the same, as the first of two components
+            r"C:\",            // a drive root
+            r"C:\x",           // a drive path
+            "C:",              // a bare drive
+            "c:x",             // drive-relative
+            r"\\?\C:\x",       // verbatim
+            r"\\.\pipe\x",     // a device namespace path
+            r"..\x",           // `..` behind a backslash
+            "lib:stream",      // an NTFS alternate data stream
+            "lib::$DATA",      // the default stream, spelled out
+            "CON",             // a reserved device name
+            "con.sql",         // a reserved device name with an extension
+            "aux.sql",         // the same
+            "a:b.sql",         // a stream again
+            "lib.",            // a trailing dot (NTFS drops it)
+            "lib ",            // a trailing space (NTFS drops it)
+            "GIT~1",           // `.git`'s 8.3 short name
+        ];
+        let refused: Vec<&str> = if cfg!(windows) {
+            structural.iter().chain(&windows).copied().collect()
+        } else {
+            structural.to_vec()
+        };
+        for h in refused {
+            assert!(
+                !is_plain_index_path(h.as_bytes()),
+                "{h:?} passed as a plain path"
+            );
+            assert_eq!(
+                alias_candidate(wt, h),
+                None,
+                "{h:?} became an alias candidate"
+            );
+        }
+        if !cfg!(windows) {
+            for h in windows {
+                assert!(
+                    is_plain_index_path(h.as_bytes()),
+                    "{h:?} is an ordinary name on this OS"
+                );
+            }
+        }
+        // 8.3 short names are plain inside the worktree, but never an alias for a case-only
+        // rename.
+        for h in ["SCRIPT~1", "a/PROGRA~2"] {
+            assert!(is_plain_index_path(h.as_bytes()), "{h:?}");
+            assert_eq!(alias_candidate(wt, h), None, "{h:?}");
+        }
+        // Ordinary spellings stay candidates, under the worktree.
+        for h in ["\u{c7}al", "Scripts/\u{c7}al", ".github", "a.b", "x~y"] {
+            let c = alias_candidate(wt, h).unwrap_or_else(|| panic!("{h:?} refused"));
+            assert!(c.starts_with(wt), "{c:?}");
+        }
+        // Non-UTF-8 bytes are refused too.
+        assert!(!is_plain_index_path(b"lib/\xff.sql"));
+    }
+
+    /// An index path that is not plain is keyed as the index spells it, `Unknown(UnsafePath)`,
+    /// and nothing under the library is looked up for it (the library here does not exist, so
+    /// any lookup would drop the badge).
+    #[test]
+    fn an_unsafe_index_path_is_unknown_and_never_looked_up() {
+        let mut b = Badges::default();
+        b.add(BStr::new("lib/../../x.sql"), FileStatus::Modified);
+        b.add(BStr::new(r"lib/\\host\share"), FileStatus::New);
+        let out = b.into_library(
+            "lib",
+            false,
+            &BTreeSet::new(),
+            Path::new("/nonexistent-cifix2"),
+            &never,
+        );
+        assert_eq!(
+            out.get("../../x.sql"),
+            Some(&FileStatus::Unknown(UnknownWhy::UnsafePath))
+        );
+        // A backslash name is unsafe on Windows only; elsewhere it is looked up, and the library
+        // here does not exist, so it has no badge.
+        assert_eq!(
+            out.get(r"\\host\share"),
+            cfg!(windows).then_some(&FileStatus::Unknown(UnknownWhy::UnsafePath))
+        );
+    }
+
+    // ## m4b-cifix-2 fix round 2 (re-review N2, R-CI2-4)
+    /// Names that only Windows interprets keep their true badge on Linux and macOS, where git
+    /// tracks them as ordinary files, and are `Unknown(UnsafePath)` on Windows (never looked
+    /// up there).
+    #[test]
+    fn windows_only_names_keep_their_badge_off_windows() {
+        let t = tempfile::tempdir().unwrap();
+        let lib = std::fs::canonicalize(t.path()).unwrap();
+        let names = ["con.sql", "aux.sql", "a:b.sql"];
+        #[cfg(unix)]
+        for n in names {
+            std::fs::write(lib.join(n), b"select 1;\n").unwrap();
+        }
+        let mut b = Badges::default();
+        for n in names {
+            b.add(BStr::new(&format!("lib/{n}")), FileStatus::Modified);
+        }
+        let out = b.into_library("lib", false, &BTreeSet::new(), &lib, &never);
+        let want = if cfg!(windows) {
+            FileStatus::Unknown(UnknownWhy::UnsafePath)
+        } else {
+            FileStatus::Modified
+        };
+        for n in names {
+            assert_eq!(out.get(n), Some(&want), "{n}");
+        }
+    }
+
+    // ## m4b-cifix-2 fix round 2 (re-review N1, R-CI2-2)
+    /// The counting seam: with `lib/link -> <outside folder>` and an index entry under the link
+    /// (`link/x.sql`, also spelled by case only), nothing outside the library is listed or
+    /// `lstat`ed, and the entry is not found. A real folder next to it still is, and the link
+    /// itself (the last component) may be `lstat`ed.
+    #[cfg(unix)]
+    #[test]
+    fn an_index_path_under_a_linked_folder_never_leaves_the_library() {
+        let t = tempfile::tempdir().unwrap();
+        let top = std::fs::canonicalize(t.path()).unwrap();
+        let lib = top.join("lib");
+        let outside = top.join("outside");
+        std::fs::create_dir_all(lib.join("real")).unwrap();
+        std::fs::create_dir_all(outside.join("deeper")).unwrap();
+        std::fs::write(outside.join("x.sql"), b"select 1;\n").unwrap();
+        std::fs::write(lib.join("real/a.sql"), b"select 2;\n").unwrap();
+        std::os::unix::fs::symlink(&outside, lib.join("link")).unwrap();
+        let mut walk = Lister::default();
+        for rel in ["link/x.sql", "LINK/x.sql", "link/deeper/y.sql"] {
+            assert!(walk.on_disk(&lib, rel).is_none(), "{rel}");
+            assert!(walk.lstat_under(&lib, rel).is_none(), "{rel}");
+        }
+        assert!(walk.lstat_under(&lib, "real/a.sql").is_some());
+        assert!(
+            walk.lstat_under(&lib, "link")
+                .is_some_and(|m| m.file_type().is_symlink())
+        );
+        let escaped: Vec<&PathBuf> = walk
+            .touched
+            .iter()
+            .filter(|p| {
+                p.starts_with(&outside)
+                    || (p.starts_with(lib.join("link")) && **p != lib.join("link"))
+            })
+            .collect();
+        assert!(
+            escaped.is_empty(),
+            "touched outside the library: {escaped:?}"
+        );
+        assert!(!walk.dirs.contains_key(&lib.join("link")));
+        assert!(!walk.dirs.contains_key(&outside));
+        // The badges path too: a change keyed under the link has no badge, and nothing outside
+        // was looked at for it (`into_library` uses the same walk).
+        let mut b = Badges::default();
+        b.add(BStr::new("lib/link/x.sql"), FileStatus::Modified);
+        b.add(BStr::new("lib/real/a.sql"), FileStatus::Modified);
+        let out = b.into_library("lib", false, &BTreeSet::new(), &lib, &never);
+        assert_eq!(out.get("link/x.sql"), None);
+        assert_eq!(out.get("real/a.sql"), Some(&FileStatus::Modified));
+    }
+    // ## m4b-cifix-2-index-paths
+
+    // ## m4b-cifix-2-windows-alias
+    /// n2's identity on every platform: the same folder under two spellings that only the file
+    /// system's case folding equates (`Çal`, `çal`) is the same entry; another folder is not;
+    /// a link to the folder is not (the last component is never followed).
+    #[test]
+    fn same_file_equates_spellings_of_one_folder_only() {
+        let t = tempfile::tempdir().unwrap();
+        let upper = t.path().join("\u{c7}al");
+        std::fs::create_dir(&upper).unwrap();
+        let lower = t.path().join("\u{e7}al");
+        let folds = std::fs::symlink_metadata(&lower).is_ok();
+        assert_eq!(same_file(&upper, &lower), folds, "folds case: {folds}");
+        assert!(same_file(&upper, &upper));
+        let other = t.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        assert!(!same_file(&upper, &other));
+        assert!(!same_file(&upper, &t.path().join("missing")));
+        #[cfg(unix)]
+        {
+            let link = t.path().join("link");
+            std::os::unix::fs::symlink(&upper, &link).unwrap();
+            assert!(!same_file(&link, &upper));
+        }
+    }
+    // ## m4b-cifix-2-windows-alias
 }
