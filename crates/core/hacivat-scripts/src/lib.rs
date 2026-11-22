@@ -87,7 +87,7 @@ pub use service::{
 };
 // ## m4b-t10-service (named exception): the service's new public types.
 pub use index::{Hit, Rank, ScriptIndex};
-pub use service::{MapError, ServiceOptions};
+pub use service::{MapError, ServiceOptions, SourceFactory, Sources};
 // fix round 1: the env-filtered view and events, the root refusals, the two-pass stream.
 pub use fileio::{PassRecord, ScriptStream};
 pub use service::{EnvView, GitSummary, LibraryView, RootRefusal, Subscription};

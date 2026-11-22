@@ -17,16 +17,25 @@
 // ## m4b-t01a-seams
 //!
 //! ## m4b-t10-service
-//! Task 10 (ADR 0009 `m4b-t10`, with its fix round 1).
+//! Task 10 (ADR 0009 `m4b-t10`, with its fix rounds 1 and 2 and the watcher wiring).
 //!
 //! - **One actor, bounded workers** (I6, R-T10-4). [`LibraryService::open`] starts one actor on
 //!   the core runtime's blocking pool. It alone owns the [`LibraryRegistry`](crate::registry::
 //!   LibraryRegistry) (the single writer of `libraries.toml`), every library's state, the event
 //!   source and the status refresh, and handles one message at a time from a bounded inbox. It
-//!   does no library I/O itself: validating a root, scanning, probing, settle looks, stamps and
-//!   the attach and alias writes run as jobs on at most [`ServiceOptions::workers`] blocking
-//!   workers, one job per library at a time (`service/work.rs`). A hung mount stalls its own
-//!   library only; commands keep answering, and detach never waits for a stuck job.
+//!   does no library I/O itself (F1): validating a root, starting its watcher, scanning,
+//!   probing, stamps and the attach and alias writes run as jobs on at most
+//!   [`ServiceOptions::workers`] blocking workers, one job per library at a time
+//!   (`service/work.rs`). A hung mount stalls its own library only: a job past
+//!   [`ServiceOptions::job_deadline`] stops counting and shows it `NotResponding` (F2,
+//!   R-T10-5), commands keep answering, and detach frees the worker at once.
+//! - **Task 9's watcher** (R-C0-7). Each library has its own `Watcher`, started on a worker
+//!   before its first scan. Its events (settled, echo-filtered, renames paired) patch the
+//!   listing through probes; a batch from a dropped watcher is ignored (a generation tag). A
+//!   save records its echo in that watcher's table under the path the bytes land at, and every
+//!   read and save `remember`s the file's stamp in it. There is no polling or settle of the
+//!   service's own: the watcher polls when it must (`Polling`), and `Unwatched` says nothing
+//!   watches a library.
 //! - **Immutable snapshots.** After each drained burst the actor publishes one new
 //!   [`WorkspaceSnapshot`] (generation + 1) if anything changed, then sends the events. Commands
 //!   reply after their snapshot is published.
@@ -37,7 +46,7 @@
 //!   arrives as [`LibraryEvent::FileLeftScope`].
 //! - **The root is re-validated** (I3) before every scan: a real folder (never a link), the
 //!   canonical path and identity it had this session, and the attach checks again.
-//! - **Watch before scan** (I5): a library's watch starts before its first scan; hints that
+//! - **Watch before scan** (I5): a library's watcher starts before its first scan; events that
 //!   arrive during a job wait and are probed after it.
 //! - **Content is read only for open files** (I4): a changed file that no tab has open
 //!   (`read` or `save` remembers it) is a listing change; its bytes are never read.
@@ -83,9 +92,9 @@ use crate::names::{DatabaseName, LogicalDb, NameError};
 use crate::pathsafe::RelPath;
 use crate::registry::{LibraryId, LibraryRoot, LocalMapping, RegistryDiag, RegistryError};
 use crate::scan::{EntryKind, LimitHit, Limits, RealFs, ScriptEntry};
-use crate::watch::{EventSource, OsEventSource};
+use crate::watch::{EventSource, WatchError};
 
-use actor::{Echo, Msg};
+use actor::{Echoes, Msg};
 
 /// How many events a slow receiver may lag behind before it misses some (it then re-reads the
 /// snapshot).
@@ -157,7 +166,7 @@ impl fmt::Debug for WorkspaceSnapshot {
             .field("state", &self.state)
             .field("libraries", &self.libraries)
             .field("mappings", &self.mappings.len())
-            .field("git", &self.git.len())
+            .field("repository", &self.git.len())
             .field("registry", &self.registry.len())
             .finish()
     }
@@ -207,6 +216,10 @@ pub enum LibraryState {
     Watching,
     Polling(PollReason),
     Unavailable(UnavailableReason),
+    /// ## m4b-t10-service (watcher wiring): listed, but nothing watches it (the OS backend was
+    /// lost and no poll source could watch it either, Task 9's `Backend::Unwatched`, or no
+    /// watcher could start). A Refresh still rescans it.
+    Unwatched,
 }
 
 /// Why a library is polled instead of watched (HV-SCRIPT-08 step 1).
@@ -331,20 +344,15 @@ pub enum MapError {
 /// and may inject a file system.
 #[derive(Clone)]
 pub struct ServiceOptions {
-    /// How long a changed file's `(len, mtime)` must stay put before it is stamped (the debounce
-    /// window, alg/28 C6).
+    /// The watcher's debounce and settle window (alg/28 C6; Task 9's `WatchOpts::window`).
     pub settle: Duration,
     /// The status refresh debounce (HV-SCRIPT-11 step 7).
     pub git_debounce: Duration,
     /// Fix round 1 (m7): a slow status refresh of polled libraries and of libraries whose
     /// repository's `.git` is above their root (a commit changes nothing in the library).
     pub git_backstop: Duration,
-    /// The rescan interval of a polled library.
-    pub poll: Duration,
     /// How often an unavailable library is checked again.
     pub recheck: Duration,
-    /// How long a save's echo is remembered.
-    pub echo_ttl: Duration,
     pub limits: Limits,
     pub git: GitLimits,
     /// The user's home folder, which is never a library (`AttachGuard`).
@@ -365,7 +373,6 @@ impl fmt::Debug for ServiceOptions {
             .field("settle", &self.settle)
             .field("git_debounce", &self.git_debounce)
             .field("git_backstop", &self.git_backstop)
-            .field("poll", &self.poll)
             .field("recheck", &self.recheck)
             .field("workers", &self.workers)
             .field("job_deadline", &self.job_deadline)
@@ -379,9 +386,7 @@ impl Default for ServiceOptions {
             settle: crate::watch::DEBOUNCE,
             git_debounce: Duration::from_millis(500),
             git_backstop: Duration::from_secs(60),
-            poll: Duration::from_secs(2),
             recheck: Duration::from_secs(2),
-            echo_ttl: Duration::from_secs(5),
             limits: Limits::default(),
             git: GitLimits::default(),
             home: std::env::home_dir(),
@@ -390,6 +395,21 @@ impl Default for ServiceOptions {
             fs: Arc::new(RealFs),
         }
     }
+}
+// ## m4b-t10-service
+
+// ## m4b-t10-service (watcher wiring)
+/// A builder of one library's event source.
+pub type SourceFactory = Arc<dyn Fn() -> Result<Box<dyn EventSource>, WatchError> + Send + Sync>;
+
+/// Where each library's watcher gets its event source.
+#[derive(Clone)]
+pub enum Sources {
+    /// Task 9's choice per library (`Watcher::open`): the OS watcher, or polling for a network
+    /// file system or past the Linux watch budget.
+    Os,
+    /// The caller's (tests: `testing::FakeHandle::sources`).
+    Custom(SourceFactory),
 }
 // ## m4b-t10-service
 
@@ -425,7 +445,8 @@ pub struct LibraryService {
     rt: Handle,
     tx: mpsc::Sender<Msg>,
     closed: Arc<AtomicBool>,
-    echo: Echo,
+    /// Each watched library's echo table (Task 9's `EchoHandle`), which a save records into.
+    echoes: Echoes,
     /// How many times a script's content was read for a stamp (I4's test).
     #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     stamps: Arc<AtomicU64>,
@@ -450,20 +471,16 @@ impl LibraryService {
     /// read through [`subscribe`](Self::subscribe) for one environment, so `open` returns no
     /// receiver.
     pub fn open(paths: &LocalPaths, rt: &Handle) -> Self {
-        let source: Box<dyn EventSource> = match OsEventSource::new() {
-            Ok(os) => Box::new(os),
-            Err(_) => Box::new(actor::NoSource),
-        };
-        Self::open_with(paths, rt, source, ServiceOptions::default())
+        Self::open_with(paths, rt, Sources::Os, ServiceOptions::default())
     }
 
     // ## m4b-t10-service
-    /// [`open`](Self::open) with an event source and options of the caller's (tests pass
-    /// `testing::FakeEventSource` and short timers).
+    /// [`open`](Self::open) with event sources and options of the caller's (tests pass
+    /// `testing::FakeHandle::sources` and short timers).
     pub fn open_with(
         paths: &LocalPaths,
         rt: &Handle,
-        source: Box<dyn EventSource>,
+        sources: Sources,
         opts: ServiceOptions,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
@@ -478,7 +495,7 @@ impl LibraryService {
         let snapshot = Arc::new(ArcSwap::from_pointee(empty));
         let (tx, inbox) = mpsc::channel(actor::INBOX_CAPACITY);
         let closed = Arc::new(AtomicBool::new(false));
-        let echo = Echo::default();
+        let echoes = Echoes::default();
         let stamps = Arc::new(AtomicU64::new(0));
         actor::start(actor::Wiring {
             paths: paths.clone(),
@@ -489,9 +506,9 @@ impl LibraryService {
             closed: closed.clone(),
             snapshot: snapshot.clone(),
             events: events.clone(),
-            echo: echo.clone(),
+            echoes: echoes.clone(),
             stamps: stamps.clone(),
-            source,
+            sources,
         });
         LibraryService {
             snapshot,
@@ -499,7 +516,7 @@ impl LibraryService {
             rt: rt.clone(),
             tx,
             closed,
-            echo,
+            echoes,
             stamps,
         }
     }
@@ -622,10 +639,12 @@ impl LibraryService {
             .blocking(move || fileio::read(&root, &path, env, ReadLimits::default()))
             .await
             .unwrap_or(Err(ReadError::Io(io::ErrorKind::Interrupted)))?;
+        // The watcher learns the open file's stamp (rename pairing, and an edit that keeps
+        // its `(len, mtime)`, R-T9-3); a later reload goes through here too (T9 carry).
         self.tell(Msg::Remember {
             id,
             rel: rel.clone(),
-            hash: Some(decoded.stamp.hash),
+            stamp: decoded.stamp,
         })
         .await;
         Ok(decoded)
@@ -651,25 +670,35 @@ impl LibraryService {
         let root = self
             .root_of(id)
             .ok_or(SaveError::Io(io::ErrorKind::NotFound))?;
-        let (path, echo) = (rel.clone(), self.echo.clone());
+        // The echo goes under the path the bytes land at: a file link's target (R-C0-7).
+        let landing = self
+            .snapshot
+            .load()
+            .library(id)
+            .and_then(|l| l.entries.iter().find(|e| &e.rel == rel))
+            .and_then(|e| e.target.clone())
+            .unwrap_or_else(|| rel.clone());
+        let (path, echo) = (rel.clone(), self.echoes.get(id));
         let saved = self
             .blocking(move || {
                 fileio::save_with_echo(&root, &path, env, text, expect, &mut |stamp| {
-                    echo.record(id, &path, *stamp);
+                    if let Some(echo) = &echo {
+                        echo.record(landing.clone(), *stamp);
+                    }
                 })
             })
             .await
             .unwrap_or(Err(SaveError::Io(io::ErrorKind::Interrupted)));
-        let hash = match &saved {
-            Ok(stamp) | Err(SaveError::SavedButPathChanged(stamp)) => Some(Some(stamp.hash)),
+        let stamp = match &saved {
+            Ok(stamp) | Err(SaveError::SavedButPathChanged(stamp)) => Some(Some(*stamp)),
             Err(SaveError::Damaged) => Some(None),
             Err(_) => None,
         };
-        if let Some(hash) = hash {
+        if let Some(stamp) = stamp {
             self.tell(Msg::Touched {
                 id,
                 rel: rel.clone(),
-                hash,
+                stamp,
             })
             .await;
         }
@@ -799,7 +828,10 @@ impl Drop for LibraryService {
 fn servable(state: &LibraryState) -> bool {
     matches!(
         state,
-        LibraryState::Scanning | LibraryState::Watching | LibraryState::Polling(_)
+        LibraryState::Scanning
+            | LibraryState::Watching
+            | LibraryState::Polling(_)
+            | LibraryState::Unwatched
     )
 }
 

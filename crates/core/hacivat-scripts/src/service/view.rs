@@ -77,7 +77,7 @@ impl fmt::Debug for LibraryView<'_> {
             .field("env", &self.env)
             .field("state", &self.lib.state)
             .field("files", &self.file_count())
-            .field("git", &self.git())
+            .field("repository", &self.git())
             .finish()
     }
 }

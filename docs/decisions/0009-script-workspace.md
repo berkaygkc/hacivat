@@ -951,7 +951,7 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
   - A plain script file inside a listed folder (or the root) is patched in place: updated, inserted in tree order, or removed.
   - Anything else rescans the library with `scan::scan` and diffs the listing: a folder, a link, a new folder, an error, a known folder gone, a scan that had stopped at a limit, a batch of more than 1,000 paths, or a batch the full inbox dropped (the sink sets an overflow flag).
   - So no hint can make the service list something the scan would not: every listing is either the scan's or a patch the scan would agree with.
-- A source that will not start, and `RawHint::Lost`, switch the library to `Polling(BackendLost)`: a rescan and diff every 2 s. **Until Task 9 fills `OsEventSource::watch`, the product's `open` polls every library this way.**
+- A source that will not start, and `RawHint::Lost`, switch the library to `Polling(BackendLost)`: a rescan and diff every 2 s. (Superseded by the watcher wiring below: Task 9's `Watcher` polls when it must, and the service has no polling of its own.)
 
 ### Settle, echo, rename (HV-SCRIPT-08 steps 5–7)
 
@@ -1057,3 +1057,79 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
 - **m10:** the index test's comment explains why no `Fs` is needed.
 - **m1:** the tripwire now covers `service/*.rs` and the renamed and brace imports. It is called a tripwire. A `check-deps` token rule is carried to T20.
 - **Adopted:** the reviewer's H3 (inbox overflow) and H4 (monotonic generations under races) are adopted as named tests.
+
+### Fix round 2 (re-review fr1: F1–F4, m-a…m-e; ruling R-T10-5)
+
+**The actor never touches the filesystem (F1).**
+- At launch and on a reload after a failed save, the service reads `libraries.toml` with the new `LibraryRegistry::load_text_only`. It compares rows by their text (id and path) and canonicalizes no row. Canonical nesting is left to each library's worker `validate` (`Overlaps`).
+- An attach is registered with the new `LibraryRegistry::add_resolved`:
+  - the worker job `resolve_attach` answers the folder's canonical path and identity, and makes the guard's checks (filesystem root, home and app folders, resolved in the job, and an environment folder);
+  - the actor checks overlap against the canonical roots it already holds.
+  - Both are T3 named exceptions in `registry.rs`. T3's own `load` and `add` are unchanged.
+- The rules' home and app folders are resolved inside each job, never on the actor.
+- The only files the actor still reads and writes are `libraries.toml` and the recovery folders, both in the app's own folders.
+- **Test:** `a_hung_mount_never_blocks_launch_attach_or_reload`. The injected `Fs` blocks every call under one library's folder. The service loads, the healthy library comes up, the hung one shows `NotResponding`, and an attach, a map, a reload after a failed save (Unix, not as root) and a detach all answer.
+
+**Deadlines (F2, R-T10-5).**
+- A detach of a busy library frees its worker at once. Its job is tracked as abandoned, so a late answer neither frees the slot twice nor reaches a library.
+- A job running past `ServiceOptions::job_deadline` (10 s) stops counting against the cap, and its library is `Unavailable(NotResponding)` until the job answers. It keeps its one job, so blocked threads stay bounded by the number of libraries.
+- **Tests:** H8 (20 libraries, 8 on a dead mount: the 12 healthy ones come up, the 8 show not responding), H9 (8 detach-and-reattach retries of a hung folder, then a healthy library scans), and `a_library_that_stops_answering_comes_back`.
+
+**H2 (F3).**
+- The cause is not pinned. Rust opens the lock file with `O_CLOEXEC`, so close-on-exec is not the fix, and on macOS `Command` spawns through `posix_spawn`, so there is no fork window there either.
+- What happens is that under full parallel load a relaunch now and then sees the dead instance's lock as held, or as untestable. It then keeps the folder, which is the fail-safe answer.
+- The test now relaunches until the sweep happens, within the 10 s ceiling. The product is unchanged.
+
+**The pass binds its decoding (F4).**
+- `PassRecord` stores the `encoding` and whether the first block began with that encoding's BOM.
+- Pass 2 in another encoding is refused at open (`ReadError::Changed`), and one whose BOM differs stops at its first block (`ChunkError::Changed`).
+- The stream never decides a line ending (the text keeps the file's own), so there is no line-ending choice to bind.
+- **Tests:** H12, `pass_two_without_pass_ones_bom_stops`.
+
+**The root's identity across sessions (m-a).**
+- `libraries.toml` rows gain optional `canonical` and `inode` keys. The service writes them after a root's first resolution (`set_resolved`), and `add_resolved` writes them at attach.
+- A later launch whose resolution differs is `RootChanged` (`Moved`, `IdentityChanged`).
+- Only the inode is compared across sessions: a device number can change with a reboot or a remount.
+- An old row without the keys gets them at its next successful validation.
+- **Test:** H6b, a folder above the root replaced by a link between sessions.
+
+**Minor findings.**
+- **m-b:** `Debug` of `WorkspaceSnapshot`, `LibrarySnapshot`, `EnvView`, `LibraryView` and `ScriptIndex` is written by hand and prints ids, states and counts, never a path (H11).
+- **m-e:** `ScriptIndex::is_empty_for(env)` replaces `is_empty()`.
+- **m-c and m-d** (forget a file when its last tab closes; a link retargeted into another scope) are carried to T14 by the controller.
+
+### Wiring Task 9's watcher (R-C0-7)
+
+- **One `Watcher` per library.** Each is started by a worker job, because `Watcher::start` and `open` block while the source registers and the library is scanned once. It starts before the library's first service scan (I5). Its events reach the actor through a forwarding task that tags each batch with the watcher's generation. A batch from a watcher that was dropped (detach, unavailable, re-attach) is ignored (T9 carry m-fr3-1).
+- **Sources.**
+  - `open` uses `Sources::Os`, which is `Watcher::open`: Task 9's backend choice per library, the OS watcher or polling for a network file system or past the inotify budget.
+  - Tests pass `Sources::Custom`, through the new `FakeHandle::sources()` and `refusing_sources()`, a `testing.rs` named exception: one fake source per watcher, all driven by one handle.
+- **Event mapping.**
+  - `Changed`, `Unsettled`, `Created` and `Removed` become probes that patch the listing.
+  - `Changed`, `Unsettled` and `PossiblyChanged` also queue a stamp, but only for a file a tab has open. A re-stamp equal to the stamp the tab knows announces nothing, so a `PossiblyChanged` that changed nothing, an echo, or our own save never reaches a subscriber. Repeated reports of one path collapse into one queued stamp (T9 carries).
+  - `Renamed` moves the remembered stamp. It is announced as `FileRenamed` once the listing has dropped the old path, and that removal is not a `FileDeleted`. Renames are paired by the watcher, so the service's own pairing is gone.
+  - `Rescan` and `BackendRearmed` become a rescan.
+  - `RepositoryChanged` becomes a status refresh.
+  - `BackendLost` and the backend's `Poll(_)`/`Unwatched` become the library's state: `Polling(reason)`, or the new `LibraryState::Unwatched`. When no watcher could start at all, the library is also listed `Unwatched`.
+- **`remember` and the echo.**
+  - Every `read` (a reload is a read) and every `save` sends the full `DiskStamp`, which the actor passes to `Watcher::remember`. A watcher that starts later is given every stamp already known.
+  - A save records its echo in that library's watcher table (`EchoHandle`, shared through the service) under the path the bytes land at: a file link's target.
+- **Removed:**
+  - the interim 2 s polling, `ServiceOptions::poll`, the actor's poll timer chain and its no-source fallback;
+  - the service's own settle queue, settle window and echo table (`ServiceOptions::echo_ttl`);
+  - the raw-hint classification and the inbox-overflow flag (the watcher bounds its own queue and turns an overflow into `Rescan`).
+  - The unavailable-library recheck stays: it is not watching.
+- **Deviation:** `LibraryService::open_with` takes `Sources` instead of one `Box<dyn EventSource>`.
+- **Residuals:**
+  - `.hacivat/workspace.toml` edits are dot-folder names, which the watcher drops. A teammate's manifest change binds at the next rescan, not at once.
+  - No test forces a stale batch from a dropped watcher (the generation check is direct code).
+- **Confirming scans** (found by the H4 stress test once the watcher was wired: 64 of 200 loaded runs left deleted files listed):
+  - A probe or a full scan reads the disk as it is *now*, which can be ahead of what the watcher last settled on. Example: a file the watcher reported removed comes back for a moment, is listed by a scan, and goes again before the watcher settles. The watcher's state is still "removed", so it reports nothing more.
+  - The watcher's events lag the disk (by its window, more under load), so no event can tell the service. Three earlier attempts failed under load: rescanning on a disagreeing probe only, rescanning only when events came during the scan, and one confirming scan only. A trace showed the confirming scan itself landing mid-change.
+  - The rule kept:
+    - Each probe carries the watcher's claim (`Expect::Present` or `Absent`); a probe that disagrees asks for a confirming scan.
+    - Every full scan asks for one too.
+    - A confirming scan runs once the library has had no watch event for four settle windows (re-armed while events keep coming), and is repeated until one finds nothing changed against the listing before it: the disk has stopped moving.
+    - Cost: one extra lstat scan per full scan when the library is at rest; probes from single saves need none.
+  - **Held removals.** A confirming scan can see a rename's old path gone before the watcher reports `Renamed`. So a *scan's* removal of a file open in a tab is held until the watcher says `Removed` (`FileDeleted`) or `Renamed` (`FileRenamed`), or until a stable confirming scan shows it gone. A tab therefore never hears "deleted" before "renamed".
+  - **Result:** 200 runs of the whole `service` binary, four in parallel, alternating en_US and tr_TR, at load average 20–36: 0 failures, H2 and H4 included.

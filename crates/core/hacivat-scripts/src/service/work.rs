@@ -1,7 +1,7 @@
 // ## m4b-t10-service (fix round 1)
 //! The library service's I/O, run only on its bounded workers (I6, ruling R-T10-4): root
-//! validation (I3), scans and probes, settle looks, stamps of files open in a tab (I4), rename
-//! pairing, and the attach and alias writes. Every function here takes what it needs by value
+//! validation (I3), scans and probes, stamps of files open in a tab (I4), and the attach and
+//! alias writes (the watcher's start is a job too, `actor.rs`). Every function here takes what it needs by value
 //! and returns a plain result; the actor applies it. Nothing here touches the actor's state, so
 //! a worker stuck on a hung mount stalls only its own library.
 //!
@@ -14,7 +14,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
 
 use hacivat_proto::EnvTag;
 
@@ -305,6 +304,17 @@ pub(super) fn stamp(
     fileio::stamp_of(root, &entry.rel, env).ok()
 }
 
+/// What the watcher said of a probed path (the probe may see the disk ahead of it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Expect {
+    /// Created or changed: the file was there when the watcher settled.
+    Present,
+    /// Removed: it was gone.
+    Absent,
+    /// No claim (an own save, a rename's ends).
+    Either,
+}
+
 /// One refresh of a library: probes of hinted paths, or a full validated scan.
 pub(super) struct RefreshJob {
     pub reg: RegisteredLibrary,
@@ -315,22 +325,21 @@ pub(super) struct RefreshJob {
     pub validate_only: bool,
     /// A full scan (else `probes` are patched in, rescanning if one needs it).
     pub scan: bool,
-    pub probes: Vec<RelPath>,
+    pub probes: Vec<(RelPath, Expect)>,
     pub old: Arc<[ScriptEntry]>,
     pub stopped: bool,
     pub limits: Limits,
-    /// Content hashes of the files open in a tab (rename pairing).
-    pub remembered: HashMap<RelPath, u128>,
     pub fs: SharedFs,
-    pub stamps: Arc<AtomicU64>,
 }
 
 /// What a refresh found.
 pub(super) enum RefreshOut {
     Refused(Refused),
     Validated(Valid),
-    /// Nothing to change.
-    Unchanged,
+    /// Nothing to change; `disagreed` as in [`Listing`].
+    Unchanged {
+        disagreed: bool,
+    },
     Listing(Box<Listing>),
 }
 
@@ -340,8 +349,8 @@ pub(super) struct Listing {
     /// Set when a full scan ran.
     pub scanned: Option<Scanned>,
     pub changes: Changes,
-    /// `(from, to, hash)`: a file open in a tab that moved (alg/28 C4).
-    pub renames: Vec<(RelPath, RelPath, u128)>,
+    /// A probe found the disk other than the watcher reported (fix: the H4 stress race).
+    pub disagreed: bool,
 }
 
 pub(super) struct Scanned {
@@ -371,8 +380,8 @@ impl RefreshJob {
                 canonical: canonical.clone(),
             };
             match self.patch(&root) {
-                Some(Some(listing)) => return RefreshOut::Listing(Box::new(listing)),
-                Some(None) => return RefreshOut::Unchanged,
+                Some((Some(listing), _)) => return RefreshOut::Listing(Box::new(listing)),
+                Some((None, disagreed)) => return RefreshOut::Unchanged { disagreed },
                 None => {}
             }
         }
@@ -380,20 +389,39 @@ impl RefreshJob {
     }
 
     /// Patches the hinted paths into the listing; `None` when one of them needs a rescan.
-    fn patch(&self, root: &LibraryRoot) -> Option<Option<Listing>> {
+    fn patch(&self, root: &LibraryRoot) -> Option<(Option<Listing>, bool)> {
         let fs = self.fs.as_ref();
-        let mut probes = self.probes.clone();
-        probes.sort();
-        probes.dedup();
+        // I3 for the watcher's reports too: a root deleted and made again (another folder at
+        // the same path) is caught here; the full scan then refuses it.
+        if self.session.identity.is_some()
+            && fileio::folder_identity(&root.canonical) != self.session.identity
+        {
+            return None;
+        }
+        // The latest claim per path wins; paths in a stable order.
+        let mut claims: HashMap<RelPath, Expect> = HashMap::new();
+        for (rel, expect) in &self.probes {
+            claims.insert(rel.clone(), *expect);
+        }
+        let mut probes: Vec<(RelPath, Expect)> = claims.into_iter().collect();
+        probes.sort_by(|a, b| a.0.cmp(&b.0));
+        // The disk is not what the watcher last settled on: it is still changing. The actor
+        // rescans once it has had time to settle (the watcher may report nothing more).
+        let mut disagreed = false;
         let mut entries: Vec<ScriptEntry> = self.old.to_vec();
         let mut changes = Changes::default();
         let mut files = entries
             .iter()
             .filter(|e| e.kind != EntryKind::Folder)
             .count();
-        for rel in probes {
+        for (rel, expect) in probes {
             let known = entries.iter().position(|e| e.rel == rel);
-            match probe(fs, root, &rel) {
+            let seen = probe(fs, root, &rel);
+            disagreed |= matches!(
+                (&seen, expect),
+                (Probe::Absent, Expect::Present) | (Probe::File(_), Expect::Absent)
+            );
+            match seen {
                 Probe::Ignore => {}
                 Probe::Rescan => return None,
                 Probe::Absent => match known {
@@ -458,7 +486,7 @@ impl RefreshJob {
             }
         }
         if changes.is_empty() {
-            return Some(None);
+            return Some((None, disagreed));
         }
         // A folder left with no script is not listed: let the scan decide.
         let emptied = changes.removed.iter().any(|(rel, _)| {
@@ -473,14 +501,16 @@ impl RefreshJob {
             return None;
         }
         tree::sort(&mut entries);
-        let renames = self.pair(root, &entries, &mut changes);
-        Some(Some(Listing {
-            valid: None,
-            entries,
-            scanned: None,
-            changes,
-            renames,
-        }))
+        Some((
+            Some(Listing {
+                valid: None,
+                entries,
+                scanned: None,
+                changes,
+                disagreed,
+            }),
+            disagreed,
+        ))
     }
 
     fn full_scan(&self) -> RefreshOut {
@@ -511,8 +541,7 @@ impl RefreshJob {
         let has_git_dir = fs
             .symlink_metadata(&valid.root.canonical.join(".git"))
             .is_ok();
-        let mut changes = diff(&self.old, &result.entries);
-        let renames = self.pair(&valid.root, &result.entries, &mut changes);
+        let changes = diff(&self.old, &result.entries);
         RefreshOut::Listing(Box::new(Listing {
             valid: Some(valid),
             entries: result.entries,
@@ -523,81 +552,42 @@ impl RefreshJob {
                 has_git_dir,
             }),
             changes,
-            renames,
+            disagreed: false,
         }))
-    }
-
-    /// Pairs a removed file that a tab has open with a created file of the same length and
-    /// content hash (alg/28 C4). Only the candidates of such a file are read.
-    fn pair(
-        &self,
-        root: &LibraryRoot,
-        entries: &[ScriptEntry],
-        changes: &mut Changes,
-    ) -> Vec<(RelPath, RelPath, u128)> {
-        let mut renames = Vec::new();
-        let mut removed = Vec::new();
-        for (from, len) in std::mem::take(&mut changes.removed) {
-            let Some(&hash) = self.remembered.get(&from) else {
-                removed.push((from, len));
-                continue;
-            };
-            let found = changes.created.iter().position(|to| {
-                entries
-                    .iter()
-                    .find(|e| &e.rel == to)
-                    .filter(|e| e.len == len && !e.dataless)
-                    .and_then(|e| stamp(root, e, &self.stamps))
-                    .is_some_and(|s| s.hash == hash)
-            });
-            match found {
-                Some(i) => renames.push((from, changes.created.remove(i), hash)),
-                None => removed.push((from, len)),
-            }
-        }
-        changes.removed = removed;
-        renames
     }
 }
 
-/// One settle look at a changed file (HV-SCRIPT-08 step 5), and its stamp when it held still
-/// and a tab has it open (I4).
-pub(super) struct SettleJob {
+// ## m4b-t10-service (watcher wiring, R-C0-7): renames are paired by Task 9's watcher, which
+// knows each open file's stamp (`Watcher::remember`); the settle window is the watcher's too.
+
+/// The stamp of a file a tab has open, after the watcher reported it changed (or possibly
+/// changed): its `lstat` for the listing, and its content stamp through `fileio` (I4: only
+/// such files are ever read).
+pub(super) struct StampJob {
     pub root: LibraryRoot,
     pub entry: ScriptEntry,
-    pub len: u64,
-    pub mtime: SystemTime,
-    pub last_try: bool,
-    pub stamp: bool,
     pub fs: SharedFs,
     pub stamps: Arc<AtomicU64>,
 }
 
-pub(super) struct SettleOut {
+pub(super) struct StampOut {
     pub meta: Option<Meta>,
-    pub still: bool,
     pub stamp: Option<DiskStamp>,
 }
 
-impl SettleJob {
-    pub fn run(self) -> SettleOut {
+impl StampJob {
+    pub fn run(self) -> StampOut {
         let Probe::File(meta) = probe(self.fs.as_ref(), &self.root, &self.entry.rel) else {
-            return SettleOut {
+            return StampOut {
                 meta: None,
-                still: false,
                 stamp: None,
             };
         };
-        let still = (meta.len, meta.mtime) == (self.len, self.mtime);
         let mut entry = self.entry.clone();
         entry.dataless = meta.dataless;
-        let stamp = (self.stamp && (still || self.last_try))
-            .then(|| stamp(&self.root, &entry, &self.stamps))
-            .flatten();
-        SettleOut {
+        StampOut {
             meta: Some(meta),
-            still,
-            stamp,
+            stamp: stamp(&self.root, &entry, &self.stamps),
         }
     }
 }

@@ -2,8 +2,8 @@
 //! the core runtime owns the registry, the scans, the watch sources and the status refresh, and
 //! publishes immutable snapshots through `arc-swap`.
 //!
-//! Watch hints come from the injected `FakeEventSource` (Task 1a's seam; the OS watcher is
-//! Task 9's), so every test is deterministic: it writes a file, then hands the service the hint
+//! Watch hints come from fake event sources (`testing::FakeHandle::sources`, one per library's
+//! Task 9 watcher, all driven by one handle), so every test is deterministic: it writes a file, then hands the service the hint
 //! an OS watcher would, and waits on a condition (never a fixed sleep; ceiling 10 s).
 //!
 //! The git CLI runs only in `git_*` tests, on fixture repositories they create
@@ -24,7 +24,7 @@ use hacivat_scripts::scan::{Diag, LimitHit, Limits};
 use hacivat_scripts::service::{
     AttachError, LibraryDiag, LibraryService, MapError, ServiceOptions, WorkspaceSnapshot,
 };
-use hacivat_scripts::testing::{FakeEventSource, FakeHandle};
+use hacivat_scripts::testing::FakeHandle;
 use hacivat_scripts::{
     DatabaseName, GitSummary, LibraryEvent, LibraryId, LibraryState, LocalMapping, PollReason,
     RawHint, ReadError, RelPath, RootRefusal, SaveError, SaveText, ScriptEntry, Subscription,
@@ -47,7 +47,6 @@ fn opts() -> ServiceOptions {
     ServiceOptions {
         settle: Duration::from_millis(20),
         git_debounce: Duration::from_millis(40),
-        poll: Duration::from_millis(60),
         recheck: Duration::from_millis(60),
         home: None,
         ..ServiceOptions::default()
@@ -130,11 +129,11 @@ struct Rig {
 
 fn rig_with(app: &Path, o: ServiceOptions) -> Rig {
     let paths = LocalPaths::under(app);
-    let (source, fake) = FakeEventSource::new();
+    let fake = FakeHandle::default();
     let svc = LibraryService::open_with(
         &paths,
         &tokio::runtime::Handle::current(),
-        Box::new(source),
+        fake.sources(),
         o,
     );
     let rx = svc.subscribe(None);
@@ -206,6 +205,22 @@ async fn attach(r: &Rig, dir: &Path) -> LibraryId {
     wait_until("the first scan and status", || {
         let snap = r.snap();
         snap.view(None).library(id).is_some_and(|l| {
+            l.git() != GitSummary::Pending && l.library().state == LibraryState::Watching
+        })
+    })
+    .await;
+    // And the confirming scan after it (the service's own background work), so a test's own
+    // change is the next thing that happens.
+    r.svc.settled().await;
+    id
+}
+
+/// [`attach`] for a service where another library hangs: `settled()` would wait for that one,
+/// so this waits for this library's own first scan and status only.
+async fn attach_while_another_hangs(r: &Rig, dir: &Path) -> LibraryId {
+    let id = r.svc.attach(dir.into(), None, false).await.unwrap();
+    wait_until("the first scan and status", || {
+        r.snap().view(None).library(id).is_some_and(|l| {
             l.git() != GitSummary::Pending && l.library().state == LibraryState::Watching
         })
     })
@@ -491,7 +506,7 @@ async fn detach_stops_watching_and_never_touches_the_folder() {
     std::fs::write(rec.join("copy.sql"), "unsaved").unwrap();
     let before = tree(d.path());
     r.svc.detach(id).await.unwrap();
-    assert!(r.fake.watched().is_empty());
+    wait_until("the watch to stop", || r.fake.watched().is_empty()).await;
     assert!(r.snap().library(id).is_none());
     assert_eq!(tree(d.path()), before);
     assert!(!rec.exists());
@@ -522,7 +537,7 @@ async fn missing_folder_is_unavailable_and_recovers_when_it_returns() {
             && r.rels(id).is_empty()
     })
     .await;
-    assert!(r.fake.watched().is_empty());
+    wait_until("the watch to stop", || r.fake.watched().is_empty()).await;
     assert!(matches!(
         r.svc.read(id, &rel("a.sql"), None).await,
         Err(ReadError::Io(std::io::ErrorKind::NotFound))
@@ -710,7 +725,7 @@ async fn root_in_an_env_folder_is_refused_and_mapped() {
     let snap = r.snap();
     assert!(entries_in(&snap, id, Some(EnvTag::Staging)).is_empty());
     assert!(diags_in(&snap, id, None).contains(&LibraryDiag::RootInEnvFolder("@staging".into())));
-    assert!(r.fake.watched().is_empty());
+    wait_until("the watch to stop", || r.fake.watched().is_empty()).await;
 }
 
 /// T4 carry: `Diag::LinkScope` reaches the library's diagnostics.
@@ -912,11 +927,12 @@ async fn watch_failure_falls_back_to_polling() {
     let d = tempfile::tempdir().unwrap();
     write_files(d.path(), &["a.sql"]);
     let paths = LocalPaths::under(app.path());
-    let (source, _fake) = FakeEventSource::refusing(WatchError::Backend("refused".into()));
+    // Every source refuses: the watcher falls back to Task 9's poll source.
+    let fake = FakeHandle::default();
     let svc = LibraryService::open_with(
         &paths,
         &tokio::runtime::Handle::current(),
-        Box::new(source),
+        fake.refusing_sources(WatchError::Backend("refused".into())),
         opts(),
     );
     let mut rx = svc.subscribe(None);
@@ -1326,9 +1342,11 @@ async fn h1_file_created_between_scan_and_watch_is_listed() {
     let svc = LibraryService::open_with(
         &LocalPaths::under(app.path()),
         &tokio::runtime::Handle::current(),
-        Box::new(LateWatch {
-            sinks: Arc::default(),
-        }),
+        hacivat_scripts::Sources::Custom(Arc::new(|| {
+            Ok(Box::new(LateWatch {
+                sinks: Arc::default(),
+            }) as Box<dyn hacivat_scripts::EventSource>)
+        })),
         opts(),
     );
     wait_until("load", || svc.snapshot().state == LibraryState::Watching).await;
@@ -1472,7 +1490,15 @@ async fn h4_generation_is_monotonic_under_races() {
         l.sort();
         l
     };
-    wait_until("the listing to equal the disk", || listing() == on_disk).await;
+    let deadline = Instant::now() + CEILING;
+    while listing() != on_disk {
+        assert!(
+            Instant::now() < deadline,
+            "listing {:?} disk {on_disk:?}",
+            listing()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 /// H6 (I3): a library folder replaced by a link between sessions is refused at the next
@@ -1505,7 +1531,7 @@ async fn h6_root_replaced_by_a_link_between_sessions_is_not_adopted() {
     .await;
     assert!(r.rels(id).is_empty());
     assert!(diags_in(&r.snap(), id, None).contains(&LibraryDiag::RootRefused(RootRefusal::Link)));
-    assert!(r.fake.watched().is_empty());
+    wait_until("the watch to stop", || r.fake.watched().is_empty()).await;
     // Attaching a link is refused up front too.
     assert_eq!(
         r.svc.attach(lib.clone(), None, false).await,
@@ -1730,7 +1756,7 @@ async fn a_hung_library_stalls_only_itself() {
     };
     let stuck = r.svc.attach(hung.path().into(), None, false).await.unwrap();
     let ok = tokio::time::timeout(CEILING, async {
-        let other = attach(&r, fine.path()).await;
+        let other = attach_while_another_hangs(&r, fine.path()).await;
         assert_eq!(r.rels(other), ["b.sql"]);
         let m = LocalMapping {
             profile: ProfileId::new(),
@@ -2000,7 +2026,7 @@ async fn a_hung_mount_never_blocks_launch_attach_or_reload() {
         })
         .await;
         // Attach while it hangs.
-        let id = attach(&r, late.path()).await;
+        let id = attach_while_another_hangs(&r, late.path()).await;
         assert_eq!(r.rels(id), ["c.sql"]);
         // A command that saves the registry, and one whose save fails (the registry is then
         // read back from the file, by text only).
@@ -2280,4 +2306,47 @@ async fn pass_two_without_pass_ones_bom_stops() {
         p2.next_chunk(),
         Some(Err(hacivat_scripts::ChunkError::Changed))
     );
+}
+
+/// T9 carries: a hint for a file that did not change (a `PossiblyChanged` for an unopened
+/// file, a re-hash that matches for an open one) reaches no subscriber, and only the open file
+/// is ever read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hint_that_changed_nothing_reaches_nobody() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    write_files(d.path(), &["open.sql", "closed.sql"]);
+    let mut r = rig_with(app.path(), opts());
+    ready(&r).await;
+    let id = attach(&r, d.path()).await;
+    let root = canonical(d.path());
+    r.svc.read(id, &rel("open.sql"), None).await.unwrap();
+    r.svc.settled().await;
+    while r.rx.try_recv().is_ok() {}
+    let before = r.svc.stamps_read();
+    for _ in 0..3 {
+        r.hint(&root, &["open.sql", "closed.sql"]);
+    }
+    // A real change afterwards proves the hints above were all handled.
+    std::fs::write(d.path().join("open.sql"), "edited").unwrap();
+    r.hint(&root, &["open.sql"]);
+    let mut seen = Vec::new();
+    wait_event(
+        &mut r.rx,
+        &mut seen,
+        "open.sql changed",
+        file_changed(id, "open.sql"),
+    )
+    .await;
+    r.svc.settled().await;
+    while let Ok(e) = r.rx.try_recv() {
+        seen.push(e);
+    }
+    let changed = seen
+        .iter()
+        .filter(|e| matches!(e, LibraryEvent::FileChanged { .. }))
+        .count();
+    assert_eq!(changed, 1, "{seen:?}");
+    let read = r.svc.stamps_read() - before;
+    assert!(read <= 2, "{read} content reads");
 }

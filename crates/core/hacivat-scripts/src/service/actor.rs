@@ -1,16 +1,24 @@
-// ## m4b-t10-service (fix round 1: the actor moved here, with its worker pool)
+// ## m4b-t10-service (fix round 1: the actor moved here, with its worker pool; wired to Task 9's
+// watcher after fix round 2)
 //! The service's actor: one long-lived task on the core runtime's blocking pool that owns every
 //! piece of mutable state and handles one message at a time. It does no library I/O itself
-//! (I6, R-T10-4): each library's validation, scans, probes, settle looks and stamps run as jobs
-//! on at most `ServiceOptions::workers` blocking workers, one job per library at a time, and
-//! come back as messages. Work that arrives while a library's job runs waits in that library's
-//! queue (coalesced: one rescan, the hinted paths, the due settle looks), so a watch started
-//! before the first scan loses nothing (I5). A job of a library that was detached meanwhile is
-//! dropped when it returns; one that never returns holds only its own worker.
+//! (I6, F1; R-T10-4): each library's validation, watcher start, scans, probes and stamps run as
+//! jobs on at most `ServiceOptions::workers` blocking workers, one job per library at a time,
+//! and come back as messages. Work that arrives while a library's job runs waits in that
+//! library's queue (coalesced: one rescan, the reported paths, the due stamps). A job of a
+//! library that was detached meanwhile frees its worker at once and is ignored when it returns;
+//! one that runs past `job_deadline` stops counting and shows its library not responding (F2,
+//! R-T10-5).
+//!
+//! Each library is watched by its own Task 9 [`Watcher`], started on a worker before the
+//! library's first scan (I5): it reconciles the source's hints (settle, echo, rename pairing)
+//! and delivers [`WatchEvent`]s, which a forwarding task tags with the watcher's generation, so
+//! a batch from a watcher that was dropped (a library detached, gone or re-attached) is
+//! ignored.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
@@ -22,25 +30,28 @@ use hacivat_settings::paths::LocalPaths;
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use super::work::{self, RefreshJob, RefreshOut, Rules, Session, SettleJob, SettleOut};
+use super::work::{self, RefreshJob, RefreshOut, Rules, Session, StampJob, StampOut};
 use super::{
-    AttachError, LibraryDiag, LibrarySnapshot, LibraryState, MapError, PollReason, ServiceOptions,
+    AttachError, LibraryDiag, LibrarySnapshot, LibraryState, MapError, ServiceOptions, Sources,
     UnavailableReason, WorkspaceSnapshot, servable,
 };
 use crate::events::LibraryEvent;
 use crate::fileio::DiskStamp;
 use crate::manifest;
 use crate::names::{DatabaseName, LogicalDb};
-use crate::pathsafe::{self, RelPath};
+use crate::pathsafe::RelPath;
 use crate::recovery;
 use crate::registry::{
     LibraryId, LibraryRegistry, LibraryRoot, LocalMapping, RegisteredLibrary, RegistryDiag,
     RegistryError,
 };
 use crate::scan::ScriptEntry;
-use crate::watch::{EventSource, HintSink, RawHint, WatchError};
+use crate::watch::{
+    Backend, EchoHandle, EventSource, HintSink, WatchBatch, WatchError, WatchEvent, WatchOpts,
+    Watcher,
+};
 
-/// The actor's inbox. A hint batch that does not fit is dropped and its library rescanned.
+/// The actor's inbox.
 pub(super) const INBOX_CAPACITY: usize = 1024;
 /// What a registry call answers once the service has stopped.
 pub(super) const STOPPED: RegistryError = RegistryError::Io(io::ErrorKind::BrokenPipe);
@@ -48,52 +59,44 @@ pub(super) const STOPPED: RegistryError = RegistryError::Io(io::ErrorKind::Broke
 const DRAIN_MAX: usize = 64;
 /// A batch with more paths than this rescans instead (HV-SCRIPT-08 step 3).
 const BURST_PATHS: usize = 1_000;
-/// The most settle rounds before a changing file is stamped anyway (HV-SCRIPT-08 step 5).
-const SETTLE_TRIES: u32 = 10;
 /// How many deleted paths per library are remembered, so their return is announced.
 const RECENT_DELETES: usize = 1_024;
+/// Batches a watcher may queue towards the actor before it waits.
+const WATCH_CHANNEL: usize = 64;
 
-/// An event source for when the OS one cannot be built: nothing is watched, every library is
-/// polled.
-pub(super) struct NoSource;
+/// A source that refuses: a factory that could not build one (the watcher falls back).
+struct Refusing(WatchError);
 
-impl EventSource for NoSource {
+impl EventSource for Refusing {
     fn watch(&mut self, _root: &Path, _sink: HintSink) -> Result<(), WatchError> {
-        Err(WatchError::Backend("no event source".into()))
+        Err(self.0.clone())
     }
 
     fn unwatch(&mut self, _root: &Path) {}
 }
 
-/// The stamps of Hacivat's own saves, recorded before the rename (HV-SCRIPT-08 step 6). Written
-/// by the save's blocking task, read by the actor; the lock is never held across an `.await`.
+/// Each watched library's echo table (Task 9's `EchoHandle`): a save records the stamp of what
+/// it wrote under the path the bytes land at, before the rename (HV-SCRIPT-07 step 4), so the
+/// watcher announces nothing for it. Written by the save's blocking task; the lock is never
+/// held across an `.await`.
 #[derive(Debug, Clone, Default)]
-pub(super) struct Echo(Arc<Mutex<EchoTable>>);
+pub(super) struct Echoes(Arc<Mutex<HashMap<LibraryId, EchoHandle>>>);
 
-/// Each saved path's last own stamp and when it was recorded.
-type EchoTable = HashMap<(LibraryId, RelPath), (DiskStamp, Instant)>;
-
-impl Echo {
-    fn lock(&self) -> std::sync::MutexGuard<'_, EchoTable> {
+impl Echoes {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<LibraryId, EchoHandle>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(super) fn record(&self, id: LibraryId, rel: &RelPath, stamp: DiskStamp) {
-        self.lock()
-            .insert((id, rel.clone()), (stamp, Instant::now()));
+    pub(super) fn get(&self, id: LibraryId) -> Option<EchoHandle> {
+        self.lock().get(&id).cloned()
     }
 
-    /// Whether `stamp` (len, mtime and hash) is one of our own writes of the last `ttl`.
-    fn is_echo(&self, id: LibraryId, rel: &RelPath, stamp: &DiskStamp, ttl: Duration) -> bool {
+    fn set(&self, id: LibraryId, echo: Option<EchoHandle>) {
         let mut table = self.lock();
-        table.retain(|_, (_, at)| at.elapsed() <= ttl);
-        table
-            .get(&(id, rel.clone()))
-            .is_some_and(|(own, _)| own == stamp)
-    }
-
-    fn forget(&self, id: LibraryId) {
-        self.lock().retain(|(lib, _), _| *lib != id);
+        match echo {
+            Some(e) => table.insert(id, e),
+            None => table.remove(&id),
+        };
     }
 }
 
@@ -123,29 +126,25 @@ pub(super) enum Msg {
         profile: ProfileId,
         reply: oneshot::Sender<Result<usize, RegistryError>>,
     },
-    /// A batch from the event source.
-    Hints {
+    /// A batch from library `id`'s watcher of generation `generation`.
+    Watch {
         id: LibraryId,
-        batch: Vec<RawHint>,
+        generation: u64,
+        batch: WatchBatch,
     },
-    /// A tab read the file: it is open, with this content hash (I4, rename pairing).
+    /// A tab read (or reloaded) the file: it is open, with this stamp (I4; `remember`).
     Remember {
         id: LibraryId,
         rel: RelPath,
-        hash: Option<u128>,
+        stamp: DiskStamp,
     },
-    /// A save wrote the file (`hash` when it is known).
+    /// A save wrote the file (`stamp` when it is known).
     Touched {
         id: LibraryId,
         rel: RelPath,
-        hash: Option<u128>,
+        stamp: Option<DiskStamp>,
     },
-    /// A changed file's settle window passed.
-    SettleDue {
-        id: LibraryId,
-        rel: RelPath,
-    },
-    /// The poll or recheck timer of a library.
+    /// The recheck timer of an unavailable library.
     Tick {
         id: LibraryId,
         seq: u64,
@@ -166,15 +165,25 @@ pub(super) enum Msg {
         job: u64,
         out: RefreshOut,
     },
-    SettleDone {
+    Stamped {
         id: LibraryId,
         job: u64,
         rel: RelPath,
-        out: SettleOut,
+        out: StampOut,
+    },
+    WatchStarted {
+        id: LibraryId,
+        job: u64,
+        result: Result<Watcher, WatchError>,
     },
     /// Fix round 2 (F2, R-T10-5): a job ran past `ServiceOptions::job_deadline`.
     JobOverdue {
         job: u64,
+    },
+    /// A probe disagreed with the watcher a while ago: rescan now.
+    Resync {
+        id: LibraryId,
+        generation: u64,
     },
     AttachResolved {
         token: u64,
@@ -205,9 +214,9 @@ pub(super) struct Wiring {
     pub closed: Arc<AtomicBool>,
     pub snapshot: Arc<ArcSwap<WorkspaceSnapshot>>,
     pub events: broadcast::Sender<LibraryEvent>,
-    pub echo: Echo,
+    pub echoes: Echoes,
     pub stamps: Arc<AtomicU64>,
-    pub source: Box<dyn EventSource>,
+    pub sources: Sources,
 }
 
 /// Starts the actor on the runtime's blocking pool; the registry is read there.
@@ -235,9 +244,9 @@ pub(super) fn start(w: Wiring) {
             closed: w.closed,
             snapshot: w.snapshot,
             events: w.events,
-            echo: w.echo,
+            echoes: w.echoes,
             stamps: w.stamps,
-            source: w.source,
+            sources: w.sources,
             rules,
             registry,
             registry_diags: Arc::from([]),
@@ -253,20 +262,13 @@ pub(super) fn start(w: Wiring) {
             next_job_id: 0,
             next_lib: 0,
             next_token: 0,
+            next_watch: 0,
             attaches: HashMap::new(),
             aliases: HashMap::new(),
             waiters: Vec::new(),
         };
         actor.run(w.inbox, diags);
     });
-}
-
-/// A changed file waiting for its `(len, mtime)` to hold still.
-#[derive(Debug, Clone, Copy)]
-struct Settle {
-    len: u64,
-    mtime: SystemTime,
-    tries: u32,
 }
 
 /// The repository status runs of one library.
@@ -281,13 +283,14 @@ struct GitRun {
 #[derive(Debug, Default)]
 struct Want {
     validate: bool,
+    watch: bool,
     scan: bool,
-    probes: Vec<RelPath>,
+    probes: Vec<(RelPath, work::Expect)>,
 }
 
 impl Want {
     fn is_empty(&self) -> bool {
-        !self.validate && !self.scan && self.probes.is_empty()
+        !self.validate && !self.watch && !self.scan && self.probes.is_empty()
     }
 }
 
@@ -305,12 +308,12 @@ struct Lib {
     entries: Arc<[ScriptEntry]>,
     stopped: bool,
     has_git_dir: bool,
-    watched: Option<PathBuf>,
-    /// The source would not watch it, or stopped: it is polled.
-    polling: bool,
-    /// Set by the source's sink when a batch did not fit the inbox.
-    overflow: Arc<AtomicBool>,
-    /// The poll or recheck timer chain that is live, if any.
+    /// Its Task 9 watcher, and that watcher's generation (a batch of an older one is ignored).
+    watcher: Option<Watcher>,
+    watch_gen: u64,
+    /// No watcher could start (or none watches it any more): listed, `Unwatched`.
+    unwatched: bool,
+    /// The recheck timer chain that is live, if any.
     timer: Option<u64>,
     next_timer: u64,
     git: GitRun,
@@ -319,10 +322,23 @@ struct Lib {
     /// Its id (F2: an answer from an abandoned job is ignored).
     job: Option<u64>,
     want: Want,
-    settles: HashMap<RelPath, Settle>,
-    settle_due: VecDeque<RelPath>,
-    /// Files open in a tab, with their last known content hash (I4: only these are read).
-    remembered: HashMap<RelPath, Option<u128>>,
+    /// A resync rescan is scheduled.
+    resync_due: bool,
+    /// Open files a scan found gone, waiting for the watcher's word (rename or delete).
+    held: HashSet<RelPath>,
+    /// The scan queued now is a resync's confirming scan.
+    confirming: bool,
+    /// When its watcher last reported anything.
+    last_event: Option<Instant>,
+    /// Files open in a tab whose new stamp is due (de-duplicated).
+    stamp_due: VecDeque<RelPath>,
+    /// Files open in a tab, with their last known stamp (I4: only these are read; a re-stamp
+    /// equal to it announces nothing, so a `PossiblyChanged` that did not change never reaches
+    /// the user).
+    remembered: HashMap<RelPath, Option<DiskStamp>>,
+    /// Renames the watcher reported (`from → to`): announced once the listing no longer has
+    /// `from` (so a reader of the snapshot sees the move), and that removal is not a delete.
+    moved: HashMap<RelPath, RelPath>,
     deleted: HashSet<RelPath>,
     snap: Arc<LibrarySnapshot>,
 }
@@ -356,18 +372,22 @@ impl Lib {
             entries: Arc::from([]),
             stopped: false,
             has_git_dir: true,
-            watched: None,
-            polling: false,
-            overflow: Arc::new(AtomicBool::new(false)),
+            watcher: None,
+            watch_gen: 0,
+            unwatched: false,
             timer: None,
             next_timer: 0,
             git: GitRun::default(),
             busy: false,
             job: None,
             want: Want::default(),
-            settles: HashMap::new(),
-            settle_due: VecDeque::new(),
+            resync_due: false,
+            held: HashSet::new(),
+            confirming: false,
+            last_event: None,
+            stamp_due: VecDeque::new(),
             remembered: HashMap::new(),
+            moved: HashMap::new(),
             deleted: HashSet::new(),
             snap,
         }
@@ -389,8 +409,18 @@ impl Lib {
     fn up(&self) -> bool {
         matches!(
             self.state,
-            LibraryState::Watching | LibraryState::Polling(_)
+            LibraryState::Watching | LibraryState::Polling(_) | LibraryState::Unwatched
         )
+    }
+
+    /// The state its watcher says (once it is up).
+    fn watched_state(&self) -> LibraryState {
+        match self.watcher.as_ref().map(Watcher::backend) {
+            _ if self.unwatched => LibraryState::Unwatched,
+            Some(Backend::Os) => LibraryState::Watching,
+            Some(Backend::Poll(reason)) => LibraryState::Polling(reason),
+            Some(Backend::Unwatched) | None => LibraryState::Unwatched,
+        }
     }
 
     fn snapshot(&self, generation: u64) -> Arc<LibrarySnapshot> {
@@ -423,47 +453,6 @@ fn folder_db(path: &Path) -> Option<LogicalDb> {
     LogicalDb::parse(path.file_name()?.to_str()?).ok()
 }
 
-/// Where a hinted path lands in a library.
-#[derive(Debug, PartialEq, Eq)]
-enum HintPath {
-    /// The root itself: rescan.
-    Root,
-    /// A file inside the repository's `.git` that changes the status.
-    Git,
-    /// `.hacivat/`: the manifest may have changed.
-    Manifest,
-    Rel(RelPath),
-    /// Outside the root, under a skipped name, or not a name the scan could list.
-    Ignore,
-}
-
-fn classify(root: &LibraryRoot, path: &Path) -> HintPath {
-    let Some(rest) = path
-        .strip_prefix(&root.canonical)
-        .or_else(|_| path.strip_prefix(&root.path))
-        .ok()
-    else {
-        return HintPath::Ignore;
-    };
-    let mut parts = Vec::new();
-    for c in rest.components() {
-        match c {
-            Component::Normal(name) => match name.to_str() {
-                Some(name) => parts.push(name),
-                None => return HintPath::Ignore,
-            },
-            _ => return HintPath::Ignore,
-        }
-    }
-    match parts.as_slice() {
-        [] => HintPath::Root,
-        [".git", "index" | "HEAD" | "packed-refs", ..] | [".git", "refs", ..] => HintPath::Git,
-        [".hacivat", ..] => HintPath::Manifest,
-        _ if parts.iter().any(|p| pathsafe::is_skipped(p)) => HintPath::Ignore,
-        _ => RelPath::parse(&parts.join("/")).map_or(HintPath::Ignore, HintPath::Rel),
-    }
-}
-
 /// Whether two status answers are the same (nothing to publish).
 fn same_git(a: &GitState, b: &GitState) -> bool {
     match (a, b) {
@@ -494,7 +483,28 @@ struct PendingMap {
 /// A library job.
 enum Job {
     Refresh(Box<RefreshJob>),
-    Settle(RelPath, Box<SettleJob>),
+    Stamp(RelPath, Box<StampJob>),
+    Watch(Box<WatchJob>),
+}
+
+/// Starts a library's watcher (it watches, then scans the library once: blocking).
+struct WatchJob {
+    root: LibraryRoot,
+    opts: WatchOpts,
+    sources: Sources,
+    sink: mpsc::Sender<WatchBatch>,
+}
+
+impl WatchJob {
+    fn run(self) -> Result<Watcher, WatchError> {
+        match self.sources {
+            Sources::Os => Watcher::open(self.root, self.opts, self.sink),
+            Sources::Custom(make) => {
+                let source = make().unwrap_or_else(|e| Box::new(Refusing(e)));
+                Watcher::start(self.root, self.opts, self.sink, source)
+            }
+        }
+    }
 }
 
 struct Actor {
@@ -505,9 +515,9 @@ struct Actor {
     closed: Arc<AtomicBool>,
     snapshot: Arc<ArcSwap<WorkspaceSnapshot>>,
     events: broadcast::Sender<LibraryEvent>,
-    echo: Echo,
+    echoes: Echoes,
     stamps: Arc<AtomicU64>,
-    source: Box<dyn EventSource>,
+    sources: Sources,
     rules: Arc<Rules>,
     registry: LibraryRegistry,
     registry_diags: Arc<[RegistryDiag]>,
@@ -529,6 +539,7 @@ struct Actor {
     /// Where the next round of `dispatch` starts (fairness).
     next_lib: usize,
     next_token: u64,
+    next_watch: u64,
     attaches: HashMap<u64, PendingAttach>,
     aliases: HashMap<u64, PendingMap>,
     waiters: Vec<oneshot::Sender<()>>,
@@ -553,14 +564,11 @@ impl Actor {
                     next = inbox.try_recv().ok();
                 }
             }
-            self.check_overflow();
             self.dispatch();
             self.flush();
         }
-        for lib in &mut self.libs {
-            if let Some(root) = lib.watched.take() {
-                self.source.unwatch(&root);
-            }
+        for i in 0..self.libs.len() {
+            self.drop_watcher(i);
         }
     }
 
@@ -632,30 +640,24 @@ impl Actor {
                 self.flush();
                 let _ = reply.send(r);
             }
-            Msg::Hints { id, batch } => self.hints(id, batch),
-            Msg::Remember { id, rel, hash } => {
+            Msg::Watch {
+                id,
+                generation,
+                batch,
+            } => self.watch_batch(id, generation, batch),
+            Msg::Remember { id, rel, stamp } => {
                 // m6: nothing is kept for a library that is gone.
                 if let Some(i) = self.index(id) {
-                    self.libs[i].remembered.insert(rel, hash);
+                    self.remember(i, rel, Some(stamp));
                 }
             }
-            Msg::Touched { id, rel, hash } => {
+            Msg::Touched { id, rel, stamp } => {
                 if let Some(i) = self.index(id) {
-                    let lib = &mut self.libs[i];
-                    let known = lib.remembered.entry(rel.clone()).or_default();
-                    if hash.is_some() {
-                        *known = hash;
+                    if stamp.is_some() || !self.libs[i].remembered.contains_key(&rel) {
+                        self.remember(i, rel.clone(), stamp);
                     }
-                    lib.want.probes.push(rel);
+                    self.libs[i].want.probes.push((rel, work::Expect::Either));
                     self.git_trigger(i);
-                }
-            }
-            Msg::SettleDue { id, rel } => {
-                if let Some(i) = self.index(id) {
-                    let lib = &mut self.libs[i];
-                    if lib.settles.contains_key(&rel) && !lib.settle_due.contains(&rel) {
-                        lib.settle_due.push_back(rel);
-                    }
                 }
             }
             Msg::Tick { id, seq } => self.tick(id, seq),
@@ -667,12 +669,38 @@ impl Actor {
                     self.refreshed(i, out);
                 }
             }
-            Msg::SettleDone { id, job, rel, out } => {
+            Msg::Stamped { id, job, rel, out } => {
                 if let Some(i) = self.job_done(id, job) {
-                    self.settle_done(i, rel, out);
+                    self.stamped(i, rel, out);
                 }
             }
+            Msg::WatchStarted { id, job, result } => match self.job_done(id, job) {
+                Some(i) => self.watch_started(i, result),
+                // Its library is gone: drop the watcher off this thread.
+                None => {
+                    if let Ok(w) = result {
+                        self.rt.spawn_blocking(move || drop(w));
+                    }
+                }
+            },
             Msg::JobOverdue { job } => self.job_overdue(job),
+            Msg::Resync { id, generation } => {
+                if let Some(i) = self.index(id) {
+                    let quiet = self.quiet_for();
+                    let lib = &mut self.libs[i];
+                    lib.resync_due = false;
+                    if lib.watch_gen != generation || !lib.up() {
+                        return;
+                    }
+                    // Still changing: wait until it has been quiet for the whole span.
+                    if lib.last_event.is_some_and(|at| at.elapsed() < quiet) {
+                        self.resync_later(i);
+                    } else {
+                        lib.want.scan = true;
+                        lib.confirming = true;
+                    }
+                }
+            }
             Msg::Settled { reply } => self.waiters.push(reply),
             Msg::Shutdown => {}
         }
@@ -694,6 +722,15 @@ impl Actor {
         self.rt.spawn_blocking(move || {
             let _ = tx.blocking_send(f());
         });
+    }
+
+    /// Records a file as open in a tab, and tells its watcher (`remember`, R-T9-3).
+    fn remember(&mut self, i: usize, rel: RelPath, stamp: Option<DiskStamp>) {
+        let lib = &mut self.libs[i];
+        if let (Some(w), Some(stamp)) = (&lib.watcher, stamp) {
+            w.remember(rel.clone(), stamp);
+        }
+        lib.remembered.insert(rel, stamp);
     }
 
     // ---- registry ----------------------------------------------------------------------------
@@ -804,12 +841,11 @@ impl Actor {
         let mut lib = Lib::new(reg);
         lib.session.canonical = Some(root.canonical.clone());
         lib.session.identity = pa.identity;
+        // I5: the watcher starts first (on a worker), then the scan (which re-validates the
+        // root) is queued behind it.
+        lib.want.watch = true;
+        lib.want.scan = true;
         self.libs.push(lib);
-        let i = self.libs.len() - 1;
-        // I5: the watch starts before the first scan; the scan (which re-validates the root)
-        // is queued behind it.
-        self.ensure_watch(i);
-        self.libs[i].want.scan = true;
         self.workspace_dirty = true;
         self.dirty.insert(id);
         self.dispatch();
@@ -825,13 +861,10 @@ impl Actor {
             if let Some(job) = self.libs[i].job {
                 self.uncount(job);
             }
-            let mut lib = self.libs.remove(i);
-            if let Some(root) = lib.watched.take() {
-                self.source.unwatch(&root);
-            }
+            self.drop_watcher(i);
+            self.libs.remove(i);
         }
         self.git.remove(&id);
-        self.echo.forget(id);
         // R-T5-4: the library's unsaved copies go with it (none is not an error).
         let _ = recovery::discard_library(&self.paths, id);
         self.dirty.remove(&id);
@@ -998,11 +1031,45 @@ impl Actor {
             .filter_map(|(_, l)| Some((l.id(), l.session.canonical.clone()?)))
             .collect();
         let lib = &mut self.libs[i];
-        // An unavailable library only re-validates and then scans (its scan is what brings it
-        // back); hinted paths and settle looks have nothing to look at.
+        // An unavailable library only re-validates, then watches and scans (that is what brings
+        // it back); reported paths and stamps have nothing to look at.
         if matches!(lib.state, LibraryState::Unavailable(_)) {
             lib.want.probes.clear();
-            lib.settle_due.clear();
+            lib.stamp_due.clear();
+        }
+        if !lib.want.validate && lib.want.watch {
+            lib.want.watch = false;
+            if let Some(root) = lib.root() {
+                self.next_watch += 1;
+                lib.watch_gen = self.next_watch;
+                let (sink, mut batches) = mpsc::channel(WATCH_CHANNEL);
+                let (tx, id, generation) = (self.tx.clone(), lib.id(), lib.watch_gen);
+                // Forwards this watcher's batches, tagged with its generation, until it drops.
+                self.rt.spawn(async move {
+                    while let Some(batch) = batches.recv().await {
+                        let msg = Msg::Watch {
+                            id,
+                            generation,
+                            batch,
+                        };
+                        if tx.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                let opts = WatchOpts {
+                    window: self.opts.settle,
+                    limits: self.opts.limits,
+                    fs: self.opts.fs.clone(),
+                    ..WatchOpts::default()
+                };
+                return Some(Job::Watch(Box::new(WatchJob {
+                    root,
+                    opts,
+                    sources: self.sources.clone(),
+                    sink,
+                })));
+            }
         }
         if lib.want.validate || lib.want.scan || !lib.want.probes.is_empty() {
             let validate_only = lib.want.validate;
@@ -1029,36 +1096,24 @@ impl Actor {
                 old: lib.entries.clone(),
                 stopped: lib.stopped,
                 limits: self.opts.limits,
-                remembered: lib
-                    .remembered
-                    .iter()
-                    .filter_map(|(rel, hash)| Some((rel.clone(), (*hash)?)))
-                    .collect(),
                 fs: self.opts.fs.clone(),
-                stamps: self.stamps.clone(),
             };
             return Some(Job::Refresh(Box::new(job)));
         }
-        while let Some(rel) = lib.settle_due.pop_front() {
-            let (Some(s), Some(root)) = (lib.settles.get(&rel).copied(), lib.root()) else {
-                lib.settles.remove(&rel);
+        while let Some(rel) = lib.stamp_due.pop_front() {
+            let (Some(root), Some(entry)) = (
+                lib.root(),
+                lib.entries.iter().find(|e| e.rel == rel).cloned(),
+            ) else {
                 continue;
             };
-            let Some(entry) = lib.entries.iter().find(|e| e.rel == rel).cloned() else {
-                lib.settles.remove(&rel);
-                continue;
-            };
-            let job = SettleJob {
+            let job = StampJob {
                 root,
                 entry,
-                len: s.len,
-                mtime: s.mtime,
-                last_try: s.tries + 1 >= SETTLE_TRIES,
-                stamp: lib.remembered.contains_key(&rel),
                 fs: self.opts.fs.clone(),
                 stamps: self.stamps.clone(),
             };
-            return Some(Job::Settle(rel, Box::new(job)));
+            return Some(Job::Stamp(rel, Box::new(job)));
         }
         None
     }
@@ -1079,11 +1134,16 @@ impl Actor {
                     job: job_id,
                     out: job.run(),
                 },
-                Job::Settle(rel, job) => Msg::SettleDone {
+                Job::Stamp(rel, job) => Msg::Stamped {
                     id,
                     job: job_id,
                     rel,
                     out: job.run(),
+                },
+                Job::Watch(job) => Msg::WatchStarted {
+                    id,
+                    job: job_id,
+                    result: job.run(),
                 },
             };
             let _ = tx.blocking_send(msg);
@@ -1137,13 +1197,31 @@ impl Actor {
                 lib.session.canonical = Some(v.root.canonical);
                 lib.session.identity = lib.session.identity.or(v.identity);
                 self.record_resolution(i);
-                // I5: the watch first, then the scan.
-                self.ensure_watch(i);
-                self.libs[i].want.scan = true;
+                // I5: the watcher first, then the scan.
+                let lib = &mut self.libs[i];
+                lib.want.watch = lib.watcher.is_none();
+                lib.want.scan = true;
             }
-            RefreshOut::Unchanged => {}
+            RefreshOut::Unchanged { disagreed } => {
+                if disagreed {
+                    self.resync_later(i);
+                }
+            }
             RefreshOut::Listing(listing) => {
                 let listing = *listing;
+                // A full scan may have caught a moment the watcher never reports back from (a
+                // file that came and went before it settled), and the watcher's events lag the
+                // disk, so no event says so. The scan is confirmed by another one after a quiet
+                // span, and again until a confirming scan finds nothing changed: the disk has
+                // stopped moving. A library at rest costs one extra scan per full scan.
+                let lib = &mut self.libs[i];
+                let scanned = listing.scanned.is_some();
+                let was_confirming = scanned && std::mem::take(&mut lib.confirming);
+                let stable = was_confirming && listing.changes.is_empty();
+                let confirm = scanned && !stable;
+                if listing.disagreed || confirm {
+                    self.resync_later(i);
+                }
                 let id = self.libs[i].id();
                 let was_up = self.libs[i].up();
                 let lib = &mut self.libs[i];
@@ -1151,7 +1229,7 @@ impl Actor {
                     lib.session.canonical = Some(v.root.canonical.clone());
                     lib.session.identity = lib.session.identity.or(v.identity);
                 }
-                let mut changed = !listing.changes.is_empty() || !listing.renames.is_empty();
+                let mut changed = !listing.changes.is_empty();
                 if lib.entries.as_ref() != listing.entries.as_slice() {
                     lib.entries = Arc::from(listing.entries);
                     changed = true;
@@ -1174,11 +1252,7 @@ impl Actor {
                     lib.stopped = s.stopped;
                     lib.has_git_dir = s.has_git_dir;
                     if !was_up {
-                        lib.state = if lib.polling {
-                            LibraryState::Polling(PollReason::BackendLost)
-                        } else {
-                            LibraryState::Watching
-                        };
+                        lib.state = lib.watched_state();
                         changed = true;
                     }
                 }
@@ -1186,13 +1260,14 @@ impl Actor {
                     self.dirty.insert(id);
                 }
                 self.record_resolution(i);
-                // A late answer after `NotResponding` (which unwatched it): watch again and
-                // look once more, since the watch starts after this scan.
-                if !was_up && self.libs[i].watched.is_none() && !self.libs[i].polling {
-                    self.ensure_watch(i);
-                    self.libs[i].want.scan = true;
+                // A late answer after `NotResponding` (which dropped the watcher): watch again
+                // and look once more, since the watch starts after this scan.
+                let lib = &mut self.libs[i];
+                if !was_up && lib.watcher.is_none() && !lib.unwatched {
+                    lib.want.watch = true;
+                    lib.want.scan = true;
                 }
-                self.announce(i, listing.changes, listing.renames);
+                self.announce(i, listing.changes, scanned, stable);
                 if !was_up && self.libs[i].up() {
                     self.git_trigger_now(i);
                 } else if changed {
@@ -1202,89 +1277,87 @@ impl Actor {
         }
     }
 
-    /// Turns listing changes into events (renames were paired by the job), and queues the
-    /// files open in a tab to settle and be stamped (I4: no other file is read).
-    fn announce(
-        &mut self,
-        i: usize,
-        changes: work::Changes,
-        renames: Vec<(RelPath, RelPath, u128)>,
-    ) {
+    /// Turns listing changes into events, and queues the files open in a tab to be stamped
+    /// (I4: no other file is read). A removal the watcher reported as a rename is not a delete.
+    ///
+    /// A *scan's* removal of a file open in a tab is held: the watcher may still report it as
+    /// a rename (its events lag the disk). It is announced when the watcher says `Removed`
+    /// (`FileDeleted`) or `Renamed` (`FileRenamed`), or when a stable confirming scan shows the
+    /// file is gone.
+    fn announce(&mut self, i: usize, changes: work::Changes, scanned: bool, stable: bool) {
         let lib = &mut self.libs[i];
         let id = lib.id();
-        for (from, to, hash) in renames {
-            lib.remembered.remove(&from);
-            lib.remembered.insert(to.clone(), Some(hash));
-            lib.settles.remove(&from);
-            self.pending
-                .push(LibraryEvent::FileRenamed { id, from, to });
-        }
         for (rel, _) in changes.removed {
-            lib.settles.remove(&rel);
+            if lib.moved.contains_key(&rel) {
+                continue;
+            }
+            if scanned && lib.remembered.contains_key(&rel) {
+                lib.held.insert(rel);
+                continue;
+            }
             if lib.deleted.len() >= RECENT_DELETES {
                 lib.deleted.clear();
             }
             lib.deleted.insert(rel.clone());
             self.pending.push(LibraryEvent::FileDeleted { id, rel });
         }
-        let mut settle = Vec::new();
-        for rel in changes.created {
-            if lib.deleted.remove(&rel) && lib.remembered.contains_key(&rel) {
-                settle.push(rel);
+        for rel in &changes.created {
+            lib.held.remove(rel);
+        }
+        if stable {
+            let gone: Vec<RelPath> = lib.held.drain().collect();
+            for rel in gone {
+                if !lib.entries.iter().any(|e| e.rel == rel) {
+                    lib.deleted.insert(rel.clone());
+                    self.pending.push(LibraryEvent::FileDeleted { id, rel });
+                }
             }
         }
-        settle.extend(
+        // The renames whose old path the listing has dropped now.
+        let gone: Vec<RelPath> = lib
+            .moved
+            .keys()
+            .filter(|from| !lib.entries.iter().any(|e| &e.rel == *from))
+            .cloned()
+            .collect();
+        for from in gone {
+            if let Some(to) = lib.moved.remove(&from) {
+                self.pending
+                    .push(LibraryEvent::FileRenamed { id, from, to });
+            }
+        }
+        let mut due = Vec::new();
+        for rel in changes.created {
+            if lib.deleted.remove(&rel) && lib.remembered.contains_key(&rel) {
+                due.push(rel);
+            }
+        }
+        due.extend(
             changes
                 .changed
                 .into_iter()
                 .filter(|rel| lib.remembered.contains_key(rel)),
         );
-        for rel in settle {
-            self.queue_settle(i, rel);
+        for rel in due {
+            self.queue_stamp(i, rel);
         }
     }
 
-    // ---- settle ------------------------------------------------------------------------------
-
-    fn queue_settle(&mut self, i: usize, rel: RelPath) {
+    /// Queues a new stamp of an open file (once: repeated reports of one path collapse).
+    fn queue_stamp(&mut self, i: usize, rel: RelPath) {
         let lib = &mut self.libs[i];
-        let id = lib.id();
-        let Some((len, mtime)) = lib
-            .entries
-            .iter()
-            .find(|e| e.rel == rel)
-            .map(|e| (e.len, e.mtime))
-        else {
-            return;
-        };
-        match lib.settles.get_mut(&rel) {
-            // Already waiting: its look compares against the newest metadata.
-            Some(s) => {
-                s.len = len;
-                s.mtime = mtime;
-            }
-            None => {
-                lib.settles.insert(
-                    rel.clone(),
-                    Settle {
-                        len,
-                        mtime,
-                        tries: 0,
-                    },
-                );
-                self.after(self.opts.settle, Msg::SettleDue { id, rel });
-            }
+        if lib.remembered.contains_key(&rel) && !lib.stamp_due.contains(&rel) {
+            lib.stamp_due.push_back(rel);
         }
     }
 
-    fn settle_done(&mut self, i: usize, rel: RelPath, out: SettleOut) {
+    /// An open file's new stamp: announced only when it differs from the one the tab knows (an
+    /// own save, an echo, a `PossiblyChanged` that changed nothing: silent).
+    fn stamped(&mut self, i: usize, rel: RelPath, out: StampOut) {
         let lib = &mut self.libs[i];
         let id = lib.id();
-        let Some(mut s) = lib.settles.remove(&rel) else {
-            return;
-        };
         let Some(meta) = out.meta else {
-            // Gone or no longer a plain file: the hint that says so patches the listing.
+            // Gone or no longer a plain file: the watcher's report patches the listing.
             return;
         };
         if let Some(pos) = lib.entries.iter().position(|e| e.rel == rel) {
@@ -1298,43 +1371,169 @@ impl Actor {
                 self.dirty.insert(id);
             }
         }
-        if !out.still && s.tries + 1 < SETTLE_TRIES {
-            s.len = meta.len;
-            s.mtime = meta.mtime;
-            s.tries += 1;
-            lib.settles.insert(rel.clone(), s);
-            self.after(self.opts.settle, Msg::SettleDue { id, rel });
-            return;
-        }
         let Some(stamp) = out.stamp else {
             return;
         };
-        lib.remembered.insert(rel.clone(), Some(stamp.hash));
-        if self.echo.is_echo(id, &rel, &stamp, self.opts.echo_ttl) {
+        let known = lib.remembered.get(&rel).copied().flatten();
+        if !lib.remembered.contains_key(&rel) || known == Some(stamp) {
             return;
         }
+        self.remember(i, rel.clone(), Some(stamp));
         self.pending
             .push(LibraryEvent::FileChanged { id, rel, stamp });
+    }
+
+    // ---- the watcher -------------------------------------------------------------------------
+
+    fn watch_started(&mut self, i: usize, result: Result<Watcher, WatchError>) {
+        let id = self.libs[i].id();
+        match result {
+            Ok(w) => {
+                // Its first look at the open files' stamps (T9 carry: `remember` after every
+                // read; these were read before it started).
+                for (rel, stamp) in &self.libs[i].remembered {
+                    if let Some(stamp) = stamp {
+                        w.remember(rel.clone(), *stamp);
+                    }
+                }
+                self.echoes.set(id, Some(w.echo()));
+                let lib = &mut self.libs[i];
+                lib.unwatched = false;
+                lib.watcher = Some(w);
+            }
+            // Not even a poll source would watch it: listed, nothing watches it.
+            Err(_) => self.libs[i].unwatched = true,
+        }
+        self.update_backend(i);
+    }
+
+    /// Drops library `i`'s watcher off this thread (its thread is joined, bounded), and makes
+    /// any batch it still sends stale.
+    fn drop_watcher(&mut self, i: usize) {
+        let lib = &mut self.libs[i];
+        self.next_watch += 1;
+        lib.watch_gen = self.next_watch;
+        self.echoes.set(lib.id(), None);
+        if let Some(w) = lib.watcher.take() {
+            self.rt.spawn_blocking(move || drop(w));
+        }
+    }
+
+    /// The library's state follows its watcher's backend once it is up.
+    fn update_backend(&mut self, i: usize) {
+        let lib = &mut self.libs[i];
+        if lib.up() {
+            let state = lib.watched_state();
+            if lib.state != state {
+                lib.state = state;
+                self.dirty.insert(lib.id());
+            }
+        }
+    }
+
+    /// One batch of watch events (Task 9): reconciled already, so paths are probed to patch the
+    /// listing, open files are re-stamped, and the backend's state is shown.
+    fn watch_batch(&mut self, id: LibraryId, generation: u64, batch: WatchBatch) {
+        let Some(i) = self.index(id) else { return };
+        let lib = &mut self.libs[i];
+        if lib.watch_gen != generation || matches!(lib.state, LibraryState::Unavailable(_)) {
+            return;
+        }
+        lib.last_event = Some(Instant::now());
+        let mut git = false;
+        let mut stamp = Vec::new();
+        for event in batch {
+            match event {
+                WatchEvent::Changed(rel) | WatchEvent::Unsettled(rel) => {
+                    stamp.push(rel.clone());
+                    lib.want.probes.push((rel, work::Expect::Present));
+                }
+                WatchEvent::Created(rel) => lib.want.probes.push((rel, work::Expect::Present)),
+                WatchEvent::Removed(rel) => {
+                    // A scan dropped it already, held for this word from the watcher.
+                    if lib.held.remove(&rel) {
+                        lib.deleted.insert(rel.clone());
+                        self.pending.push(LibraryEvent::FileDeleted {
+                            id,
+                            rel: rel.clone(),
+                        });
+                    }
+                    lib.want.probes.push((rel, work::Expect::Absent));
+                }
+                // Its `(len, mtime)` did not change; only an open file needs a look, and when
+                // the look finds the same stamp nobody hears of it (T9 carry).
+                WatchEvent::PossiblyChanged(rel) => stamp.push(rel),
+                WatchEvent::Renamed { from, to } => {
+                    if let Some(known) = lib.remembered.remove(&from) {
+                        lib.remembered.insert(to.clone(), known);
+                    }
+                    lib.want.probes.push((from.clone(), work::Expect::Either));
+                    lib.want.probes.push((to.clone(), work::Expect::Either));
+                    let dropped = !lib.entries.iter().any(|e| e.rel == from);
+                    if lib.held.remove(&from) || dropped {
+                        // A scan already dropped the old path: the rename is news now.
+                        self.pending
+                            .push(LibraryEvent::FileRenamed { id, from, to });
+                    } else {
+                        lib.moved.insert(from, to);
+                    }
+                }
+                WatchEvent::Rescan => lib.want.scan = true,
+                WatchEvent::RepositoryChanged => git = true,
+                // The backend changed (lost, re-armed, nothing left): shown below; a re-armed
+                // watch found a change nothing announced, so look again.
+                WatchEvent::BackendLost(_) => {}
+                WatchEvent::BackendRearmed => lib.want.scan = true,
+            }
+        }
+        for rel in stamp {
+            self.queue_stamp(i, rel);
+        }
+        self.update_backend(i);
+        if git {
+            self.git_trigger(i);
+        }
+    }
+
+    /// The disk did not match the watcher's report: things are still changing. One rescan
+    /// (coalesced) a few windows later sees where they ended, which the watcher may never
+    /// report (a file that came back and went again before its settle).
+    ///
+    /// The same holds for a full scan made while the watcher was still reporting: it may have
+    /// caught an intermediate state the watcher never reports back from.
+    fn resync_later(&mut self, i: usize) {
+        let quiet = self.quiet_for();
+        let lib = &mut self.libs[i];
+        if lib.resync_due {
+            return;
+        }
+        lib.resync_due = true;
+        let (id, generation) = (lib.id(), lib.watch_gen);
+        self.after(quiet, Msg::Resync { id, generation });
+    }
+
+    /// How long a library must have had no watch event before a resync scan is trusted.
+    fn quiet_for(&self) -> Duration {
+        self.opts.settle * 4
     }
 
     // ---- availability ------------------------------------------------------------------------
 
     fn make_unavailable(&mut self, i: usize, reason: UnavailableReason, diags: Vec<LibraryDiag>) {
+        self.drop_watcher(i);
         let lib = &mut self.libs[i];
         let id = lib.id();
-        if let Some(root) = lib.watched.take() {
-            self.source.unwatch(&root);
-        }
         let state = LibraryState::Unavailable(reason);
         let changed = lib.state != state || !lib.entries.is_empty() || lib.scan_diags != diags;
         lib.state = state;
         lib.entries = Arc::from([]);
         lib.scan_diags = diags;
         lib.stopped = false;
-        lib.polling = false;
+        lib.unwatched = false;
         lib.want = Want::default();
-        lib.settles.clear();
-        lib.settle_due.clear();
+        lib.stamp_due.clear();
+        lib.moved.clear();
+        lib.held.clear();
         if self.git.remove(&id).is_some() {
             self.workspace_dirty = true;
         }
@@ -1344,55 +1543,7 @@ impl Actor {
         self.arm_timer(i, self.opts.recheck);
     }
 
-    /// Starts watching library `i` (else polls it).
-    fn ensure_watch(&mut self, i: usize) {
-        let lib = &mut self.libs[i];
-        if lib.watched.is_some() || lib.polling {
-            return;
-        }
-        let Some(root) = lib.session.canonical.clone() else {
-            return;
-        };
-        let (tx, overflow, id) = (self.tx.clone(), lib.overflow.clone(), lib.id());
-        let sink: HintSink = Box::new(move |batch| {
-            if tx.try_send(Msg::Hints { id, batch }).is_err() {
-                overflow.store(true, Ordering::Release);
-            }
-        });
-        match self.source.watch(&root, sink) {
-            Ok(()) => {
-                lib.watched = Some(root);
-                lib.timer = None;
-            }
-            Err(_) => {
-                lib.polling = true;
-                if lib.up() {
-                    lib.state = LibraryState::Polling(PollReason::BackendLost);
-                }
-                let poll = self.opts.poll;
-                self.arm_timer(i, poll);
-            }
-        }
-        self.dirty.insert(self.libs[i].id());
-    }
-
-    /// The event source of library `i` stopped: poll it from now on.
-    fn lose_backend(&mut self, i: usize) {
-        let lib = &mut self.libs[i];
-        if let Some(root) = lib.watched.take() {
-            self.source.unwatch(&root);
-        }
-        lib.polling = true;
-        if lib.up() {
-            lib.state = LibraryState::Polling(PollReason::BackendLost);
-        }
-        lib.want.scan = true;
-        self.dirty.insert(lib.id());
-        let poll = self.opts.poll;
-        self.arm_timer(i, poll);
-    }
-
-    /// Starts a new timer chain for library `i` (the old one, if any, is ignored from now on).
+    /// Starts a new recheck timer chain for library `i` (the old one, if any, is ignored).
     fn arm_timer(&mut self, i: usize, after: Duration) {
         let lib = &mut self.libs[i];
         lib.next_timer += 1;
@@ -1409,44 +1560,8 @@ impl Actor {
             return;
         }
         lib.timer = None;
-        match lib.state {
-            LibraryState::Unavailable(_) => lib.want.validate = true,
-            _ if lib.polling => {
-                lib.want.scan = true;
-                let poll = self.opts.poll;
-                self.arm_timer(i, poll);
-            }
-            _ => {}
-        }
-    }
-
-    // ---- hints -------------------------------------------------------------------------------
-
-    /// Handles one batch of hints for library `id`: queued for its next job (I5: hints that
-    /// arrive while a scan runs are probed after it).
-    fn hints(&mut self, id: LibraryId, batch: Vec<RawHint>) {
-        let Some(i) = self.index(id) else { return };
-        if matches!(self.libs[i].state, LibraryState::Unavailable(_)) {
-            return;
-        }
-        let Some(root) = self.libs[i].root() else {
-            return;
-        };
-        let mut git = false;
-        for hint in batch {
-            match hint {
-                RawHint::Lost => self.lose_backend(i),
-                RawHint::Rescan(_) => self.libs[i].want.scan = true,
-                RawHint::Path(p) => match classify(&root, &p) {
-                    HintPath::Root | HintPath::Manifest => self.libs[i].want.scan = true,
-                    HintPath::Git => git = true,
-                    HintPath::Rel(rel) => self.libs[i].want.probes.push(rel),
-                    HintPath::Ignore => {}
-                },
-            }
-        }
-        if git {
-            self.git_trigger(i);
+        if matches!(lib.state, LibraryState::Unavailable(_)) {
+            lib.want.validate = true;
         }
     }
 
@@ -1471,12 +1586,17 @@ impl Actor {
         self.git_tick(id, seq);
     }
 
-    /// m7: polled libraries and libraries whose repository's `.git` is above their root get a
-    /// status refresh every `git_backstop` (a commit there changes nothing in the library).
+    /// m7: polled or unwatched libraries, and libraries whose repository's `.git` is above
+    /// their root, get a status refresh every `git_backstop` (a commit there changes nothing in
+    /// the library).
     fn backstop(&mut self) {
         for i in 0..self.libs.len() {
             let lib = &self.libs[i];
-            if lib.up() && (lib.polling || !lib.has_git_dir) {
+            let not_watched = matches!(
+                lib.state,
+                LibraryState::Polling(_) | LibraryState::Unwatched
+            );
+            if lib.up() && (not_watched || !lib.has_git_dir) {
                 self.git_trigger_now(i);
             }
         }
@@ -1525,15 +1645,6 @@ impl Actor {
 
     // ---- plumbing ----------------------------------------------------------------------------
 
-    /// Rescans every library whose source dropped a batch (the inbox was full).
-    fn check_overflow(&mut self) {
-        for lib in &mut self.libs {
-            if lib.overflow.swap(false, Ordering::AcqRel) && lib.up() {
-                lib.want.scan = true;
-            }
-        }
-    }
-
     fn after(&self, delay: Duration, msg: Msg) {
         let tx = self.tx.clone();
         self.rt.spawn(async move {
@@ -1542,13 +1653,14 @@ impl Actor {
         });
     }
 
-    /// No job running or queued, no file waiting to settle, no attach under way.
+    /// No job running or queued, no open file waiting for its stamp, no attach under way.
     fn quiet(&self) -> bool {
         self.attaches.is_empty()
             && self.aliases.is_empty()
-            && self.libs.iter().all(|l| {
-                !l.busy && l.want.is_empty() && l.settles.is_empty() && l.settle_due.is_empty()
-            })
+            && self
+                .libs
+                .iter()
+                .all(|l| !l.busy && l.want.is_empty() && l.stamp_due.is_empty() && !l.resync_due)
     }
 
     /// Publishes one new snapshot if anything changed, then sends the events.
@@ -1592,4 +1704,5 @@ impl Actor {
         }
     }
 }
+
 // ## m4b-t10-service
