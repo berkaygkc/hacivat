@@ -110,11 +110,31 @@ enum SavedKind {
     // ## m4b-t01b-seams (named lines, R-M4b-22, R-M4b-29): a script tab (version 2). The file
     // holds the binding itself; `interned` is the restored tab's handle, set by `restore`
     // (never saved).
+    // ## m4b-t14-tabs (named exception, T1b m1): every field is read leniently (a value of
+    // another type, or none, is `None`), so a bad entry closes its own tab, never the layout.
     Script {
-        library: String,
-        rel_path: String,
+        #[serde(default, deserialize_with = "crate::scripts::restore::lenient")]
+        library: Option<String>,
+        #[serde(default, deserialize_with = "crate::scripts::restore::lenient")]
+        rel_path: Option<String>,
+        #[serde(default, deserialize_with = "crate::scripts::restore::lenient")]
         profile: Option<String>,
+        #[serde(default, deserialize_with = "crate::scripts::restore::lenient")]
         database: Option<String>,
+        // ## m4b-t14-tabs fix round 1 (C2, R-T14-1): a SQLite tab's file, as it was at open
+        // (its canonical path and `dev:ino`); left out for every other tab.
+        #[serde(
+            default,
+            deserialize_with = "crate::scripts::restore::lenient",
+            skip_serializing_if = "Option::is_none"
+        )]
+        sqlite_path: Option<String>,
+        #[serde(
+            default,
+            deserialize_with = "crate::scripts::restore::lenient",
+            skip_serializing_if = "Option::is_none"
+        )]
+        sqlite_id: Option<String>,
         #[serde(skip)]
         interned: Option<crate::scripts::ScriptTabId>,
     },
@@ -298,8 +318,16 @@ impl Workspace {
             .is_some_and(|v| v >= SCRIPT_TABS_SINCE);
         let saved = serde_json::from_value::<SavedState>(value).map(|mut saved| {
             if scripts {
+                // ## m4b-t14-tabs (named exception, T1b m2): one tab per (file, connection).
+                let mut dedup = crate::scripts::restore::Dedup::default();
                 for tab in &mut saved.tabs {
                     intern_script_tab(&mut tab.kind, cx);
+                    if let SavedKind::Script { interned, .. } = &mut tab.kind
+                        && let Some(id) = *interned
+                        && !dedup.first(id)
+                    {
+                        *interned = None;
+                    }
                 }
             }
             saved
@@ -377,11 +405,15 @@ impl Workspace {
                             // ## m4b-t01b-seams (R-M4b-22): the binding itself, never a handle.
                             TabKind::Script { script } => {
                                 let tab = crate::scripts::tabs::spec(*script, cx)?;
+                                // ## m4b-t14-tabs fix round 1 (C2)
+                                let file = crate::scripts::tabs::sqlite_file(*script, cx);
                                 SavedKind::Script {
-                                    library: tab.library.to_string(),
-                                    rel_path: tab.rel.as_str().to_string(),
+                                    library: Some(tab.library.to_string()),
+                                    rel_path: Some(tab.rel.as_str().to_string()),
                                     profile: tab.profile.map(|p| p.to_string()),
                                     database: tab.database.map(|d| d.as_str().to_string()),
+                                    sqlite_id: file.as_ref().and_then(|f| f.id_text()),
+                                    sqlite_path: file.map(|f| f.path),
                                     interned: None,
                                 }
                             }
@@ -1099,14 +1131,19 @@ fn intern_script_tab(kind: &mut SavedKind, cx: &mut App) {
         rel_path,
         profile,
         database,
+        sqlite_path,
+        sqlite_id,
         interned,
     } = kind
     else {
         return;
     };
-    let (Some(library), Ok(rel)) = (
-        crate::scripts::parse_library_id(library),
-        crate::scripts::RelPath::parse(rel_path),
+    // ## m4b-t14-tabs (named exception): the fields are optional (read leniently).
+    let (Some(library), Some(Ok(rel))) = (
+        library
+            .as_deref()
+            .and_then(crate::scripts::parse_library_id),
+        rel_path.as_deref().map(crate::scripts::RelPath::parse),
     ) else {
         return;
     };
@@ -1116,7 +1153,15 @@ fn intern_script_tab(kind: &mut SavedKind, cx: &mut App) {
         profile: profile.as_deref().and_then(|p| p.parse().ok()),
         database: database.as_deref().map(crate::scripts::DatabaseName::new),
     };
-    *interned = Some(crate::scripts::tabs::intern(tab, cx));
+    let id = crate::scripts::tabs::intern(tab, cx);
+    // ## m4b-t14-tabs fix round 2 (m-fr1-7): its first read waits for the library's listing.
+    crate::scripts::tabs::mark_restored(id, cx);
+    // ## m4b-t14-tabs fix round 1 (C2): the SQLite file it was opened on (Run compares it).
+    if let Some(path) = sqlite_path.as_deref() {
+        let file = crate::scripts::tabs::SqliteFile::parse(path, sqlite_id.as_deref());
+        crate::scripts::tabs::set_sqlite_file(id, file, cx);
+    }
+    *interned = Some(id);
 }
 
 /// A restored workspace, consistent and within the window.
@@ -1571,7 +1616,8 @@ impl Workspace {
                     id: *tab,
                     title,
                     title_source,
-                    dirty: false,
+                    // ## m4b-t14-tabs (named exception): a script tab's unsaved edits.
+                    dirty: crate::scripts::tabs::tab_dirty(*tab, cx),
                     env,
                 }
             })
@@ -1678,9 +1724,17 @@ impl Workspace {
                     None => editor_empty(theme, cx),
                 }
             }
-            // ## m4b-t01b-seams (named exception, R-M4b-29): a script tab shows nothing and runs
-            // nothing until Task 14 builds its console view.
-            Some(TabKind::Script { .. }) => editor_empty(theme, cx),
+            // ## m4b-t01b-seams (named exception, R-M4b-29), ## m4b-t14-tabs (named exception):
+            // the script tab's console view, built once.
+            Some(TabKind::Script { script }) => {
+                if let Some(view) = self.tab_views.get(&tab) {
+                    view.clone().into_any_element()
+                } else {
+                    let view = crate::console::view::build_script(tab, script, window, cx);
+                    self.tab_views.insert(tab, view.clone());
+                    view.into_any_element()
+                }
+            }
             None => editor_empty(theme, cx),
         }
     }

@@ -295,7 +295,8 @@ fn m4b_stub_commands_are_disabled_and_out_of_the_palette(cx: &mut TestAppContext
     let vcx = shell(cx, "en");
     let stubs: Vec<&str> = scripts::STUB_COMMANDS.to_vec();
     // ## m4b-t13-explorer (named exception): `scripts.reveal` and `scripts.rename` are filled.
-    assert_eq!(stubs.len(), 4);
+    // ## m4b-t14-tabs (named exception): `file.save` and `file.save_all` are filled.
+    assert_eq!(stubs.len(), 2);
     let (enabled, listed) = vcx.cx.read(|cx| {
         let reg = cx.global::<ActionRegistry>();
         let enabled: Vec<&'static str> = reg
@@ -798,7 +799,8 @@ fn scripts_contributor_stub_adds_no_node_so_m4_shots_hold(cx: &mut TestAppContex
     });
     vcx.run_until_parked();
     assert_eq!(tab_count(vcx), tabs_before);
-    // `open_script` opens nothing either, bound or not.
+    // `open_script` opens nothing either, bound or not. ## m4b-t14-tabs (named exception):
+    // filled since Task 14, it still opens nothing for a library no snapshot lists.
     let opened = vcx.cx.update(|cx| {
         scripts::open_script(
             cx,

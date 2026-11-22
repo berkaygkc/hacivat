@@ -526,6 +526,10 @@ impl Surface {
         if let Surface::M3c(s) = self {
             return s.shows_production();
         }
+        // ## m4b-t14-tabs (named line): the connected production script tab.
+        if let Surface::M4b(s) = self {
+            return s.connects();
+        }
         matches!(
             self,
             Surface::ShellDemoProduction
@@ -1515,6 +1519,8 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     let m3c_state = shot.surface.m3c();
     let stepped =
         m3a_state.is_some() || m3b_state.is_some_and(|s| !s.is_fixture()) || m3c_state.is_some();
+    // ## m4b-t14-tabs (named line): a connected script tab connects as an M3a state does.
+    let stepped = stepped || matches!(shot.surface, Surface::M4b(s) if s.connects());
     let mut connections = shot.surface.needs_connections().then(|| {
         if stepped {
             m3a::connections(&paths)

@@ -202,6 +202,8 @@ pub fn start(
     }
     let window = open_workspace(cx, demo)?;
     show_startup_diags(cx, &startup.diags, startup.quarantined.as_deref());
+    // ## m4b-t14-tabs (named exception, R-M4b-5): unsaved script text a crashed instance left.
+    crate::scripts::restore::recover_at_launch(cx);
     Ok(window)
 }
 

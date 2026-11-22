@@ -1196,7 +1196,7 @@ fn open_entry(inner: &Inner, place: &Place, library: LibraryId, entry: &ScriptEn
     ));
     super::open_script(
         cx,
-        super::LibraryId(library.0.as_u128()),
+        library,
         rel,
         Some(place.profile),
         Some(super::DatabaseName::new(&place.database)),

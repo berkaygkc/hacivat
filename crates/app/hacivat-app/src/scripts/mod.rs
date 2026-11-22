@@ -39,9 +39,7 @@ pub mod secret_marks;
 pub mod tabs;
 pub mod unsaved_prompt;
 
-use std::fmt;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use hacivat_ui::actions::{ActionDef, ActionRegistry};
 use hacivat_ui::menu::MenuItemSpec;
@@ -77,12 +75,9 @@ const COMMANDS: [(&str, &str, &str); 6] = [
 /// it here (and lowers the count in `tests/m4b_routing.rs`, a named exception).
 // ## m4b-t13-explorer (named exception): `scripts.reveal` and `scripts.rename` are filled
 // (`file_ops::filled`).
-pub const STUB_COMMANDS: [&str; 4] = [
-    "scripts.goto",
-    "file.save",
-    "file.save_all",
-    "scripts.attach",
-];
+// ## m4b-t14-tabs (named exception): `file.save` and `file.save_all` are Task 14's
+// (`save::register_commands`).
+pub const STUB_COMMANDS: [&str; 2] = ["scripts.goto", "scripts.attach"];
 
 /// A stub command is never enabled.
 fn not_yet(_: &App) -> bool {
@@ -96,6 +91,9 @@ fn not_yet(_: &App) -> bool {
 /// ever attached); with no service it contributes nothing.
 pub fn install(cx: &mut App) {
     cx.set_global(tabs::ScriptTabs::default());
+    // ## m4b-t14-tabs (named exception): the script tabs' app-wide parts (the save commands,
+    // registered before the stubs so their definitions win; the quit-time recovery copies).
+    tabs::install(cx);
     let reg = cx.default_global::<ActionRegistry>();
     // Every command is a stub until its task fills it (and gives it its own run and enabled).
     for (id, title_id, context) in COMMANDS {
@@ -162,111 +160,11 @@ pub fn file_name(rel: &RelPath) -> &str {
     rel.components().last().unwrap_or_default()
 }
 
-// ---- app-side placeholders for Task 1a's core types ---------------------------------------------
-// ## m4b-t01b-seams: placeholders for `hacivat_scripts::{DatabaseName, LibraryId, PathError,
-// RelPath}`, which are not on Task 1a's manifests commit this task starts from. They copy the
-// API Task 1a merged into `m4b` (`names.rs`, `pathsafe.rs`, `registry.rs`) and nothing else. The
-// controller replaces this block with `pub use hacivat_scripts::{DatabaseName, LibraryId,
-// PathError, RelPath};`.
-
-/// A registered library's stable ID (a v4 UUID); serialized as its hyphenated text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct LibraryId(pub u128);
-
-impl fmt::Display for LibraryId {
-    /// The hyphenated lowercase UUID form, as `uuid::Uuid` writes it.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let h = format!("{:032x}", self.0);
-        write!(
-            f,
-            "{}-{}-{}-{}-{}",
-            &h[..8],
-            &h[8..12],
-            &h[12..16],
-            &h[16..20],
-            &h[20..]
-        )
-    }
-}
-
-impl serde::Serialize for LibraryId {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(self)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for LibraryId {
-    /// The hyphenated UUID form (any ASCII case).
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        let groups: Vec<&str> = s.split('-').collect();
-        let lengths: Vec<usize> = groups.iter().map(|g| g.len()).collect();
-        let hex = groups
-            .iter()
-            .all(|g| g.bytes().all(|b| b.is_ascii_hexdigit()));
-        if lengths != [8, 4, 4, 4, 12] || !hex {
-            return Err(serde::de::Error::custom("not a hyphenated UUID"));
-        }
-        u128::from_str_radix(&groups.concat(), 16)
-            .map(LibraryId)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-/// A path inside a library, relative to its root, `/`-separated; never joined to a path here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RelPath(Arc<str>);
-
-/// Why a path was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathError {
-    NotImplemented,
-    /// Empty, absolute, an empty, `.` or `..` component, a `\`, or a control character.
-    Malformed,
-}
-
-impl RelPath {
-    /// A library-relative path from `/`-separated text, checked structurally.
-    pub fn parse(text: &str) -> Result<Self, PathError> {
-        let well_formed = !text.is_empty()
-            && text.split('/').all(|c| {
-                !c.is_empty()
-                    && c != "."
-                    && c != ".."
-                    && !c.contains('\\')
-                    && !c.chars().any(char::is_control)
-            });
-        if well_formed {
-            Ok(RelPath(text.into()))
-        } else {
-            Err(PathError::Malformed)
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// The components, root first.
-    pub fn components(&self) -> impl Iterator<Item = &str> {
-        self.0.split('/')
-    }
-}
-
-/// A database's exact name on its server (`"main"` on SQLite, R-M4b-32; C-M4-4's fallback).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DatabaseName(Arc<str>);
-
-impl DatabaseName {
-    /// The server's own name; never validated, never joined to a path.
-    pub fn new(exact: &str) -> Self {
-        DatabaseName(exact.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+// ---- the core types ------------------------------------------------------------------------
+// ## m4b-t01b-seams: the placeholders for Task 1a's core types are replaced by them, as this
+// block said the controller would (## m4b-t14-tabs, named exception: Task 14 is the first task
+// that hands these values to `hacivat_scripts`).
+pub use hacivat_scripts::{DatabaseName, LibraryId, PathError, RelPath};
 
 #[cfg(test)]
 mod tests {

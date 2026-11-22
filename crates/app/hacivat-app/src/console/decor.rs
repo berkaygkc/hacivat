@@ -42,6 +42,11 @@ pub fn console_title(cx: &App, profile: &Profile, slot: u32) -> SharedString {
 
 /// The `tab_decor` hook.
 pub fn tab_decor(tab: TabId, cx: &App) -> TabDecor {
+    // ## m4b-t14-tabs (named exception): a script tab's title and its connection's mark, from
+    // the profile as it is now (never a console's title).
+    if let Some(doc) = crate::scripts::tabs::doc_of_tab(tab, cx) {
+        return crate::scripts::tabs::tab_decor(tab, doc.read(cx).id, cx);
+    }
     // The host's binding; a console registered for the tab without a host of ours (a test
     // console) is its profile's first.
     let binding = host_binding(cx, tab).or_else(|| {

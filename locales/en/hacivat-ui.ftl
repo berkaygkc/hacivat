@@ -4984,3 +4984,142 @@ hv-scripts-trashed-changed =
         [windows] Moved { $name } to the Recycle Bin, but a folder on the way changed meanwhile. Check the Recycle Bin.
        *[other] Moved { $name } to the Trash, but a folder on the way changed meanwhile. Check the Trash.
     }
+## m4b-t14-tabs
+
+# Surface 5 (Script tab): the tab while its file is read.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+hv-scripts-opening = Opening { $file }…
+# Surface 5 (Script tab): the file could not be read; the tab stays and runs nothing.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+hv-scripts-open-failed = { $file } couldn't be opened.
+# Surface 5 (Script tab).
+# Variables:
+#   $reason (String) - selector: why; one of missing, library, scope, binary, refused, lossy, encoding (anything else: the default).
+#   $conn (String) - the connection's name (data), e.g. "orders-staging".
+hv-scripts-open-failed-body =
+    { $reason ->
+        [missing] It isn't in the library any more.
+        [library] Its library isn't attached or can't be reached now.
+        [scope] It isn't listed under { $conn }.
+        [binary] It looks like a binary file, not text.
+        [refused] Its path isn't one a script may have, or it leads out of the library.
+        [lossy] Saving it back would change bytes that weren't edited, so it isn't opened.
+        [encoding] It doesn't decode in the encoding you chose.
+       *[other] The file couldn't be read.
+    }
+# Surface 5 (Script tab): a PostgreSQL or SQLite script is opened only on the database its session is on (R-M4b-25).
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+#   $conn (String) - the connection's name (data), e.g. "orders-prod".
+#   $database (String) - the database the script was opened under (data), e.g. "orders_archive".
+#   $current (String) - the database the connection runs on (data), e.g. "orders".
+hv-scripts-open-other-db = { $file } wasn't opened: { $conn } runs on { $current }, not { $database }.
+# Surface 5 (Script tab).
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+#   $conn (String) - the connection's name (data), e.g. "orders-prod".
+#   $database (String) - the database the script was opened under (data), e.g. "orders".
+hv-scripts-open-db-unknown = { $file } wasn't opened: { -brand-hacivat } can't tell which database { $conn } runs on, so it can't be sure it is { $database }.
+# Surface 5 (Script tab): a MySQL profile set to one session cannot give a script tab its own session on another database.
+# Variables:
+#   $file (String) - the file name (data), e.g. "kampanya_özet.sql".
+#   $conn (String) - the connection's name (data), e.g. "api-dev".
+#   $database (String) - the database (data), e.g. "kampanya".
+hv-scripts-open-single-session = { $file } wasn't opened: { $conn } uses one session for every console, so a script can't run on { $database } beside it.
+# Surface 5 (Script tab): the connection the tab was opened under no longer exists.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+hv-scripts-open-no-profile = { $file } wasn't opened: its connection no longer exists.
+# Surface 5 (Script tab): the session's database could not be read before Run (R-M4b-27).
+# Variables:
+#   $bound (String) - the database the tab is bound to (data), e.g. "orders".
+hv-scripts-run-refused-unknown = Run refused: this tab runs on { $bound }, but { -brand-hacivat } can't tell which database its session is on.
+# Surface 5 (Script tab).
+hv-scripts-run-refused-unknown-body = Nothing was sent. Reconnect, or open the script under another connection.
+# Surface 5 (Script tab): the MySQL switch made when the tab opened failed.
+# Variables:
+#   $database (String) - the database (data), e.g. "kampanya".
+hv-scripts-switch-failed = This tab's session couldn't switch to { $database }.
+# Surface 5 (Script tab).
+hv-scripts-switch-failed-body = Run stays off, so nothing runs on the wrong database. Close the tab and open the script again to retry.
+# Surface 9 (Large files): the status bar's segment of a T2 preview tab.
+hv-scripts-preview-segment = Read-only preview
+# Surface 9 (Large files): why Save does nothing on a preview.
+hv-scripts-preview-no-save = A read-only preview isn't saved: it holds only the start of the file.
+# Surface 9 (Large files): why Run does nothing on a preview.
+hv-scripts-preview-no-run = A read-only preview doesn't run. Run as script sends the whole file.
+# Surface 6 (Changes on disk): a save failed; the tab keeps its edits.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+hv-scripts-save-failed = Couldn't save { $file }
+# Surface 6 (Changes on disk).
+# Variables:
+#   $reason (String) - selector: why; one of path, scope, damaged, missing (anything else: the default).
+#   $conn (String) - the connection's name (data), e.g. "orders-staging".
+hv-scripts-save-failed-body =
+    { $reason ->
+        [path] A folder on its path changed, or it became a link, so nothing was written. Your edits are still in this tab.
+        [scope] It isn't listed under { $conn } any more, so nothing was written. Your edits are still in this tab.
+        [damaged] The file couldn't be written and couldn't be put back. Your text is kept in this tab and in a recovery copy.
+        [missing] Its library isn't attached or can't be reached now, so nothing was written. Your edits are still in this tab.
+       *[other] Nothing was written. Your edits are still in this tab.
+    }
+# Surface 6 (Changes on disk): the save went through, but a folder check after it failed.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+hv-scripts-saved-path-changed = Saved { $file }, but a folder on its path changed while it was saved. Check that it is where you expect.
+# Surface 6 (Changes on disk): a rename on disk the tab follows (carries-w1 T14).
+# Variables:
+#   $path (String) - the new path in the library (data), e.g. "reports/haftalık_rapor.sql".
+hv-scripts-moved = Moved to { $path }
+# Surface 6 (Changes on disk).
+# Variables:
+#   $conn (String) - the connection's name (data), e.g. "orders-staging".
+hv-scripts-moved-body = The file was moved on disk and this tab follows it. It still runs only on { $conn }.
+# Surface 6 (Changes on disk): the Deleted on disk notice's second button.
+hv-scripts-disk-close = Close tab
+# Surface 12 (Recovery): a recovered copy whose writer may still be running (R-T5-5).
+hv-scripts-recover-unknown = This copy may belong to another { -brand-hacivat } window that is still open. It is kept until you save or discard it.
+# Surface 12 (Recovery): the launch notice's list line.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+#   $conn (String) - the connection's name (data), e.g. "orders-prod".
+hv-scripts-recover-item = { $file } · { $conn }
+# Surface 12 (Recovery).
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+hv-scripts-recover-item-unbound = { $file } · no connection
+# Surface 10 (Encoding): an encoding the user can open the file in (one button each).
+# Variables:
+#   $encoding (String) - the encoding's name (data), e.g. "windows-1254".
+hv-scripts-enc-open-as = Open as { $encoding }
+# Fix round 1 (T14 review).
+# Surface 5 (Script tab): a MySQL/MariaDB script tab never shares a session (R-T14-3); the profile cannot give it one of its own.
+hv-scripts-one-session = This connection allows one session; close the console or raise the limit.
+# Surface 6 (Changes on disk): why a "No longer listed" tab is off (R-T14-4); the file moved where this connection does not show it.
+hv-scripts-unlisted-gone = It moved to a place this connection doesn't show.
+# Surface 6 (Changes on disk).
+# Variables:
+#   $folder (String) - the environment folder (data), e.g. "@production".
+hv-scripts-unlisted-env = It is in { $folder }, a folder for another environment.
+# Surface 6 (Changes on disk): Run and Save are off on a tab whose file is no longer listed (R-T14-4).
+hv-scripts-unlisted-off = Run and Save are off in this tab, so it never runs or writes the file where it no longer belongs.
+# Surface 5 (Script tab): why "Open under another connection…" is disabled (a sentence, N2).
+hv-scripts-open-under-none-reason = No other connection shows this file.
+# Surface 5 (Script tab): why "Open under another connection…" is disabled until the chooser can pick (production is never chosen for you).
+hv-scripts-open-under-chooser = Open it from the Scripts node of the connection you want.
+# Surface 6b (Unsaved changes): the prompt's subtitle (I5).
+# Variables:
+#   $env (String) - the environment word, e.g. "PRODUCTION".
+#   $conn (String) - the connection's name (data), e.g. "orders-prod".
+#   $database (String) - the database (data), e.g. "orders".
+hv-scripts-unsaved-subtitle = { $env } · { $conn } · { $database }
+# Surface 6b (Unsaved changes): the subtitle of a tab with no connection.
+hv-scripts-unsaved-subtitle-unbound = No connection
+# m4b-t14-tabs fix round 3 (R-T14-5): the first Run after a launch restore follows a SQLite
+# file that is now on another volume (same path and inode).
+# Variables:
+#   $path (String) - the database file's path (data), e.g. "/Volumes/data/orders.db".
+hv-scripts-sqlite-remounted = The database file is on a different volume now; running on { $path }.

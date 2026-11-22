@@ -347,6 +347,8 @@ pub(crate) fn spawn_supervised(
         live: Some(live),
         tx,
         schema: None,
+        // ## m4b-t14-tabs (named exception, fix round 2)
+        kept_schema: None,
         initial_mode,
         initial_isolation,
         broken: None,
@@ -430,6 +432,11 @@ pub(crate) struct Core {
     pub(crate) live: Option<LiveConnection>,
     pub(crate) tx: TxState,
     schema: Option<SchemaCtx>,
+    // ## m4b-t14-tabs (named exception, fix round 2, I-fr1-1): the last schema read, kept for
+    // the next replay's plan when the probe after a reconnect could not read the new
+    // connection's (`schema` is then unknown, so a script tab's Run refuses; M3's `USE`
+    // restore is unchanged).
+    kept_schema: Option<SchemaCtx>,
     pub(crate) initial_mode: TxMode,
     pub(crate) initial_isolation: IsolationLevel,
     /// Set once the connection must not be used again.
@@ -602,7 +609,8 @@ impl Core {
             self.kind,
             &self.profile,
             self.read_only,
-            self.schema.as_ref(),
+            // ## m4b-t14-tabs (named exception, fix round 2)
+            self.schema.as_ref().or(self.kept_schema.as_ref()),
             self.time_zone.as_deref().and_then(SessionZone::usable),
         );
         // ## m3b-t18-safe06 (named exception): the observed `sql_mode` pinned (R-M3-57).
@@ -917,6 +925,8 @@ impl Core {
                 self.observe(false);
                 let ctx = parse_schema_probe(self.kind, &answer);
                 self.schema = (ctx != SchemaCtx::default()).then_some(ctx);
+                // ## m4b-t14-tabs (named exception, fix round 2): what was read wins.
+                self.kept_schema = None;
                 true
             }
             Err(e) => {
@@ -2290,7 +2300,14 @@ async fn recover(
         };
         let access = core.install(live);
         let replayed = {
-            let replay = tokio::time::timeout(limit, core.replay());
+            // ## m4b-t14-tabs (named exception, R-T14-2, fix round 2 I-fr1-1): the new
+            // connection's database is read again as the replay's last step, inside the same
+            // bound and the same Close-serving loop (a reconnect may land on an edited
+            // profile's database). A probe that hangs is a replay that timed out.
+            let replay = tokio::time::timeout(limit, async {
+                core.replay().await?;
+                Ok::<bool, ExecError>(core.reprobe().await)
+            });
             tokio::pin!(replay);
             loop {
                 tokio::select! {
@@ -2313,7 +2330,18 @@ async fn recover(
                 core.close().await;
                 return false;
             }
-            Ok(Ok(Ok(()))) => None,
+            // ## m4b-t14-tabs (named exception, fix round 2): a probe that read nothing on a
+            // connection that still works leaves the database unknown; one that lost it is a
+            // failed replay.
+            Ok(Ok(Ok(probed))) => match core.broken {
+                Some(class) => Some(class),
+                None => {
+                    if !probed && core.schema.is_some() {
+                        core.kept_schema = core.schema.take();
+                    }
+                    None
+                }
+            },
             Ok(Ok(Err(e))) => {
                 tracing::debug!(session = ctl.id.0, kind = ?e.kind, "the replay failed");
                 Some(
@@ -2328,6 +2356,12 @@ async fn recover(
             }
         };
         if let Some(class) = failed {
+            // ## m4b-t14-tabs (named exception, fix round 2): until a probe reads it, the
+            // database is unknown (the last one stays for the next replay's plan).
+            if core.schema.is_some() {
+                core.kept_schema = core.schema.take();
+                ctl.publish(|s| s.schema = None);
+            }
             core.close().await;
             if is_recovery_case(class)
                 && let Some(reconnector) = ctl.hooks.reconnect.clone()

@@ -50,6 +50,13 @@ pub const POPOVER_LAYER: &str = "popover";
 /// The Tab": the capsule describes the editor's connection), with its saved profile whatever
 /// its live state; `status::followed_console` says which console that is.
 pub fn current_profile(cx: &App) -> Option<Arc<Profile>> {
+    // ## m4b-t14-tabs (named exception, R-M4b-30): a followed script tab that runs nowhere
+    // (unbound, or its connection deleted) shows no connection, never another one.
+    if crate::connections::status::followed_console(cx)
+        .is_some_and(|id| crate::scripts::tabs::runs_nowhere(id, cx))
+    {
+        return None;
+    }
     // ## m3a-t34-status-follows
     if let Some((_, p)) = crate::connections::status::followed_bound_console(cx) {
         return Some(p);

@@ -404,6 +404,13 @@ fn on_execute(console: ConsoleId, req: ExecRequest, cx: &mut App) {
     let custom = policy_of(console, cx);
     let remembered = exec.remembered;
     let context = exec.context;
+    // ## m4b-t14-tabs fix round 1 (named exception, R-M4b-30): a script tab that runs nowhere
+    // (unbound, or its connection deleted) says so instead of doing nothing.
+    if crate::scripts::tabs::runs_nowhere(console, cx) {
+        crate::scripts::tabs::say_runs_nowhere(cx);
+        return;
+    }
+    // ## m4b-t14-tabs
     let Some(profile) = profile_of(cx, console) else {
         return;
     };
@@ -682,6 +689,16 @@ pub(crate) fn start_run_capped(
     if preparing(console, cx)
         || console_exec(cx, console).is_some_and(|e| e.run.as_ref().is_some_and(|r| !r.ended))
     {
+        return;
+    }
+    // ## m4b-t14-tabs (named exception, R-M4b-27, R-M4b-30): a script tab runs only on the
+    // database it was opened under; a MySQL tab switches its session back once and runs this
+    // same Run again, which checks again. A refusal shows its notice and sends nothing.
+    let rerun = {
+        let units = units.clone();
+        Box::new(move |cx: &mut App| start_run_capped(console, version, units, cell_cap, cx))
+    };
+    if !crate::scripts::tabs::run_gate(console, rerun, cx) {
         return;
     }
     let Some(session) = live_session(cx, console) else {
@@ -1993,6 +2010,27 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
     // prepared and classified in.
     let (now, generation) =
         context_within(&job.session, cx.background_executor().timer(CONTEXT_WAIT)).await;
+    // ## m4b-t14-tabs fix round 1 (named exception; C1, R-T14-2): a script tab's run is sent
+    // only under the context generation its database check read; anything that moved the
+    // session in between (a reconnect, a replay, a queued `USE`) refuses, and Run checks again.
+    let console_id = job.console;
+    let session_id = job.session.id();
+    if !cx.update(|cx: &mut App| {
+        crate::scripts::tabs::generation_holds(console_id, session_id, generation, cx)
+    }) {
+        cx.update(|cx: &mut App| {
+            refuse(
+                console_id,
+                job.version,
+                ranges(&job.units),
+                (CONNECTION_CHANGED, Vec::new()),
+                NOT_SENT,
+                cx,
+            );
+        });
+        return;
+    }
+    // ## m4b-t14-tabs
     if now != sctx {
         cx.update(|cx: &mut App| {
             refuse(

@@ -709,6 +709,82 @@ impl LibraryService {
         Ok(decoded)
     }
 
+    // ## m4b-t14-tabs (named exception: the script tabs' two service calls)
+    /// [`read`](Self::read) in the encoding the user chose (`label`, a WHATWG name such as
+    /// `"windows-1254"`; NOTES surface 10), after `read` answered `NeedsEncoding`. The file is
+    /// remembered as open, as by `read`.
+    pub async fn read_with(
+        &self,
+        id: LibraryId,
+        rel: &RelPath,
+        env: Option<EnvTag>,
+        label: &'static str,
+    ) -> Result<Decoded, ReadError> {
+        let root = self
+            .root_of(id)
+            .ok_or(ReadError::Io(io::ErrorKind::NotFound))?;
+        let path = rel.clone();
+        let decoded = self
+            .blocking(move || fileio::read_with(&root, &path, env, label))
+            .await
+            .unwrap_or(Err(ReadError::Io(io::ErrorKind::Interrupted)))?;
+        self.tell(Msg::Remember {
+            id,
+            rel: rel.clone(),
+            stamp: decoded.stamp,
+        })
+        .await;
+        Ok(decoded)
+    }
+
+    /// The last tab of `rel` closed (carries-w1 T14, T10 re-review): the file is no longer open,
+    /// so its stamp is forgotten and its later changes are listing changes again (I4: only open
+    /// files are read).
+    pub async fn forget(&self, id: LibraryId, rel: &RelPath) {
+        self.tell(Msg::Forget {
+            id,
+            rel: rel.clone(),
+        })
+        .await;
+    }
+
+    /// [`forget`](Self::forget) queued now, from any thread (the UI's tab close): it is in the
+    /// inbox before any later read can remember the file again (T14 review minor 13). A full
+    /// inbox hands it to the core runtime instead.
+    pub fn forget_now(&self, id: LibraryId, rel: &RelPath) {
+        let msg = Msg::Forget {
+            id,
+            rel: rel.clone(),
+        };
+        if let Err(mpsc::error::TrySendError::Full(msg)) = self.tx.try_send(msg) {
+            let tx = self.tx.clone();
+            self.rt.spawn(async move {
+                let _ = tx.send(msg).await;
+            });
+        }
+    }
+
+    /// Stops the service now, as dropping it does (the app at quit: the core runtime's shutdown
+    /// then never waits for the actor). Every later call answers as a stopped service does.
+    pub fn shutdown(&self) {
+        self.closed.store(true, Ordering::Release);
+        let _ = self.tx.try_send(Msg::Shutdown);
+    }
+
+    /// Whether `rel` is remembered as open in a tab (tests of the last-tab rule).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn is_remembered(&self, id: LibraryId, rel: &RelPath) -> bool {
+        self.ask(|reply| Msg::IsRemembered {
+            id,
+            rel: rel.clone(),
+            reply,
+        })
+        .await
+        .unwrap_or(false)
+    }
+    // ## m4b-t14-tabs
+
     /// Saves a script (HV-SCRIPT-07) for a tab under `env`, recording the echo before the
     /// rename.
     ///
