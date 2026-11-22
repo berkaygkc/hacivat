@@ -64,10 +64,23 @@ pub struct Debouncer {
     rescan: bool,
     lost: bool,
     pending_at: Option<Instant>,
+    // ## m4b-cifix-2-repo-op (review I1, R-CI2-3)
+    /// While a repository operation runs (`.git/index.lock` exists), the latest moment it may
+    /// hold the burst ([`REPO_OP_MAX`] after it began).
+    op_until: Option<Instant>,
+    /// An operation outlived its bound and its lock has not been seen gone since.
+    op_stale: bool,
+    // ## m4b-cifix-2-repo-op
 }
 
 /// How long an overflowed burst that keeps going waits for its rescan at most.
 const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(2);
+
+// ## m4b-cifix-2-repo-op (review I1, R-CI2-3)
+/// The longest one repository operation holds the burst: a stale `index.lock` (a crashed git)
+/// must not hold settling for ever.
+pub const REPO_OP_MAX: Duration = Duration::from_secs(30);
+// ## m4b-cifix-2-repo-op
 
 impl Debouncer {
     /// A debouncer with the R-M4b-14 burst limit.
@@ -92,8 +105,60 @@ impl Debouncer {
             rescan: false,
             lost: false,
             pending_at: None,
+            op_until: None,
+            op_stale: false,
         }
     }
+
+    // ## m4b-cifix-2-repo-op (review I1, R-CI2-3)
+    /// A repository operation began at `at` (git took `.git/index.lock`): until it ends, or at
+    /// most [`REPO_OP_MAX`], the burst does not end on a quiet window. Its distinct paths are
+    /// counted across the whole operation, and nothing but open files settles (the watcher's
+    /// R-T9-6 exception), so a checkout that pauses for a window mid-way is still one burst. A
+    /// second call while one runs changes nothing, and so does one after an operation outlived
+    /// its bound, until [`end_operation`](Self::end_operation) says the lock went (a stale lock
+    /// never holds twice).
+    pub fn begin_operation(&mut self, at: Instant) {
+        if self.op_until.is_some() || self.op_stale {
+            return;
+        }
+        self.op_until = Some(at + REPO_OP_MAX);
+        let quiet = self.last_at.is_none_or(|l| at >= l + self.window);
+        if quiet && self.overflowed.is_none() {
+            self.burst.clear();
+            self.began = Some(at);
+        }
+        self.last_at = Some(self.last_at.map_or(at, |l| l.max(at)));
+    }
+
+    /// The repository operation ended at `at` (the lock went): an operation whose distinct
+    /// paths overflowed is one `Rescan`, handed on once the hints are quiet for a window;
+    /// otherwise the held paths are released to the ordinary hold.
+    pub fn end_operation(&mut self, at: Instant) {
+        self.op_stale = false;
+        self.finish_operation(at);
+    }
+
+    fn finish_operation(&mut self, at: Instant) {
+        if self.op_until.take().is_none() {
+            return;
+        }
+        // An overflowed operation falls back to the ordinary rule from its end: its rescan is
+        // handed on once the hints have been quiet for a window (at most `max_wait` later), so
+        // the events FSEvents still delivers after the lock went are swallowed too, and the
+        // one rescan sees the end state.
+        if self.overflowed.is_some() {
+            self.overflowed = Some(at);
+            self.paths.clear();
+            self.mark(at);
+        }
+    }
+
+    /// Whether a repository operation holds the burst.
+    pub fn in_operation(&self) -> bool {
+        self.op_until.is_some()
+    }
+    // ## m4b-cifix-2-repo-op
 
     /// Takes one hint that arrived at `at` (a path counts toward a burst).
     pub fn push(&mut self, hint: RawHint, at: Instant) {
@@ -125,7 +190,8 @@ impl Debouncer {
             }
             return;
         }
-        if self.last_at.is_none_or(|l| at >= l + self.window) {
+        // ## m4b-cifix-2-repo-op: a repository operation is one burst, pauses and all.
+        if self.op_until.is_none() && self.last_at.is_none_or(|l| at >= l + self.window) {
             // A new burst; an overflowed one that was not flushed yet is due now.
             if self.overflowed.take().is_some() {
                 self.rescan = true;
@@ -172,6 +238,9 @@ impl Debouncer {
         let last = self.last_at?;
         let began = self.began.unwrap_or(last);
         let hold = (last + self.window).min(began + self.max_wait);
+        // ## m4b-cifix-2-repo-op: a repository operation holds until it ends, at most its
+        // bound.
+        let hold = self.op_until.map_or(hold, |until| hold.max(until));
         Some(match self.due() {
             Some(due) => hold.max(due),
             None => hold,
@@ -186,12 +255,21 @@ impl Debouncer {
     /// When an overflowed burst's rescan is due.
     pub fn due(&self) -> Option<Instant> {
         let since = self.overflowed?;
+        // ## m4b-cifix-2-repo-op: an operation's rescan waits for its end, at most its bound.
+        if let Some(until) = self.op_until {
+            return Some(until);
+        }
         let quiet = self.last_at.map_or(since, |l| l + self.window);
         Some(quiet.min(since + self.max_wait))
     }
 
     /// Everything pending at `now`: `Lost` first, then either `Rescan` or the paths.
     pub fn flush(&mut self, now: Instant) -> Vec<Flushed> {
+        // ## m4b-cifix-2-repo-op: an operation past its bound (a stale lock) ends here.
+        if self.op_until.is_some_and(|until| now >= until) {
+            self.finish_operation(now);
+            self.op_stale = true;
+        }
         let mut out = Vec::new();
         if std::mem::take(&mut self.lost) {
             out.push(Flushed::Lost);

@@ -2452,3 +2452,142 @@ fn poll_pass_reports_manifest_changes() {
     );
     ev.wait_for("manifest", |e| e.contains(&WatchEvent::ManifestChanged));
 }
+
+// ---------------------------------------------------------------------------------------------
+// ## m4b-cifix-2-repo-op (review I1, R-CI2-3): a repository operation is one burst.
+
+/// A library of `n` known scripts (`many/f0000.sql` …) and `open.sql`, all an hour old (none
+/// racy), with a real `.git` folder.
+fn repo_lib(n: usize) -> Lib {
+    let lib = Lib::new(&[]);
+    for i in 0..n {
+        let name = format!("many/f{i:04}.sql");
+        lib.write(&name, "SELECT 1;");
+        age(&lib.path(&name), 3_600);
+    }
+    lib.write("open.sql", "SELECT 1;");
+    age(&lib.path("open.sql"), 3_600);
+    fs::create_dir_all(lib.path(".git")).unwrap();
+    lib
+}
+
+/// Rewrites the files of `range` and hands their hints in at `at`.
+fn rewrite(r: &mut Reconciler, lib: &Lib, range: std::ops::Range<usize>, at: Instant) {
+    for i in range {
+        let name = format!("many/f{i:04}.sql");
+        lib.write(&name, "SELECT 2; -- topic");
+        r.push(lib.hint(&name), at);
+    }
+}
+
+fn per_file(events: &[WatchEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| !matches!(e, WatchEvent::Rescan | WatchEvent::RepositoryChanged))
+        .count()
+}
+
+/// The CI flake's shape, deterministic: a checkout of 1,200 files whose events pause for more
+/// than a window after the first 600 (FSEvents under load). While `.git/index.lock` exists
+/// the burst counts across the pause and nothing unopened settles; when the lock goes, the
+/// whole operation is one `Rescan`. Without the lock (the control) the pause splits it into
+/// two bursts under the limit, and every file is reported one by one.
+#[test]
+fn a_checkout_that_pauses_mid_way_is_one_rescan_while_the_index_is_locked() {
+    // The control: no lock.
+    let lib = repo_lib(1_200);
+    let mut r = lib.rec();
+    let t = t0();
+    rewrite(&mut r, &lib, 0..600, t);
+    let mut out = r.tick(t + ms(10));
+    out.extend(r.tick(t + ms(200)));
+    rewrite(&mut r, &lib, 600..1_200, t + ms(350));
+    out.extend(drain(&mut r, t + ms(360)));
+    assert_eq!(per_file(&out), 1_200, "the control reports every file");
+    assert!(!out.contains(&WatchEvent::Rescan));
+
+    // The same checkout under `index.lock`, with an open file edited mid-way.
+    let lib = repo_lib(1_200);
+    let mut r = lib.rec();
+    r.remember(&rel("open.sql"), &lib.read_stamp("open.sql"));
+    let t = t0() + Duration::from_secs(100);
+    lib.write(".git/index.lock", "");
+    r.push(lib.hint(".git/index.lock"), t);
+    rewrite(&mut r, &lib, 0..600, t + ms(5));
+    lib.write("open.sql", "SELECT 'edited while git ran';");
+    r.push(lib.hint("open.sql"), t + ms(5));
+    let mut out = r.tick(t + ms(10));
+    // The pause: more than a window with nothing new. Only the open file settles (R-T9-6).
+    out.extend(r.tick(t + ms(200)));
+    out.extend(r.tick(t + ms(340)));
+    assert_eq!(out, vec![WatchEvent::Changed(rel("open.sql"))]);
+    rewrite(&mut r, &lib, 600..1_200, t + ms(350));
+    out.extend(r.tick(t + ms(360)));
+    out.extend(r.tick(t + ms(600)));
+    assert_eq!(
+        per_file(&out),
+        1,
+        "nothing unopened settles under the lock: {out:?}"
+    );
+    // git drops the lock: one rescan for the whole operation.
+    fs::remove_file(lib.path(".git/index.lock")).unwrap();
+    r.push(lib.hint(".git/index.lock"), t + ms(700));
+    assert_eq!(drain(&mut r, t + ms(700)), vec![WatchEvent::Rescan]);
+}
+
+/// An operation under the limit: when the lock goes, the files it held settle and are
+/// reported; a lock gone with no hint saying so is seen by the re-look a window later.
+#[test]
+fn a_small_operation_releases_its_files_when_the_lock_goes_unheard() {
+    let lib = repo_lib(10);
+    let mut r = lib.rec();
+    let t = t0() + Duration::from_secs(200);
+    lib.write(".git/index.lock", "");
+    r.push(lib.hint(".git/index.lock"), t);
+    rewrite(&mut r, &lib, 0..10, t + ms(5));
+    let mut out = r.tick(t + ms(10));
+    out.extend(r.tick(t + ms(400)));
+    assert_eq!(per_file(&out), 0, "{out:?}");
+    fs::remove_file(lib.path(".git/index.lock")).unwrap();
+    out.extend(drain(&mut r, t + ms(500)));
+    let changed = out
+        .iter()
+        .filter(|e| matches!(e, WatchEvent::Changed(_)))
+        .count();
+    assert_eq!(changed, 10, "{out:?}");
+    assert!(!out.contains(&WatchEvent::Rescan));
+}
+
+/// A stale lock (a crashed git) holds one operation for at most `REPO_OP_MAX`, then never
+/// again until it has been seen gone, and is not looked at every window: later edits settle
+/// as usual.
+#[test]
+fn a_stale_index_lock_holds_at_most_once_for_the_bound() {
+    use hacivat_scripts::watch::REPO_OP_MAX;
+    let lib = repo_lib(1_200);
+    let mut r = lib.rec();
+    let t = t0() + Duration::from_secs(300);
+    lib.write(".git/index.lock", "");
+    r.push(lib.hint(".git/index.lock"), t);
+    rewrite(&mut r, &lib, 0..1_200, t + ms(5));
+    assert_eq!(per_file(&r.tick(t + ms(10))), 0);
+    assert_eq!(r.tick(t + ms(5_000)), vec![]);
+    // At the bound the overflowed operation is one rescan.
+    assert_eq!(r.tick(t + REPO_OP_MAX), vec![WatchEvent::Rescan]);
+    assert_eq!(drain(&mut r, t + REPO_OP_MAX + ms(1)), vec![]);
+    assert_eq!(
+        r.next_due(),
+        None,
+        "a stale lock is not looked at every window"
+    );
+    // The lock is still there; another edit is a burst of one and settles as usual.
+    let later = t + REPO_OP_MAX + Duration::from_secs(5);
+    lib.write("open.sql", "SELECT 3;");
+    r.push(lib.hint(".git/index.lock"), later);
+    r.push(lib.hint("open.sql"), later);
+    assert_eq!(
+        drain(&mut r, later),
+        vec![WatchEvent::Changed(rel("open.sql"))]
+    );
+}
+// ## m4b-cifix-2-repo-op

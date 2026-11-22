@@ -98,7 +98,8 @@ use notify_debouncer_full::{DebounceEventResult, NoCache, new_debouncer_opt};
 use tokio::sync::mpsc;
 
 pub use self::debounce::{
-    Debouncer, Flushed, HINT_CAPACITY, HintQueue, MAX_HINTS_PER_WINDOW, SettleQueue, Taken,
+    Debouncer, Flushed, HINT_CAPACITY, HintQueue, MAX_HINTS_PER_WINDOW, REPO_OP_MAX, SettleQueue,
+    Taken,
 };
 pub use self::echo::{ECHO_TTL, EchoHandle, EchoTable};
 pub use self::limits::{FsKind, backend_for, choose_backend, inotify_budget};
@@ -192,6 +193,11 @@ pub(crate) fn watcher_config() -> notify::Config {
 /// The reconciler takes only paths from a hint, never kinds (alg/28 C3), so the rewrite loses
 /// nothing. It can only add hints: a file made and deleted within one window, which nothing
 /// ever listed, costs one look or scan.
+///
+/// Fix round (review m1): it forwards `watch` and `unwatch` only. `Watcher::configure` keeps
+/// the trait's default (`Ok(false)`, nothing changed), so no caller can reconfigure the inner
+/// watcher, link following included (R-T0-2); `paths_mut` keeps the default too (one `watch`
+/// per path). Nothing in this crate calls either.
 struct NoCancel<W>(W);
 
 impl<W: notify::Watcher> notify::Watcher for NoCancel<W> {
@@ -673,6 +679,9 @@ enum Named {
     /// `.hacivat` itself (made, removed or replaced).
     ManifestFolder,
     Rel(RelPath),
+    /// ## m4b-cifix-2-repo-op (review I1): `.git/index.lock`, which git holds for a whole
+    /// checkout, merge or reset.
+    RepositoryLock,
 }
 
 enum HintKind {
@@ -702,6 +711,11 @@ enum ScanOutcome {
 /// ## m4b-t09-watcher fix round 2 (m-fr1-1): `logs` too: `logs/HEAD` is appended on every move
 /// of `HEAD`'s branch, so a ref-only change (`reset --soft`, `update-ref`) is seen.
 const REPOSITORY_NAMES: [&str; 5] = ["index", "HEAD", "packed-refs", "refs", "logs"];
+
+// ## m4b-cifix-2-repo-op (review I1, R-CI2-3)
+/// The lock git holds on the index for a whole checkout, merge, reset or rebase step.
+const REPOSITORY_LOCK: &str = "index.lock";
+// ## m4b-cifix-2-repo-op
 
 /// ## m4b-t09-watcher fix round 1 (I1, R-T9-3): below this age an equal `(len, mtime)` does not
 /// prove a file unchanged; git calls such an entry "racily clean".
@@ -779,6 +793,10 @@ pub struct Reconciler {
     /// A hint arrived since the last backstop (m-fr1-5).
     hinted_since_backstop: bool,
     info: TickInfo,
+    /// ## m4b-cifix-2-repo-op (review I1): while a repository operation runs, when the lock
+    /// was last looked at (it is looked at again a window later, so a missed removal hint
+    /// costs a window, never the 30 s bound).
+    lock_checked: Option<Instant>,
 }
 
 impl fmt::Debug for Reconciler {
@@ -811,6 +829,7 @@ impl Reconciler {
             now: Instant::now(),
             hinted_since_backstop: false,
             info: TickInfo::default(),
+            lock_checked: None,
         };
         let started = SystemTime::now();
         let s = r.scan();
@@ -838,6 +857,11 @@ impl Reconciler {
         };
         let counted = match self.name_filter(&path) {
             Named::Drop => return,
+            // ## m4b-cifix-2-repo-op (review I1)
+            Named::RepositoryLock => {
+                self.check_repository_lock(at);
+                return;
+            }
             Named::Root | Named::Repository | Named::Manifest | Named::ManifestFolder => true,
             Named::Rel(rel) => {
                 let name = rel.name();
@@ -848,6 +872,52 @@ impl Reconciler {
         };
         self.debouncer.push_path(path, at, counted);
     }
+
+    // ## m4b-cifix-2-repo-op (review I1, R-CI2-3)
+    /// Whether git holds the index lock of a repository whose `.git` folder is the library's
+    /// own (a real folder, not a link or a gitfile: nothing outside the library is looked at).
+    /// A repository above the library root gives no such signal; its checkouts keep the
+    /// ordinary burst rule.
+    fn repository_lock_held(&self) -> bool {
+        let fs = &*self.opts.fs;
+        let git = self.root.canonical.join(".git");
+        matches!(fs.symlink_metadata(&git), Ok(m) if m.kind == MetaKind::Dir)
+            && matches!(
+                fs.symlink_metadata(&git.join(REPOSITORY_LOCK)),
+                Ok(m) if m.kind == MetaKind::File
+            )
+    }
+
+    /// Looks at the index lock at `at` (a hint named it, or the operation's re-look is due):
+    /// held, the debouncer counts one operation; gone, the operation ends, and the looks it
+    /// held are due one window later (or an overflowed operation is one `Rescan`).
+    fn check_repository_lock(&mut self, at: Instant) {
+        if self.repository_lock_held() {
+            // A lock that outlived its bound is stale: no new operation, and no re-look
+            // every window, until it has been seen gone.
+            self.debouncer.begin_operation(at);
+            self.lock_checked = self.debouncer.in_operation().then_some(at);
+            return;
+        }
+        self.lock_checked = None;
+        let running = self.debouncer.in_operation();
+        self.debouncer.end_operation(at);
+        if !running {
+            return;
+        }
+        // The held looks were scheduled at the operation's bound: release them now.
+        let soon = at + self.opts.window;
+        let late: Vec<RelPath> = self
+            .settle
+            .iter()
+            .filter(|(_, t)| **t > soon)
+            .map(|(rel, _)| rel.clone())
+            .collect();
+        for rel in late {
+            self.settle.schedule(rel, soon);
+        }
+    }
+    // ## m4b-cifix-2-repo-op
 
     /// The content stamp of `rel` as a tab read or saved it: kept while the file still has
     /// that length and time, so a later move of it can be paired by hash, and an edit that
@@ -890,6 +960,8 @@ impl Reconciler {
             self.debouncer.due(),
             self.debouncer.pending_at(),
             self.backstop_next,
+            // ## m4b-cifix-2-repo-op: the lock is looked at again a window later.
+            self.lock_checked.map(|t| t + self.opts.window),
         ]
         .into_iter()
         .flatten()
@@ -916,6 +988,14 @@ impl Reconciler {
         self.wall = SystemTime::now();
         self.now = now;
         self.info = TickInfo::default();
+        // ## m4b-cifix-2-repo-op: an operation's lock is looked at again once per window, so
+        // its end is seen even when no hint reports the removal.
+        if self
+            .lock_checked
+            .is_some_and(|t| now >= t + self.opts.window)
+        {
+            self.check_repository_lock(now);
+        }
         let mut repository = false;
         let mut manifest = false;
         let mut need_scan = false;
@@ -1550,6 +1630,10 @@ impl Reconciler {
             return Named::Root;
         };
         if first.eq_ignore_ascii_case(".git") {
+            // ## m4b-cifix-2-repo-op (review I1)
+            if parts.len() == 2 && parts[1] == REPOSITORY_LOCK {
+                return Named::RepositoryLock;
+            }
             let status = parts.get(1).is_some_and(|n| REPOSITORY_NAMES.contains(n));
             return if status {
                 Named::Repository
@@ -1579,7 +1663,8 @@ impl Reconciler {
 
     fn classify(&self, path: &Path) -> HintKind {
         let rel = match self.name_filter(path) {
-            Named::Drop => return HintKind::Drop,
+            // `.git/index.lock` is handled when it is pushed (`push`), never looked at here.
+            Named::Drop | Named::RepositoryLock => return HintKind::Drop,
             Named::Root => return HintKind::Scan,
             Named::Repository => return HintKind::Repository,
             Named::Manifest => return HintKind::Manifest,
