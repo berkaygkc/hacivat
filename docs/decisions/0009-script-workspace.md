@@ -1437,3 +1437,21 @@ Task 14 fills `scripts::{tabs,open,save,disk_bars,restore,unsaved_prompt}` and t
   - If the profile was repointed between the crash and the relaunch, Run refuses with the "Run refused" notice naming both files; it never adopts the new file silently.
   - A copy written before this change still takes the profile's file at the first Run (fix round 2's rule).
 - **m-fr2-3:** a comment on `QuitDiscards` now says that only the quit guard pushes to it (when the quit goes on) and only the quit hook drains it. Its futures are `!Send`.
+
+## m4b-cifix-3 — a polled library never misses a manifest change
+
+- **Finding (CI 45068616161, macOS).**
+  - `h15_manifest_change_rebinds_on_a_polled_library` timed out waiting for the new binding.
+  - The poll source took its first stamps of `.hacivat/workspace.toml` and of the repository files at its first pass, one interval after `watch`. The service's scan reads the manifest after `watch`.
+  - A rewrite that landed between that read and the first pass became the baseline, and no pass reported it. Only the 60 s backstop re-read the manifest. In the app the gap is up to one interval, 2 s. In the test it is 30 ms plus however late the poll thread first runs on a loaded runner.
+  - The stamp was `(len, mtime, dataless)`. A rewrite that kept the length inside one modification-time tick was never seen. Network shares, the reason a library is polled, often keep coarse times.
+- **Decision.**
+  - `PollEventSource::watch` takes the repository and manifest baselines itself, on the caller's thread, before it returns. The watcher calls it before its first scan, so a change is caught either by that scan or by the next pass.
+  - The manifest's stamp also carries the XXH3-64 of its bytes. `manifest::content_hash` reads them with the service's own reader: directory handles, no link followed, a plain file of at most `MANIFEST_MAX_BYTES`.
+  - A dataless manifest is never read, because reading it would download it. Its stamp keeps `dataless = true` and no hash.
+  - This is the only content a pass reads. Scripts are still compared by `lstat` alone ("never read what you only list"). A manifest is tiny and the service reads it on every scan anyway.
+- **Tests.** In `tests/watch.rs`:
+  - `a_manifest_rewrite_before_the_first_poll_pass_is_hinted`. RED: no pass named it in 10 s.
+  - `a_same_length_same_mtime_manifest_rewrite_is_hinted`. RED: 358 passes, none named it.
+  - `an_unchanged_manifest_is_never_hinted_by_a_poll_pass`, the control.
+  - `h15_manifest_change_rebinds_on_a_polled_library` no longer sleeps 150 ms before the rewrite.

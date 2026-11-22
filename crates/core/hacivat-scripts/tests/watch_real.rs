@@ -400,9 +400,6 @@ fn dir_symlink_created_after_watch_is_not_walked() {
         ..WatchOpts::default()
     };
     let mut w = Real::with(&lib, opts, Box::new(OsEventSource::new().unwrap()));
-    // Fix round 1 (m7): on Linux, the backend's own watches are counted too.
-    #[cfg(target_os = "linux")]
-    let watches_before = own_inotify_watches();
     std::os::unix::fs::symlink(big.path(), lib.path("outside")).unwrap();
     std::os::unix::fs::symlink("/", lib.path("root")).unwrap();
     // Writes inside the link targets, after the links exist.
@@ -410,11 +407,52 @@ fn dir_symlink_created_after_watch_is_not_walked() {
     fs::write(big.path().join("new.sql"), "SELECT 3;").unwrap();
     w.sentinel(&lib);
     assert_eq!(w.reported(), vec![]);
+    // Fix round 1 (m7): on Linux, the backend's own watches are looked at too.
+    //
+    // ## m4b-cifix-3-link-watch (CI 45068616161): by what they watch, not by how many there
+    // are. The process's inotify watches include those of the tests running beside this one,
+    // so a count moved with them (CI saw 5 before, 4 after: another test's watcher ended).
+    // A walk through either link would watch the link's target folder (`big`, or `/`), so no
+    // watch of this process may be on one of them; and this watcher's own root is watched
+    // (the control that the watches are read at all).
     #[cfg(target_os = "linux")]
     {
-        let after = own_inotify_watches();
-        println!("HV-FACT t09 link_watches_before={watches_before} after={after}");
-        assert_eq!(after, watches_before, "a watch was added through a link");
+        let watched = own_inotify_watched();
+        let own = inode_of(&lib.root.canonical, false).unwrap();
+        // The links themselves, their targets, and the folders one step below `/` (a walk
+        // into `root/usr` resolves the link and watches `/usr`).
+        let mut through: Vec<(PathBuf, (u64, u64))> = Vec::new();
+        for (p, follow) in [
+            (lib.path("outside"), false),
+            (lib.path("root"), false),
+            (big.path().to_path_buf(), true),
+            (PathBuf::from("/"), true),
+        ] {
+            through.extend(inode_of(&p, follow).map(|i| (p, i)));
+        }
+        for e in fs::read_dir("/").unwrap().flatten() {
+            if fs::metadata(e.path()).is_ok_and(|m| m.is_dir()) {
+                through.extend(inode_of(&e.path(), true).map(|i| (e.path(), i)));
+            }
+        }
+        let hits: Vec<&PathBuf> = through
+            .iter()
+            .filter(|(_, i)| watched.contains(i))
+            .map(|(p, _)| p)
+            .collect();
+        // The control matches the inode alone (btrfs reports a subvolume's own `st_dev`).
+        let own_seen = watched.iter().any(|w| w.1 == own.1);
+        println!(
+            "HV-FACT t09 link_watches total={} through_link={} own_root={own_seen}",
+            watched.len(),
+            hits.len(),
+        );
+        assert!(own_seen, "the root's own watch is read");
+        assert_eq!(
+            hits,
+            Vec::<&PathBuf>::new(),
+            "a watch was added through a link"
+        );
     }
     // The scan that settled the sentinel listed the root, so it met both links, and went
     // through neither.
@@ -557,6 +595,49 @@ fn own_inotify_watches() -> usize {
     }
     n
 }
+
+// ## m4b-cifix-3-link-watch
+/// What every inotify watch of this process is on, as `(device, inode)` in the kernel's
+/// encoding (`/proc/self/fdinfo`: `inotify wd:… ino:<hex> sdev:<hex> …`).
+#[cfg(target_os = "linux")]
+fn own_inotify_watched() -> std::collections::HashSet<(u64, u64)> {
+    let mut out = std::collections::HashSet::new();
+    for fd in fs::read_dir("/proc/self/fdinfo").unwrap().flatten() {
+        let Ok(text) = fs::read_to_string(fd.path()) else {
+            continue;
+        };
+        for line in text.lines().filter(|l| l.starts_with("inotify wd:")) {
+            let field = |key: &str| {
+                line.split_whitespace()
+                    .find_map(|t| t.strip_prefix(key))
+                    .and_then(|v| u64::from_str_radix(v, 16).ok())
+            };
+            if let (Some(ino), Some(dev)) = (field("ino:"), field("sdev:")) {
+                out.insert((dev, ino));
+            }
+        }
+    }
+    out
+}
+
+/// `path`'s `(device, inode)` in the kernel's encoding (`MKDEV`: major << 20 | minor), as
+/// fdinfo prints them; `follow` resolves a link first.
+#[cfg(target_os = "linux")]
+fn inode_of(path: &Path, follow: bool) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = if follow {
+        fs::metadata(path)
+    } else {
+        fs::symlink_metadata(path)
+    }
+    .ok()?;
+    // glibc's `gnu_dev_major`/`gnu_dev_minor` of the user-space `st_dev`.
+    let dev = m.dev();
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & 0xffff_f000);
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xffff_ff00);
+    Some(((major << 20) | minor, m.ino()))
+}
+// ## m4b-cifix-3-link-watch
 
 /// Idle cost (review probe): CPU time of this process over 5 s with ten idle watchers.
 #[cfg(unix)]

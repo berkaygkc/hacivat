@@ -2591,3 +2591,102 @@ fn a_stale_index_lock_holds_at_most_once_for_the_bound() {
     );
 }
 // ## m4b-cifix-2-repo-op
+
+// ---------------------------------------------------------------------------------------------
+// ## m4b-cifix-3-manifest-poll (CI 45068616161, macOS `h15_manifest_change_rebinds_on_a_polled_library`)
+// A polled library never misses a change of its manifest: the poll source's baseline is taken
+// when the root is watched (before the service's scan reads the manifest), and a rewrite that
+// keeps the file's length and modification time is still told apart by its content.
+
+type HintSinkFn = Box<dyn FnMut(Vec<RawHint>) + Send>;
+
+/// Collects every hint batch a poll source hands on.
+fn collecting_sink() -> (HintSinkFn, std::sync::mpsc::Receiver<Vec<RawHint>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sink: HintSinkFn = Box::new(move |batch| {
+        let _ = tx.send(batch);
+    });
+    (sink, rx)
+}
+
+/// Waits (10 s ceiling) for a batch that names `path`.
+fn wait_for_hint(rx: &std::sync::mpsc::Receiver<Vec<RawHint>>, path: &Path, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut passes = 0;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(batch) => {
+                passes += 1;
+                if batch.contains(&RawHint::Path(path.to_path_buf())) {
+                    return;
+                }
+            }
+            Err(_) => panic!("timed out waiting for {what} ({passes} passes, none named it)"),
+        }
+    }
+}
+
+/// The shape of the CI miss, made deterministic: the manifest changes after the root is
+/// watched but before the source's first pass. The first pass must compare against the stamp
+/// taken at `watch`, not record the new one as its baseline.
+#[test]
+fn a_manifest_rewrite_before_the_first_poll_pass_is_hinted() {
+    use hacivat_scripts::watch::PollEventSource;
+    let lib = Lib::new(&[("a.sql", "x"), (".hacivat/workspace.toml", "format = 1\n")]);
+    let manifest = lib.path(".hacivat/workspace.toml");
+    let mut src = PollEventSource::with_interval(ms(200)).unwrap();
+    let (sink, rx) = collecting_sink();
+    src.watch(&lib.root.canonical, sink).unwrap();
+    lib.write(
+        ".hacivat/workspace.toml",
+        "format = 1\ndatabase = \"billing\"\n",
+    );
+    // Before the fix no pass ever named it (RED: 48 passes in the 10 s ceiling).
+    wait_for_hint(&rx, &manifest, "the manifest hint");
+}
+
+/// A rewrite that keeps the manifest's length and its modification time (a coarse-clock
+/// network share, two writes in one tick) is still a change: the content differs.
+#[test]
+fn a_same_length_same_mtime_manifest_rewrite_is_hinted() {
+    use hacivat_scripts::watch::PollEventSource;
+    let old = "format = 1\ndatabase = \"orders\"\n";
+    let lib = Lib::new(&[("a.sql", "x"), (".hacivat/workspace.toml", old)]);
+    let manifest = lib.path(".hacivat/workspace.toml");
+    let mtime = fs::metadata(&manifest).unwrap().modified().unwrap();
+    let mut src = PollEventSource::with_interval(ms(20)).unwrap();
+    let (sink, rx) = collecting_sink();
+    src.watch(&lib.root.canonical, sink).unwrap();
+    // One pass first, so the stamp is surely recorded.
+    rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    // Same length ("orders" → "ledger"), and the old modification time put back.
+    lib.write(
+        ".hacivat/workspace.toml",
+        "format = 1\ndatabase = \"ledger\"\n",
+    );
+    set_mtime(&manifest, mtime);
+    let after = fs::metadata(&manifest).unwrap();
+    assert_eq!(after.modified().unwrap(), mtime);
+    assert_eq!(after.len(), old.len() as u64);
+    wait_for_hint(&rx, &manifest, "the manifest hint");
+}
+
+/// Control: an untouched manifest is never hinted, pass after pass.
+#[test]
+fn an_unchanged_manifest_is_never_hinted_by_a_poll_pass() {
+    use hacivat_scripts::watch::PollEventSource;
+    let lib = Lib::new(&[("a.sql", "x"), (".hacivat/workspace.toml", "format = 1\n")]);
+    let manifest = lib.path(".hacivat/workspace.toml");
+    let mut src = PollEventSource::with_interval(ms(10)).unwrap();
+    let (sink, rx) = collecting_sink();
+    src.watch(&lib.root.canonical, sink).unwrap();
+    for _ in 0..10 {
+        let batch = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(
+            !batch.contains(&RawHint::Path(manifest.clone())),
+            "{batch:?}"
+        );
+    }
+}
+// ## m4b-cifix-3-manifest-poll
