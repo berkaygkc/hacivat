@@ -66,6 +66,13 @@ mod work;
 pub use subscription::Subscription;
 pub use view::{EnvView, GitSummary, LibraryView};
 // ## m4b-t10-service
+// ## m4b-t13-explorer (named exception): the trash seam; the file operations' I/O lives in
+// `crate::fileops` (outside `service/`, whose sources name no file system call).
+use crate::fileops;
+#[cfg(any(test, feature = "test-support"))]
+pub use crate::fileops::FolderTrash;
+pub use crate::fileops::{OsTrash, Trasher};
+// ## m4b-t13-explorer
 
 use std::collections::HashMap;
 use std::fmt;
@@ -365,6 +372,9 @@ pub struct ServiceOptions {
     /// Fix round 1 (I6): the file system the workers list and `lstat` through (tests inject one
     /// that stalls).
     pub fs: Arc<dyn crate::scan::Fs + Send + Sync>,
+    // ## m4b-t13-explorer (named exception)
+    /// Where Move to Trash moves a file ([`OsTrash`]; tests pass a folder of their own).
+    pub trasher: Arc<dyn Trasher>,
 }
 
 impl fmt::Debug for ServiceOptions {
@@ -393,6 +403,8 @@ impl Default for ServiceOptions {
             workers: 8,
             job_deadline: Duration::from_secs(10),
             fs: Arc::new(RealFs),
+            // ## m4b-t13-explorer (named exception)
+            trasher: Arc::new(OsTrash),
         }
     }
 }
@@ -414,10 +426,34 @@ pub enum Sources {
 // ## m4b-t10-service
 
 /// Why creating, renaming or trashing a file was refused; the library is unchanged.
+///
+/// ## m4b-t13-explorer (named exception): the Task 1a stub's `NotImplemented` is gone; these are
+/// the refusals of the filled operations (`crate::fileops`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOpError {
-    /// Task 1a's stub changes nothing.
-    NotImplemented,
+    /// The library is not registered, or not available (missing, not answering).
+    Unavailable,
+    /// The name breaks the scan's rules on this host or on Windows (a separator, `.`/`..`, a
+    /// reserved device name, a trailing dot or space, a skipped name such as `.git`).
+    BadName(crate::pathsafe::NameProblem),
+    /// A script's name ends in `.sql` or `.md`.
+    NotAScript,
+    /// Something already has that name.
+    Exists,
+    /// Nothing is listed (or on disk) at the path.
+    NotFound,
+    /// The path, or what it would become, is not shown under the caller's connection
+    /// (R-T5-6, R-M4b-6).
+    NotListed,
+    /// The folder holds a listed file the caller's connection does not show.
+    HoldsHidden,
+    /// A rename moves only the name, never to another folder.
+    OtherFolder,
+    /// The path was refused on the way (a link, outside the root, a changed folder).
+    Path(crate::pathsafe::PathError),
+    /// The operating system's trash refused it.
+    Trash(io::ErrorKind),
+    Io(io::ErrorKind),
 }
 
 /// A script read from disk in UTF-8 chunks, each cut at a character boundary (Task 12's
@@ -451,6 +487,8 @@ pub struct LibraryService {
     #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     stamps: Arc<AtomicU64>,
     // ## m4b-t10-service
+    // ## m4b-t13-explorer (named exception)
+    trasher: Arc<dyn Trasher>,
 }
 
 impl fmt::Debug for LibraryService {
@@ -484,6 +522,8 @@ impl LibraryService {
         opts: ServiceOptions,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        // ## m4b-t13-explorer (named exception)
+        let trasher = opts.trasher.clone();
         let empty = WorkspaceSnapshot {
             generation: 0,
             state: LibraryState::Scanning,
@@ -513,6 +553,7 @@ impl LibraryService {
         LibraryService {
             snapshot,
             events,
+            trasher,
             rt: rt.clone(),
             tx,
             closed,
@@ -706,40 +747,82 @@ impl LibraryService {
         saved
     }
 
-    /// Creates an empty script or a folder.
-    ///
-    /// Task 1a stub (fail closed): creates nothing. (Task 10: still a stub; the file operations
-    /// are Task 13's.)
+    // ## m4b-t13-explorer (named exception): Task 1a's stubs, filled. Each runs on the
+    // blocking pool, for a tree row under a connection whose environment is `env` (R-T5-6),
+    // and asks for a rescan of the library afterwards, so the listing shows the change even
+    // before the watcher reports it.
+    /// Creates an empty script or a folder at `rel` (never over an existing name).
     pub async fn create(
         &self,
         id: LibraryId,
         rel: &RelPath,
         kind: EntryKind,
+        env: Option<EnvTag>,
     ) -> Result<(), FileOpError> {
-        let _ = (id, rel, kind);
-        Err(FileOpError::NotImplemented)
+        let root = self.root_of(id).ok_or(FileOpError::Unavailable)?;
+        let rel2 = rel.clone();
+        let out = self
+            .blocking(move || fileops::create(&root, &rel2, kind, env))
+            .await
+            .unwrap_or(Err(FileOpError::Io(io::ErrorKind::Interrupted)));
+        self.after_op(id, &out).await;
+        out
     }
 
-    /// Renames a script or folder inside its library.
-    ///
-    /// Task 1a stub (fail closed): renames nothing. (Task 10: still a stub; Task 13's.)
+    /// Renames a script or folder to `to`, in the same folder (never over an existing name).
     pub async fn rename(
         &self,
         id: LibraryId,
         from: &RelPath,
         to: &RelPath,
+        env: Option<EnvTag>,
     ) -> Result<(), FileOpError> {
-        let _ = (id, from, to);
-        Err(FileOpError::NotImplemented)
+        let (root, entries) = self.listing_of(id).ok_or(FileOpError::Unavailable)?;
+        let (from2, to2) = (from.clone(), to.clone());
+        let out = self
+            .blocking(move || fileops::rename(&root, &entries, &from2, &to2, env))
+            .await
+            .unwrap_or(Err(FileOpError::Io(io::ErrorKind::Interrupted)));
+        self.after_op(id, &out).await;
+        out
     }
 
-    /// Moves a script or folder to the OS Trash (Q11).
-    ///
-    /// Task 1a stub (fail closed): moves nothing. (Task 10: still a stub; Task 13's.)
-    pub async fn trash(&self, id: LibraryId, rel: &RelPath) -> Result<(), FileOpError> {
-        let _ = (id, rel);
-        Err(FileOpError::NotImplemented)
+    /// Moves a script or folder to the OS Trash (Q11), through [`ServiceOptions::trasher`].
+    pub async fn trash(
+        &self,
+        id: LibraryId,
+        rel: &RelPath,
+        env: Option<EnvTag>,
+    ) -> Result<(), FileOpError> {
+        let (root, entries) = self.listing_of(id).ok_or(FileOpError::Unavailable)?;
+        let (rel2, trasher) = (rel.clone(), self.trasher.clone());
+        let out = self
+            .blocking(move || fileops::trash(&root, &entries, &rel2, env, trasher.as_ref()))
+            .await
+            .unwrap_or(Err(FileOpError::Io(io::ErrorKind::Interrupted)));
+        self.after_op(id, &out).await;
+        out
     }
+
+    /// Lists library `id` again and refreshes its repository status (the tree's Refresh).
+    pub async fn refresh(&self, id: LibraryId) {
+        self.tell(Msg::Rescan { id }).await;
+    }
+
+    /// After a file operation that changed something: a rescan.
+    async fn after_op(&self, id: LibraryId, out: &Result<(), FileOpError>) {
+        if out.is_ok() {
+            self.refresh(id).await;
+        }
+    }
+
+    /// The root and every listed entry of an available library.
+    fn listing_of(&self, id: LibraryId) -> Option<(LibraryRoot, Arc<[ScriptEntry]>)> {
+        let snap = self.snapshot.load();
+        let lib = snap.library(id)?;
+        servable(&lib.state).then(|| (lib.root.clone(), lib.entries.clone()))
+    }
+    // ## m4b-t13-explorer
 
     /// A chunked UTF-8 reader of a script for "Run as script" (Task 12's source), for a tab
     /// under `env`.

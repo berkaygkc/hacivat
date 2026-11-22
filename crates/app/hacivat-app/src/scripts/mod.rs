@@ -6,7 +6,8 @@
 //!
 //! ## m4b-t01b-seams: every module is a fail-closed stub until its owner lands (Global
 //! Constraints, "No silent weakening"), and **none of them is wired into a user path**: the
-//! [`ScriptsContributor`] is not registered (Task 13 registers it), [`open_script`] opens
+//! [`ScriptsContributor`] is not registered (Task 13 registers it: `## m4b-t13-explorer`, it is
+//! now, and fills `scripts.reveal`/`scripts.rename`), [`open_script`] opens
 //! nothing, [`database_menu_items`] adds nothing to a menu, and every M4b command is registered
 //! **disabled** ([`STUB_COMMANDS`]): a disabled command is not in the palette and its chord
 //! passes through, exactly as before M4b. Owners:
@@ -74,13 +75,13 @@ const COMMANDS: [(&str, &str, &str); 6] = [
 
 /// The M4b commands that are still stubs (registered disabled). A task that fills one removes
 /// it here (and lowers the count in `tests/m4b_routing.rs`, a named exception).
-pub const STUB_COMMANDS: [&str; 6] = [
+// ## m4b-t13-explorer (named exception): `scripts.reveal` and `scripts.rename` are filled
+// (`file_ops::filled`).
+pub const STUB_COMMANDS: [&str; 4] = [
     "scripts.goto",
     "file.save",
     "file.save_all",
-    "scripts.reveal",
     "scripts.attach",
-    "scripts.rename",
 ];
 
 /// A stub command is never enabled.
@@ -88,22 +89,32 @@ fn not_yet(_: &App) -> bool {
     false
 }
 
-/// Registers the M4b commands and the script-tab table (one line in `crate::init`). Registers
-/// no explorer contributor: the stub contributes nothing, and Task 13 registers the real one.
+/// Registers the M4b commands and the script-tab table (one line in `crate::init`).
+///
+/// ## m4b-t13-explorer (named exception): and the Scripts contributor, over the app's library
+/// service host (`projection::install_service` opens the service at boot when a library was
+/// ever attached); with no service it contributes nothing.
 pub fn install(cx: &mut App) {
     cx.set_global(tabs::ScriptTabs::default());
     let reg = cx.default_global::<ActionRegistry>();
     // Every command is a stub until its task fills it (and gives it its own run and enabled).
     for (id, title_id, context) in COMMANDS {
+        // ## m4b-t13-explorer (named exception): Task 13's filled commands.
+        let (run, enabled) = file_ops::filled(id).unwrap_or_else(|| (Rc::new(|_, _| {}), not_yet));
         // A duplicate keeps the first definition (registration order is the palette's order).
         let _ = reg.register(ActionDef {
             id,
             title_id,
             context,
-            run: Rc::new(|_, _| {}),
-            enabled: not_yet,
+            run,
+            enabled,
         });
     }
+    // ## m4b-t13-explorer (named lines)
+    file_ops::install(cx);
+    let contributor = ScriptsContributor::for_app(cx);
+    crate::explorer::contrib::register_contributor(Rc::new(contributor), cx);
+    // ## m4b-t13-explorer
 }
 
 // ---- the database menus (R-M4b-34) -------------------------------------------------------------

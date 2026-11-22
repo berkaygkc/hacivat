@@ -90,8 +90,9 @@ pub trait ExplorerContributor: 'static {
 /// The registered contributors, in registration order.
 // ## m4b-t01b-seams (named exception, R-M4b-34 (3)): public so the explorer observes it; its
 // list stays private.
+// ## m4b-t13-explorer (named exception, T1b review m7): crate-visible only.
 #[derive(Default, Clone)]
-pub struct Contributors(Vec<Rc<dyn ExplorerContributor>>);
+pub(crate) struct Contributors(Vec<Rc<dyn ExplorerContributor>>);
 
 impl Global for Contributors {}
 

@@ -18,6 +18,11 @@ disallowed-methods = [
     { path = "notify::Watcher::new", reason = "R-T0-2: a watcher is built only with watcher_config() (follow_symlinks(false)), at the one reviewed site", allow-invalid = true },
     { path = "notify::PollWatcher::new", reason = "R-T0-2: a watcher is built only with watcher_config() (follow_symlinks(false)), at the one reviewed site", allow-invalid = true },
     { path = "notify::PollWatcher::with_initial_scan", reason = "R-T0-2: a watcher is built only with watcher_config() (follow_symlinks(false)), at the one reviewed site", allow-invalid = true },
+    # ## m4b-t13-explorer (named exception, T1a review m3): the free functions use the default
+    # context, which on macOS runs `osascript` and asks Finder. Move to Trash goes through
+    # `hacivat_scripts::service::OsTrash` (a `TrashContext` with `DeleteMethod::NsFileManager`).
+    { path = "trash::delete", reason = "T1a m3: use hacivat_scripts::service::OsTrash (TrashContext with NsFileManager on macOS)", allow-invalid = true },
+    { path = "trash::delete_all", reason = "T1a m3: use hacivat_scripts::service::OsTrash (TrashContext with NsFileManager on macOS)", allow-invalid = true },
 ]
 
 # ## m4b-t01a-seams (R-T0-2): the debouncer caches that walk through directory links.

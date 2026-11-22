@@ -428,6 +428,13 @@ impl Dir {
         self.write_checked(|| fs::remove_file(self.child(name)))
     }
 
+    // ## m4b-t13-explorer (named exception): New folder in the Scripts tree.
+    /// A new folder `name` (`mkdir`: never an existing name, never through a link).
+    pub(crate) fn create_dir(&self, name: &str) -> Result<(), FsError> {
+        self.write_checked(|| fs::create_dir(self.child(name)))
+    }
+    // ## m4b-t13-explorer
+
     /// Flushes the folder's entries (Unix; best effort: the file is already in place).
     pub(crate) fn sync(&self) {
         #[cfg(unix)]

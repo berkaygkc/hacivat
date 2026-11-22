@@ -524,12 +524,8 @@ impl<M: TreeModel> TreeView<M> {
         }
         if let Some(status) = data.status {
             // Never red (Hue Is Meaning); the text alternative is the item's description.
-            let ink = match status.kind {
-                StatusKind::Modified | StatusKind::Conflicted => c.amber,
-                StatusKind::New => c.green,
-                StatusKind::ContainsChanges => c.text_2,
-                StatusKind::Unknown => c.text_3,
-            };
+            // ## m4b-t13-explorer (named exception, controller ruling R-T2-1 a)
+            let ink = status_ink(status.kind, c);
             el = el.child(div().flex_none().ml(px(gap)).child(Label::new(
                 status.glyph,
                 TextSource::Fluent,
@@ -717,10 +713,57 @@ impl<M: TreeModel> TreeView<M> {
     }
 }
 
+// ## m4b-t13-explorer (named exception, controller ruling R-T2-1 a)
+/// The status glyph's ink: Modified and New amber (an uncommitted change, Pending Amber),
+/// Conflicted ink (a refusal-like state, Errors Without A New Hue), the folder dot `text-2`,
+/// Unknown `text-3`. Never red, never green. The glyph stays `mono_micro` (weight 400).
+fn status_ink(
+    kind: StatusKind,
+    c: &hacivat_ui_core::theme::Colors,
+) -> hacivat_ui_core::theme::Color {
+    match kind {
+        StatusKind::Modified | StatusKind::New => c.amber,
+        StatusKind::Conflicted => c.text,
+        StatusKind::ContainsChanges => c.text_2,
+        StatusKind::Unknown => c.text_3,
+    }
+}
+// ## m4b-t13-explorer
+
 /// Reachable for the row-key helpers' tests.
 #[cfg(test)]
 mod tests {
     use super::{Yield, give_way};
+
+    // ## m4b-t13-explorer (named exception)
+    #[test]
+    fn git_status_inks_follow_ruling_r_t2_1_a() {
+        use super::{StatusKind, status_ink};
+        for tokens in [
+            &hacivat_ui_core::theme::DARK,
+            &hacivat_ui_core::theme::LIGHT,
+        ] {
+            let c = &tokens.colors;
+            assert_eq!(status_ink(StatusKind::Modified, c), c.amber);
+            assert_eq!(status_ink(StatusKind::New, c), c.amber);
+            assert_eq!(status_ink(StatusKind::Conflicted, c), c.text);
+            assert_eq!(status_ink(StatusKind::ContainsChanges, c), c.text_2);
+            assert_eq!(status_ink(StatusKind::Unknown, c), c.text_3);
+            for k in [
+                StatusKind::Modified,
+                StatusKind::New,
+                StatusKind::Conflicted,
+                StatusKind::ContainsChanges,
+                StatusKind::Unknown,
+            ] {
+                assert_ne!(status_ink(k, c), c.red, "{k:?} is never red");
+                assert_ne!(status_ink(k, c), c.green, "{k:?} is never green");
+            }
+            // Mono micro, weight 400.
+            assert_eq!(tokens.type_ramp.mono_micro.weight, 400);
+        }
+    }
+    // ## m4b-t13-explorer
 
     #[test]
     fn the_give_way_ranks_follow_notes_cross_cutting_5() {

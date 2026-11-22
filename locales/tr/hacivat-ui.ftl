@@ -4667,3 +4667,133 @@ hv-scripts-dataless-row-tip = Bulutta tutuluyor, indirilmedi. Açınca önce ind
 # Surface 1 (Scripts node).
 # Review: PO
 hv-scripts-downloading-row-tip = İndiriliyor… İndirme bitince sekme metni gösterir.
+
+## m4b-t13-explorer
+# Surface 1 (Scripts node). What assistive technology reads for a file's git badge.
+# Review: PO
+hv-scripts-a11y-modified = değiştirildi
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-a11y-new = yeni
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-a11y-conflicted = çakışmalı
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-a11y-unknown = git durumu bilinmiyor
+# Surface 1 (Scripts node). A folder that holds changed files.
+# Review: PO
+hv-scripts-a11y-contains = değişiklik içeriyor
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-a11y-outside = kitaplığın dışını gösteriyor
+# Surface 1 (Scripts node).
+# Review: PO
+hv-scripts-a11y-dataless = indirilmedi
+# Surface 1 (Scripts node). The "?" badge's text alternative for the reasons hv-scripts-git-unknown-tip does not cover.
+# Variables:
+#   $reason (String) - selector: the reason; one of case, notafile, submodule (anything else: the default).
+# Review: PO
+hv-scripts-git-unknown-other-tip =
+    { $reason ->
+        [submodule] Git durumu bilinmiyor: bu bir alt modül ve Hacivat alt modül açmaz.
+        [case] Git durumu bilinmiyor: depo bu adı başka büyük/küçük harflerle yazıyor.
+       *[notafile] Git durumu bilinmiyor: normal bir dosya değil.
+    }
+# Surface 1 (Scripts node). The Scripts node's child row when the library folder can't be listed.
+# Variables:
+#   $reason (String) - selector: why; one of moved, responding, unreadable (anything else: the default).
+# Review: PO
+hv-scripts-unavailable-row =
+    { $reason ->
+        [responding] Klasör yanıt vermiyor
+        [moved] Klasör taşındı ya da değiştirildi
+       *[unreadable] Klasör okunamıyor
+    }
+# Surface 11 (Diagnostics). The problems the other diagnostics messages do not cover.
+# Variables:
+#   $what (String) - selector: the problem; one of badname, hidden, linkscope, manifest, moved, noname, rootenv, suppressed, unreadable (anything else: the default).
+#   $n (Number) - a count, e.g. 3.
+#   $folder (String) - the library's folder name (data), e.g. "orders-scripts".
+# Review: PO
+hv-scripts-diag-other =
+    { $what ->
+        [badname] Bazı adlar adlandırma kurallarına uymuyor; o dosyalar listelenmiyor.
+        [unreadable] Bir klasör okunamıyor; içindeki dosyalar listelenmiyor.
+        [linkscope] Bir bağlantı başka bir ortamın klasörünü gösteriyor; hiçbir yerde listelenmiyor.
+        [suppressed] { $n } sorun daha listelenmiyor.
+        [hidden] { $n } sorun daha bu bağlantının göstermediği dosyalarla ilgili.
+        [noname] Ne .hacivat/workspace.toml ne de { $folder } klasör adı bir veritabanı adı; kitaplık yalnızca eşlendiği yerde görünür.
+        [rootenv] Kitaplık klasörü bir ortam klasörünün içinde; içindeki hiçbir şey listelenmiyor.
+        [moved] Kitaplık klasörü taşındı ya da değiştirildi; içindeki hiçbir şey listelenmiyor.
+       *[manifest] .hacivat/workspace.toml kullanılamıyor; kitaplık klasör adına, { $folder }, göre bağlanıyor.
+    }
+# Surface 2 (Context menus). The reasons hv-scripts-name-err does not cover, under the name field.
+# Variables:
+#   $reason (String) - selector: the reason; one of chars, hidden, long (anything else: the default).
+# Review: PO
+hv-scripts-name-err-more =
+    { $reason ->
+        [long] Bir ad en çok 255 bayt olabilir.
+        [hidden] Bir ad noktayla başlayamaz; node_modules listelenmez.
+       *[chars] Bir ad < > : " | ? * ya da denetim karakterleri içeremez.
+    }
+# Surface 2 (Context menus). The toast's title when a file operation was refused.
+# Variables:
+#   $op (String) - selector: the operation; one of create, rename, trash (anything else: the default).
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+#   $name (String) - the file or folder name (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-op-failed-title =
+    { $op ->
+        [create] { $name } oluşturulamadı
+        [rename] { $name } yeniden adlandırılamadı
+       *[trash]
+            { $os ->
+                [windows] { $name } Geri Dönüşüm Kutusu'na taşınamadı
+               *[other] { $name } Çöp Sepeti'ne taşınamadı
+            }
+    }
+# Surface 2 (Context menus). The toast's body: why, in plain words; nothing was changed.
+# Variables:
+#   $reason (String) - selector: the reason; one of exists, gone, hidden, io, listed, name, path, trash, unavailable (anything else: the default).
+# Review: PO
+hv-scripts-op-failed =
+    { $reason ->
+        [exists] Bu klasörde aynı adı taşıyan bir şey zaten var. Hiçbir şey değişmedi.
+        [gone] Artık kitaplıkta değil. Hiçbir şey değişmedi.
+        [listed] Bu bağlantı o klasörü göstermiyor; Hacivat onu buradan değiştirmez.
+        [hidden] Klasörde bu bağlantının göstermediği dosyalar var; Hacivat onları buradan taşımaz.
+        [name] Bu ad burada kullanılamaz. Hiçbir şey değişmedi.
+        [path] Yoldaki bir klasör değişti ya da bağlantıya dönüştü; Hacivat durdu. Hiçbir şey değişmedi.
+        [unavailable] Kitaplık klasörü şu anda kullanılamıyor. Hiçbir şey değişmedi.
+        [trash] Sistemin çöp kutusu kabul etmedi. Dosya yerinde duruyor.
+       *[io] Sistem izin vermedi. Hiçbir şey değişmedi.
+    }
+# Surface 2 (Context menus). Palette title.
+# Review: PO
+hv-cmd-scripts-open = Betiği aç
+# Surface 2 (Context menus). Palette title.
+# Review: PO
+hv-cmd-scripts-new-script = Yeni betik
+# Surface 2 (Context menus). Palette title.
+# Review: PO
+hv-cmd-scripts-new-folder = Yeni betik klasörü
+# Surface 2 (Context menus). Palette title; no default chord (controller ruling c).
+# Variables:
+#   $os (String) - selector: the host (macos, windows, linux); one of linux, macos, windows (anything else: the default).
+# Review: PO
+hv-cmd-scripts-trash =
+    { $os ->
+        [windows] Betiği Geri Dönüşüm Kutusu'na taşı
+       *[other] Betiği Çöp Sepeti'ne taşı
+    }
+# Surface 2 (Context menus). Palette title.
+# Review: PO
+hv-cmd-scripts-copy-path = Betik yolunu kopyala
+# Surface 2 (Context menus). Palette title.
+# Review: PO
+hv-cmd-scripts-copy-relative-path = Betiğin göreli yolunu kopyala
+# Surface 2 (Context menus). Palette title.
+# Review: PO
+hv-cmd-scripts-refresh = Betik kitaplığını yenile
