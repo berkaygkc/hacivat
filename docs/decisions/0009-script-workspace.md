@@ -850,7 +850,63 @@ HV-SCRIPT-10; R-M4b-17, -28; alg/28 C9.
 - Scope: `query_for(q, opts, limit, env)` keeps only files `envscope::visible` under `env`, the same rule as the tree. A `@production` file never appears for a staging or untagged connection. `query` lists every offered file, and `query_where` takes any filter (Task 15's candidates).
 - Cost: only the best `limit` hits copy their strings. The 10,000-entry query budget (5 ms) is a release budget (`HACIVAT_PERF=1 cargo test --release`); the debug build measures about 31 ms, almost all of it in `hacivat-l10n`'s subsequence matcher.
 
-### Enforcement
+### A tripwire, not an enforcement (m1)
 
 - A test tripwire (`service_index_and_events_touch_no_file_themselves`) fails if `service.rs`, `index.rs` or `events.rs` names `std::fs`, `fs::`, `File::`, `OpenOptions`, a read call, `read_dir` or `canonicalize(`. Every touch of the disk goes through `fileio`, `pathsafe`, `scan`, `manifest`, `registry` or `recovery`.
 - A `check-deps` rule was not added: `xtask/src/check_deps.rs` is Task 1a's file, and the tripwire covers this task's own modules. A token rule for the whole crate is a candidate for Task 20.
+
+### Fix round 1 (review I1–I7, m1–m10; rulings R-T10-2, R-T10-3, R-T10-4)
+
+**Bounded workers (I6, R-T10-4).**
+- The actor now does no library I/O. A library's root validation, scans, probes, settle looks, stamps and rename pairing run as jobs on at most `ServiceOptions::workers` (8) blocking workers, one job per library at a time (`service/work.rs`). The attach steps (resolving the folder, writing the manifest) and the alias write are command jobs that are not counted against the pool.
+- A job's answer is applied by the actor. Work that arrives meanwhile waits in that library's queue, coalesced into one rescan, the hinted paths and the due settle looks.
+- A library whose mount hangs holds one worker and stalls only itself. `detach` removes it at once and abandons its job, whose late answer finds no library. Test: `a_hung_library_stalls_only_itself`, with a stalling `Fs`; with one worker it fails.
+- **Residual:** `LibraryRegistry::add` (Task 3) still canonicalizes on the actor during an attach. The folder was resolved by a worker just before, so only a mount that hangs between the two steps can stall the actor.
+
+**What a connection sees (m2; I1, R-T10-2).**
+- `WorkspaceSnapshot`'s per-path data is now crate-private: the listings, the diagnostics and the status maps. A connection reads `snapshot.view(env)`.
+  - Its `LibraryView` gives the shown entries (visible files, and the folders on their way), `file_count`, badges for shown entries only (`git_status`, `git_statuses`), and a `GitSummary` without the map.
+  - Its diagnostics drop any that name a path not shown under the connection, and count them as `LibraryDiag::HiddenProblems(n)`. An `EnvContradiction` always names other environments' folders, so it is always counted, not shown. The misspelt-folder diagnostic is still named, as R-M4b-6 requires.
+- `ScriptIndex` counts and queries per environment: `len_for`, `query_for`, `query_for_any`. There is no public unscoped query.
+- **Events go through `subscribe(env) -> Subscription`.** `open` returns no receiver any more.
+  - `Changed` and `GitChanged` always pass.
+  - `FileChanged`, `FileDeleted` and `FileLeftScope` pass only for a path shown under that environment.
+  - `FileRenamed` passes when both of its paths are shown. When only `from` is shown, it becomes the new `LibraryEvent::FileLeftScope { from }` ("no longer listed under this connection"), and the new path is never given. When `from` is not shown, nothing passes.
+  - Test: H7, `h7_rename_is_never_paired_across_an_env_boundary`. Staging gets `FileLeftScope`, production hears nothing of the staging path, and an untagged subscriber hears no `@` path.
+
+**The root is re-validated (I3).**
+- Every bring-up and every full scan checks the root in `work::validate`. The registered path must be a real folder, not a link or junction (`RootRefusal::Link`). It must resolve to the canonical path and folder identity (Unix dev/ino) it had when first resolved this session (`Moved`, `IdentityChanged`). The attach checks run again: filesystem root, home, app folders, overlap with another library, and an environment folder.
+- A failure is `Unavailable(RootChanged)` with `LibraryDiag::RootRefused(why)`; nothing is listed or watched.
+- `attach` refuses a link root up front (`AttachError::RootIsLink`), because a link root would be refused at every launch.
+- Tests: H6, `h6_root_replaced_by_a_link_between_sessions_is_not_adopted`; `a_root_with_a_new_identity_is_refused`.
+- **Residual:** across sessions only the "not a link" rule holds; the identity is not stored in `libraries.toml`. A parent folder that became a link between sessions is still followed.
+
+**Watch before scan (I5).** A library's watch starts as soon as its root is known (at attach, or after the first validation at launch), and only then is its first scan queued. Hints that arrive during the scan wait and are probed after it. Test: H1, `h1_file_created_between_scan_and_watch_is_listed`.
+
+**Content only for open files (I4).**
+- `read` and `save` remember the file as open in a tab. Only remembered files are settled, stamped (`fileio::stamp_of`) and announced with `FileChanged`.
+- Any other changed file is a listing change (`Changed`), and its bytes are never read. Rename pairing reads only the candidates of a remembered file.
+- Test: `an_unopened_changed_file_is_never_read`, which counts `stamps_read`.
+
+**The launch sweep checks liveness (I2).** `recovery::sweep_unregistered` keeps a folder if any of its copies belongs to an instance that is alive, or whose liveness cannot be tested (R-T5-5), or if any sidecar cannot be read. The 10-minute age guard stays as a second line. Test: H2, `h2_sweep_spares_a_live_instances_copies`; once that instance is gone, the folder is swept.
+
+**Two-pass streams (I7, R-T10-3).**
+- `open_stream(.., expect)` returns a `ScriptStream`.
+- Its `PassRecord` holds:
+  - the opening stamp (`len`, `mtime`, and privately the full fingerprint: dev, ino, ctime);
+  - a running XXH3-64 of the raw bytes at the end of every 64 KiB block: one `u64` per block, about 2,400 for a 150 MB file.
+- **The pass-1/pass-2 contract.** Pass 2 opened with that record is refused at once (`ReadError::Changed`, a fenced named exception in `fileio`) unless the fingerprint is pass 1's. It stops with `ChunkError::Changed` before handing out the first block whose running hash differs, and when the file has more or fewer blocks.
+- Tests: `two_passes_see_the_same_file_or_stop` (a change between the passes, and one during pass 2); the inline `second_pass_stops_at_the_first_block_that_differs`, a forged record with an unchanged fingerprint.
+- `hacivat_exec::ScriptChunks` is unchanged: T12's adapter keeps the record.
+
+**Minor findings.**
+- **m3:** queries are cut to `MAX_QUERY_CHARS` (256).
+- **m4:** the `OnceLock` key build is documented; Task 15 queries one index from one thread.
+- **m5:** documented. The effective name is the snapshot's `db`.
+- **m6:** `Remember` and `Touched` for a library that is gone are dropped.
+- **m7:** a 60 s status backstop (`git_backstop`) for polled libraries and for libraries whose `.git` is above their root.
+- **m8:** `Subscription` documents that a lagged receiver re-reads the snapshot.
+- **m9:** alg/28's ranking text is corrected (R-T10-1).
+- **m10:** the index test's comment explains why no `Fs` is needed.
+- **m1:** the tripwire now covers `service/*.rs` and the renamed and brace imports. It is called a tripwire. A `check-deps` token rule is carried to T20.
+- **Adopted:** the reviewer's H3 (inbox overflow) and H4 (monotonic generations under races) are adopted as named tests.
