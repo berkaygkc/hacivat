@@ -83,7 +83,9 @@ fn parts_of(status: EditorStatus, eol: bool) -> Vec<SegmentPart> {
     SegmentPart::ALL
         .into_iter()
         .filter(|p| match p {
-            SegmentPart::Reduced => status.tier == Tier::Reduced,
+            // ## m4b-t14-tabs (named exception, carries-w1 T14/T18): a T2 preview's
+            // "Read-only preview" takes the same cell (a trust signal too).
+            SegmentPart::Reduced => matches!(status.tier, Tier::Reduced | Tier::Preview),
             SegmentPart::LineEndings => status.mixed_line_endings && eol,
             SegmentPart::Carets => status.carets > 1,
             SegmentPart::Selected => status.selected_chars > 0,
@@ -137,7 +139,8 @@ impl EditorSegment {
 
     /// The editor is in reduced mode: the segment's "Reduced mode" cell never gives way.
     pub fn reduced(&self) -> bool {
-        self.status.tier == Tier::Reduced
+        // ## m4b-t14-tabs (named exception)
+        matches!(self.status.tier, Tier::Reduced | Tier::Preview)
     }
 
     /// How often it rendered (tests: typing re-renders it, an unrelated change does not).
@@ -238,6 +241,17 @@ fn part_element(
                 t.colors.text.to_hsla(),
             )
             .id("editor-segment-reduced")
+            .into_any_element(),
+        ),
+        // ## m4b-t14-tabs (named exception, carries-w1 T14/T18): "Read-only preview".
+        SegmentPart::Reduced if s.tier == Tier::Preview => Some(
+            Label::new(
+                crate::scripts::tabs::msg(cx, "hv-scripts-preview-segment", Vec::new()),
+                TextSource::Fluent,
+                style,
+                t.colors.text.to_hsla(),
+            )
+            .id("editor-segment-preview")
             .into_any_element(),
         ),
         // ## m3c-t34-editor (named exception, NOTES 17 and M3c-16): "Mixed line endings", after

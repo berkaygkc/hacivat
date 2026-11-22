@@ -2197,3 +2197,127 @@ pub mod live {
         }
     }
 }
+
+// ## m4b-t14-tabs
+/// A connections shell whose drivers send each connect to the `FakeDriver` of its target host
+/// (one fake per connection, so a test can tell which connection a statement reached). Every
+/// router dials itself (no socket, no DNS: hosts are IP literals). `routes` are (engine, host,
+/// fake); the fakes come back in that order. Engines without a route get a plain fake.
+pub fn shell_with_routes(
+    cx: &mut TestAppContext,
+    lang: &str,
+    routes: Vec<(
+        hacivat_proto::DbmsKind,
+        &'static str,
+        hacivat_driver::fake::FakeDriver,
+    )>,
+) -> (
+    &'static mut VisualTestContext,
+    Vec<std::sync::Arc<hacivat_driver::fake::FakeDriver>>,
+) {
+    shell_with_routes_prepared(cx, lang, routes, |_| {})
+}
+
+/// [`shell_with_routes`]; `prepare` runs on the local paths before boot.
+pub fn shell_with_routes_prepared(
+    cx: &mut TestAppContext,
+    lang: &str,
+    routes: Vec<(
+        hacivat_proto::DbmsKind,
+        &'static str,
+        hacivat_driver::fake::FakeDriver,
+    )>,
+    prepare: impl FnOnce(&LocalPaths),
+) -> (
+    &'static mut VisualTestContext,
+    Vec<std::sync::Arc<hacivat_driver::fake::FakeDriver>>,
+) {
+    use hacivat_driver::fake::FakeDriver;
+    use hacivat_driver::{Driver as _, DriverRegistry};
+    use hacivat_proto::DbmsKind;
+
+    /// Routes a connect by its target host.
+    struct Routed {
+        descriptor: hacivat_driver::DriverDescriptor,
+        hosts: Vec<(&'static str, std::sync::Arc<FakeDriver>)>,
+    }
+
+    impl hacivat_driver::Driver for Routed {
+        fn descriptor(&self) -> &hacivat_driver::DriverDescriptor {
+            &self.descriptor
+        }
+        fn connect(
+            &self,
+            req: hacivat_driver::DriverConnect,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<Box<dyn hacivat_driver::RawConn>, hacivat_driver::RawError>,
+        > {
+            let host = match &req.endpoint {
+                hacivat_driver::Endpoint::Network { tls_host, .. } => tls_host.clone(),
+                hacivat_driver::Endpoint::File { path, .. } => path.display().to_string(),
+            };
+            let fake = self
+                .hosts
+                .iter()
+                .find(|(h, _)| host.contains(h))
+                .map(|(_, f)| f.clone())
+                .unwrap_or_else(|| panic!("no fake routes the host {host}"));
+            hacivat_driver::Driver::connect(fake.as_ref(), req)
+        }
+    }
+
+    let path = temp_root();
+    let paths = LocalPaths::under(&path);
+    paths.ensure_dirs().expect("test dirs");
+    prepare(&paths);
+    let mut fakes = Vec::new();
+    let mut by_kind: Vec<(DbmsKind, Vec<(&'static str, std::sync::Arc<FakeDriver>)>)> =
+        Vec::new();
+    for (kind, host, fake) in routes {
+        let fake = std::sync::Arc::new(fake);
+        fakes.push(fake.clone());
+        match by_kind.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, hosts)) => hosts.push((host, fake)),
+            None => by_kind.push((kind, vec![(host, fake)])),
+        }
+    }
+    let mut drivers = DriverRegistry::new();
+    for kind in [
+        DbmsKind::Postgres,
+        DbmsKind::MySql,
+        DbmsKind::MariaDb,
+        DbmsKind::Sqlite,
+    ] {
+        match by_kind.iter().find(|(k, _)| *k == kind) {
+            Some((_, hosts)) if !hosts.is_empty() => {
+                let mut descriptor = hosts[0].1.descriptor().clone();
+                descriptor.caps.stream_injection = false;
+                drivers.register(std::sync::Arc::new(Routed {
+                    descriptor,
+                    hosts: hosts.clone(),
+                }));
+            }
+            _ => drivers.register(std::sync::Arc::new(FakeDriver::new(kind))),
+        }
+    }
+    let mut boot = hacivat_app::connections::ConnectionsBoot::for_tests(&paths, drivers);
+    let backend: std::sync::Arc<dyn hacivat_secrets::SecretBackend> =
+        std::sync::Arc::new(hacivat_secrets::MemoryBackend::new());
+    boot.secrets = std::sync::Arc::new(hacivat_secrets::SecretStore::new(Some(backend.clone())));
+    let mut outcome = hacivat_settings::load(&paths.settings_toml());
+    outcome.settings.ui.language = LanguagePref::Tag(lang.to_string());
+    let mut startup = Startup::new(paths, outcome, OsLocale::default());
+    startup.connections = Some(boot);
+    let window = cx.update(|cx| {
+        cx.set_global(TestSecretBackend(backend));
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+        start(cx, startup, None).expect("open the workspace").into()
+    });
+    cx.executor().allow_parking();
+    (finish(cx, window), fakes)
+}
+// ## m4b-t14-tabs

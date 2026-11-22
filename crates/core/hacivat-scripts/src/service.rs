@@ -650,6 +650,59 @@ impl LibraryService {
         Ok(decoded)
     }
 
+    // ## m4b-t14-tabs (named exception: the script tabs' two service calls)
+    /// [`read`](Self::read) in the encoding the user chose (`label`, a WHATWG name such as
+    /// `"windows-1254"`; NOTES surface 10), after `read` answered `NeedsEncoding`. The file is
+    /// remembered as open, as by `read`.
+    pub async fn read_with(
+        &self,
+        id: LibraryId,
+        rel: &RelPath,
+        env: Option<EnvTag>,
+        label: &'static str,
+    ) -> Result<Decoded, ReadError> {
+        let root = self
+            .root_of(id)
+            .ok_or(ReadError::Io(io::ErrorKind::NotFound))?;
+        let path = rel.clone();
+        let decoded = self
+            .blocking(move || fileio::read_with(&root, &path, env, label))
+            .await
+            .unwrap_or(Err(ReadError::Io(io::ErrorKind::Interrupted)))?;
+        self.tell(Msg::Remember {
+            id,
+            rel: rel.clone(),
+            stamp: decoded.stamp,
+        })
+        .await;
+        Ok(decoded)
+    }
+
+    /// The last tab of `rel` closed (carries-w1 T14, T10 re-review): the file is no longer open,
+    /// so its stamp is forgotten and its later changes are listing changes again (I4: only open
+    /// files are read).
+    pub async fn forget(&self, id: LibraryId, rel: &RelPath) {
+        self.tell(Msg::Forget {
+            id,
+            rel: rel.clone(),
+        })
+        .await;
+    }
+
+    /// Whether `rel` is remembered as open in a tab (tests of the last-tab rule).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn is_remembered(&self, id: LibraryId, rel: &RelPath) -> bool {
+        self.ask(|reply| Msg::IsRemembered {
+            id,
+            rel: rel.clone(),
+            reply,
+        })
+        .await
+        .unwrap_or(false)
+    }
+    // ## m4b-t14-tabs
+
     /// Saves a script (HV-SCRIPT-07) for a tab under `env`, recording the echo before the
     /// rename.
     ///

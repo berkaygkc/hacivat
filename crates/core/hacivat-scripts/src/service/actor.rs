@@ -156,6 +156,20 @@ pub(super) enum Msg {
         rel: RelPath,
         stamp: Option<DiskStamp>,
     },
+    // ## m4b-t14-tabs (named exception)
+    /// The last tab of the file closed: it is no longer open.
+    Forget {
+        id: LibraryId,
+        rel: RelPath,
+    },
+    /// Whether the file is remembered as open (tests).
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    IsRemembered {
+        id: LibraryId,
+        rel: RelPath,
+        reply: oneshot::Sender<bool>,
+    },
+    // ## m4b-t14-tabs
     /// The recheck timer of an unavailable library.
     Tick {
         id: LibraryId,
@@ -731,6 +745,21 @@ impl Actor {
                     self.git_trigger(i);
                 }
             }
+            // ## m4b-t14-tabs (named exception)
+            Msg::Forget { id, rel } => {
+                if let Some(i) = self.index(id) {
+                    let lib = &mut self.libs[i];
+                    lib.remembered.remove(&rel);
+                    lib.stamp_due.retain(|r| *r != rel);
+                }
+            }
+            Msg::IsRemembered { id, rel, reply } => {
+                let open = self
+                    .index(id)
+                    .is_some_and(|i| self.libs[i].remembered.contains_key(&rel));
+                let _ = reply.send(open);
+            }
+            // ## m4b-t14-tabs
             Msg::Tick { id, seq } => self.tick(id, seq),
             Msg::Backstop => self.backstop(),
             Msg::GitTick { id, seq } => self.git_tick(id, seq),

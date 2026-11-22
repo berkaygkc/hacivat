@@ -684,6 +684,16 @@ pub(crate) fn start_run_capped(
     {
         return;
     }
+    // ## m4b-t14-tabs (named exception, R-M4b-27, R-M4b-30): a script tab runs only on the
+    // database it was opened under; a MySQL tab switches its session back once and runs this
+    // same Run again, which checks again. A refusal shows its notice and sends nothing.
+    let rerun = {
+        let units = units.clone();
+        Box::new(move |cx: &mut App| start_run_capped(console, version, units, cell_cap, cx))
+    };
+    if !crate::scripts::tabs::run_gate(console, rerun, cx) {
+        return;
+    }
     let Some(session) = live_session(cx, console) else {
         if let Some(p) = profile_of(cx, console) {
             connect_first(&p, cx);

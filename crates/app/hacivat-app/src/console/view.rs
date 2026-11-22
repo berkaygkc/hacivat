@@ -35,6 +35,18 @@
 //! A console registered for its tab by someone else (`register_test_console`) is shown as is:
 //! its editor and session are the registrant's, and the host only draws it (no session, no
 //! autosave, no binding).
+//!
+//! ## m4b-t14-tabs (named exception: the script tab's host, R-M4b-4, R-M4b-25, R-M4b-30)
+//! A script tab's host ([`build_script`]) is this host with a [`ScriptDoc`] beside the editor:
+//! its text comes from the file (read off the UI thread while "Opening…" shows), it never
+//! autosaves into the consoles folder (R-M4b-5), and its binding is the one its handle names:
+//! - **never bound by a connect** (R-M3-37's auto-binding skips it, R-M4b-30), and a tab whose
+//!   profile is gone gets no binding at all;
+//! - **its session** (C-M4-5, R-M4b-27): PostgreSQL and SQLite share the profile's sessions as a
+//!   console does; a MySQL/MariaDB tab always opens a session of its own (slot 0, never the
+//!   profile's default one, which consoles and the explorer read) and, under a database other
+//!   than the profile's, switches it with `USE` before Run is enabled (`ScriptDoc::session_taken`);
+//!   a single-session profile that hands back its one session is refused for such a tab.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -78,6 +90,8 @@ use crate::console::toolbar::{self, RunUx, ToolbarActions, ToolbarModel};
 use crate::l10n_global::tr;
 use crate::results::ConsoleResults;
 use crate::shell::{AppState, TabKind, Workspace, register_focus_context};
+// ## m4b-t14-tabs (named exception)
+use crate::scripts::tabs::{ScriptDoc, ScriptDocEvent, ScriptTabId};
 
 // ---- the hosts ------------------------------------------------------------------------------
 
@@ -548,6 +562,10 @@ pub struct ConsoleHost {
     pane: Option<hacivat_ui::panes::PaneId>,
     // ## m4-t33d-fr1 (ruling R-T33d-5): the console is a focus home; its primary is the editor.
     home: HomeSlot,
+    // ## m4b-t14-tabs (named exception): a script tab's file side, and the home of its
+    // not-yet-shown states.
+    script: Option<Entity<ScriptDoc>>,
+    script_home: HomeSlot,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -560,7 +578,20 @@ pub fn build(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyView {
-    cx.new(|cx| ConsoleHost::new(tab, n, profile, window, cx))
+    cx.new(|cx| ConsoleHost::new(tab, n, profile, None, window, cx))
+        .into()
+}
+
+// ## m4b-t14-tabs (named exception)
+/// The view of script tab `tab`, bound for its life as handle `script` names, built once.
+pub fn build_script(
+    tab: TabId,
+    script: ScriptTabId,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyView {
+    let n = crate::scripts::tabs::client_number(script);
+    cx.new(|cx| ConsoleHost::new(tab, n, None, Some(script), window, cx))
         .into()
 }
 
@@ -569,6 +600,8 @@ impl ConsoleHost {
         tab: TabId,
         n: u32,
         profile: Option<ProfileId>,
+        // ## m4b-t14-tabs (named exception)
+        script: Option<ScriptTabId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -603,6 +636,9 @@ impl ConsoleHost {
             fixture: None,
             pane: None,
             home: HomeSlot::new(),
+            // ## m4b-t14-tabs
+            script: None,
+            script_home: HomeSlot::new(),
             _subscriptions: subscriptions,
         };
         // A binding the hook handed out is for the tab built in this frame; whatever no host
@@ -622,7 +658,10 @@ impl ConsoleHost {
                 owned: registered.is_none(),
             },
         );
-        if let Some(console) = registered {
+        // ## m4b-t14-tabs (named exception): a script tab's host reads its file first.
+        if let Some(script) = script {
+            this.open_script(script, window, cx);
+        } else if let Some(console) = registered {
             this.adopt(console, cx);
             // ## m3c-t33-find (named exception): the registrant's editor gets its find bar.
             if let Some(editor) = this.editor().cloned() {
@@ -659,6 +698,76 @@ impl ConsoleHost {
             editor,
             owned: false,
         };
+    }
+
+    // ## m4b-t14-tabs (named exception)
+    /// Starts script tab `script`: its doc, its binding as its handle names it (none when the
+    /// profile is gone or the tab may not run there), then the file's read.
+    fn open_script(&mut self, script: ScriptTabId, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.tab;
+        let doc = cx.new(|cx| ScriptDoc::new(script, tab, cx));
+        self._subscriptions
+            .push(cx.subscribe_in(&doc, window, Self::on_script_doc));
+        let (profile, plan) = {
+            let d = doc.read(cx);
+            (d.spec(cx).and_then(|t| t.profile), d.plan.clone())
+        };
+        if let Some(p) = profile.filter(|p| profile_of(cx, *p).is_some()) {
+            match plan {
+                Ok(crate::scripts::open::SessionPlan::Shared) => self.set_binding(p, cx),
+                Ok(crate::scripts::open::SessionPlan::Own { .. }) => {
+                    // Slot 0: a session of its own, never the profile's default one.
+                    self.binding = Some((p, 0));
+                    if let Some(e) = cx.default_global::<Hosts>().by_tab.get_mut(&self.tab) {
+                        e.binding = self.binding;
+                    }
+                }
+                // Refused where it is bound: no binding, nothing runs.
+                Err(_) => {}
+            }
+        }
+        self.script = Some(doc.clone());
+        self.mode = Mode::Loading;
+        doc.update(cx, |d, cx| d.start_load(None, cx));
+    }
+
+    /// The script doc's events: the file was read (the editor opens over it), or something the
+    /// host draws changed.
+    fn on_script_doc(
+        &mut self,
+        doc: &Entity<ScriptDoc>,
+        event: &ScriptDocEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ScriptDocEvent::Read(opened) => {
+                if !matches!(self.mode, Mode::Loading) {
+                    return;
+                }
+                let opened = opened.clone();
+                self.open_editor(opened.text.clone(), None, true, window, cx);
+                let (Some(console), Some(editor)) = (self.console(), self.editor().cloned())
+                else {
+                    return;
+                };
+                if opened.tier == hacivat_scripts::fileio::SizeTier::Preview {
+                    let spec = hacivat_ui_editor::PreviewSpec {
+                        shown_bytes: opened.text.len() as u64,
+                        total_bytes: opened.total,
+                    };
+                    editor.update(cx, |e, cx| e.set_preview(spec, cx));
+                }
+                doc.update(cx, |d, cx| d.attach(console, editor, opened, cx));
+                // A session taken before the doc knew its console.
+                if let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone())
+                {
+                    doc.update(cx, |d, cx| d.session_taken(session, cx));
+                }
+                cx.notify();
+            }
+            ScriptDocEvent::Changed => cx.notify(),
+        }
     }
 
     fn set_binding(&mut self, profile: ProfileId, cx: &mut Context<Self>) {
@@ -759,6 +868,10 @@ impl ConsoleHost {
     fn on_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = live_kinds(cx);
         match self.mode {
+            // ## m4b-t14-tabs (named exception, R-M4b-30): a script tab is never bound by a
+            // connect.
+            Mode::Unbound | Mode::Loading if self.script.is_some() => {}
+            Mode::Ready { owned: true, .. } if self.script.is_some() && self.binding.is_none() => {}
             Mode::Unbound => {
                 let newly: Vec<ProfileId> = now
                     .iter()
@@ -941,19 +1054,29 @@ impl ConsoleHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((profile_id, slot)) = self.binding else {
+        // ## m4b-t14-tabs (named exception): a script tab opens its editor unbound too (it
+        // then runs nothing); a console needs its binding.
+        let binding = self.binding;
+        if binding.is_none() && self.script.is_none() {
             return;
-        };
-        let profile = profile_of(cx, profile_id);
+        }
+        let slot = binding.map_or(0, |(_, slot)| slot);
+        let profile = binding.and_then(|(p, _)| profile_of(cx, p));
         let doc = DocId(u64::from(self.tab.0));
         let service = SqlLanguageService::new();
         let language: Rc<dyn LanguageService> = service.clone();
-        let label = a11y::label(self.title(cx));
+        // ## m4b-t14-tabs (named exception): a script editor is named by its tab's title.
+        let label = a11y::label(match &self.script {
+            Some(doc) => crate::scripts::tabs::tab_title(doc.read(cx).id, cx),
+            None => self.title(cx),
+        });
         let cfg = editor_config(cx);
         let editor = cx.new(|cx| EditorView::new(doc, &text, cfg, language, label, window, cx));
         let log = hacivat_exec::SessionLog::new();
         let results = cx.new(|_| ConsoleResults::new(log.clone()));
-        let client = if slot <= 1 {
+        // ## m4b-t14-tabs (named exception): slot 0 (a script tab's own session) is never the
+        // default client.
+        let client = if slot == 1 {
             ClientId::DEFAULT
         } else {
             ClientId(u64::from(self.n))
@@ -964,7 +1087,7 @@ impl ConsoleHost {
                 id: ConsoleId(0),
                 tab: self.tab,
                 n: self.n,
-                profile: Some(profile_id),
+                profile: binding.map(|(p, _)| p),
                 client,
                 session: None,
                 editor: Some(editor.clone()),
@@ -987,10 +1110,13 @@ impl ConsoleHost {
         ];
         self._subscriptions.extend(subscriptions);
         self.set_segment(&editor, cx);
+        // ## m4b-t14-tabs (named exception, R-M4b-5): a script tab never autosaves into the
+        // consoles folder.
+        let autosave = autosave.filter(|_| autosave::allowed(self.script.is_some()));
         self.autosave = autosave.and_then(|on_disk| {
             let paths = cx.try_global::<AppState>()?.paths.clone();
             Some(Autosave::new(
-                autosave::console_path(&paths, profile_id, self.n),
+                autosave::console_path(&paths, binding?.0, self.n),
                 on_disk,
             ))
         });
@@ -1025,9 +1151,22 @@ impl ConsoleHost {
             self.paint_errors = errors;
         }
         match event {
-            EditorEvent::Changed { .. } => self.schedule_autosave(cx),
+            EditorEvent::Changed { .. } => {
+                self.schedule_autosave(cx);
+                // ## m4b-t14-tabs (named exception): dirty and recovery are the doc's.
+                if let Some(doc) = &self.script {
+                    doc.update(cx, |d, cx| d.on_edit(cx));
+                }
+            }
             EditorEvent::TierChanged(tier) => {
                 exec_tier(editor, self.console(), *tier, cx);
+            }
+            // ## m4b-t14-tabs (named exception)
+            EditorEvent::Reloaded { version } => {
+                if let Some(doc) = &self.script {
+                    let version = *version;
+                    doc.update(cx, |d, cx| d.on_reloaded(version, cx));
+                }
             }
             _ => {}
         }
@@ -1122,7 +1261,8 @@ impl ConsoleHost {
             return;
         };
         let read_only = must_be_read_only(cx, profile);
-        if slot <= 1 {
+        // ## m4b-t14-tabs (named exception): slot 0 is a script tab's own session.
+        if slot == 1 {
             let Some(handle) = sessions.default_session() else {
                 return;
             };
@@ -1214,6 +1354,28 @@ impl ConsoleHost {
                 .default_session()
         });
         self.own_session = default.is_none_or(|d| d.id() != handle.id());
+        // ## m4b-t14-tabs (named exception, R-M4b-27): a script tab that needs a session of its
+        // own never takes the profile's default one (a single-session profile hands it back).
+        if !self.own_session
+            && self.binding.is_some_and(|(_, slot)| slot == 0)
+            && let Some(doc) = self.script.clone()
+        {
+            let db = doc
+                .read(cx)
+                .spec(cx)
+                .and_then(|t| t.database)
+                .map(|d| d.as_str().to_string())
+                .unwrap_or_default();
+            doc.update(cx, |d, cx| {
+                d.show(
+                    crate::scripts::tabs::Notice::SwitchFailed { database: db },
+                    cx,
+                );
+                d.switch = crate::scripts::tabs::Switch::Failed;
+            });
+            self.acquire = Acquire::Cancelled;
+            return;
+        }
         // The registry's client says whose session it is (Task 33 closes a closed console's
         // session only when it is not the default one).
         let client = if self.own_session {
@@ -1227,6 +1389,12 @@ impl ConsoleHost {
         });
         exec_rebind(console, window, cx);
         self.watch_session(window, cx);
+        // ## m4b-t14-tabs (named exception): a MySQL script tab switches its own session.
+        if let Some(doc) = self.script.clone()
+            && let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone())
+        {
+            doc.update(cx, |d, cx| d.session_taken(session, cx));
+        }
     }
 
     /// Takes the session away from the console; a session of its own closes.
@@ -1471,9 +1639,11 @@ impl ConsoleHost {
                 .map(|p| SharedString::from(p.name.clone()))
                 .unwrap_or_default()
         });
+        // ## m4b-t14-tabs (named exception): a script tab runs only where it may.
+        let script_runs = self.script.as_ref().is_none_or(|d| d.read(cx).run_enabled(cx));
         ToolbarModel {
             run,
-            run_enabled: !matches!(self.acquire, Acquire::Waiting { .. }),
+            run_enabled: !matches!(self.acquire, Acquire::Waiting { .. }) && script_runs,
             name,
             env: profile
                 .as_ref()
@@ -1508,6 +1678,10 @@ impl ConsoleHost {
             && e.host.upgrade().is_none()
         {
             cx.default_global::<Hosts>().by_tab.remove(&self.tab);
+        }
+        // ## m4b-t14-tabs (named exception): the last tab of a file lets the service forget it.
+        if let Some(doc) = self.script.take() {
+            doc.update(cx, |d, cx| d.closed(cx));
         }
         let Mode::Ready {
             console,
@@ -1561,6 +1735,11 @@ impl Render for ConsoleHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let editor = match &self.mode {
+            // ## m4b-t14-tabs (named exception): a script tab whose text is not shown says why.
+            Mode::Unbound | Mode::Loading if self.script.is_some() => {
+                let doc = self.script.clone().expect("checked");
+                return crate::scripts::disk_bars::render_unloaded(&doc, &self.script_home, cx);
+            }
             Mode::Unbound => return crate::shell::workspace::editor_empty(&theme, cx),
             Mode::Loading => {
                 return div()
@@ -1586,6 +1765,12 @@ impl Render for ConsoleHost {
             .size_full()
             .bg(theme.tokens.colors.panel.to_hsla())
             .child(bar)
+            // ## m4b-t14-tabs (named exception): a script tab's notices, under its toolbar.
+            .children(
+                self.script
+                    .as_ref()
+                    .and_then(|doc| crate::scripts::disk_bars::render(doc, cx)),
+            )
             // ## m3c-t33-find (named exception): the find bar, a row under the toolbar
             // (design/m3b-safe surface 16, M3c-9).
             .children(

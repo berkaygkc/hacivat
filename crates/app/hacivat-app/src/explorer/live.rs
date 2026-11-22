@@ -1076,13 +1076,25 @@ fn forward(id: ProfileId, cx: &mut App) {
 /// The session of `id`'s user: the focused console's when it is bound to `id`, else the first
 /// console of `id` with a session.
 fn user_session(id: ProfileId, cx: &App) -> Option<hacivat_session::session::SessionHandle> {
+    // ## m4b-t14-tabs (named exception, R-M4b-25, R-M4b-27): a script tab's session is the
+    // tab's (a MySQL tab under another database switched its own), never the profile's user
+    // session: the explorer's current database and a script opened without one follow the
+    // consoles.
+    let console = |c: &crate::console::ConsoleId| {
+        !matches!(
+            Consoles::source(cx, *c),
+            crate::console::ConsoleSource::Script { .. }
+        )
+    };
     let focused = Consoles::focused(cx)
+        .filter(console)
         .and_then(|c| Consoles::get(cx, c))
         .filter(|s| s.profile == Some(id))
         .and_then(|s| s.session.clone());
     focused.or_else(|| {
         Consoles::ids(cx)
             .into_iter()
+            .filter(console)
             .filter_map(|c| Consoles::get(cx, c))
             .filter(|s| s.profile == Some(id))
             .find_map(|s| s.session.clone())

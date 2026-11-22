@@ -4667,3 +4667,144 @@ hv-scripts-dataless-row-tip = Bulutta tutuluyor, indirilmedi. Açınca önce ind
 # Surface 1 (Scripts node).
 # Review: PO
 hv-scripts-downloading-row-tip = İndiriliyor… İndirme bitince sekme metni gösterir.
+
+## m4b-t14-tabs
+
+# Surface 5 (Script tab): the tab while its file is read.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-opening = { $file } açılıyor…
+# Surface 5 (Script tab): the file could not be read; the tab stays and runs nothing.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-open-failed = { $file } açılamadı.
+# Surface 5 (Script tab).
+# Variables:
+#   $reason (String) - selector: why; one of missing, library, scope, binary, refused, lossy, encoding (anything else: the default).
+#   $conn (String) - the connection's name (data), e.g. "orders-staging".
+# Review: PO
+hv-scripts-open-failed-body =
+    { $reason ->
+        [missing] Artık kitaplıkta değil.
+        [library] Kitaplığı bağlı değil ya da şu an erişilemiyor.
+        [scope] { $conn } altında listelenmiyor.
+        [binary] Metin değil, ikili bir dosyaya benziyor.
+        [refused] Yolu bir betiğin taşıyabileceği bir yol değil ya da kitaplığın dışına çıkıyor.
+        [lossy] Geri kaydetmek düzenlenmemiş baytları değiştirirdi, bu yüzden açılmadı.
+        [encoding] Seçtiğiniz kodlamayla çözülemiyor.
+       *[other] Dosya okunamadı.
+    }
+# Surface 5 (Script tab): a PostgreSQL or SQLite script is opened only on the database its session is on (R-M4b-25).
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+#   $conn (String) - the connection's name (data), e.g. "orders-prod".
+#   $database (String) - the database the script was opened under (data), e.g. "orders_archive".
+#   $current (String) - the database the connection runs on (data), e.g. "orders".
+# Review: PO
+hv-scripts-open-other-db = { $file } açılmadı: { $conn } { $database } üzerinde değil, { $current } üzerinde çalışıyor.
+# Surface 5 (Script tab).
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+#   $conn (String) - the connection's name (data), e.g. "orders-prod".
+#   $database (String) - the database the script was opened under (data), e.g. "orders".
+# Review: PO
+hv-scripts-open-db-unknown = { $file } açılmadı: { -brand-hacivat } { $conn } bağlantısının hangi veritabanında çalıştığını bilemiyor, bu yüzden { $database } olduğundan emin olamıyor.
+# Surface 5 (Script tab): a MySQL profile set to one session cannot give a script tab its own session on another database.
+# Variables:
+#   $file (String) - the file name (data), e.g. "kampanya_özet.sql".
+#   $conn (String) - the connection's name (data), e.g. "api-dev".
+#   $database (String) - the database (data), e.g. "kampanya".
+# Review: PO
+hv-scripts-open-single-session = { $file } açılmadı: { $conn } her konsol için tek oturum kullanıyor, bu yüzden bir betik onun yanında { $database } üzerinde çalışamaz.
+# Surface 5 (Script tab): the connection the tab was opened under no longer exists.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-open-no-profile = { $file } açılmadı: bağlantısı artık yok.
+# Surface 5 (Script tab): the session's database could not be read before Run (R-M4b-27).
+# Variables:
+#   $bound (String) - the database the tab is bound to (data), e.g. "orders".
+# Review: PO
+hv-scripts-run-refused-unknown = Çalıştırma reddedildi: bu sekme { $bound } üzerinde çalışır, ama { -brand-hacivat } oturumunun hangi veritabanında olduğunu bilemiyor.
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-run-refused-unknown-body = Hiçbir şey gönderilmedi. Yeniden bağlanın ya da betiği başka bir bağlantı altında açın.
+# Surface 5 (Script tab): the MySQL switch made when the tab opened failed.
+# Variables:
+#   $database (String) - the database (data), e.g. "kampanya".
+# Review: PO
+hv-scripts-switch-failed = Bu sekmenin oturumu { $database } veritabanına geçemedi.
+# Surface 5 (Script tab).
+# Review: PO
+hv-scripts-switch-failed-body = Yanlış veritabanında hiçbir şey çalışmasın diye Çalıştır kapalı kalır. Yeniden denemek için sekmeyi kapatıp betiği tekrar açın.
+# Surface 9 (Large files): the status bar's segment of a T2 preview tab.
+# Review: PO
+hv-scripts-preview-segment = Salt okunur önizleme
+# Surface 9 (Large files): why Save does nothing on a preview.
+# Review: PO
+hv-scripts-preview-no-save = Salt okunur önizleme kaydedilmez: dosyanın yalnızca başını tutar.
+# Surface 9 (Large files): why Run does nothing on a preview.
+# Review: PO
+hv-scripts-preview-no-run = Salt okunur önizleme çalışmaz. Betik olarak çalıştır dosyanın tamamını gönderir.
+# Surface 6 (Changes on disk): a save failed; the tab keeps its edits.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-save-failed = { $file } kaydedilemedi
+# Surface 6 (Changes on disk).
+# Variables:
+#   $reason (String) - selector: why; one of path, scope, damaged, missing (anything else: the default).
+#   $conn (String) - the connection's name (data), e.g. "orders-staging".
+# Review: PO
+hv-scripts-save-failed-body =
+    { $reason ->
+        [path] Yolundaki bir klasör değişti ya da dosya bir bağlantıya dönüştü, bu yüzden hiçbir şey yazılmadı. Düzenlemeleriniz bu sekmede duruyor.
+        [scope] Artık { $conn } altında listelenmiyor, bu yüzden hiçbir şey yazılmadı. Düzenlemeleriniz bu sekmede duruyor.
+        [damaged] Dosya yazılamadı ve eski hâline getirilemedi. Metniniz bu sekmede ve bir kurtarma kopyasında duruyor.
+        [missing] Kitaplığı bağlı değil ya da şu an erişilemiyor, bu yüzden hiçbir şey yazılmadı. Düzenlemeleriniz bu sekmede duruyor.
+       *[other] Hiçbir şey yazılmadı. Düzenlemeleriniz bu sekmede duruyor.
+    }
+# Surface 6 (Changes on disk): the save went through, but a folder check after it failed.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-saved-path-changed = { $file } kaydedildi, ama kaydedilirken yolundaki bir klasör değişti. Beklediğiniz yerde olduğunu denetleyin.
+# Surface 6 (Changes on disk): a rename on disk the tab follows (carries-w1 T14).
+# Variables:
+#   $path (String) - the new path in the library (data), e.g. "reports/haftalık_rapor.sql".
+# Review: PO
+hv-scripts-moved = { $path } konumuna taşındı
+# Surface 6 (Changes on disk).
+# Variables:
+#   $conn (String) - the connection's name (data), e.g. "orders-staging".
+# Review: PO
+hv-scripts-moved-body = Dosya diskte taşındı ve bu sekme onu izliyor. Yine yalnızca { $conn } üzerinde çalışır.
+# Surface 6 (Changes on disk): the file moved to a place this connection does not show (its new path is not shown).
+# Variables:
+#   $conn (String) - the connection's name (data), e.g. "orders-staging".
+# Review: PO
+hv-scripts-unlisted-moved-body = Bu bağlantının göstermediği bir yere taşındı. Bu sekme yine yalnızca { $conn } üzerinde çalışır.
+# Surface 6 (Changes on disk): the Deleted on disk notice's second button.
+# Review: PO
+hv-scripts-disk-close = Sekmeyi kapat
+# Surface 12 (Recovery): a recovered copy whose writer may still be running (R-T5-5).
+# Review: PO
+hv-scripts-recover-unknown = Bu kopya hâlâ açık olan başka bir { -brand-hacivat } penceresine ait olabilir. Kaydedene ya da atana kadar saklanır.
+# Surface 12 (Recovery): the launch notice's list line.
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+#   $conn (String) - the connection's name (data), e.g. "orders-prod".
+# Review: PO
+hv-scripts-recover-item = { $file } · { $conn }
+# Surface 12 (Recovery).
+# Variables:
+#   $file (String) - the file name (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-recover-item-unbound = { $file } · bağlantı yok
+# Surface 10 (Encoding): an encoding the user can open the file in (one button each).
+# Variables:
+#   $encoding (String) - the encoding's name (data), e.g. "windows-1254".
+# Review: PO
+hv-scripts-enc-open-as = { $encoding } olarak aç
