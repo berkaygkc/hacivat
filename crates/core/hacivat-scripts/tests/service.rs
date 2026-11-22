@@ -1649,6 +1649,38 @@ async fn a_root_made_again_unheard_after_its_removal_is_refused() {
             .contains(&LibraryDiag::RootRefused(RootRefusal::IdentityChanged))
     );
 }
+
+/// Fix round (review C1, R-CI2-1): a restore into the root that sets its time back (`rsync -a`
+/// or `tar -x` of a `./` entry, `touch -t 200001010000 <root>`) keeps the library. On macOS
+/// that also moves the folder's birth time back, which is why the birth time is part of the
+/// identity on Linux only (where userland cannot set it).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_root_whose_time_is_set_back_stays_the_same_library() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("scripts");
+    write_files(&lib, &["a.sql"]);
+    let r = rig_with(app.path(), opts());
+    ready(&r).await;
+    let id = attach(&r, &lib).await;
+    let root = canonical(&lib);
+    // `touch -t 200001010000 <root>`.
+    let y2000 = SystemTime::UNIX_EPOCH + Duration::from_secs(946_684_800);
+    std::fs::File::open(&root)
+        .unwrap()
+        .set_modified(y2000)
+        .unwrap();
+    write_files(&lib, &["b.sql"]);
+    r.hint(&root, &["", "b.sql"]);
+    wait_until("b.sql listed", || r.rels(id).contains(&"b.sql".to_owned())).await;
+    r.svc.settled().await;
+    assert_eq!(
+        r.snap().library(id).map(|l| l.state.clone()),
+        Some(LibraryState::Watching)
+    );
+    assert_eq!(r.rels(id), ["a.sql", "b.sql"]);
+}
 // ## m4b-cifix-2-root-birth
 
 /// H7 (I1, R-T10-2): a file a staging tab opened, moved from `@staging/` into `@production/`,

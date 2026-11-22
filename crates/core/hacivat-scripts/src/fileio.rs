@@ -617,22 +617,44 @@ pub fn open_stream_checked(
     }))
 }
 
-/// The identity a library root keeps for a session (I3): its device and inode, and its birth
-/// time where the file system reports one.
+/// The identity a library root keeps for a session (I3): its device and inode, and on Linux
+/// its birth time.
 ///
 /// ## m4b-cifix-2: device and inode alone do not tell a folder from one made again at the same
 /// path. Linux's ext4 hands a freed inode to the next `mkdir` in the same block group, so a
-/// root deleted and made again often keeps its number (CI 44990057141); APFS never reuses one.
-/// The birth time (`statx` `btime` on Linux, `st_birthtime` on macOS, read through `std`'s
-/// `Metadata::created`) is new for the new folder and survives a rename, so a root that went
-/// away and came back under another name stays the same folder.
+/// root deleted and made again often keeps its number (CI 44990057141). The birth time
+/// (`statx` `btime`, read through `std`'s `Metadata::created`) is new for the new folder and
+/// survives a rename, so a root that went away and came back under another name stays the
+/// same folder.
+///
+/// ## m4b-cifix-2 fix round (review C1, R-CI2-1): Linux only, where userland cannot set
+/// `btime`. On macOS, setting a folder's modification time earlier than its birth time moves
+/// the birth time back (APFS, HFS+), so an `rsync -a`, `cp -Rp`, `tar -x` or `touch -t` into
+/// the root would refuse an unchanged library. APFS never reuses an object id (HFS+ CNIDs only
+/// grow), so `(dev, ino)` is enough there. Residual: a network or FUSE mount may report a
+/// settable birth time (an NFSv4 `time_create`, an SMB creation time); such a library is
+/// polled, and a restore into its root can still refuse it (ADR 0009).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FolderIdentity {
     pub dev: u64,
     pub ino: u64,
-    /// `None` where the file system or platform reports no birth time; both sides of a
-    /// comparison are read on the same file system, so `None` matches only `None`.
+    /// The birth time on Linux; `None` elsewhere, or where the file system reports none. Both
+    /// sides of a comparison are read on the same file system, so `None` matches only `None`.
     pub born: Option<std::time::SystemTime>,
+}
+
+/// The part of [`FolderIdentity`] userland cannot set: the birth time, on Linux only.
+#[cfg(unix)]
+fn unsettable_birth(meta: &std::fs::Metadata) -> Option<std::time::SystemTime> {
+    #[cfg(target_os = "linux")]
+    {
+        meta.created().ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = meta;
+        None
+    }
 }
 
 /// The [`FolderIdentity`] of a folder (Unix); `None` where it cannot be read or the platform
@@ -645,7 +667,7 @@ pub(crate) fn folder_identity(path: &std::path::Path) -> Option<FolderIdentity> 
         meta.is_dir().then(|| FolderIdentity {
             dev: meta.dev(),
             ino: meta.ino(),
-            born: meta.created().ok(),
+            born: unsettable_birth(&meta),
         })
     }
     #[cfg(not(unix))]
@@ -1821,9 +1843,20 @@ mod tests {
             let root = d.path().join("scripts");
             std::fs::create_dir(&root).unwrap();
             let first = folder_identity(&root).unwrap();
-            let born = first
-                .born
+            // Fix round (C1): the birth time is part of the identity on Linux only.
+            assert_eq!(first.born.is_some(), cfg!(target_os = "linux"));
+            let born = std::fs::metadata(&root)
+                .unwrap()
+                .created()
                 .expect("the test file system reports no birth time");
+            // Fix round (C1): a restore that sets the folder's time back (`rsync -a`,
+            // `touch -t`) keeps the identity; on macOS it moves the birth time back as well.
+            let restored = SystemTime::UNIX_EPOCH + Duration::from_secs(946_684_800);
+            std::fs::File::open(&root)
+                .unwrap()
+                .set_modified(restored)
+                .unwrap();
+            assert_eq!(folder_identity(&root), Some(first));
             let away = d.path().join("away");
             std::fs::rename(&root, &away).unwrap();
             assert_eq!(folder_identity(&away), Some(first));
