@@ -254,9 +254,9 @@ fn an_endless_burst_still_rescans_every_two_seconds() {
             rescans.push(step);
         }
     }
-    // Fix round 2 (N1): counting starts afresh after each rescan, so the next overflow (one
-    // step later) waits its own 2 s.
-    assert_eq!(rescans, vec![20, 41]);
+    // Fix round 3 (I-fr2-1): a burst still going stays overflowed after a forced rescan, so
+    // one rescan every 2 s, and the count restarts only once it is quiet.
+    assert_eq!(rescans, vec![20, 40]);
     assert_eq!(d.flush(t0() + ms(4_900 + 150)), vec![Flushed::Rescan]);
 }
 
@@ -1149,10 +1149,10 @@ fn dropping_the_watcher_releases_everything() {
     let probe = w.probe();
     assert!(!probe.released());
     drop(w);
-    assert!(
-        probe.released(),
-        "the thread ended and the source dropped its sink"
-    );
+    // The drop is bounded (I6); under load the thread may end just after it (fix round 3).
+    poll_until("the thread ended and the source dropped its sink", || {
+        probe.released()
+    });
     assert_eq!(handle.watched(), Vec::<PathBuf>::new());
 }
 
@@ -1168,7 +1168,7 @@ fn a_closed_receiver_ends_the_watcher() {
     poll_until("the watcher unwatches", || handle.watched().is_empty());
     assert_eq!(handle.watched(), Vec::<PathBuf>::new());
     drop(w);
-    assert!(probe.released());
+    poll_until("the thread ended", || probe.released());
 }
 
 #[test]
@@ -2324,4 +2324,64 @@ fn the_watcher_rearms_a_source_that_stopped_silently() {
         e.contains(&WatchEvent::Created(rel("b.sql")))
     });
     assert!(*watches.lock().unwrap() >= 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m4b-t09-watcher fix round 3 (re-review I-fr2-1, m-fr2-1).
+
+/// P14 (re-review probe), on a fake clock: a checkout that takes 4 s (one changed file per
+/// millisecond, 4,000 files, never a quiet window) is only rescans, never per-file events,
+/// except for the one file a tab has open (R-T9-6).
+#[test]
+fn slow_checkout_per_file_events() {
+    let names: Vec<String> = (0..4_000).map(|i| format!("many/f{i:04}.sql")).collect();
+    let files: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "SELECT 1;")).collect();
+    let lib = Lib::new(&files);
+    let mut r = lib.rec();
+    r.remember(&rel("many/f2500.sql"), &lib.read_stamp("many/f2500.sql"));
+    let start = Instant::now() + Duration::from_secs(5);
+    let mut out = Vec::new();
+    for (i, n) in names.iter().enumerate() {
+        lib.write(n, "SELECT 2; -- topic");
+        let at = start + ms(i as u64);
+        r.push(lib.hint(n), at);
+        if i % 10 == 0 {
+            out.extend(r.tick(at));
+        }
+    }
+    out.extend(drain(&mut r, start + Duration::from_secs(10)));
+    let rescans = out.iter().filter(|e| **e == WatchEvent::Rescan).count();
+    let per_file: Vec<&WatchEvent> = out.iter().filter(|e| **e != WatchEvent::Rescan).collect();
+    assert!(rescans >= 1, "{out:?}");
+    assert_eq!(
+        per_file,
+        vec![&WatchEvent::Changed(rel("many/f2500.sql"))],
+        "rescans={rescans}"
+    );
+}
+
+/// m-fr2-1 (P12's shape): FSEvents can deliver one write in two batches. The second hint,
+/// for an unchanged stamp still within R-T9-3's window, is `PossiblyChanged` when no tab has
+/// the file open; once the consumer remembers what it re-read, it is nothing.
+#[test]
+fn a_second_hint_for_the_same_write_is_possibly_changed_unless_remembered() {
+    for remembered in [false, true] {
+        let lib = Lib::new(&[("a.sql", "SELECT 1;")]);
+        let mut r = lib.rec();
+        let start = Instant::now() + Duration::from_secs(5);
+        lib.write("a.sql", "SELECT 1; SELECT 2;");
+        let first = run(&mut r, vec![lib.hint("a.sql")], start);
+        assert_eq!(first, vec![WatchEvent::Changed(rel("a.sql"))]);
+        if remembered {
+            // The service reloads the tab and remembers what it read.
+            r.remember(&rel("a.sql"), &lib.read_stamp("a.sql"));
+        }
+        let second = run(&mut r, vec![lib.hint("a.sql")], start + ms(800));
+        let want = if remembered {
+            vec![]
+        } else {
+            vec![WatchEvent::PossiblyChanged(rel("a.sql"))]
+        };
+        assert_eq!(second, want, "remembered={remembered}");
+    }
 }

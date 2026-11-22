@@ -795,8 +795,20 @@ impl Reconciler {
         // Settle looks wait while a burst is still arriving (never a busy wake-up).
         let hold = self.debouncer.hold_until();
         let held = |t: Option<Instant>| t.map(|t| hold.map_or(t, |h| t.max(h)));
+        // Fix round 3 (R-T9-6): an open file's look is never held.
+        let settle = self
+            .settle
+            .iter()
+            .map(|(rel, t)| {
+                if self.is_open(rel) {
+                    *t
+                } else {
+                    hold.map_or(*t, |h| (*t).max(h))
+                }
+            })
+            .min();
         [
-            held(self.settle.next()),
+            settle,
             held(self.scan_due),
             self.debouncer.due(),
             self.debouncer.pending_at(),
@@ -805,6 +817,11 @@ impl Reconciler {
         .into_iter()
         .flatten()
         .min()
+    }
+
+    /// Whether a tab has `rel` open (its content hash is known: R-T9-6).
+    fn is_open(&self, rel: &RelPath) -> bool {
+        self.known.get(rel).is_some_and(|k| k.hash.is_some())
     }
 
     /// The files known now (for tests and diagnostics).
@@ -862,11 +879,18 @@ impl Reconciler {
         // one by one.
         let holding = self.debouncer.holding(now);
         let mut settled: Vec<(RelPath, Option<Seen>, bool)> = Vec::new();
-        let due = if holding {
-            Vec::new()
-        } else {
-            self.settle.take_due(now)
-        };
+        let mut due = self.settle.take_due(now);
+        if holding {
+            // Fix round 3 (R-T9-6): an open file settles even while a burst holds the rest;
+            // the others wait for the hold's end (or the rescan, which drops them).
+            let hold = self.debouncer.hold_until().unwrap_or(now);
+            let (open, wait): (Vec<RelPath>, Vec<RelPath>) =
+                due.into_iter().partition(|rel| self.is_open(rel));
+            for rel in wait {
+                self.settle.schedule(rel, hold);
+            }
+            due = open;
+        }
         for rel in due {
             let Some(c) = self.candidates.get(&rel).cloned() else {
                 continue;

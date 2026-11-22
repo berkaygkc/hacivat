@@ -62,6 +62,8 @@ struct Real {
     rt: tokio::runtime::Runtime,
     rx: mpsc::Receiver<WatchBatch>,
     seen: Vec<WatchEvent>,
+    /// When each event of `seen` arrived (fix round 3, m-fr2-1).
+    arrived: Vec<Instant>,
     sentinels: u32,
 }
 
@@ -86,6 +88,7 @@ impl Real {
             rt,
             rx,
             seen: Vec::new(),
+            arrived: Vec::new(),
             sentinels: 0,
         }
     }
@@ -99,7 +102,11 @@ impl Real {
                 .rt
                 .block_on(async { tokio::time::timeout(left, self.rx.recv()).await })
             {
-                Ok(Some(batch)) => self.seen.extend(batch),
+                Ok(Some(batch)) => {
+                    self.arrived
+                        .extend(std::iter::repeat_n(Instant::now(), batch.len()));
+                    self.seen.extend(batch);
+                }
                 Ok(None) => panic!("{what}: the watcher hung up; saw {:?}", self.seen),
                 Err(_) => panic!("{what}: not within 10 s; saw {:?}", self.seen),
             }
@@ -134,7 +141,11 @@ impl Real {
                 .rt
                 .block_on(async { tokio::time::timeout(left, self.rx.recv()).await })
             {
-                Ok(Some(batch)) => self.seen.extend(batch),
+                Ok(Some(batch)) => {
+                    self.arrived
+                        .extend(std::iter::repeat_n(Instant::now(), batch.len()));
+                    self.seen.extend(batch);
+                }
                 Ok(None) => panic!("{name}: the watcher hung up; saw {:?}", self.seen),
                 Err(_) => panic!("{name}: not within 10 s; saw {:?}", self.seen),
             }
@@ -142,7 +153,8 @@ impl Real {
     }
 
     /// The events seen, without the sentinels, and without a `PossiblyChanged` that repeats a
-    /// file already reported.
+    /// file reported `Created` or `Changed` less than R-T9-3's window (plus two debounce
+    /// windows of delivery) before it (fix round 3, m-fr2-1: never "any later time").
     ///
     /// Fix round 2 (root cause of a 1-in-60 failure of `external_in_place_write_is_seen`):
     /// FSEvents can deliver one write in two debounced batches (the write, then `sync_all`,
@@ -151,16 +163,22 @@ impl Real {
     /// open, so the ruled answer is `PossiblyChanged`. It names a file the test already saw
     /// reported; it is not a second change.
     fn reported(&self) -> Vec<WatchEvent> {
+        use hacivat_scripts::watch::{DEBOUNCE, RACY_WINDOW};
+        let window = RACY_WINDOW + DEBOUNCE * 2;
         let mut out: Vec<WatchEvent> = Vec::new();
-        for e in &self.seen {
+        for (i, e) in self.seen.iter().enumerate() {
             if matches!(e, WatchEvent::Created(r) | WatchEvent::Changed(r) | WatchEvent::Unsettled(r) | WatchEvent::PossiblyChanged(r) if r.as_str().starts_with("zz-sentinel-"))
             {
                 continue;
             }
             if let WatchEvent::PossiblyChanged(r) = e
-                && out
+                && self.seen[..i]
                     .iter()
-                    .any(|x| matches!(x, WatchEvent::Created(y) | WatchEvent::Changed(y) if y == r))
+                    .zip(&self.arrived[..i])
+                    .any(|(x, at)| {
+                        matches!(x, WatchEvent::Created(y) | WatchEvent::Changed(y) if y == r)
+                            && self.arrived[i].saturating_duration_since(*at) < window
+                    })
             {
                 continue;
             }
@@ -427,10 +445,24 @@ fn dropping_the_watcher_stops_its_threads() {
         let mut w = Real::with(&lib, WatchOpts::default(), source);
         w.sentinel(&lib);
         let probe = w.w.probe();
+        let started = Instant::now();
         drop(w);
-        // Its own thread was joined, and the source's debouncer thread (which holds the hint
-        // queue through the sink) was joined in the source's drop.
-        assert!(probe.released());
+        // The drop is bounded (fix round 1, I6: at most `DROP_JOIN_BOUND`, then the thread is
+        // abandoned, never waited for).
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Fix round 3 (root cause of 11 of 40 failures under parallel load): under load the
+        // thread's teardown (unwatch, the source's drop joining notify's debouncer thread) can
+        // outlast that bound, so the thread ends shortly after the drop returns. Condition
+        // wait, 10 s ceiling: its own thread ended, and the source's debouncer thread (which
+        // holds the hint queue through the sink) was joined in the source's drop.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !probe.released() {
+            assert!(
+                Instant::now() < deadline,
+                "the watcher's threads never ended"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 

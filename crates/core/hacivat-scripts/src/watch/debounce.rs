@@ -163,10 +163,19 @@ impl Debouncer {
     /// hint, but never longer than `max_wait` after the burst began (fix round 1, I7: the
     /// files of a `git checkout` must not settle one by one before the burst is known to
     /// overflow). `None` before the first hint.
+    ///
+    /// ## m4b-t09-watcher fix round 3 (I-fr2-1): while a burst has overflowed, the hold lasts
+    /// until its rescan is handed on ([`due`](Self::due)), with no fixed end: a slow
+    /// checkout's first thousand files never settle one by one before the rescan. (Open files
+    /// are the watcher's exception, R-T9-6.)
     pub fn hold_until(&self) -> Option<Instant> {
         let last = self.last_at?;
         let began = self.began.unwrap_or(last);
-        Some((last + self.window).min(began + self.max_wait))
+        let hold = (last + self.window).min(began + self.max_wait);
+        Some(match self.due() {
+            Some(due) => hold.max(due),
+            None => hold,
+        })
     }
 
     /// Whether reports wait at `now` ([`hold_until`](Self::hold_until)).
@@ -191,9 +200,12 @@ impl Debouncer {
             && now >= due
         {
             self.rescan = true;
-            // Fix round 2 (N1): counting starts afresh after each handed-on rescan, so a long
-            // run of moderate churn is never one ever-growing burst.
-            self.overflowed = None;
+            // Fix round 3 (I-fr2-1, reverting fr2's reset): a burst still going stays
+            // overflowed (swallowing, one rescan per `max_wait`); the count starts afresh only
+            // once the burst has been quiet for a window (a new burst, in `push_path`). Noise
+            // never counts (the watcher's name filter), so this cannot starve a real edit.
+            let going = self.last_at.is_some_and(|l| now < l + self.window);
+            self.overflowed = going.then_some(now);
             self.burst.clear();
         }
         if std::mem::take(&mut self.rescan) {
@@ -254,6 +266,11 @@ impl<K: Ord + Clone> SettleQueue<K> {
     /// The earliest time something is due.
     pub fn next(&self) -> Option<Instant> {
         self.due.values().min().copied()
+    }
+
+    /// Every key and when it is due.
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &Instant)> {
+        self.due.iter()
     }
 
     pub fn len(&self) -> usize {

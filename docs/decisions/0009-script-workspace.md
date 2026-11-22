@@ -841,3 +841,23 @@ The event half of HV-SCRIPT-08 (`crates/core/hacivat-scripts/src/watch/{mod,debo
 - **m-fr1-4:** a hint through a folder that became a link (`join_with` answers `LinkOnPath`) is reconciled by a scan. After the scan, the per-folder watches are re-synced, which removes a stray watch on the link's target. Test: `a_hint_through_a_linked_folder_triggers_a_scan_and_so_a_sync`.
 - **m-fr1-5: the backstop re-arms.** A backstop look that finds a difference no hint announced since the previous one (`TickInfo::rearm`) makes the watcher unwatch and re-watch the root of an OS source, and say `WatchEvent::BackendRearmed`. If the re-watch fails, the library falls back to polling. A per-folder source is not re-armed this way (it is Linux's, and has no backstop). Tests: `a_backstop_look_finding_an_unannounced_change_asks_for_a_rearm`, `the_watcher_rearms_a_source_that_stopped_silently`.
 - **m-fr1-6: residual of R-T9-3.** A tool that restores an old modification time (`rsync -t`, `cp -p`, `touch -r`, `tar x`) on a file last seen well after that time keeps `(len, mtime)` equal and outside the racy window, so the edit is not seen until the next one. These are git's racy-clean semantics. A same-length edit restored this way is reported only if a tab re-reads the file. Seeing it would mean hashing every file on every look.
+
+### Fix round 3 (re-review I-fr2-1, m-fr2-1, m-fr2-2)
+
+- **I-fr2-1: a slow checkout is one rescan again.** fr2 had two causes:
+  - the hold ended at `began + 2 s` while an overflowed burst's rescan was due later, so the first thousand files settled one by one;
+  - fr2's count reset after a forced rescan, so the rest of a still-going burst was reported per file.
+
+  Now:
+  - While a burst has overflowed, `Debouncer::hold_until` lasts until its rescan is handed on, with no fixed end.
+  - After a `max_wait`-forced rescan of a burst that is still going, the burst stays overflowed: it keeps swallowing hints and gets one rescan per 2 s. The count starts afresh only once the burst has been quiet for a window. That reverts fr2's reset; the name filter alone keeps noise from ever counting (P8 still passes).
+  - The R-T9-6 exception holds inside the hold. A candidate whose file is open (a known hash) settles at its normal time, so `next_due` never holds it, and the rescan's `learn_state` keeps an open file's change back as before.
+
+  Tests:
+  - `slow_checkout_per_file_events` (P14 on a fake clock: 4,000 files rewritten one per millisecond over 4 s, one of them open). Result: only `Rescan`s plus `Changed` for the open file. The RED run gave 1,992 per-file events.
+  - `an_endless_burst_still_rescans_every_two_seconds` (rescans at 2 s and 4 s, then once quiet).
+  - `git_checkout_2000_is_one_rescan` now passes under parallel load (three `watch_real` and one `watch` at once).
+- **m-fr2-1: the double report is pinned.** `a_second_hint_for_the_same_write_is_possibly_changed_unless_remembered` (P12's shape): a second hint for the same write within R-T9-3's window is `PossiblyChanged` when no tab has the file open, and nothing once the consumer has remembered what it re-read.
+  - The real-OS test helper drops such a `PossiblyChanged` only when it arrives within `RACY_WINDOW` plus two debounce windows of the same file's `Created` or `Changed`. Before, it was any later time.
+  - Carry for T10: call `Watcher::remember` after every read or reload of an open tab, and treat `PossiblyChanged` as "re-hash; act only if the hash differs". A re-hash that matches never reaches the user.
+- **m-fr2-2:** re-arm (m-fr1-5) is not supported for a per-folder source. Unwatching its sole root stops its debouncer (m-fr1-3), so the re-watch fails and the library falls back to polling (`BackendLost(Failed)`). That never happens with today's defaults: the backstop is Windows-only and per-folder watching is Linux-only. Changing either default needs a re-arm that rebuilds the per-folder source.
