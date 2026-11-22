@@ -192,6 +192,12 @@ pub enum UnknownWhy {
     /// Not a regular file, link or folder (an untracked FIFO, socket or device; m5).
     NotAFile,
     // ## m4b-t07-git
+    // ## m4b-cifix-2-index-paths (review C2, R-CI2-2)
+    /// The index names it with a component that is not a plain name (a separator, a drive or
+    /// UNC prefix, `.`/`..`, an NTFS stream or reserved name, `.git`): the path is never
+    /// joined, looked up or compared on disk.
+    UnsafePath,
+    // ## m4b-cifix-2-index-paths
 }
 
 /// Bounds of one status call.

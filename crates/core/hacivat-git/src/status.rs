@@ -364,9 +364,13 @@ fn collect(
                 continue;
             }
             let head = comps[..n].join("/");
+            // ## m4b-cifix-2-index-paths (review C2, R-CI2-2): `head` is untrusted index
+            // content; only a plain one, joined lexically under the worktree, is ever looked at
+            // (a UNC `\\host\share` head would otherwise make Windows contact the host).
             if heads.insert(head.clone())
                 && map::lib_relative(p, prefix, icase, &none).is_none()
-                && map::same_file(&found.worktree.join(&head), library)
+                && map::alias_candidate(&found.worktree, &head)
+                    .is_some_and(|candidate| map::same_file(&candidate, library))
             {
                 aliases.insert(head);
             }
@@ -402,6 +406,16 @@ fn collect(
     let mut tracked: Vec<(BString, gix::index::entry::Mode)> = Vec::new();
     for entry in on_disk.entries() {
         let path = entry.path(&on_disk);
+        // ## m4b-cifix-2-index-paths (review C2, R-CI2-2): an entry whose path is not made of
+        // plain names leaves the index copy, so gix never stats it either, and is
+        // `Unknown(UnsafePath)` when it falls in the library; nothing joins it to a directory.
+        if !map::is_plain_index_path(path) {
+            if rel_of(path).is_some() {
+                badges.add(path, FileStatus::Unknown(UnknownWhy::UnsafePath));
+            }
+            dataless_paths.insert(path.to_owned());
+            continue;
+        }
         let Some(rel) = rel_of(path) else {
             continue;
         };

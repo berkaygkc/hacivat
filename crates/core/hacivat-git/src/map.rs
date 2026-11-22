@@ -37,8 +37,53 @@ fn rank(s: FileStatus) -> u8 {
         FileStatus::Unknown(UnknownWhy::NotAFile) => 6,
         FileStatus::Unknown(UnknownWhy::Dataless) => 7,
         FileStatus::Unknown(UnknownWhy::Submodule) => 8,
+        // ## m4b-cifix-2-index-paths: the index path itself is not trusted.
+        FileStatus::Unknown(UnknownWhy::UnsafePath) => 9,
     }
 }
+
+// ## m4b-cifix-2-index-paths (review C2, R-CI2-2)
+/// Whether an index path (`/`-separated bytes, untrusted repository content) is made of plain
+/// names only, so that joining it under the worktree names a path inside the worktree on every
+/// OS. Each component must pass `gix_validate::path::component` with the Windows, NTFS and HFS
+/// protections on (`Options::default()`): no empty, `.` or `..` component, no `/` or `\`, no
+/// drive (`C:`) or UNC (`\\host\share`, `\\?\`) prefix, no NTFS stream (`a:b`), reserved device
+/// name or `.git` spelling (`GIT~1`, `.git ` …). On Unix an absolute index path (`/net/x`)
+/// starts with an empty component. Nothing else in this crate joins an index path to a
+/// directory before this holds (T7's Unix automounter case, `/net/<host>`, included).
+pub(crate) fn is_plain_index_path(path: &[u8]) -> bool {
+    use gix::validate::path::component::Options;
+    !path.is_empty()
+        && path.split(|b| *b == b'/').all(|c| {
+            gix::validate::path::component(c.as_bstr(), None, Options::default()).is_ok()
+                && c.to_str().is_ok_and(|s| {
+                    let mut parts = Path::new(s).components();
+                    matches!(
+                        (parts.next(), parts.next()),
+                        (Some(std::path::Component::Normal(_)), None)
+                    )
+                })
+        })
+}
+
+/// An index folder spelling that n2 may compare with the library folder: plain
+/// ([`is_plain_index_path`]), with no 8.3 short-name component (`SCRIPT~1`: another spelling
+/// than a case-only rename, which the alias is for), joined under `worktree` and still under
+/// it, component for component. `None` means: never touched.
+pub(crate) fn alias_candidate(worktree: &Path, head: &str) -> Option<PathBuf> {
+    let short_name = |c: &str| {
+        c.as_bytes()
+            .windows(2)
+            .any(|w| w[0] == b'~' && w[1].is_ascii_digit())
+    };
+    if !is_plain_index_path(head.as_bytes()) || head.split('/').any(short_name) {
+        return None;
+    }
+    let joined = worktree.join(head);
+    let depth = worktree.components().count() + head.split('/').count();
+    (joined.starts_with(worktree) && joined.components().count() == depth).then_some(joined)
+}
+// ## m4b-cifix-2-index-paths
 
 /// The stronger of two badges.
 pub(crate) fn stronger(a: FileStatus, b: FileStatus) -> FileStatus {
@@ -92,6 +137,13 @@ impl Badges {
             let Some((rel, prefix_case)) = lib_relative(repo_path, prefix, icase, aliases) else {
                 continue;
             };
+            // ## m4b-cifix-2-index-paths (C2): keyed as the index spells it, never looked up.
+            if !is_plain_index_path(rel.as_bytes()) {
+                let s = FileStatus::Unknown(UnknownWhy::UnsafePath);
+                let e = out.entry(GitPath::new(&rel)).or_insert(s);
+                *e = stronger(*e, s);
+                continue;
+            }
             let Some(found) = lister.on_disk(library, &rel) else {
                 continue;
             };
@@ -217,7 +269,8 @@ impl Lister {
         let mut parts: Vec<String> = Vec::new();
         let mut case_only = false;
         for comp in rel.split('/') {
-            if comp.is_empty() || comp == "." || comp == ".." {
+            // ## m4b-cifix-2-index-paths (C2): no file-system call on a name that is not plain.
+            if !is_plain_index_path(comp.as_bytes()) {
                 return None;
             }
             let want = nfc(comp);
@@ -458,6 +511,98 @@ mod tests {
         std::fs::write(&p, b"select 1;\n").unwrap();
         assert!(!is_dataless(&std::fs::symlink_metadata(&p).unwrap()));
     }
+
+    // ## m4b-cifix-2-index-paths (review C2, R-CI2-2)
+    /// Hostile index spellings are never joined to a directory: not as an n2 alias head, not as
+    /// a path. Every case is refused on every OS (an index written on another system is read
+    /// here as-is).
+    #[test]
+    fn hostile_index_paths_are_never_candidates() {
+        let wt = Path::new(if cfg!(windows) {
+            r"C:\w\repo"
+        } else {
+            "/w/repo"
+        });
+        let hostile = [
+            r"\\host\share",   // UNC: Windows would contact the host
+            r"\\host\share/x", // the same, as the first of two components
+            r"C:\",            // a drive root
+            r"C:\x",           // a drive path
+            "C:",              // a bare drive
+            "c:x",             // drive-relative
+            r"\\?\C:\x",       // verbatim
+            r"\\.\pipe\x",     // a device namespace path
+            r"..\x",           // `..` behind a backslash
+            "..",              // the parent
+            "../x",            // the parent, then a name
+            "a/../b",          // a parent in the middle
+            ".",               // the folder itself
+            "/net/x",          // absolute (macOS's automounter)
+            "/abs",            // absolute
+            "a//b",            // an empty component
+            "a/",              // a trailing empty component
+            "lib:stream",      // an NTFS alternate data stream
+            "lib::$DATA",      // the default stream, spelled out
+            "CON",             // a reserved device name
+            "aux.sql",         // a reserved device name with an extension
+            "lib.",            // a trailing dot (NTFS drops it)
+            "lib ",            // a trailing space (NTFS drops it)
+            ".git",            // the repository itself
+            "GIT~1",           // its 8.3 short name
+            ".GIT",            // its case-folded spelling
+            "a\u{0}b",         // a NUL
+        ];
+        for h in hostile {
+            assert!(
+                !is_plain_index_path(h.as_bytes()),
+                "{h:?} passed as a plain path"
+            );
+            assert_eq!(
+                alias_candidate(wt, h),
+                None,
+                "{h:?} became an alias candidate"
+            );
+        }
+        // 8.3 short names are plain inside the worktree, but never an alias for a case-only
+        // rename.
+        for h in ["SCRIPT~1", "a/PROGRA~2"] {
+            assert!(is_plain_index_path(h.as_bytes()), "{h:?}");
+            assert_eq!(alias_candidate(wt, h), None, "{h:?}");
+        }
+        // Ordinary spellings stay candidates, under the worktree.
+        for h in ["\u{c7}al", "Scripts/\u{c7}al", ".github", "a.b", "x~y"] {
+            let c = alias_candidate(wt, h).unwrap_or_else(|| panic!("{h:?} refused"));
+            assert!(c.starts_with(wt), "{c:?}");
+        }
+        // Non-UTF-8 bytes are refused too.
+        assert!(!is_plain_index_path(b"lib/\xff.sql"));
+    }
+
+    /// An index path that is not plain is keyed as the index spells it, `Unknown(UnsafePath)`,
+    /// and nothing under the library is looked up for it (the library here does not exist, so
+    /// any lookup would drop the badge).
+    #[test]
+    fn an_unsafe_index_path_is_unknown_and_never_looked_up() {
+        let mut b = Badges::default();
+        b.add(BStr::new("lib/../../x.sql"), FileStatus::Modified);
+        b.add(BStr::new(r"lib/\\host\share"), FileStatus::New);
+        let out = b.into_library(
+            "lib",
+            false,
+            &BTreeSet::new(),
+            Path::new("/nonexistent-cifix2"),
+            &never,
+        );
+        assert_eq!(
+            out.get("../../x.sql"),
+            Some(&FileStatus::Unknown(UnknownWhy::UnsafePath))
+        );
+        assert_eq!(
+            out.get(r"\\host\share"),
+            Some(&FileStatus::Unknown(UnknownWhy::UnsafePath))
+        );
+    }
+    // ## m4b-cifix-2-index-paths
 
     // ## m4b-cifix-2-windows-alias
     /// n2's identity on every platform: the same folder under two spellings that only the file
