@@ -511,3 +511,53 @@ fn the_confirmation_dialog_is_safe_by_default(cx: &mut TestAppContext) {
         );
     });
 }
+
+// ## m4b-t11-editor (fix round 2, I-fr1-1)
+
+/// The reviewer's probe: `reload_preview` on an editable editor with a composition open. It
+/// is refused (`NotPreview`): only an editor that already is a preview takes a new preview
+/// text, so it can never overwrite unsaved edits (R-T11-1); the composition and the text stay.
+/// (T14 opens a file that grew past 20 MB as a new preview tab, never through this call.)
+#[gpui::test]
+fn reload_preview_refuses_an_editable_editor_and_its_composition(cx: &mut TestAppContext) {
+    let mut o = open(cx, "SELECT 1;\n");
+    move_to(&mut o, 9);
+    o.editor.update_in(o.vcx, |v, window, cx| {
+        v.replace_and_mark_text_in_range(None, "か", None, window, cx);
+    });
+    o.vcx.run_until_parked();
+    let spec = PreviewSpec {
+        shown_bytes: 11,
+        total_bytes: 30 * MB,
+    };
+    let got = o
+        .editor
+        .update(o.vcx, |v, cx| v.reload_preview("-- preview\n", spec, cx));
+    o.vcx.run_until_parked();
+    assert_eq!(got, Err(hacivat_ui_editor::ReloadRefused::NotPreview));
+    assert_eq!(text(&o), "SELECT 1;か\n");
+    assert!(o.vcx.read(|cx| o.editor.read(cx).status().composing));
+    assert_eq!(o.vcx.read(|cx| o.editor.read(cx).preview()), None);
+    assert_ne!(
+        o.vcx.read(|cx| o.editor.read(cx).status().tier),
+        Tier::Preview
+    );
+}
+
+/// On a preview, `reload_preview` replaces the text at once: never held (nothing waits for a
+/// composition or for held edits), so an `Ok` always means the new text is shown.
+#[gpui::test]
+fn reload_preview_replaces_a_preview_at_once(cx: &mut TestAppContext) {
+    let mut o = open(cx, "SELECT 1;\n");
+    preview(&mut o, 10, 30 * MB);
+    let spec = PreviewSpec {
+        shown_bytes: 11,
+        total_bytes: 31 * MB,
+    };
+    let got = o.editor.update(o.vcx, |v, cx| {
+        let got = v.reload_preview("-- preview\n", spec, cx);
+        // Read before anything else runs: the text is already the new one.
+        (got, v.snapshot().buffer.to_string(), v.preview())
+    });
+    assert_eq!(got, (Ok(()), "-- preview\n".to_string(), Some(spec)));
+}

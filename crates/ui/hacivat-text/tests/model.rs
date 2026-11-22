@@ -658,3 +658,15 @@ fn dispatch_prebuilt_fails_closed() {
     );
     assert_eq!(m.rope_edit_bytes(), 4);
 }
+
+// ## m4b-t11-editor (fix round 2, m-fr1-1)
+
+/// In debug builds a prebuilt text of the right length but the wrong content is caught.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a prebuilt text must be the change applied to this exact version")]
+fn dispatch_prebuilt_checks_the_content_in_debug_builds() {
+    let mut m = EditorModel::new("abc", ModelConfig::default());
+    let tr = insert_tr(m.buffer(), 3, "d");
+    let _ = m.dispatch_prebuilt(tr, TextBuffer::from_str("abcx"));
+}

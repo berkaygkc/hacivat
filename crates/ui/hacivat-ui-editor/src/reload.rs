@@ -69,6 +69,11 @@ pub enum ReloadRefused {
     /// composition's text included), which a reload never overwrites. The host shows its
     /// "Changed on disk" bar.
     Edited { version: u64 },
+    // ## m4b-t11-editor (fix round 2, I-fr1-1)
+    /// `reload_preview` on an editor that is not a preview: an editable editor's text is
+    /// replaced only through `replace_from_disk` at the host's clean version (R-T11-1); a file
+    /// that grew past 20 MB opens as a new preview instead.
+    NotPreview,
 }
 
 /// A T2 read-only preview (UI-EDIT-23 step 1): the first `shown_bytes` of a file of
@@ -373,22 +378,29 @@ impl EditorView {
         cx.notify();
     }
 
-    /// Replaces a preview's text and sizes (the host read the file's first part again): the one
-    /// way to change a preview's text (`set_text` leaves a preview alone, m1). Refused past
-    /// `TierLimits::preview_bytes`; it makes the editor a preview when it was not one.
+    /// Replaces a preview's text and sizes: the host read the first part of the file again
+    /// (T14, when a previewed file changes on disk). The one way to change a preview's text
+    /// (`set_text` leaves a preview alone, m1). ## fix round 2 (I-fr1-1): refused
+    /// (`NotPreview`) unless the editor already is a preview, so it can never overwrite an
+    /// editable editor's unsaved edits (R-T11-1; a file that grew past 20 MB opens as a new
+    /// preview tab); refused past `TierLimits::preview_bytes`. Never held: an open
+    /// composition is discarded first and the text replaced at once, so `Ok` means the new
+    /// text is shown.
     pub fn reload_preview(
         &mut self,
         text: &str,
         spec: PreviewSpec,
         cx: &mut Context<Self>,
     ) -> Result<(), ReloadRefused> {
+        if self.tier.tier != Tier::Preview {
+            return Err(ReloadRefused::NotPreview);
+        }
         let bytes = text.len() as u64;
         if bytes > self.config.tiers.preview_bytes {
             return Err(ReloadRefused::TooLarge { bytes });
         }
-        self.preview_text_allowed = true;
-        self.set_text(text, cx);
-        self.preview_text_allowed = false;
+        ime::discard_composition(self, cx);
+        self.replace_all(text, cx);
         self.model.clear_history();
         self.set_preview(spec, cx);
         Ok(())

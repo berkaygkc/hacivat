@@ -299,7 +299,9 @@ impl EditorModel {
     /// [`EditorModel::dispatch`] with `after`, the text `tr.changes` makes from the current
     /// text, built elsewhere (off the UI thread, from a snapshot of this very version): it is
     /// swapped in instead of applying the change in place, so the commit costs O(sections), not
-    /// O(bytes changed). The caller guarantees `after`'s content; the model checks its length.
+    /// O(bytes changed). The caller builds `after` from this exact version (a snapshot taken at
+    /// the current `version()`) and guarantees its content; the model checks its length, and
+    /// in debug builds its content hash.
     /// A change the checks or the filters rewrite is applied in place as usual (correct, only
     /// slower). A wrong length is vetoed (`editor-veto-stale-change`): nothing changes.
     pub fn dispatch_prebuilt(
@@ -309,6 +311,22 @@ impl EditorModel {
     ) -> Result<Committed, Veto> {
         if after.len_bytes() != tr.changes.len_new() {
             return Err(Veto("editor-veto-stale-change"));
+        }
+        // ## m4b-t11-editor (fix round 2, m-fr1-1): in debug builds, the content too (O(text),
+        // debug only): `after` is the change applied to this exact text.
+        #[cfg(debug_assertions)]
+        if tr.changes.len_old() == self.buffer.len_bytes()
+            && tr.changes.edits().all(|(r, _)| {
+                self.buffer.is_char_boundary(r.start) && self.buffer.is_char_boundary(r.end)
+            })
+        {
+            let mut expected = self.buffer.clone();
+            tr.changes.apply(&mut expected);
+            debug_assert_eq!(
+                expected.content_hash(),
+                after.content_hash(),
+                "a prebuilt text must be the change applied to this exact version"
+            );
         }
         self.run(tr, Action::Edit, Some(after))
     }

@@ -243,8 +243,6 @@ pub struct EditorView {
     /// Lines `longest_touched` measured on the UI thread since the editor was made
     /// ([`EditorView::ui_work`]).
     pub(crate) lines_measured: u64,
-    /// `reload_preview` is replacing a preview's text: `set_text` lets it through.
-    pub(crate) preview_text_allowed: bool,
     /// The snapshot the fan-out last saw (the scroll rebase and the reveal rule read it).
     fanned: Snapshot,
     /// `commit` marked the probe's input before its dispatch; the fan-out does not mark again.
@@ -384,7 +382,6 @@ impl EditorView {
             reload: None,
             longest_measured: false,
             lines_measured: 0,
-            preview_text_allowed: false,
             fanned,
             input_marked: false,
             context_point: None,
@@ -437,13 +434,20 @@ impl EditorView {
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         // ## m4b-t11-editor (fix round 1, m1; named item): a T2 preview is the file's first
         // part; only the host's `reload_preview` replaces it.
-        if self.tier.tier == Tier::Preview && !self.preview_text_allowed {
+        if self.tier.tier == Tier::Preview {
             return;
         }
         // ## m3a-t27-ime-clipboard (named exception, R-M3-7 corrected): held while composing.
         if ime::defer_while_composing(self, ime::AppEdit::SetText(text.to_string())) {
             return;
         }
+        self.replace_all(text, cx);
+    }
+
+    // ## m4b-t11-editor (fix round 2, I-fr1-1; named item)
+    /// The whole text replaced by `text` now (`set_text`'s body, never held): the caller has
+    /// made sure no composition is open (`reload_preview` discards one first).
+    pub(crate) fn replace_all(&mut self, text: &str, cx: &mut Context<Self>) {
         let len = self.model.snapshot().buffer.len_bytes();
         let Ok(changes) = ChangeSet::from_edits(len, [(0..len, Arc::from(text))]) else {
             return;
@@ -665,9 +669,11 @@ impl EditorView {
     }
 
     // ## m4b-t11-editor (fix round 1, I2; named item)
-    /// The text work the UI thread did for this editor's commits since it was made: bytes
-    /// edited in the rope in place, and lines measured for the long-line rule. A reload from
-    /// disk adds neither (its text is built and measured off the UI thread), whatever its size.
+    /// A proxy for the UI thread's share of this editor's commits since it was made, counting
+    /// the two costs that grow with a change (not a time, and not the fan-out's other work;
+    /// the perf gate times it): bytes edited in the rope in place, and lines measured for the
+    /// long-line rule. A reload from disk adds neither (its text is built and measured off the
+    /// UI thread), whatever its size.
     pub fn ui_work(&self) -> UiWork {
         UiWork {
             rope_edit_bytes: self.model.rope_edit_bytes(),

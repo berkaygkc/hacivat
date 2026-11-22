@@ -1465,3 +1465,15 @@ read-only preview and the 20–100 MB paste confirmation. `hacivat-text` gains
     follows the region (L15(d)); a tr-TR test expects "42,6 MB". The mock's `nf()` is noted in
     NOTES §9 as a mock error.
   - **m8:** the paste question's shot is staged over a console with a script.
+- *Fix round 2 (re-review I-fr1-1, m-fr1-1, m-fr1-2).*
+  - `reload_preview(text, spec)` refuses with `ReloadRefused::NotPreview` unless the editor is
+    already a preview. It can therefore never overwrite an editable editor's unsaved edits
+    (R-T11-1).
+  - This matches how T14 calls it: a previewed file changes on disk, and the host reads its
+    first part again. A file that grows past 20 MB opens as a new preview tab instead.
+  - It is never held. An open composition is discarded first, and the text is replaced at
+    once (`EditorView::replace_all`, `set_text`'s body without the hold), so `Ok` means the
+    new text is shown.
+  - `dispatch_prebuilt` checks the prebuilt text's content hash in debug builds. Its doc says
+    the caller builds it from this exact version.
+  - `ui_work` is documented as a proxy, not a time.
