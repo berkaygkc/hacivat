@@ -48,13 +48,21 @@ enum Problem {
     Diag(LibraryDiag),
     Polling(PollReason),
     Untrusted,
+    // ## m4b-t16-attach (named line; R-T9-1): nothing watches it; the popover suggests polling.
+    Unwatched,
 }
 
 fn problems(lib: &LibraryView<'_>) -> Vec<Problem> {
     let mut out: Vec<Problem> = lib.diagnostics().into_iter().map(Problem::Diag).collect();
-    if let LibraryState::Polling(r) = lib.library().state {
-        out.push(Problem::Polling(r));
+    // ## m4b-t16-attach (named exception; R-T9-1): a poll the user chose is not a problem, and
+    // a library nothing watches is one (the popover suggests "Every 2 seconds").
+    match lib.library().state {
+        LibraryState::Polling(PollReason::UserChoice) => {}
+        LibraryState::Polling(r) => out.push(Problem::Polling(r)),
+        LibraryState::Unwatched => out.push(Problem::Unwatched),
+        _ => {}
     }
+    // ## m4b-t16-attach
     if matches!(lib.git(), GitSummary::Untrusted(_)) {
         out.push(Problem::Untrusted);
     }
@@ -64,6 +72,13 @@ fn problems(lib: &LibraryView<'_>) -> Vec<Problem> {
 /// How many problems the library's row counts ("2 problems").
 pub(crate) fn count(lib: &LibraryView<'_>) -> usize {
     problems(lib).len()
+}
+
+// ## m4b-t16-attach (named exception)
+/// [`count`] for tests.
+#[cfg(feature = "test-support")]
+pub fn count_for_tests(lib: &LibraryView<'_>) -> usize {
+    count(lib)
 }
 
 fn manifest_line(d: &ManifestDiag, folder: &str, cx: &App) -> SharedString {
@@ -166,6 +181,8 @@ fn lines(p: &Problem, folder: &str, cx: &App) -> Vec<SharedString> {
             let reason = match r {
                 PollReason::WatchBudget => "watches",
                 PollReason::NetworkFs | PollReason::BackendLost => "network",
+                // ## m4b-t16-attach (named line): never listed (see `problems`).
+                PollReason::UserChoice => return Vec::new(),
             };
             vec![text(
                 cx,
@@ -173,6 +190,12 @@ fn lines(p: &Problem, folder: &str, cx: &App) -> Vec<SharedString> {
                 vec![("reason", arg(reason))],
             )]
         }
+        // ## m4b-t16-attach (named lines)
+        Problem::Unwatched => vec![text(
+            cx,
+            "hv-scripts-diag-unwatched",
+            vec![("folder", arg(folder))],
+        )],
         Problem::Untrusted => vec![
             tr_id(cx, "hv-scripts-diag-untrusted"),
             tr_id(cx, "hv-scripts-diag-untrusted-help"),

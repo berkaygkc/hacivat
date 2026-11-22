@@ -1383,6 +1383,80 @@ pub fn describe_key(
     Some((place.profile, place.database.clone(), place.library(), rel))
 }
 
+// ## m4b-t16-attach (named exception): the attach and mapping dialogs' questions, answered by
+// the same placement rule as the Scripts node (R-M4b-25, R-M4b-31, R-M4b-32).
+
+/// Whether a Scripts node can show under `database` of `p`, and the logical name it binds by
+/// there (`Some(None)`: a place with no logical name, which binds through a mapping only).
+/// `None`: no Scripts node ever shows there (a PostgreSQL database other than the one the
+/// profile's session is on, a SQLite database other than `main`).
+pub(crate) fn place_logical(p: &Profile, database: &str, cx: &App) -> Option<Option<LogicalDb>> {
+    Some(match database_level(p.engine) {
+        DbLevel::File => {
+            if database != "main" {
+                return None;
+            }
+            match &p.endpoint {
+                ProfileEndpoint::File { path, .. } => binding::logical_for_sqlite(path),
+                _ => None,
+            }
+        }
+        DbLevel::Database => {
+            let current =
+                crate::explorer::live::session_database(p.id, cx).or_else(|| p.database.clone());
+            if current.as_deref() != Some(database) {
+                return None;
+            }
+            LogicalDb::parse(database).ok()
+        }
+        DbLevel::SchemaIsDatabase => LogicalDb::parse(database).ok(),
+    })
+}
+
+/// The libraries the Scripts node under `(profile, database)` shows now (a local mapping
+/// first, else by name).
+pub(crate) fn bound_at(profile: ProfileId, database: &str, cx: &App) -> Vec<LibraryId> {
+    let (Some(inner), Some(p)) = (host(cx), self::profile(profile, cx)) else {
+        return Vec::new();
+    };
+    let Some(snap) = inner.snapshot() else {
+        return Vec::new();
+    };
+    libraries_at(&inner, &p, database, &snap, cx)
+}
+
+/// Every `(profile, database)` where a library binding one of `names` would show: the places
+/// the explorer lists and each profile's configured database (R-M4b-31), as Go to script's
+/// candidates are found.
+pub(crate) fn places_binding(names: &[LogicalDb], cx: &App) -> Vec<(ProfileId, String)> {
+    let profiles: Vec<Arc<Profile>> = cx
+        .try_global::<ConnectionsModel>()
+        .map(|m| m.profiles().to_vec())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for q in &profiles {
+        let mut dbs = asked_databases(q, cx);
+        let configured = match database_level(q.engine) {
+            DbLevel::File => Some("main".to_string()),
+            _ => q.database.clone(),
+        };
+        if let Some(db) = configured
+            && !dbs.contains(&db)
+        {
+            dbs.push(db);
+        }
+        for db in dbs {
+            if let Some(Some(logical)) = place_logical(q, &db, cx)
+                && names.iter().any(|n| n.same_db(&logical))
+            {
+                out.push((q.id, db));
+            }
+        }
+    }
+    out
+}
+// ## m4b-t16-attach
+
 #[cfg(test)]
 mod tests {
     use super::*;

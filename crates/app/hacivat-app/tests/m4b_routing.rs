@@ -131,6 +131,17 @@ const M4B_ROWS: &[Row] = &[
         None,
     ),
     // ## m4b-t13-explorer
+    // ## m4b-t16-attach (named exception): the database menu's "Map to a script library…" and
+    // "Script library settings…" (menu and palette only).
+    ("scripts.map", "ExplorerTree", "ExplorerTree", None, None),
+    (
+        "scripts.library_settings",
+        "Workspace",
+        "Workspace",
+        None,
+        None,
+    ),
+    // ## m4b-t16-attach
 ];
 
 /// `chord` in the keymap's canonical spelling.
@@ -296,7 +307,8 @@ fn m4b_stub_commands_are_disabled_and_out_of_the_palette(cx: &mut TestAppContext
     let stubs: Vec<&str> = scripts::STUB_COMMANDS.to_vec();
     // ## m4b-t13-explorer (named exception): `scripts.reveal` and `scripts.rename` are filled.
     // ## m4b-t14-tabs (named exception): `file.save` and `file.save_all` are filled.
-    assert_eq!(stubs.len(), 2);
+    // ## m4b-t16-attach (named exception): `scripts.attach` is filled.
+    assert_eq!(stubs.len(), 1);
     let (enabled, listed) = vcx.cx.read(|cx| {
         let reg = cx.global::<ActionRegistry>();
         let enabled: Vec<&'static str> = reg
@@ -388,9 +400,22 @@ fn every_m4b_title_id_exists_in_en_and_tr() {
         en_t13, tr_t13,
         "EN and TR hold the same ids, in the same order"
     );
+    // ## m4b-t16-attach (named exception): or in Task 16's block (`scripts.map`,
+    // `scripts.library_settings`), in English and Turkish alike.
+    let t16 = |ftl: &str| -> Vec<String> {
+        let (_, after) = ftl
+            .split_once("\n## m4b-t16-attach\n")
+            .expect("Task 16's block");
+        message_ids_in(after.split("\n## ").next().unwrap_or(after))
+    };
+    let (en_t16, tr_t16) = (t16(EN_UI), t16(TR_UI));
+    assert_eq!(en_t16, tr_t16);
     for (id, ..) in M4B_ROWS {
         let title = format!("hv-cmd-{}", id.replace(['.', '_'], "-"));
-        assert!(en.contains(&title) || en_t13.contains(&title), "{title}");
+        assert!(
+            en.contains(&title) || en_t13.contains(&title) || en_t16.contains(&title),
+            "{title}"
+        );
     }
 }
 
@@ -812,13 +837,27 @@ fn scripts_contributor_stub_adds_no_node_so_m4_shots_hold(cx: &mut TestAppContex
     });
     assert_eq!(opened, None);
     assert_eq!(tab_count(vcx), tabs_before);
-    // And the menu seam adds nothing: the database row's menu is M4's alone.
+    // And the menu seam adds nothing of the contributor's.
+    // ## m4b-t16-attach (named exception): only Task 16's two items, last.
     let menu = vcx
         .cx
         .read(|cx| node_menu(key_of(vcx, "app"), cx))
         .expect("a menu");
     assert!(menu.last().is_some_and(|m| !m.separator));
-    assert!(menu.iter().all(|m| !m.action.starts_with("scripts.")));
+    let scripts: Vec<String> = menu
+        .iter()
+        .map(|m| m.action.to_string())
+        .filter(|a| a.starts_with("scripts."))
+        .collect();
+    assert_eq!(scripts, ["scripts.attach", "scripts.map"]);
+    assert_eq!(
+        menu.iter()
+            .rev()
+            .take(2)
+            .map(|m| m.action.to_string())
+            .collect::<Vec<_>>(),
+        ["scripts.map", "scripts.attach"]
+    );
 }
 
 #[gpui::test]
@@ -1096,11 +1135,41 @@ fn database_and_schema_menus_end_with_the_scripts_items(cx: &mut TestAppContext)
             })
             .collect()
     };
-    // The stub: M4's menus, unchanged.
-    let m4_pg = actions(&menu(vcx, pg_db));
-    let m4_my = actions(&menu(vcx, my_schema));
-    let m2a_lite = actions(&root_menu(vcx, lite_id));
+    // ## m4b-t16-attach (named exception): Task 16 fills the seam: M4's menus and then its two
+    // items after a separator; on the SQLite root before the last Delete…; none on a
+    // PostgreSQL profile root. What is before them is M4's (and M2a's) menu, unchanged.
+    let filled = |items: Vec<String>| -> Vec<String> {
+        let n = items.len();
+        assert_eq!(
+            items[n - 3..],
+            [
+                "—".to_string(),
+                "scripts.attach".into(),
+                "scripts.map".into()
+            ],
+            "{items:?}"
+        );
+        items[..n - 3].to_vec()
+    };
+    let m4_pg = filled(actions(&menu(vcx, pg_db)));
+    let m4_my = filled(actions(&menu(vcx, my_schema)));
+    let lite_filled = actions(&root_menu(vcx, lite_id));
+    let n = lite_filled.len();
+    assert_eq!(
+        lite_filled[n - 5..],
+        [
+            "—".to_string(),
+            "scripts.attach".into(),
+            "scripts.map".into(),
+            "—".into(),
+            "connection.delete".into()
+        ],
+        "{lite_filled:?}"
+    );
+    let mut m2a_lite = lite_filled[..n - 5].to_vec();
+    m2a_lite.push("connection.delete".into());
     let m2a_pg_root = actions(&root_menu(vcx, pg_id));
+    // ## m4b-t16-attach
     assert_eq!(
         m4_pg.last().map(String::as_str),
         Some("explorer.collapse_children")

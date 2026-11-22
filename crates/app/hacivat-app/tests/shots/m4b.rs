@@ -77,13 +77,29 @@ pub(super) enum M4b {
     /// connection, connected: the capsule, the hairline and the status segment follow it.
     ScriptConnectedProd,
     // ## m4b-t14-tabs
+    // ## m4b-t16-attach: surfaces 3 and 4.
+    /// Surface 3: a new library from orders-prod's database, name and aliases typed: the exact
+    /// `.hacivat/workspace.toml` it writes, and where it will show.
+    AttachNew,
+    /// Surface 3: a folder with a teammate's `workspace.toml` (comments kept, read only).
+    AttachFound,
+    /// Surface 3: "Show a script library under orders_p", the share box ticked: the edited file
+    /// with the added line on the selection tint.
+    MapShare,
+    /// Surface 4: Settings › Script libraries: a watched library with a local mapping and one
+    /// checked every 2 seconds by choice.
+    LibrarySettings,
+    /// Surface 4: "Remove orders-scripts from Hacivat?" (Remove Default, Cancel focused).
+    LibraryRemove,
+    // ## m4b-t16-attach
 }
 
 /// Every M4b state, in shot order.
 // ## m4b-t13-explorer: Task 13's four after Task 11's two.
 // ## m4b-t13-explorer fix round 1 (review m7): and its four more.
 // ## m4b-t14-tabs (named exception): Task 14's states after Task 11's.
-pub(super) const M4B_STATES: [M4b; 18] = [
+// ## m4b-t16-attach (named exception): Task 16's five after Task 14's.
+pub(super) const M4B_STATES: [M4b; 23] = [
     M4b::T2Preview,
     M4b::PasteConfirm,
     M4b::ScriptsProd,
@@ -102,6 +118,12 @@ pub(super) const M4B_STATES: [M4b; 18] = [
     M4b::ScriptRemoved,
     M4b::ScriptUnsaved,
     M4b::ScriptConnectedProd,
+    // ## m4b-t16-attach
+    M4b::AttachNew,
+    M4b::AttachFound,
+    M4b::MapShare,
+    M4b::LibrarySettings,
+    M4b::LibraryRemove,
 ];
 
 /// The preview's file: 148 MB (the mock's).
@@ -137,6 +159,12 @@ impl M4b {
             M4b::ScriptRemoved => "m4b-script-removed",
             M4b::ScriptUnsaved => "m4b-script-unsaved",
             M4b::ScriptConnectedProd => "m4b-script-connected-prod",
+            // ## m4b-t16-attach
+            M4b::AttachNew => "m4b-scripts-attach-new",
+            M4b::AttachFound => "m4b-scripts-attach-found",
+            M4b::MapShare => "m4b-scripts-map-share",
+            M4b::LibrarySettings => "m4b-scripts-settings",
+            M4b::LibraryRemove => "m4b-scripts-settings-remove",
         }
     }
 
@@ -162,6 +190,11 @@ impl M4b {
             | M4b::ScriptUnlisted
             | M4b::ScriptRunRefused
             | M4b::ScriptRemoved => ("hacivat-ui/src/notice.rs:", None),
+            // ## m4b-t16-attach
+            M4b::AttachNew | M4b::AttachFound => ("#scripts-attach-file-path", None),
+            M4b::MapShare => ("#scripts-map-subtitle", None),
+            M4b::LibrarySettings => ("#button-label-scripts-set-attach", None),
+            M4b::LibraryRemove => ("hacivat-ui/src/dialog.rs:", None),
         }
     }
 
@@ -186,11 +219,20 @@ impl M4b {
             | M4b::ScriptTabs
             | M4b::ScriptConnectedProd
             | M4b::ScriptUnsaved => &[],
+            // ## m4b-t16-attach
+            M4b::AttachNew => &["#scripts-attach-file-line-0"],
+            M4b::AttachFound => &["#scripts-attach-found-head"],
+            M4b::MapShare => &["#scripts-attach-file-line-0"],
+            M4b::LibrarySettings | M4b::LibraryRemove => &[],
         }
     }
 
     /// Brings the state's fixtures on screen in a freshly started shell.
     pub(super) fn open(self, window: &mut Window, cx: &mut App) {
+        // ## m4b-t16-attach
+        if self.is_t16() {
+            return t16::open(self, window, cx);
+        }
         // ## m4b-t13-explorer
         if self == M4b::ScriptsEngines {
             return scripts::open_engines(window, cx);
@@ -218,6 +260,19 @@ impl M4b {
             api.database = Some("api".into());
             save(cx, api);
         }
+    }
+
+    // ## m4b-t16-attach
+    /// A Task 16 state (surfaces 3 and 4).
+    fn is_t16(self) -> bool {
+        matches!(
+            self,
+            M4b::AttachNew
+                | M4b::AttachFound
+                | M4b::MapShare
+                | M4b::LibrarySettings
+                | M4b::LibraryRemove
+        )
     }
 
     // ## m4b-t14-tabs
@@ -261,11 +316,21 @@ impl M4b {
             | M4b::ScriptRemoved
             | M4b::ScriptUnsaved
             | M4b::ScriptConnectedProd => None,
+            // ## m4b-t16-attach
+            M4b::AttachNew
+            | M4b::AttachFound
+            | M4b::MapShare
+            | M4b::LibrarySettings
+            | M4b::LibraryRemove => None,
         }
     }
 
     /// The steps after [`M4b::open`].
     pub(super) fn steps(self) -> Vec<Step> {
+        // ## m4b-t16-attach
+        if self.is_t16() {
+            return t16::steps(self);
+        }
         // ## m4b-t13-explorer
         if self == M4b::ScriptsEngines {
             return scripts::engine_steps();
@@ -372,6 +437,12 @@ impl M4b {
             | M4b::ScriptRemoved
             | M4b::ScriptUnsaved
             | M4b::ScriptConnectedProd => Vec::new(),
+            // ## m4b-t16-attach: reached through `t16::steps` above.
+            M4b::AttachNew
+            | M4b::AttachFound
+            | M4b::MapShare
+            | M4b::LibrarySettings
+            | M4b::LibraryRemove => Vec::new(),
         }
     }
 }
@@ -575,6 +646,12 @@ fn script_steps(state: M4b) -> Vec<Step> {
         | M4b::ScriptsTooltip
         | M4b::ScriptsEngines
         | M4b::ScriptsTrashed => {}
+        // ## m4b-t16-attach: Task 16's states (`t16::steps`).
+        M4b::AttachNew
+        | M4b::AttachFound
+        | M4b::MapShare
+        | M4b::LibrarySettings
+        | M4b::LibraryRemove => {}
     }
     steps
 }
@@ -964,6 +1041,12 @@ mod scripts {
             | M4b::ScriptRemoved
             | M4b::ScriptUnsaved
             | M4b::ScriptConnectedProd => {}
+            // ## m4b-t16-attach: Task 16's states (`t16::steps`).
+            M4b::AttachNew
+            | M4b::AttachFound
+            | M4b::MapShare
+            | M4b::LibrarySettings
+            | M4b::LibraryRemove => {}
         }
         out
     }
@@ -1086,3 +1169,235 @@ mod scripts {
     }
 }
 // ## m4b-t13-explorer
+
+// ## m4b-t16-attach
+/// Task 16's states (surfaces 3 and 4): orders-prod (production) and orders-p (development, on
+/// the database `orders_p`), a library service over fake event sources, and fixture folders
+/// beside the app's own.
+mod t16 {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use hacivat_app::scripts::{attach_dialog, mapping, projection};
+    use hacivat_app::settings_ui::{self, Section};
+    use hacivat_proto::{EnvTag, ProfileId};
+    use hacivat_scripts::service::{LibraryService, ServiceOptions};
+    use hacivat_scripts::testing::FakeHandle;
+    use hacivat_scripts::{DatabaseName, LibraryState, LocalMapping, WatchMode};
+    use hacivat_ui_core::gpui_surface::{App, Window};
+
+    use super::super::m3a::{Step, step};
+    use super::{M4b, pg, profile_named, save};
+
+    const PROD: &str = "orders-prod";
+    const OTHER: &str = "orders-p";
+
+    fn write(dir: &std::path::Path, rel: &str, text: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().expect("a parent")).expect("the folder");
+        std::fs::write(p, text).expect("the file");
+    }
+
+    /// A fixture folder `name` holding a few scripts (and `manifest` when given).
+    fn folder(name: &str, manifest: Option<&str>) -> PathBuf {
+        let dir = super::super::support::temp_root().join(name);
+        for f in [
+            "daily.sql",
+            "reports/haftalık_rapor.sql",
+            "@production/purge.sql",
+        ] {
+            write(&dir, f, "SELECT 1;\n");
+        }
+        if let Some(m) = manifest {
+            write(&dir, ".hacivat/workspace.toml", m);
+        }
+        std::fs::canonicalize(&dir).expect("canonical")
+    }
+
+    /// The team's file (surface 3, "Found").
+    const TEAM: &str = "# The orders team's binding. Keep it in git.\nformat = 1\ndatabase = \"orders\"\naliases = [\"orders_main\"]\n";
+
+    fn start_service(cx: &mut App) -> Arc<LibraryService> {
+        let paths = cx.global::<hacivat_app::AppState>().paths.clone();
+        let rt = cx
+            .global::<hacivat_app::connections::ConnectionsModel>()
+            .runtime();
+        let svc = Arc::new(LibraryService::open_with(
+            &paths,
+            &rt,
+            FakeHandle::default().sources(),
+            ServiceOptions {
+                home: None,
+                ..ServiceOptions::default()
+            },
+        ));
+        projection::set_service(svc.clone(), cx);
+        svc
+    }
+
+    pub(super) fn open(state: M4b, _window: &mut Window, cx: &mut App) {
+        save(cx, pg(PROD, EnvTag::Production));
+        let mut other = pg(OTHER, EnvTag::Dev);
+        other.database = Some("orders_p".into());
+        save(cx, other);
+        let svc = start_service(cx);
+        let other = profile_named(cx, OTHER);
+        match state {
+            M4b::MapShare => {
+                let dir = folder("orders-scripts", Some(TEAM));
+                cx.spawn(async move |_| {
+                    let _ = svc.attach(dir, None, false).await;
+                })
+                .detach();
+            }
+            M4b::LibrarySettings | M4b::LibraryRemove => {
+                let first = folder("orders-scripts", Some(TEAM));
+                let second = folder("billing", None);
+                cx.spawn(async move |_| {
+                    let Ok(id) = svc.attach(first, None, false).await else {
+                        return;
+                    };
+                    if let Some(profile) = other {
+                        let _ = svc
+                            .map(
+                                LocalMapping {
+                                    profile,
+                                    database: DatabaseName::new("orders_p"),
+                                    library: id,
+                                },
+                                false,
+                            )
+                            .await;
+                    }
+                    if let Ok(b) = svc.attach(second, None, false).await {
+                        let _ = svc.set_watch(b, WatchMode::Poll).await;
+                    }
+                })
+                .detach();
+            }
+            _ => {}
+        }
+    }
+
+    /// The service has read its registry and every library is up.
+    fn ready(cx: &App, n: usize) -> bool {
+        projection::service(cx).is_some_and(|s| {
+            let snap = s.snapshot();
+            snap.state == LibraryState::Watching
+                && snap.libraries.len() == n
+                && snap
+                    .libraries
+                    .iter()
+                    .all(|l| matches!(l.state, LibraryState::Watching | LibraryState::Polling(_)))
+        })
+    }
+
+    fn profile(cx: &App, name: &str) -> Option<ProfileId> {
+        profile_named(cx, name)
+    }
+
+    pub(super) fn steps(state: M4b) -> Vec<Step> {
+        match state {
+            M4b::AttachNew => vec![
+                step(|_, _| {}, |_, cx| ready(cx, 0)),
+                step(
+                    |window, cx| {
+                        let Some(p) = profile(cx, PROD) else {
+                            return;
+                        };
+                        let dir = folder("orders-scripts", None);
+                        attach_dialog::open_at(
+                            dir,
+                            Some(attach_dialog::Origin {
+                                profile: p,
+                                database: "orders".into(),
+                            }),
+                            window,
+                            cx,
+                        );
+                    },
+                    |_, cx| attach_dialog::open_dialog(cx).is_some_and(|d| d.read(cx).is_ready()),
+                ),
+                step(
+                    |_, cx| {
+                        attach_dialog::fixtures::type_names("orders", "orders_main, sipariş", cx)
+                    },
+                    |_, cx| {
+                        attach_dialog::open_dialog(cx).is_some_and(|d| d.read(cx).can_attach(cx))
+                    },
+                ),
+            ],
+            M4b::AttachFound => vec![
+                step(|_, _| {}, |_, cx| ready(cx, 0)),
+                step(
+                    |window, cx| {
+                        let dir = folder("team-scripts", Some(TEAM));
+                        attach_dialog::open_at(dir, None, window, cx);
+                    },
+                    |_, cx| {
+                        attach_dialog::open_dialog(cx)
+                            .is_some_and(|d| d.read(cx).is_ready() && d.read(cx).found())
+                    },
+                ),
+            ],
+            M4b::MapShare => vec![
+                step(|_, _| {}, |_, cx| ready(cx, 1)),
+                step(
+                    |window, cx| {
+                        if let Some(p) = profile(cx, OTHER) {
+                            mapping::open_for(p, "orders_p".into(), window, cx);
+                        }
+                    },
+                    |_, cx| mapping::open_dialog(cx).is_some_and(|d| d.read(cx).is_ready()),
+                ),
+                step(
+                    |_, cx| mapping::fixtures::tick_share(cx),
+                    |_, cx| mapping::open_dialog(cx).is_some_and(|d| d.read(cx).shares_alias()),
+                ),
+            ],
+            M4b::LibrarySettings | M4b::LibraryRemove => {
+                let mut out = vec![
+                    step(
+                        |_, _| {},
+                        |_, cx| {
+                            ready(cx, 2)
+                                && projection::service(cx).is_some_and(|s| {
+                                    let snap = s.snapshot();
+                                    !snap.mappings.is_empty()
+                                        && snap.libraries.iter().any(|l| l.watch == WatchMode::Poll)
+                                })
+                        },
+                    ),
+                    step(
+                        |window, cx| {
+                            hacivat_ui::actions::ActionRegistry::run(
+                                "workspace.open_settings",
+                                window,
+                                cx,
+                            );
+                            settings_ui::fixtures::show_section(Section::Scripts, cx);
+                        },
+                        |_, cx| {
+                            settings_ui::fixtures::shown(cx)
+                                .is_some_and(|(s, _)| s == Section::Scripts)
+                        },
+                    ),
+                ];
+                if state == M4b::LibraryRemove {
+                    out.push(step(
+                        |window, cx| settings_ui::scripts::fixtures::ask_remove(0, window, cx),
+                        |window, cx| {
+                            window
+                                .root::<hacivat_app::shell::Workspace>()
+                                .flatten()
+                                .is_some_and(|ws| ws.read(cx).layer_ids().contains(&"dialog"))
+                        },
+                    ));
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+// ## m4b-t16-attach

@@ -148,7 +148,11 @@ async fn attach_writing_writes_exactly_the_text_it_was_given() {
     let id = r.svc.attach_writing(lib.clone(), m).await.unwrap();
     r.up(id).await;
     let written = std::fs::read(lib.join(".hacivat/workspace.toml")).unwrap();
-    assert_eq!(written, shown.as_bytes(), "the bytes written are the bytes shown");
+    assert_eq!(
+        written,
+        shown.as_bytes(),
+        "the bytes written are the bytes shown"
+    );
     // Only that one file was added to the folder.
     let mut after = tree(&lib);
     after.retain(|(n, _)| !n.starts_with(".hacivat"));
@@ -245,7 +249,9 @@ async fn map_sharing_writes_exactly_the_shown_edit_and_only_over_what_was_shown(
     std::fs::write(&file, &pulled).unwrap();
     assert_eq!(
         r.svc.map_sharing(m.clone(), p.bytes.clone()).await,
-        Err(hacivat_scripts::MapError::Alias(manifest::WriteError::Changed))
+        Err(hacivat_scripts::MapError::Alias(
+            manifest::WriteError::Changed
+        ))
     );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), pulled);
     assert!(r.svc.snapshot().mappings.is_empty());
@@ -379,15 +385,19 @@ async fn use_this_folder_adopts_a_replaced_root_and_keeps_its_mappings() {
     let rels: Vec<String> = snap
         .view(None)
         .library(id)
-        .map(|l| l.entries().iter().map(|e| e.rel.as_str().to_owned()).collect())
+        .map(|l| {
+            l.entries()
+                .iter()
+                .map(|e| e.rel.as_str().to_owned())
+                .collect()
+        })
         .unwrap_or_default();
     assert_eq!(rels, ["restored.sql"]);
-    assert!(
-        !snap
-            .view(None)
-            .library(id)
-            .is_some_and(|l| l.diagnostics().iter().any(|d| matches!(d, LibraryDiag::RootRefused(_))))
-    );
+    assert!(!snap.view(None).library(id).is_some_and(|l| {
+        l.diagnostics()
+            .iter()
+            .any(|d| matches!(d, LibraryDiag::RootRefused(_)))
+    }));
     // A second adopt on a served library is refused.
     assert_eq!(
         r.svc.adopt_root(id).await,
@@ -443,7 +453,11 @@ async fn an_unreadable_manifest_keeps_the_last_good_binding() {
     write_files(&lib, &["a.sql"]);
     std::fs::create_dir_all(lib.join(".hacivat")).unwrap();
     let file = lib.join(".hacivat/workspace.toml");
-    std::fs::write(&file, "format = 1\ndatabase = \"orders\"\naliases = [\"orders_p\"]\n").unwrap();
+    std::fs::write(
+        &file,
+        "format = 1\ndatabase = \"orders\"\naliases = [\"orders_p\"]\n",
+    )
+    .unwrap();
     let r = rig(app.path());
     r.ready().await;
     let id = r.svc.attach(lib.clone(), None, false).await.unwrap();

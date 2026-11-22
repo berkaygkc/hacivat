@@ -68,10 +68,13 @@ pub enum Section {
     History,
     // ## m4-t27-refresh-ui (named lines)
     Metadata,
+    // ## m4b-t16-attach (named line): Settings › Script libraries (its own content, no rows).
+    Scripts,
 }
 
 impl Section {
-    pub const ALL: [Section; 8] = [
+    // ## m4b-t16-attach (named line): 9 with Script libraries.
+    pub const ALL: [Section; 9] = [
         Section::General,
         Section::Appearance,
         Section::Keyboard,
@@ -82,6 +85,8 @@ impl Section {
         Section::History,
         // ## m4-t27-refresh-ui (named lines)
         Section::Metadata,
+        // ## m4b-t16-attach (named line)
+        Section::Scripts,
     ];
 
     /// The navigation label (and the section a search result names).
@@ -97,6 +102,8 @@ impl Section {
             Section::History => ids::hv::SETTINGS_NAV_HISTORY,
             // ## m4-t27-refresh-ui (named lines)
             Section::Metadata => ids::hv::SETTINGS_NAV_METADATA,
+            // ## m4b-t16-attach (named line)
+            Section::Scripts => ids::hv::SETTINGS_NAV_SCRIPTS,
         }
     }
 }
@@ -115,6 +122,8 @@ impl Section {
             Section::History => ids::hv::SETTINGS_SECTION_HISTORY,
             // ## m4-t27-refresh-ui (named lines)
             Section::Metadata => ids::hv::SETTINGS_SECTION_METADATA,
+            // ## m4b-t16-attach (named line)
+            Section::Scripts => ids::hv::SETTINGS_SECTION_SCRIPTS,
         }
     }
 }

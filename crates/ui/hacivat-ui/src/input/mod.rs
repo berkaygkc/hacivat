@@ -199,6 +199,16 @@ impl TextInput {
         self.mono = mono;
     }
 
+    // ## m4b-t16-attach (named exception; R-T33-1, R-M4b-43)
+    /// Makes the field a Tab stop of the window (GPUI's `focus_next`), in document order with
+    /// the buttons around it: the M4b dialogs list their fields and buttons in one order. Off
+    /// by default (every existing form traps Tab with its own order). GPUI reads the flag from
+    /// the tracked handle, so it is set on the handle itself.
+    pub fn set_tab_stop(&mut self, on: bool) {
+        self.focus_handle = self.focus_handle.clone().tab_stop(on);
+    }
+    // ## m4b-t16-attach
+
     /// Refuses edits (typing, IME, paste, cut, Backspace); the text can still be selected and
     /// copied (a form whose changes cannot be saved).
     pub fn set_read_only(&mut self, read_only: bool) {
