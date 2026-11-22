@@ -496,6 +496,27 @@ pub use crate::fileio::dir::with_procfs_absent;
 /// when the library already binds that name. Refuses a missing, linked, unreadable, invalid or
 /// newer manifest and a full alias list, and then writes nothing.
 pub fn add_alias(root: &Path, alias: &LogicalDb) -> Result<(), WriteError> {
+    add_alias_checked(root, alias, None)
+}
+
+// ## m4b-t16-attach (named exception): the mapping dialog shows exactly what is written.
+/// [`add_alias`] only while the manifest's bytes are still `before` (what the mapping dialog
+/// read and showed, [`ManifestPreview::bytes`]); a file changed since is refused with
+/// [`WriteError::Changed`] and nothing is written.
+pub fn add_alias_if_unchanged(
+    root: &Path,
+    alias: &LogicalDb,
+    before: &[u8],
+) -> Result<(), WriteError> {
+    add_alias_checked(root, alias, Some(before))
+}
+
+fn add_alias_checked(
+    root: &Path,
+    alias: &LogicalDb,
+    before: Option<&[u8]>,
+) -> Result<(), WriteError> {
+    // ## m4b-t16-attach
     let root_dir = Dir::open_root(root).map_err(write_error)?;
     let h = root_dir.subdir(HACIVAT).map_err(|e| match e {
         FsError::Io(e) if e.kind() == io::ErrorKind::NotFound => WriteError::NoManifest,
@@ -506,18 +527,37 @@ pub fn add_alias(root: &Path, alias: &LogicalDb) -> Result<(), WriteError> {
         FsError::Io(e) if e.kind() == io::ErrorKind::NotFound => WriteError::NoManifest,
         e => WriteError::Unreadable(read_diag(e)),
     })?;
+    // ## m4b-t16-attach (named lines)
+    if before.is_some_and(|b| b != bytes.as_slice()) {
+        return Err(WriteError::Changed);
+    }
     let folder = root.file_name().and_then(OsStr::to_str).unwrap_or("");
-    let read = read_bytes(&bytes, folder);
+    match with_alias(&bytes, folder, alias)? {
+        None => Ok(()),
+        Some(out) => replace(&h, &out, &meta),
+    }
+}
+
+/// The bytes [`add_alias`] writes for a manifest of `bytes` in a library folder named
+/// `folder` (`None`: the library binds `alias` already, nothing is written). Pure: the mapping
+/// dialog shows its result (R-M4b-8).
+pub fn with_alias(
+    bytes: &[u8],
+    folder: &str,
+    alias: &LogicalDb,
+) -> Result<Option<Vec<u8>>, WriteError> {
+    // ## m4b-t16-attach
+    let read = read_bytes(bytes, folder);
     if let Some(d) = read.diags.iter().find(|d| refuses_edit(d)) {
         return Err(WriteError::Unreadable(d.clone()));
     }
     let bound = read.logical(folder);
     if bound.is_some_and(|b| b.same_db(alias)) || read.aliases.iter().any(|a| a.same_db(alias)) {
-        return Ok(());
+        return Ok(None);
     }
 
     let bom = bytes.starts_with(BOM);
-    let text = std::str::from_utf8(bytes.strip_prefix(BOM).unwrap_or(&bytes))
+    let text = std::str::from_utf8(bytes.strip_prefix(BOM).unwrap_or(bytes))
         .map_err(|_| WriteError::Unreadable(Diag::NotUtf8))?;
     let mut doc: toml_edit::DocumentMut = text
         .parse()
@@ -556,7 +596,8 @@ pub fn add_alias(root: &Path, alias: &LogicalDb) -> Result<(), WriteError> {
     if out.len() > MANIFEST_MAX_BYTES {
         return Err(WriteError::Unreadable(Diag::TooLarge));
     }
-    replace(&h, &out, &meta)
+    // ## m4b-t16-attach (named line)
+    Ok(Some(out))
 }
 
 /// Whether a reading problem means the file must not be rewritten.
@@ -696,3 +737,79 @@ fn hacivat_creating(root: &Dir) -> Result<Dir, FsError> {
 }
 
 // ## m4b-t01a-seams
+
+// ## m4b-t16-attach (named exception): what the attach dialog shows of a folder's manifest.
+
+/// What the attach dialog shows of a folder's manifest (R-M4b-8, Q6): whether one is there,
+/// its text when it could be read, and what Hacivat makes of it. Read exactly as [`read`]
+/// reads (no link followed, never a FIFO, at most [`MANIFEST_MAX_BYTES`]).
+#[derive(Debug, Clone, Default)]
+pub struct ManifestPreview {
+    /// Something is at `.hacivat/workspace.toml` (or `.hacivat` itself is a link or a file):
+    /// the attach writes nothing and reads what is there.
+    pub present: bool,
+    /// The file's text (UTF-8, its BOM dropped) when it was read; untrusted, so it is shown
+    /// escaped (`names::escape_untrusted`).
+    pub text: Option<String>,
+    /// The file's bytes as read (empty when it was not read): what
+    /// [`add_alias_if_unchanged`] compares against.
+    pub bytes: Vec<u8>,
+    pub read: ManifestRead,
+}
+
+/// Reads `<library_dir>/.hacivat/workspace.toml` for the attach dialog.
+pub fn preview(library_dir: &Path) -> ManifestPreview {
+    let folder = library_dir
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("");
+    let found = Dir::open_root(library_dir)
+        .and_then(|root| root.subdir(HACIVAT))
+        .and_then(|h| read_manifest_file(&h));
+    match found {
+        Ok((bytes, _)) => {
+            let text = std::str::from_utf8(bytes.strip_prefix(BOM).unwrap_or(&bytes))
+                .ok()
+                .map(str::to_string);
+            ManifestPreview {
+                present: true,
+                text,
+                read: read_bytes(&bytes, folder),
+                bytes,
+            }
+        }
+        Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => ManifestPreview::default(),
+        Err(e) => ManifestPreview {
+            present: true,
+            text: None,
+            bytes: Vec::new(),
+            read: ManifestRead {
+                diags: vec![read_diag(e)],
+                ..ManifestRead::default()
+            },
+        },
+    }
+}
+
+/// Whether `d` says a manifest that is there could not be read or understood (R-T10-7: the
+/// library then keeps the binding it last read, instead of falling back to its folder name).
+/// A newer `format` is not one: it binds by folder name on purpose (R-M4b-21).
+pub fn is_read_failure(d: &Diag) -> bool {
+    matches!(
+        d,
+        Diag::LinkIgnored
+            | Diag::NotAFolder
+            | Diag::NotAFile
+            | Diag::Changed
+            | Diag::Unreadable(_)
+            | Diag::TooLarge
+            | Diag::NotUtf8
+            | Diag::TooDeep
+            | Diag::InvalidToml
+            | Diag::MissingFormat
+            | Diag::BadFormat
+            | Diag::WrongType(Field::Database)
+            | Diag::BadName(Field::Database, _)
+    )
+}
+// ## m4b-t16-attach

@@ -81,6 +81,8 @@ pub use fileio::{
 pub use names::{DatabaseName, LogicalDb, NameError};
 pub use pathsafe::{PathError, RelPath};
 pub use registry::{LibraryId, LibraryRoot, LocalMapping, RegistryError};
+// ## m4b-t16-attach (named line; R-T9-1)
+pub use registry::WatchMode;
 pub use scan::{EntryKind, LinkState, ScriptEntry};
 pub use secrets::{SecretFinding, SecretKind, SpanKind, scan_secrets};
 pub use service::{

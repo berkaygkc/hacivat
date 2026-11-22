@@ -196,6 +196,12 @@ pub(super) struct ManifestOut {
     pub db: LogicalDb,
     pub aliases: Vec<LogicalDb>,
     pub diags: Vec<LibraryDiag>,
+    // ## m4b-t16-attach (named lines; R-T10-7)
+    /// The binding came from a manifest that was read and understood.
+    pub good: bool,
+    /// A manifest is there but could not be read or understood (`manifest::is_read_failure`).
+    pub unreadable: bool,
+    // ## m4b-t16-attach
 }
 
 pub(super) fn read_manifest(root: &LibraryRoot) -> ManifestOut {
@@ -207,6 +213,10 @@ pub(super) fn read_manifest(root: &LibraryRoot) -> ManifestOut {
         .cloned()
         .map(LibraryDiag::Manifest)
         .collect();
+    // ## m4b-t16-attach (named lines; R-T10-7)
+    let unreadable = read.diags.iter().any(manifest::is_read_failure);
+    let good = !unreadable && (read.db.is_some() || !read.aliases.is_empty());
+    // ## m4b-t16-attach
     let db = read.logical(folder).unwrap_or_else(|| {
         diags.push(LibraryDiag::NoLogicalName);
         LogicalDb::unbindable()
@@ -215,6 +225,9 @@ pub(super) fn read_manifest(root: &LibraryRoot) -> ManifestOut {
         db,
         aliases: read.aliases,
         diags,
+        // ## m4b-t16-attach (named lines)
+        good,
+        unreadable,
     }
 }
 

@@ -162,6 +162,8 @@ pub struct LibrarySnapshot {
     pub state: LibraryState,
     /// ## m4b-t10-service fix round 1 (m2): read through [`LibraryView::diagnostics`].
     pub(crate) diagnostics: Arc<[LibraryDiag]>,
+    // ## m4b-t16-attach (named exception; R-T9-1): how its changes are found, as chosen.
+    pub watch: crate::registry::WatchMode,
 }
 
 // ## m4b-t10-service fix round 2 (m-b): a log line never names a file (or a root) of any
@@ -211,6 +213,8 @@ impl LibrarySnapshot {
             entries: Arc::from(entries),
             state,
             diagnostics: Arc::from([]),
+            // ## m4b-t16-attach (named line)
+            watch: crate::registry::WatchMode::Automatic,
         }
     }
     // ## m4b-t10-service
@@ -237,6 +241,9 @@ pub enum PollReason {
     WatchBudget,
     /// The event source stopped, or would not start.
     BackendLost,
+    // ## m4b-t16-attach (named exception; R-T9-1)
+    /// The user chose "Checking every 2 seconds" for it in Settings › Script libraries.
+    UserChoice,
 }
 
 /// Why a library shows nothing.
@@ -622,6 +629,50 @@ impl LibraryService {
         .unwrap_or(Err(AttachError::Stopped))
     }
 
+    // ## m4b-t16-attach (named exception; R-M4b-8, Q6)
+    /// Registers `path` and writes exactly `manifest` as its `.hacivat/workspace.toml`: the
+    /// text the attach dialog showed ([`ManifestV1::to_toml`](manifest::ManifestV1::to_toml)),
+    /// byte for byte. A file already there (it appeared after the dialog read the folder) is
+    /// never replaced: the attach is refused with `Manifest(Exists)` and nothing is registered,
+    /// so the dialog can show what it found.
+    pub async fn attach_writing(
+        &self,
+        path: PathBuf,
+        manifest: manifest::ManifestV1,
+    ) -> Result<LibraryId, AttachError> {
+        self.ask(|reply| Msg::AttachWriting {
+            path,
+            manifest,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(AttachError::Stopped))
+    }
+
+    /// Sets how library `id`'s changes are found (R-T9-1; Settings › Script libraries) and
+    /// restarts its watcher that way. Saved in `libraries.toml`.
+    pub async fn set_watch(
+        &self,
+        id: LibraryId,
+        watch: crate::registry::WatchMode,
+    ) -> Result<(), RegistryError> {
+        self.ask(|reply| Msg::SetWatch { id, watch, reply })
+            .await
+            .unwrap_or(Err(actor::STOPPED))
+    }
+
+    /// The user's confirmed "Use this folder" for library `id`, refused as
+    /// `Unavailable(RootChanged)` because its folder moved or was replaced (T10 m-h): the
+    /// recorded resolution is forgotten and the folder is validated again from scratch (every
+    /// other check still applies), so the library keeps its id, its mappings and its tabs'
+    /// bindings instead of a detach and attach. `UnknownLibrary` for any other state.
+    pub async fn adopt_root(&self, id: LibraryId) -> Result<(), RegistryError> {
+        self.ask(|reply| Msg::AdoptRoot { id, reply })
+            .await
+            .unwrap_or(Err(actor::STOPPED))
+    }
+    // ## m4b-t16-attach
+
     /// Forgets library `id`; the folder is never touched.
     ///
     /// ## m4b-t10-service
@@ -644,11 +695,30 @@ impl LibraryService {
         self.ask(|reply| Msg::Map {
             m,
             share_alias,
+            // ## m4b-t16-attach (named line)
+            expect: None,
             reply,
         })
         .await
         .unwrap_or(Err(MapError::Stopped))
     }
+
+    // ## m4b-t16-attach (named exception; R-M4b-8, Q5)
+    /// [`map`](Self::map) with the alias shared, written only while the library's manifest is
+    /// still `before` (the bytes the mapping dialog read and showed its edit of,
+    /// `manifest::preview`): a file changed since refuses with `Alias(Changed)` and nothing
+    /// changes, so what is written is what was shown.
+    pub async fn map_sharing(&self, m: LocalMapping, before: Vec<u8>) -> Result<(), MapError> {
+        self.ask(|reply| Msg::Map {
+            m,
+            share_alias: true,
+            expect: Some(before),
+            reply,
+        })
+        .await
+        .unwrap_or(Err(MapError::Stopped))
+    }
+    // ## m4b-t16-attach
 
     // ## m4b-t10-service
     /// Removes the local mapping of the node `(profile, database)`; whether there was one.

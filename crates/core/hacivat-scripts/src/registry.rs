@@ -201,7 +201,43 @@ pub struct RegisteredLibrary {
     /// device number is not kept: it can change across a reboot or a remount.
     pub inode: Option<u64>,
     // ## m4b-t10-service
+    // ## m4b-t16-attach (named exception; R-T9-1): how its changes are found, as the user chose
+    // in Settings › Script libraries. Written only when not [`WatchMode::Automatic`].
+    pub watch: WatchMode,
+    // ## m4b-t16-attach
 }
+
+// ## m4b-t16-attach (named exception; R-T9-1)
+/// How a library's changes are found: the watcher's own choice (the OS watcher, or polling on
+/// a network drive or past the Linux watch budget), or polling every 2 seconds because the user
+/// chose it (Settings › Script libraries; the diagnostics popover suggests it when events look
+/// missing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WatchMode {
+    #[default]
+    Automatic,
+    Poll,
+}
+
+impl WatchMode {
+    /// The `watch` value in `libraries.toml` (`None`: the key is left out).
+    fn as_toml(self) -> Option<&'static str> {
+        match self {
+            WatchMode::Automatic => None,
+            WatchMode::Poll => Some("poll"),
+        }
+    }
+
+    /// A row's `watch` value; anything but exactly `"poll"` is [`WatchMode::Automatic`], the
+    /// product's default (a hand-edited value never stops a library being watched).
+    fn of_toml(value: Option<&toml::Value>) -> Self {
+        match value.and_then(toml::Value::as_str) {
+            Some("poll") => WatchMode::Poll,
+            _ => WatchMode::Automatic,
+        }
+    }
+}
+// ## m4b-t16-attach
 
 impl RegisteredLibrary {
     /// The folder as it is now: its canonical path, or the error when it is missing or
@@ -280,6 +316,41 @@ impl LibraryRegistry {
         }
     }
 
+    // ## m4b-t16-attach (named exception; R-T9-1, T10 m-h)
+    /// Sets how library `id`'s changes are found. Does not save; `false` when unknown or
+    /// read-only.
+    pub fn set_watch(&mut self, id: LibraryId, watch: WatchMode) -> bool {
+        if self.read_only {
+            return false;
+        }
+        match self.libraries.iter_mut().find(|l| l.id == id) {
+            Some(l) => {
+                l.watch = watch;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forgets the canonical path and inode recorded for library `id` (the user's confirmed
+    /// "Use this folder" for a root refused as moved or replaced): the next validation resolves
+    /// and records it afresh, and its mappings stay. Does not save; `false` when unknown or
+    /// read-only.
+    pub fn clear_resolved(&mut self, id: LibraryId) -> bool {
+        if self.read_only {
+            return false;
+        }
+        match self.libraries.iter_mut().find(|l| l.id == id) {
+            Some(l) => {
+                l.canonical = None;
+                l.inode = None;
+                true
+            }
+            None => false,
+        }
+    }
+    // ## m4b-t16-attach
+
     /// [`add`](Self::add) for a folder already resolved off this thread: `canonical` (and its
     /// inode) come from the caller's worker, the attach guard's checks (filesystem root, home,
     /// app folders) were made there, and `others` are the canonical paths of the registered
@@ -323,6 +394,8 @@ impl LibraryRegistry {
             added_at: rfc3339(now),
             canonical: Some(canonical.to_path_buf()),
             inode,
+            // ## m4b-t16-attach (named line)
+            watch: WatchMode::Automatic,
         });
         Ok(LibraryRoot {
             id,
@@ -493,6 +566,9 @@ impl LibraryRegistry {
             canonical: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             inode: Option<String>,
+            // ## m4b-t16-attach (named line; R-T9-1)
+            #[serde(skip_serializing_if = "Option::is_none")]
+            watch: Option<&'static str>,
         }
         #[derive(Serialize)]
         struct MappingOut<'a> {
@@ -510,6 +586,8 @@ impl LibraryRegistry {
                     added_at: &l.added_at,
                     canonical: l.canonical.as_deref().and_then(Path::to_str),
                     inode: l.inode.map(|i| i.to_string()),
+                    // ## m4b-t16-attach (named line)
+                    watch: l.watch.as_toml(),
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -621,6 +699,8 @@ impl LibraryRegistry {
             added_at: rfc3339(now),
             canonical: None,
             inode: None,
+            // ## m4b-t16-attach (named line)
+            watch: WatchMode::Automatic,
         });
         Ok(LibraryRoot {
             id,
@@ -771,6 +851,8 @@ fn library_row(row: &toml::Table) -> Result<RegisteredLibrary, RowProblem> {
         added_at,
         canonical,
         inode,
+        // ## m4b-t16-attach (named line)
+        watch: WatchMode::of_toml(row.get("watch")),
     })
 }
 
