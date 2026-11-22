@@ -364,9 +364,13 @@ fn collect(
                 continue;
             }
             let head = comps[..n].join("/");
+            // ## m4b-cifix-2-index-paths (review C2, R-CI2-2): `head` is untrusted index
+            // content; only a plain one, joined lexically under the worktree, is ever looked at
+            // (a UNC `\\host\share` head would otherwise make Windows contact the host).
             if heads.insert(head.clone())
                 && map::lib_relative(p, prefix, icase, &none).is_none()
-                && map::same_file(&found.worktree.join(&head), library)
+                && map::alias_candidate(&found.worktree, &head)
+                    .is_some_and(|candidate| map::same_file(&candidate, library))
             {
                 aliases.insert(head);
             }
@@ -399,9 +403,20 @@ fn collect(
     // made the walk quadratic (U-05: past the 5 s budget), so Task 7 drops entries instead.
     let extra: BTreeSet<String> = extra_dataless.iter().map(|l| map::nfc(l)).collect();
     let mut dataless_paths: BTreeSet<BString> = BTreeSet::new();
+    let mut walk = map::Lister::default();
     let mut tracked: Vec<(BString, gix::index::entry::Mode)> = Vec::new();
     for entry in on_disk.entries() {
         let path = entry.path(&on_disk);
+        // ## m4b-cifix-2-index-paths (review C2, R-CI2-2): an entry whose path is not made of
+        // plain names leaves the index copy, so gix never stats it either, and is
+        // `Unknown(UnsafePath)` when it falls in the library; nothing joins it to a directory.
+        if !map::is_plain_index_path(path) {
+            if rel_of(path).is_some() {
+                badges.add(path, FileStatus::Unknown(UnknownWhy::UnsafePath));
+            }
+            dataless_paths.insert(path.to_owned());
+            continue;
+        }
         let Some(rel) = rel_of(path) else {
             continue;
         };
@@ -413,10 +428,14 @@ fn collect(
             badges.add(path, FileStatus::Unknown(UnknownWhy::Submodule));
             continue;
         }
+        // ## m4b-cifix-2 fix round 2 (re-review N1): through the link-refusing walk, `lstat`
+        // only at the last component (a plain path is UTF-8); a path under a linked folder is
+        // never looked at here, and gix's own walk (`SymlinkCheck`) does not enter it either.
         let dataless = extra.contains(&map::nfc(&rel))
-            || gix::path::from_bstr(path)
+            || path
+                .to_str()
                 .ok()
-                .and_then(|p| std::fs::symlink_metadata(found.worktree.join(p)).ok())
+                .and_then(|p| walk.lstat_under(&found.worktree, p))
                 .is_some_and(|m| map::is_dataless(&m));
         if dataless {
             dataless_paths.insert(path.to_owned());
