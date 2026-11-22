@@ -136,6 +136,8 @@ fn scan_into(
     masks.extend(local.into_iter().map(|m| Mask {
         range: m.range.start + offset..m.range.end + offset,
         kind: m.kind,
+        role: m.role,
+        depth: m.depth,
     }));
 }
 
@@ -263,6 +265,32 @@ enum Kind {
 struct Mask {
     range: Range<usize>,
     kind: Kind,
+    // ## m4b-t06-secrets (named exception, alg/28 C9): why the range is masked. Only
+    // [`secret_spans`] reads it; `redact` and `scrub` ignore it.
+    role: Role,
+    // ## m4b-t06-secrets (fix round 1, I1): the depth of the scan that masked it (0: the text
+    // itself; more: a comment body or code quoted in code). [`secret_spans`] reports a bare
+    // word found at depth > 0 (comment prose) as `Armed`.
+    depth: u8,
+}
+
+// ## m4b-t06-secrets (named exception, alg/28 C9)
+/// Why a range is masked: a value position is a secret literal; another string of an armed
+/// statement only shares its statement with one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// The value right after a secret keyword, a crypto function's string argument, a secret
+    /// setting's value, or what `INTO @pw` assigns.
+    Value,
+    /// A `password=` value or a URI password inside a comment.
+    Connection,
+    /// A whole string masked because it looks like a connection string; its values are found
+    /// by [`secret_spans`].
+    Conninfo,
+    /// A psql meta-command line; its `password=` values are found by [`secret_spans`].
+    Meta,
+    /// Another string of a statement a secret word armed.
+    Armed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,6 +349,9 @@ struct Call {
     arg: u32,
     /// `set_config`'s first argument names a secret.
     secret_key: bool,
+    // ## m4b-t06-secrets (fix round 1, m2): the arguments (bit i = argument i, at depth 1)
+    // that are the key or password; [`secret_spans`] reports only those as values.
+    key_args: u8,
 }
 
 struct Scan<'a> {
@@ -347,6 +378,13 @@ struct Scan<'a> {
     into: bool,
     /// The statement's strings so far, unmasked: a later `INTO @<secret>` masks them.
     strings: Vec<(Range<usize>, (usize, usize))>,
+    // ## m4b-t06-secrets (named exception, C9)
+    /// The word that set [`Expect::Value`] names the value itself (`PASSWORD`, `api_key`),
+    /// not something about it (`password_hash`): [`secret_spans`] reports only the former.
+    named: bool,
+    // ## m4b-t06-secrets (fix round 1, m2)
+    /// The key arguments of the call named last ([`Call::key_args`]).
+    pending_key_args: u8,
 }
 
 // ## m3b-po-redact (PO M3b-23)
@@ -385,6 +423,8 @@ impl<'a> Scan<'a> {
             head: None,
             into: false,
             strings: Vec::new(),
+            named: false,
+            pending_key_args: 0,
         }
     }
 
@@ -405,8 +445,14 @@ impl<'a> Scan<'a> {
         self.strings.clear();
     }
 
-    fn mask(&mut self, range: Range<usize>, kind: Kind) {
-        self.masks.push(Mask { range, kind });
+    fn mask(&mut self, range: Range<usize>, kind: Kind, role: Role) {
+        let depth = self.depth;
+        self.masks.push(Mask {
+            range,
+            kind,
+            role,
+            depth,
+        });
     }
 
     fn secret(&mut self, s: &str) {
@@ -423,7 +469,7 @@ impl<'a> Scan<'a> {
             Tok::Comment { inner } => self.comment(inner),
             Tok::Semicolon => self.reset(),
             Tok::Meta => {
-                self.mask(range.clone(), Kind::Meta);
+                self.mask(range.clone(), Kind::Meta, Role::Meta);
                 for v in key_values(piece) {
                     self.secret(v);
                 }
@@ -444,8 +490,18 @@ impl<'a> Scan<'a> {
                 if !value && self.bytes[range.start] == b'"' && is_secret_word(&kw_upper(content)) {
                     self.armed = true;
                     self.expect = Expect::Value;
+                    // ## m4b-t06-secrets (named exception, C9)
+                    self.named = names_a_value(&kw_upper(content));
                     return;
                 }
+                // ## m4b-t06-secrets (named exception, C9)
+                let value_role = self.value_role();
+                // ## m4b-t06-secrets (fix round 1, m2): a call's key argument, never its data,
+                // options or a nested call's argument (`crypt('pw', gen_salt('bf'))`).
+                let key_arg = self.call.is_some_and(|c| match c.kind {
+                    CallKind::SetConfig => true,
+                    CallKind::Crypto => c.depth == 1 && c.arg < 8 && c.key_args & (1 << c.arg) != 0,
+                });
                 if value {
                     self.secret(content);
                 }
@@ -475,7 +531,15 @@ impl<'a> Scan<'a> {
                     }
                 }
                 if self.armed || value || conninfo || in_call {
-                    self.mask(range, Kind::String);
+                    // ## m4b-t06-secrets (named exception, C9)
+                    let role = if (in_call && key_arg) || (value && value_role == Role::Value) {
+                        Role::Value
+                    } else if conninfo {
+                        Role::Conninfo
+                    } else {
+                        Role::Armed
+                    };
+                    self.mask(range, Kind::String, role);
                 } else {
                     // ## m3b-po-redact (fix round 1, m3)
                     self.strings.push((range, inner));
@@ -489,11 +553,14 @@ impl<'a> Scan<'a> {
                 // `` `password` = 'pw' ``: as the bare keyword.
                 self.armed = true;
                 self.expect = Expect::Value;
+                // ## m4b-t06-secrets (named exception, C9)
+                self.named = names_a_value(&kw_upper(piece.trim_matches('`')));
             }
             Tok::Ident | Tok::Number => {
                 if matches!(self.expect, Expect::Value | Expect::StrictValue) {
                     self.secret(piece);
-                    self.mask(range, Kind::Word);
+                    let role = self.value_role();
+                    self.mask(range, Kind::Word, role);
                 }
                 self.after_value();
             }
@@ -523,6 +590,8 @@ impl<'a> Scan<'a> {
                 depth: 0,
                 arg: 0,
                 secret_key: false,
+                // ## m4b-t06-secrets (fix round 1, m2)
+                key_args: self.pending_key_args,
             });
         }
         let Some(call) = self.call.as_mut() else {
@@ -584,7 +653,7 @@ impl<'a> Scan<'a> {
                 continue;
             }
             let start = inner.0 + (v.as_ptr() as usize - body.as_ptr() as usize);
-            self.mask(start..start + v.len(), Kind::Word);
+            self.mask(start..start + v.len(), Kind::Word, Role::Connection);
             self.secret(v);
         }
     }
@@ -629,6 +698,8 @@ impl<'a> Scan<'a> {
         {
             self.pending_call = Some(kind);
             self.expect = Expect::Nothing;
+            // ## m4b-t06-secrets (fix round 1, m2)
+            self.pending_key_args = crypto_key_args(&upper);
             return;
         }
         // ## m3b-po-redact (PO M3b-23): a MySQL user variable named like a secret (`@pw`,
@@ -638,13 +709,21 @@ impl<'a> Scan<'a> {
             && self.bytes[range.start - 1] == b'@'
             && (range.start < 2 || self.bytes[range.start - 2] != b'@');
         if user_var && is_secret_variable(&upper) {
+            // ## m4b-t06-secrets (named exception, C9): `@pw`, `@db_pass`, `@api_key` name
+            // the value; `@password_hash` does not.
+            self.named = names_a_value(&upper)
+                || matches!(
+                    upper.rsplit('_').next(),
+                    Some("PW" | "PASS" | "PASSPHRASE" | "KEY" | "TOKEN")
+                );
+            let role = if self.named { Role::Value } else { Role::Armed };
             // ## m3b-po-redact (fix round 1, m3): `SELECT '…' INTO @pw`: the statement's
             // strings before it are the value.
             if self.into {
                 let text = self.text;
                 for (r, inner) in std::mem::take(&mut self.strings) {
                     self.secret(&text[inner.0..inner.1]);
-                    self.mask(r, Kind::String);
+                    self.mask(r, Kind::String, role);
                 }
             }
             self.armed = true;
@@ -659,7 +738,7 @@ impl<'a> Scan<'a> {
             Expect::StrictValue => {
                 if !matches!(upper.as_str(), "PASSWORD" | "RANDOM") {
                     self.secret(w);
-                    self.mask(range, Kind::Word);
+                    self.mask(range, Kind::Word, Role::Value);
                     self.expect = Expect::Nothing;
                 }
                 return;
@@ -688,7 +767,8 @@ impl<'a> Scan<'a> {
                     && !TYPE_WORDS.contains(&upper.as_str())
                 {
                     self.secret(w);
-                    self.mask(range, Kind::Word);
+                    let role = self.value_role();
+                    self.mask(range, Kind::Word, role);
                     self.expect = Expect::Nothing;
                     return;
                 }
@@ -710,6 +790,20 @@ impl<'a> Scan<'a> {
         {
             self.armed = true;
             self.expect = Expect::Value;
+            // ## m4b-t06-secrets (named exception, C9): `PASSWORD`, `MASTER_PASSWORD`,
+            // `api_key`, `PRAGMA key` name a value; `password_hash`, `passwd_changed` do not.
+            self.named = names_a_value(&upper) || !is_secret_word(&upper);
+        }
+    }
+
+    // ## m4b-t06-secrets (named exception, C9)
+    /// The role of a value read now: after `IDENTIFIED … BY` always a value, after a
+    /// `PASSWORD`-like word only when the word names the value itself ([`names_a_value`]).
+    fn value_role(&self) -> Role {
+        if self.expect == Expect::StrictValue || self.named {
+            Role::Value
+        } else {
+            Role::Armed
         }
     }
 
@@ -720,7 +814,12 @@ impl<'a> Scan<'a> {
         let c = *b.get(start)?;
         let tok = match c {
             b' ' | b'\t' | b'\r' | b'\n' | 0x0b | 0x0c => {
-                self.at = self.skip_while(start, |c| c.is_ascii_whitespace());
+                // ## m4b-t06-secrets (fix round 1, found by `redact_is_byte_identical_to_m3`):
+                // `u8::is_ascii_whitespace` leaves out the vertical tab (0x0b), so a vertical
+                // tab outside quotes made an empty token and the scan never ended (M3: the
+                // history writer and the secret scan spun forever). It is skipped as the white
+                // space this arm already takes it for; every other text scans as before.
+                self.at = self.skip_while(start, |c| c.is_ascii_whitespace() || c == 0x0b);
                 Tok::Space
             }
             // `--`: in the MySQL reading only before whitespace or the end (`1--1` is
@@ -1036,6 +1135,113 @@ fn is_secret_word(upper: &str) -> bool {
     // ## m3b-po-redact (PO M3b-23): token and key names too ([`secret_parts`]).
     let parts: Vec<&str> = upper.split('_').collect();
     secret_parts(&parts)
+}
+
+// ## m4b-t06-secrets (named exception, C9)
+/// A secret word whose last `_`-separated part is the secret part (`PASSWORD`,
+/// `MASTER_PASSWORD`, `client_secret`, `api_key`, `access_token`): what follows it is the value.
+/// A word that only mentions one (`password_hash`, `passwd_changed`, `api_key_id`) is not.
+fn names_a_value(upper: &str) -> bool {
+    let parts: Vec<&str> = upper.split('_').collect();
+    last_part_names_a_value(&parts)
+}
+
+// ## m4b-t06-secrets (fix round 1, I2)
+/// [`names_a_value`] over a name's ASCII-uppercased parts: the last one, read as
+/// [`secret_parts`] reads it, is the secret part.
+fn last_part_names_a_value(parts: &[&str]) -> bool {
+    let Some((&last, rest)) = parts.split_last() else {
+        return false;
+    };
+    let before = rest.last().copied();
+    // ## m4b-t06-secrets (fix round 2, I-fr1-1): a part that ends with the secret word names
+    // the value too (`PGPASSWORD`, `sslpassword`, `dbpassword`); `PASSWORDHASH`,
+    // `password_policy` and `password_file` do not end with one.
+    if ["PASSWORD", "PASSWD", "PWD", "SECRET"]
+        .iter()
+        .any(|w| last.len() > w.len() && last.ends_with(w))
+    {
+        return true;
+    }
+    match last {
+        "PASSWORD" | "PASSWD" | "PWD" | "SECRET" | "BEARER" => true,
+        "TOKEN" => rest.is_empty() || before.is_some_and(|b| SECRET_TOKEN_KINDS.contains(&b)),
+        "KEY" => before.is_some_and(|b| SECRET_KEY_KINDS.contains(&b)),
+        _ => false,
+    }
+}
+
+// ## m4b-t06-secrets (fix round 1, I2)
+/// The value at byte `at` of `piece` (found inside a string or a meta-command line) is a
+/// secret value: the name of its `name=value` or JSON pair names the value itself
+/// (`password=`, `"apiKey":`, `aws_secret_access_key=`, a SQLite `?key=`), or it follows
+/// `Bearer`, or it has no name at all (reported: fail towards a warning). A name that only
+/// mentions a secret (`password_hash=`, `"password_changed_at":`) is not.
+fn pair_names_a_value(piece: &str, at: usize) -> bool {
+    let b = piece.as_bytes();
+    let mut i = at;
+    if i > 0 && matches!(b[i - 1], b'\'' | b'"') {
+        i -= 1;
+    }
+    while i > 0 && b[i - 1] == b' ' {
+        i -= 1;
+    }
+    if i >= 6 && piece.as_bytes()[i - 6..i].eq_ignore_ascii_case(b"bearer") {
+        return true;
+    }
+    if i == 0 || !matches!(b[i - 1], b'=' | b':') {
+        return true;
+    }
+    i -= 1;
+    // A URI's userinfo password (`scheme://user:pw@`): the user is no pair name.
+    if b[i] == b':' {
+        let mut k = i;
+        while k > 0 && !b[k - 1].is_ascii_whitespace() && !matches!(b[k - 1], b'/' | b'@') {
+            k -= 1;
+        }
+        if k >= 2 && &b[k - 2..k] == b"//" {
+            return true;
+        }
+    }
+    while i > 0 && b[i - 1] == b' ' {
+        i -= 1;
+    }
+    if i > 0 && b[i - 1] == b'"' {
+        i -= 1;
+    }
+    let end = i;
+    while i > 0 && (b[i - 1].is_ascii_alphanumeric() || matches!(b[i - 1], b'_' | b'-' | b'.')) {
+        i -= 1;
+    }
+    let name = &piece[i..end];
+    if name.is_empty() {
+        return true;
+    }
+    if i > 0
+        && matches!(b[i - 1], b'?' | b'&')
+        && SQLCIPHER_PRAGMAS.contains(&kw_upper(name).as_str())
+    {
+        return true;
+    }
+    let parts = name_parts(name);
+    let parts: Vec<&str> = parts
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !p.is_empty())
+        .collect();
+    last_part_names_a_value(&parts)
+}
+
+// ## m4b-t06-secrets (fix round 1, m2)
+/// The key or password arguments of a crypto function (`upper` from [`kw_upper`]), bit i for
+/// argument i: `crypt(password, salt)`, `pgp_pub_decrypt(msg, key, psw)`, and the key of every
+/// other one (`pgp_sym_encrypt(data, psw)`, `encrypt(data, key, type)`, `AES_ENCRYPT(s, key)`).
+fn crypto_key_args(upper: &str) -> u8 {
+    match upper {
+        "CRYPT" => 0b001,
+        "PGP_PUB_DECRYPT" | "PGP_PUB_DECRYPT_BYTEA" => 0b110,
+        _ => 0b010,
+    }
 }
 
 /// A string that looks like it carries a credential (a connection string, a URI with a
@@ -1714,10 +1920,610 @@ pub enum SecretSpanKind {
 /// The byte ranges of `text` the history redactor would mask, each with its kind (the script
 /// workspace's secret scanner takes them from the app, R-M4b-28).
 ///
-/// Task 1a stub (fail closed): one `Value` span over the whole text, so a caller warns instead
-/// of passing. Task 6 builds the body from `scan_into`'s masks; `redact` and `scrub` stay as
-/// they are.
+/// ## m4b-t06-secrets (named exception: the body)
+/// Built from `scan_into`'s masks, the very scan `redact` uses, so every range `redact` masks
+/// lies inside a span (`secret_spans_cover_what_redact_masks`). A value position (alg/28 C9)
+/// is `Value`; a comment's `password=` value or URI password is `ConnectionValue`; every other
+/// mask is `Armed`. Inside an `Armed` connection string or psql meta-command line, its
+/// `password=` values, secret `name=value` and JSON pairs, `Bearer` credentials and URI
+/// password come back as `ConnectionValue` spans, and code quoted in code (a dollar body, a
+/// string with doubled quotes) is read again to [`MAX_DEPTH`] for its quoted values. Sorted by
+/// start, without duplicates; every range lies on character boundaries of `text`.
 pub fn secret_spans(text: &str) -> Vec<(Range<usize>, SecretSpanKind)> {
-    vec![(0..text.len(), SecretSpanKind::Value)]
+    let mut out = Vec::new();
+    spans_into(text, 0, &|r| r, &mut out);
+    out.sort_by_key(|(r, k)| (r.start, std::cmp::Reverse(r.end), *k as u8));
+    out.dedup();
+    out
 }
 // ## m4b-t01a-seams
+
+// ## m4b-t06-secrets
+/// `secret_spans` of `text` read at `depth`, each range mapped into the outer text by `map`
+/// (a range of `text` to a range of the outermost text).
+fn spans_into(
+    text: &str,
+    depth: u8,
+    map: &dyn Fn(Range<usize>) -> Range<usize>,
+    out: &mut Vec<(Range<usize>, SecretSpanKind)>,
+) {
+    let mut masks = Vec::new();
+    let mut secrets = Vec::new();
+    scan_into(text, depth, 0, &mut masks, &mut secrets);
+    // ## m4b-t06-secrets (fix round 1, I1): what one reading masked inside a comment (`#` is
+    // one in the MySQL reading only: `# password reset flow`).
+    let in_comment: std::collections::HashSet<(usize, usize)> = masks
+        .iter()
+        .filter(|m| m.depth > depth)
+        .map(|m| (m.range.start, m.range.end))
+        .collect();
+    // ## m4b-t06-secrets (fix round 2, n1): built only when a cross-reading downgrade asks.
+    let glued: std::cell::OnceCell<GluedHashes> = std::cell::OnceCell::new();
+    for m in masks {
+        // ## m4b-t06-secrets (fix round 1, I1): code quoted in code, or a comment body (the
+        // mask's own scan depth, in either reading), is read again; its bare words are too
+        // often prose or names (`-- rotate the password monthly`, `EXECUTE 'GRANT … ' ||
+        // password_col`): only quoted values count there.
+        // ## m4b-t06-secrets (fix round 2, n1): not when that comment is a `#` glued to a name.
+        let nested = depth > 0
+            || m.depth > depth
+            || (in_comment.contains(&(m.range.start, m.range.end))
+                && !glued
+                    .get_or_init(|| GluedHashes::new(text))
+                    .before(m.range.start));
+        let piece = &text[m.range.clone()];
+        let kind = match m.role {
+            Role::Value if nested && !piece.starts_with(['\'', '"', '$']) => SecretSpanKind::Armed,
+            Role::Value => SecretSpanKind::Value,
+            // ## m4b-t06-secrets (fix round 1, I2): C9 inside comments too.
+            Role::Connection if !pair_names_a_value(text, m.range.start) => SecretSpanKind::Armed,
+            Role::Connection => SecretSpanKind::ConnectionValue,
+            Role::Conninfo | Role::Meta | Role::Armed => SecretSpanKind::Armed,
+        };
+        out.push((map(m.range.clone()), kind));
+        if !matches!(m.role, Role::Conninfo | Role::Meta) {
+            continue;
+        }
+        let mut values: Vec<&str> = key_values(piece);
+        values.extend(string_secrets(piece));
+        values.extend(uri_password(piece));
+        for v in values {
+            if v.is_empty() {
+                continue;
+            }
+            let at = v.as_ptr() as usize - piece.as_ptr() as usize;
+            // ## m4b-t06-secrets (fix round 1, I2): only a pair whose name names the value.
+            if !pair_names_a_value(piece, at) {
+                continue;
+            }
+            let start = m.range.start + at;
+            out.push((map(start..start + v.len()), SecretSpanKind::ConnectionValue));
+        }
+        if m.role == Role::Conninfo && depth < MAX_DEPTH {
+            quoted_code(piece, m.range.start, depth + 1, map, out);
+        }
+    }
+}
+
+// ## m4b-t06-secrets (fix round 2, n1)
+/// The first `#` on `at`'s line before `at` is glued to a name (`CREATE USER app#1 IDENTIFIED
+/// BY tiger`, an Oracle name). MySQL does read it as a comment ("From a `#` character to the
+/// end of the line", MySQL 8.4 Reference Manual §11.7; `#` is not among the unquoted
+/// identifier characters `[0-9,a-z,A-Z$_]`, §11.2), so only the standard reading sees the
+/// value; the warning trusts that reading here rather than stay quiet. One pass over the text,
+/// then a binary search per question (linear on a 2 MiB line too).
+struct GluedHashes {
+    /// Per line: its start, and its first `#` when that `#` is glued to a name.
+    lines: Vec<(usize, Option<usize>)>,
+}
+
+impl GluedHashes {
+    fn new(text: &str) -> Self {
+        let b = text.as_bytes();
+        let mut lines = Vec::new();
+        let mut start = 0;
+        let mut first: Option<usize> = None;
+        for (i, &c) in b.iter().enumerate() {
+            if c == b'#' && first.is_none() {
+                first = Some(i);
+            }
+            if c == b'\n' || i + 1 == b.len() {
+                let glued = first.filter(|&h| {
+                    h > start
+                        && (b[h - 1].is_ascii_alphanumeric()
+                            || matches!(b[h - 1], b'_' | b'$')
+                            || b[h - 1] >= 0x80)
+                });
+                lines.push((start, glued));
+                start = i + 1;
+                first = None;
+            }
+        }
+        GluedHashes { lines }
+    }
+
+    /// The first `#` on `at`'s line comes before `at` and is glued to a name.
+    fn before(&self, at: usize) -> bool {
+        let i = self.lines.partition_point(|&(s, _)| s <= at);
+        i > 0 && self.lines[i - 1].1.is_some_and(|h| h < at)
+    }
+}
+
+// ## m4b-t06-secrets
+/// The spans of the code quoted in `piece` (a masked string token starting at `at` of the text
+/// `map` maps from): a dollar body as it stands, or a `'…'`/`"…"` string with a doubled quote
+/// (`EXECUTE 'ALTER ROLE r PASSWORD ''x'''`), read with each doubled quote as one.
+fn quoted_code(
+    piece: &str,
+    at: usize,
+    depth: u8,
+    map: &dyn Fn(Range<usize>) -> Range<usize>,
+    out: &mut Vec<(Range<usize>, SecretSpanKind)>,
+) {
+    let b = piece.as_bytes();
+    match b.first() {
+        Some(b'$') => {
+            // `$tag$ … $tag$`: the body between the tags (an unclosed body runs to the end).
+            let Some(tag_len) = piece[1..].find('$').map(|p| p + 2) else {
+                return;
+            };
+            let tag = &piece[..tag_len];
+            let body_end = if piece.len() >= 2 * tag_len && piece.ends_with(tag) {
+                piece.len() - tag_len
+            } else {
+                piece.len()
+            };
+            let body = &piece[tag_len..body_end];
+            let base = at + tag_len;
+            spans_into(body, depth, &|r| map(r.start + base..r.end + base), out);
+        }
+        Some(&q @ (b'\'' | b'"')) => {
+            let end = if b.len() >= 2 && b[b.len() - 1] == q {
+                b.len() - 1
+            } else {
+                b.len()
+            };
+            let cb = &b[1..end];
+            if !cb.windows(2).any(|w| w == [q, q]) {
+                return;
+            }
+            // `starts[i]`/`ends[i]`: where byte `i` of the unescaped text starts and ends in
+            // `piece`; a doubled quote is two bytes of `piece` for one (ASCII, so the
+            // unescaped bytes stay UTF-8).
+            let mut bytes = Vec::with_capacity(cb.len());
+            let mut starts = Vec::with_capacity(cb.len() + 1);
+            let mut ends = Vec::with_capacity(cb.len());
+            let mut i = 0;
+            while i < cb.len() {
+                let width = if cb[i] == q && cb.get(i + 1) == Some(&q) {
+                    2
+                } else {
+                    1
+                };
+                bytes.push(cb[i]);
+                starts.push(1 + i);
+                ends.push(1 + i + width);
+                i += width;
+            }
+            starts.push(1 + cb.len());
+            let Ok(unescaped) = String::from_utf8(bytes) else {
+                return;
+            };
+            spans_into(
+                &unescaped,
+                depth,
+                &|r: Range<usize>| {
+                    let start = at + starts[r.start];
+                    let end = if r.end > r.start {
+                        at + ends[r.end - 1]
+                    } else {
+                        start
+                    };
+                    map(start..end)
+                },
+                out,
+            );
+        }
+        _ => {}
+    }
+}
+// ## m4b-t06-secrets
+
+// ## m4b-t06-secrets
+/// M3's redactor as it was before Task 6, the reference of `redact_is_byte_identical_to_m3`.
+#[cfg(test)]
+mod m3_base;
+
+#[cfg(test)]
+mod m4b_t06_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Every range `redact` masks lies inside one `secret_spans` range.
+    fn covered(text: &str) -> Result<(), String> {
+        let mut masks = Vec::new();
+        let mut secrets = Vec::new();
+        scan_into(text, 0, 0, &mut masks, &mut secrets);
+        let spans = secret_spans(text);
+        for m in &masks {
+            if !spans
+                .iter()
+                .any(|(r, _)| r.start <= m.range.start && m.range.end <= r.end)
+            {
+                return Err(format!("{text:?}: {:?} not in {spans:?}", m.range));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn value_and_armed_are_told_apart() {
+        // C9: `password_hash = 'x'` is masked in history but is no value position.
+        let t = "SELECT * FROM users WHERE password_hash = 'x'";
+        assert_eq!(secret_spans(t), [(42..45, SecretSpanKind::Armed)]);
+        let t = "ALTER ROLE app PASSWORD 'x'";
+        assert_eq!(secret_spans(t), [(24..27, SecretSpanKind::Value)]);
+        let t = "CREATE USER u IDENTIFIED BY tiger";
+        assert_eq!(secret_spans(t), [(28..33, SecretSpanKind::Value)]);
+        // A connection string: the whole string is masked; its password is the value.
+        let t = "SELECT dblink_connect('host=h password=pw')";
+        assert_eq!(
+            secret_spans(t),
+            [
+                (22..42, SecretSpanKind::Armed),
+                (39..41, SecretSpanKind::ConnectionValue)
+            ]
+        );
+        assert!(secret_spans("SELECT 1").is_empty());
+        // The word names the value (`MASTER_PASSWORD`, `@pw`) or only mentions one.
+        let value = |t: &str| {
+            secret_spans(t)
+                .iter()
+                .any(|(_, k)| *k == SecretSpanKind::Value)
+        };
+        for t in [
+            "UPDATE users SET password = 's3cret'",
+            "CHANGE MASTER TO MASTER_PASSWORD='s3cret'",
+            "SELECT 's3cret' INTO @pw",
+            "SET @db_pass = 's3cret'",
+            "UPDATE t SET api_key = 's3cret'",
+        ] {
+            assert!(value(t), "{t}");
+        }
+        for t in [
+            "SET @password_hash = 's3cret'",
+            "SELECT 'x' INTO @password_hash",
+            "UPDATE t SET api_key_id = 's3cret'",
+            "UPDATE t SET passwd_changed = '2030-01-01'",
+        ] {
+            assert!(!value(t), "{t}");
+            assert!(!secret_spans(t).is_empty(), "{t}: still masked in history");
+        }
+    }
+
+    #[test]
+    fn spans_cover_every_mask_of_the_corpus() {
+        for t in [
+            "ALTER ROLE app PASSWORD 's3cret'",
+            "\\connect db u password=s3cret",
+            "SELECT 'a\\'; ALTER ROLE r PASSWORD 's3cret'",
+            "DO $$ BEGIN EXECUTE 'ALTER ROLE r PASSWORD ''s3cret'''; END $$",
+            "-- password s3cret\nSELECT 1",
+            "SELECT '' INTO @pw",
+        ] {
+            covered(t).unwrap();
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn spans_cover_every_mask(
+            s in "(PASSWORD|IDENTIFIED|BY|WITH|FOR|REPLACE|U&|E|\\$\\$|\\$t\\$|'|''|\"|`|\\\\|;|=|\\(|\\)|/\\*|\\*/|--|\n| |ş|İ|x|1|password=|://u:p@h|pgp_sym_encrypt|INTO|@pw|PRAGMA|key){0,40}"
+        ) {
+            prop_assert!(covered(&s).is_ok(), "{}", covered(&s).unwrap_err());
+            for (r, _) in secret_spans(&s) {
+                prop_assert!(s.get(r.clone()).is_some(), "{s:?}: {r:?}");
+            }
+        }
+    }
+
+    // ## m4b-t06-secrets (fix round 1; controller ruling on deviation 1)
+    /// `redact` and `scrub` give exactly what M3's redactor (`m3_base`, vendored for this
+    /// test only) gives: the text, `changed`, the secrets and both scrubs.
+    fn same_as_m3(t: &str) -> Result<(), String> {
+        let (new, old) = (redact(t), super::m3_base::redact(t));
+        if (&new.text, new.changed, &new.secrets) != (&old.text, old.changed, &old.secrets) {
+            return Err(format!("redact {t:?}: {:?} vs {:?}", new.text, old.text));
+        }
+        let given = ["s3cret".to_owned(), "tiger".to_owned()];
+        for secrets in [&given[..], &[]] {
+            if scrub(t, secrets) != super::m3_base::scrub(t, secrets) {
+                return Err(format!("scrub {t:?}"));
+            }
+        }
+        Ok(())
+    }
+
+    // ## m4b-t06-secrets (fix round 2, n3)
+    /// 20,000 SQL-ish texts from a fixed generator over statement pieces that reach the masked
+    /// paths and every control byte but the vertical tab, plus non-ASCII spaces: `redact` and
+    /// `scrub` equal M3's on each, and enough of them are masked that the test cannot go
+    /// vacuous.
+    #[test]
+    fn redact_is_byte_identical_to_m3_with_control_bytes() {
+        const PIECES: &[&str] = &[
+            "ALTER ROLE r PASSWORD ",
+            "CREATE USER u IDENTIFIED BY ",
+            "IDENTIFIED WITH mysql_native_password BY ",
+            "SET PASSWORD FOR 'u'@'%' = ",
+            "SET @pw := ",
+            " INTO @pw",
+            "PRAGMA key = ",
+            "ATTACH 'x.db' AS x KEY ",
+            "SELECT pgp_sym_encrypt(d, ",
+            "SELECT crypt(",
+            "set_config('app.secret', ",
+            "dblink_connect('host=h password=",
+            "'postgresql://u:",
+            "@h/db'",
+            "'{\"apiKey\": \"",
+            "Bearer ",
+            "\\connect db u password=",
+            "-- password ",
+            "# password ",
+            "/* PASSWORD ",
+            " */",
+            "/*!80000 ",
+            "$$",
+            "$t$",
+            "E'",
+            "U&'",
+            "'",
+            "''",
+            "\"",
+            "`",
+            "\\",
+            "(",
+            ")",
+            ",",
+            ";",
+            "=",
+            "s3cret",
+            "tiger",
+            "password_hash = ",
+            "\n",
+            " ",
+            "İ",
+            "ş",
+        ];
+        let mut controls: Vec<String> = (0u8..0x20)
+            .chain([0x7f])
+            .filter(|&c| c != 0x0b)
+            .map(|c| char::from(c).to_string())
+            .collect();
+        for c in ['\u{a0}', '\u{85}', '\u{2028}', '\u{3000}', '\u{feff}'] {
+            controls.push(c.to_string());
+        }
+        // xorshift64*: fixed seed, so a failure names a reproducible case number.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+        let (cases, mut masked) = (20_000, 0);
+        for case in 0..cases {
+            let len = (next() % 24) as usize;
+            let mut t = String::new();
+            for _ in 0..len {
+                let r = next();
+                if r % 4 == 0 {
+                    t.push_str(&controls[(r / 4) as usize % controls.len()]);
+                } else {
+                    t.push_str(PIECES[(r / 4) as usize % PIECES.len()]);
+                }
+            }
+            if let Err(e) = same_as_m3(&t) {
+                panic!("case {case}: {e}");
+            }
+            if redact(&t).changed {
+                masked += 1;
+            }
+        }
+        // Measured: 15,204 of 20,000 masked; a generator that stopped reaching the masked paths
+        // fails here.
+        println!("HV-FACT t06 identity_cases={cases} masked={masked}");
+        assert!(masked * 4 >= cases, "only {masked} of {cases} masked");
+    }
+
+    #[test]
+    fn redact_is_byte_identical_to_m3_on_the_corpus() {
+        let corpus = [
+            "ALTER ROLE app PASSWORD 's3cret'",
+            "CREATE USER 'u'@'%' IDENTIFIED WITH mysql_native_password BY 's3cret'",
+            "ALTER USER u IDENTIFIED BY 'n3w' REPLACE 's3cret'",
+            "SET PASSWORD FOR 'u'@'localhost' = PASSWORD('s3cret')",
+            "SELECT pgp_sym_encrypt('Alice SSN', 's3cret', 'cipher-algo=aes256')",
+            "SELECT crypt('s3cret', gen_salt('bf'))",
+            "SELECT pgp_pub_decrypt(msg, dearmor('k'), 's3cret')",
+            "SELECT set_config('app.secret', 's3cret', false)",
+            "PRAGMA main.key = 's3cret'; ATTACH 'x.db' AS x KEY 's3cret'",
+            "SELECT 's3cret' INTO @pw; SET @db_pass := 's3cret'",
+            "-- remember to rotate the password monthly\nSELECT 1",
+            "# password reset flow\n/* the password column holds bcrypt hashes */",
+            "SELECT '{\"password_changed_at\": \"2024-01-01\", \"apiKey\": \"s3cret\"}'",
+            "INSERT INTO cfg VALUES ('password_min_length=12'), ('password_hash=abc')",
+            "SELECT dblink_connect('postgresql://u:s3cret@h/db?sslmode=require')",
+            "DO $$ BEGIN EXECUTE 'ALTER ROLE r PASSWORD ''s3cret'''; END $$",
+            "\\connect host=h password=s3cret\nSELECT 2",
+            "SELECT 'Authorization: Bearer s3cret'",
+            "CHANGE MASTER TO MASTER_PASSWORD='s3cret', MASTER_HOST='h'",
+            "/*!80000 ALTER USER u IDENTIFIED BY 's3cret' */",
+        ];
+        for t in corpus {
+            same_as_m3(t).unwrap();
+        }
+    }
+
+    /// The vocabulary of the SQL-shaped inputs: no vertical tab (M3 never returned on one, see
+    /// `a_vertical_tab_is_white_space`); other control bytes and non-ASCII spaces are in
+    /// (## m4b-t06-secrets, fix round 2, n3).
+    const VOCAB: &str = "PASSWORD|IDENTIFIED|BY|WITH|FOR|REPLACE|RANDOM|SET|INTO|@pw|@@x|:=|PRAGMA|ATTACH|KEY|key|EXPLAIN|crypt|pgp_sym_encrypt|gen_salt|set_config|'app\\.secret'|password_hash|api_key|U&|E|N|\\$\\$|\\$t\\$|'|''|\"|`|\\\\|;|,|=|\\(|\\)|/\\*|\\*/|/\\*!80000|--|#|\n| |\t|ş|İ|ı|x|1|s3cret|tiger|password=|pwd=|\"apiKey\":|Bearer |://u:p@h|\\{|\\}|\\x00|\\x01|\\x1f|\\x0c|\r|\\x7f|\\x{a0}|\\x{85}|\\x{3000}|\\x{feff}|pgp_pub_decrypt|AES_ENCRYPT|password_changed_at|sp_addlogin";
+
+    // ## m4b-t06-secrets (p3)
+    /// The identity proptests' case count: 4,000, or 20,000 with `HACIVAT_IDENTITY_FULL=1`
+    /// (the nightly `build-test`). Read here because `with_cases` overrides `PROPTEST_CASES`.
+    fn identity_cases() -> u32 {
+        if std::env::var("HACIVAT_IDENTITY_FULL").as_deref() == Ok("1") {
+            20_000
+        } else {
+            4_000
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(identity_cases()))]
+        #[test]
+        fn redact_is_byte_identical_to_m3(
+            s in proptest::string::string_regex(&format!("({VOCAB}){{0,48}}")).unwrap()
+        ) {
+            prop_assert!(same_as_m3(&s).is_ok(), "{}", same_as_m3(&s).unwrap_err());
+        }
+
+        #[test]
+        fn redact_is_byte_identical_to_m3_on_any_text(s in "\\PC{0,80}") {
+            prop_assert!(same_as_m3(&s).is_ok(), "{}", same_as_m3(&s).unwrap_err());
+        }
+
+    }
+
+    proptest! {
+        // A hang guard: fewer cases suffice.
+        #![proptest_config(ProptestConfig::with_cases(3_000))]
+        /// The one change to `redact`: a vertical tab is white space. M3 never returned once a
+        /// vertical tab started a token (every vertical tab outside quotes, in either reading,
+        /// at any depth), so on every text M3 returns on, the change is never reached and the
+        /// two tests above hold; on the others the scan now ends (this test hangs otherwise).
+        #[test]
+        fn a_vertical_tab_never_hangs_the_scan(
+            s in proptest::string::string_regex(&format!("({VOCAB}|\u{b}){{0,40}}")).unwrap()
+        ) {
+            let r = redact(&s);
+            let _ = scrub(&s, &r.secrets);
+            for (range, _) in secret_spans(&s) {
+                prop_assert!(s.get(range).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn a_vertical_tab_is_white_space() {
+        // M3 spun forever on these (`u8::is_ascii_whitespace` leaves out 0x0b).
+        for (t, masked) in [
+            ("SELECT\u{b}1", "SELECT\u{b}1"),
+            (
+                "ALTER ROLE r PASSWORD\u{b}'s3cret'",
+                "ALTER ROLE r PASSWORD\u{b}'***'",
+            ),
+            (
+                "SELECT crypt('app\u{b}secret', 'k')",
+                "SELECT crypt('***', '***')",
+            ),
+        ] {
+            assert_eq!(redact(t).text, masked, "{t:?}");
+            let _ = secret_spans(t);
+        }
+    }
+
+    #[test]
+    fn comment_prose_is_never_a_value() {
+        // I1: a bare word after a secret word in a comment is prose; a quoted value, a
+        // `password=` value and a URI password in a comment still are values.
+        for t in [
+            "-- remember to rotate the password monthly",
+            "-- password policy: at least twelve characters",
+            "-- TODO change password later",
+            "# password reset flow",
+            "/* the password column holds bcrypt hashes */",
+            "-- IDENTIFIED BY is MySQL syntax",
+        ] {
+            let s = secret_spans(t);
+            assert!(
+                s.iter().all(|(_, k)| *k == SecretSpanKind::Armed),
+                "{t}: {s:?}"
+            );
+        }
+        for t in [
+            "/* CREATE USER a PASSWORD 's3cret' */ SELECT 1",
+            "-- password=s3cret",
+            "-- prod: postgresql://u:s3cret@db/orders",
+        ] {
+            let s = secret_spans(t);
+            assert!(
+                s.iter()
+                    .any(|(r, k)| *k != SecretSpanKind::Armed && t[r.clone()].contains("s3cret")),
+                "{t}: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_names_follow_c9_inside_strings() {
+        // I2: a pair whose name only mentions a secret is no value; one that names it is.
+        let reported = |t: &str| {
+            secret_spans(t)
+                .into_iter()
+                .filter(|(_, k)| *k != SecretSpanKind::Armed)
+                .map(|(r, _)| t[r].to_owned())
+                .collect::<Vec<_>>()
+        };
+        for t in [
+            "SELECT '{\"password_changed_at\": \"2024-01-01\"}'",
+            "SELECT '{\"password_policy\": \"strict\"}'::jsonb",
+            "INSERT INTO cfg VALUES ('password_min_length=12')",
+            "INSERT INTO cfg VALUES ('password_hash=abc')",
+            "-- password_min_length=12",
+        ] {
+            assert!(reported(t).is_empty(), "{t}: {:?}", reported(t));
+        }
+        for t in [
+            "SELECT 'host=h password=s3cret'",
+            "SELECT 'Server=h;Pwd=s3cret;'",
+            "SELECT '{\"access_token\": \"s3cret\"}'",
+            "SELECT '{\"apiKey\":\"s3cret\"}'",
+            "SELECT 'aws_secret_access_key=s3cret'",
+            "SELECT 'Authorization: Bearer s3cret'",
+            "SELECT 'file:x.db?key=s3cret'",
+            "SELECT 'redis://:s3cret@cache:6379'",
+        ] {
+            assert_eq!(reported(t), ["s3cret"], "{t}");
+        }
+    }
+
+    #[test]
+    fn only_a_crypto_key_argument_is_a_value() {
+        // m2: the key or password position, never the data, the options or a nested call.
+        let values = |t: &str| {
+            secret_spans(t)
+                .into_iter()
+                .filter(|(_, k)| *k == SecretSpanKind::Value)
+                .map(|(r, _)| t[r].to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            values("SELECT pgp_sym_encrypt('Alice SSN', 'k3y', 'cipher-algo=aes256')"),
+            ["'k3y'"]
+        );
+        assert_eq!(values("SELECT crypt('newpw', gen_salt('bf'))"), ["'newpw'"]);
+        assert_eq!(
+            values("SELECT pgp_pub_decrypt(msg, 'k3y', 'psw')"),
+            ["'k3y'", "'psw'"]
+        );
+        assert_eq!(values("SELECT AES_ENCRYPT('data', 'k3y')"), ["'k3y'"]);
+        // Every argument stays masked in history.
+        let t = "SELECT pgp_sym_encrypt('Alice SSN', 'k3y')";
+        assert_eq!(redact(t).text, "SELECT pgp_sym_encrypt('***', '***')");
+    }
+}
+// ## m4b-t06-secrets

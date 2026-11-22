@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+// ## m4b-t06-secrets: the imports of the new case `secret_spans_cover_what_redact_masks`.
+use hacivat_exec::history::{SecretSpanKind, secret_spans};
+use std::ops::Range;
+// ## m4b-t06-secrets
 use hacivat_exec::{
     HistoryConfig, HistoryError, HistoryHit, HistoryOrigin, HistoryQuery, HistoryRecord,
     HistoryStore, Outcome,
@@ -1580,3 +1584,91 @@ async fn damaged_backups_follow_the_rotation_pattern_and_delete_only_what_was_li
     );
     assert!(stranger.exists());
 }
+
+// ## m4b-t06-secrets
+// M4b Task 6 (new cases only): `secret_spans` (the script workspace's secret scanner takes them
+// from the app, R-M4b-28) covers every range the history redaction masks.
+
+/// `masked` is `original` changed only inside `spans`: the text outside the spans' union
+/// survives, in order, with only masks between its pieces.
+fn changes_only_inside(
+    original: &str,
+    masked: &str,
+    spans: &[(Range<usize>, SecretSpanKind)],
+) -> bool {
+    let mut union: Vec<Range<usize>> = spans.iter().map(|(r, _)| r.clone()).collect();
+    union.sort_by_key(|r| r.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for r in union {
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => merged.push(r),
+        }
+    }
+    let mut kept = Vec::new();
+    let mut at = 0;
+    for r in &merged {
+        kept.push(&original[at..r.start]);
+        at = r.end;
+    }
+    kept.push(&original[at..]);
+    if kept.len() == 1 {
+        return masked == original;
+    }
+    let (first, last) = (kept[0], kept[kept.len() - 1]);
+    if masked.len() < first.len() + last.len()
+        || !masked.starts_with(first)
+        || !masked.ends_with(last)
+    {
+        return false;
+    }
+    let mut rest = &masked[first.len()..masked.len() - last.len()];
+    for piece in &kept[1..kept.len() - 1] {
+        match rest.find(piece) {
+            Some(p) => rest = &rest[p + piece.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+#[tokio::test]
+async fn secret_spans_cover_what_redact_masks() {
+    let mut corpus: Vec<&str> = SECRET_STATEMENTS.to_vec();
+    corpus.extend([
+        "SELECT * FROM users WHERE password_hash = 's3cret' AND a = 'b'",
+        "-- prod: postgresql://u:s3cret@db/orders\nSELECT 1",
+        "SELECT pgp_sym_encrypt(data, 's3cret')",
+        "PRAGMA key = 's3cret'",
+        "SET @pw = 's3cret'",
+        "SELECT set_config('app.secret', 's3cret', false)",
+        "SELECT '{\"access_token\": \"s3cret\"}'",
+    ]);
+    for sql in corpus {
+        let masked = stored_text(sql).await;
+        let spans = secret_spans(sql);
+        assert!(
+            changes_only_inside(sql, &masked, &spans),
+            "{sql} → {masked}: {spans:?}"
+        );
+        // Every occurrence of the secret lies inside a span.
+        for (at, _) in sql.match_indices(SECRET) {
+            assert!(
+                spans
+                    .iter()
+                    .any(|(r, _)| r.start <= at && at + SECRET.len() <= r.end),
+                "{sql}: {at}"
+            );
+        }
+    }
+    // Statements the history keeps verbatim have no span at all.
+    for sql in [
+        "SELECT * FROM t WHERE a = 'x'",
+        "SELECT password_reset_at FROM users",
+        "UPDATE t SET note = 'İstanbul' WHERE id = 1",
+    ] {
+        assert_eq!(stored_text(sql).await, sql);
+        assert!(secret_spans(sql).is_empty(), "{sql}");
+    }
+}
+// ## m4b-t06-secrets

@@ -18,7 +18,8 @@
 //!   `LibraryState::Unavailable(NotImplemented)` and scans nothing; every other service call
 //!   answers `NotImplemented` and touches no file;
 //! - [`binding::resolve`] binds nothing; [`envscope::visible`] answers `false`;
-//! - [`scan_secrets`] answers one finding over the whole text (a save asks, never passes);
+//! - [`scan_secrets`] answered one finding over the whole text (a save asks, never passes);
+//!   Task 6 filled it (`## m4b-t06-secrets`, named exception for this line);
 //! - [`fileio::read`] and [`fileio::save`] answer `NotImplemented` and read or write nothing;
 //! - [`manifest::read`] reads nothing and binds nothing; [`pathsafe::component`] and
 //!   [`pathsafe::join`] refuse every name;
