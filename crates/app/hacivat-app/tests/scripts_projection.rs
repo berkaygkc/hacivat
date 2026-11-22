@@ -1240,8 +1240,9 @@ fn rename_refuses_a_traversal_name(cx: &mut TestAppContext) {
         dir.join("müşteri.sql").exists()
     });
     assert!(!dir.join("a.sql").exists());
-    wait_until(r.vcx, "the renamed row", |vcx| {
+    wait_until(r.vcx, "the renamed row and the field closed", |vcx| {
         scripts_rows(vcx, id, "orders") == ["b.sql", "müşteri.sql"]
+            && !layer_ids(vcx).contains(&file_ops::NAME_FIELD_LAYER)
     });
     // ## m4b-t13-explorer fix round 1 (review m12): a committed rename gives the focus back to
     // the tree, as Escape does.
@@ -1276,8 +1277,11 @@ fn rename_refuses_a_traversal_name(cx: &mut TestAppContext) {
     r.vcx.simulate_keystrokes(&select_all());
     r.vcx.simulate_input("yeni.sql");
     press_key(r.vcx, "enter");
-    wait_until(r.vcx, "the new script", |_| dir.join("yeni.sql").exists());
-    assert!(!layer_ids(r.vcx).contains(&file_ops::NAME_FIELD_LAYER));
+    // The file lands on the worker before the field's own answer is handled on the UI
+    // thread: wait for both.
+    wait_until(r.vcx, "the new script and the field closed", |vcx| {
+        dir.join("yeni.sql").exists() && !layer_ids(vcx).contains(&file_ops::NAME_FIELD_LAYER)
+    });
     assert_focus_on(r.vcx, "the tree after a create", &tree_focus);
     r.finish();
 }
