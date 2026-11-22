@@ -947,12 +947,46 @@ fn a_contributed_node_shows_its_contributors_menu(cx: &mut TestAppContext) {
     });
     vcx.run_until_parked();
     enable_registry(vcx);
-    assert!(
+    // ## m4b-cifix-1: on Windows and Linux the menu shows access keys, and a row's label is
+    // drawn as runs around its key letter (`""`, `"S"`, `"cripts item"`; `button::key_label_from`),
+    // so no single run reads "Scripts item" there (CI 44981552034, Linux). Every run of a row's
+    // label carries `#menu-item-label`; the menu has one row, so its runs joined are its label on
+    // every platform.
+    let label_runs = |vcx: &VisualTestContext| -> Vec<String> {
         full_frame(vcx)
-            .iter()
-            .any(|t| t.text.as_ref() == "Scripts item"),
+            .into_iter()
+            .filter(|t| t.path.ends_with("#menu-item-label"))
+            .map(|t| t.text.to_string())
+            .collect()
+    };
+    assert_eq!(
+        label_runs(vcx).concat(),
+        "Scripts item",
         "the contributor's item is drawn"
     );
+    // The same items with access keys shown, as Windows and Linux draw them, so the check above
+    // runs against the split drawing on macOS too.
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    let items = vcx
+        .cx
+        .read(|cx| node_menu(a.leaf_key(), cx))
+        .expect("a menu");
+    let menu = with_ws(vcx, |ws, window, cx| {
+        ws.open_popup_menu(at, items, window, cx)
+    });
+    vcx.cx.update(|cx| {
+        menu.update(cx, |m, cx| {
+            m.set_access_keys(true);
+            cx.notify();
+        })
+    });
+    let runs = label_runs(vcx);
+    assert!(
+        runs.len() > 1,
+        "the label is split around its key: {runs:?}"
+    );
+    assert_eq!(runs.concat(), "Scripts item");
 }
 
 #[gpui::test]
