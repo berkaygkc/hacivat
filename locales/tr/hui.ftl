@@ -97,3 +97,18 @@ hui-grid-a11y-row-of-more = Satır { $row } / { $total } veya daha fazla
 hui-grid-selection-summary = { $cells } hücre seçili
 # Review: PO
 hui-grid-a11y-more-rows = Daha fazla satır var
+
+## m4b-t11-editor
+
+# Review: PO
+hui-editor-t2-title = Salt okunur önizleme: bu dosya { $size }.
+# Review: PO
+hui-editor-t2-body = Düzenleyici dosyanın ilk { $preview } kısmını gösterir. Betik olarak çalıştır dosyanın tamamını gönderir.
+# Review: PO
+hui-editor-paste-confirm-title = { $size } yapıştırılsın mı?
+# Review: PO
+hui-editor-paste-confirm-body = Bu, belgeyi düzenlenemeyecek kadar büyütür ({ $total }). Salt okunur önizleme olarak yapıştırın ya da vazgeçin.
+# Review: PO
+hui-editor-paste-confirm-preview = Önizleme olarak yapıştır
+# Review: PO
+hui-editor-paste-confirm-cancel = Vazgeç

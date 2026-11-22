@@ -13,6 +13,13 @@
 //! - **Nothing above 20 MB** enters the editor in M3a (R-M3-49: the paste guard and the console
 //!   restore refuse it); a document that got there anyway stays in T1, as there is no T2 before
 //!   M4b.
+//! - **T2** (## m4b-t11-editor; UI-EDIT-23 step 1, R-M4b-20): a file past 20 MB opens as a
+//!   read-only preview of its first 2.5 MB ([`preview_cut`]); the host builds the editor over
+//!   that part and calls `EditorView::set_preview`. The tier is then `Preview` for good
+//!   ([`update`] never moves it), the banner reads the T2 copy with the file's and the
+//!   preview's sizes and its own ids (`editor-t2-*`), and the description carries it. A paste
+//!   past 20 MB is still refused unless the host asks the user (`EditorConfig::
+//!   confirm_large_paste`, the 20–100 MB question in `clipboard.rs`).
 //!
 //! The view keeps the longest line from the lines each edit touched (it only grows during
 //! editing; `set_text` measures it again). ## m3a-f4-ime (EDIT-2): it never exceeds the
@@ -35,6 +42,8 @@ use hacivat_ui_core::theme::{Theme, ThemeMode};
 
 use crate::commands::message;
 use crate::config::{Tier, TierLimits};
+// ## m4b-t11-editor
+use crate::reload::PreviewSpec;
 use crate::view::EditorView;
 
 /// The longest line T0 takes (UI-EDIT-23 step 1: 64 KB).
@@ -108,6 +117,37 @@ fn narrow_title_px(
         .ceil()
 }
 
+// ## m4b-t11-editor
+/// The element ids and debug selectors of a banner (scene checks and shots find it by them).
+struct BannerIds {
+    banner: &'static str,
+    notice: &'static str,
+    title_box: &'static str,
+    title: &'static str,
+    body: &'static str,
+    body_scroll: &'static str,
+}
+
+/// The T1 ("Reduced mode") banner's.
+const T1_IDS: BannerIds = BannerIds {
+    banner: "editor-t1-banner",
+    notice: "editor-t1-notice",
+    title_box: "editor-t1-title-box",
+    title: "editor-t1-title",
+    body: "editor-t1-body",
+    body_scroll: "editor-t1-body-scroll",
+};
+
+/// The T2 ("Read-only preview") banner's.
+const T2_IDS: BannerIds = BannerIds {
+    banner: "editor-t2-banner",
+    notice: "editor-t2-notice",
+    title_box: "editor-t2-title-box",
+    title: "editor-t2-title",
+    body: "editor-t2-body",
+    body_scroll: "editor-t2-body-scroll",
+};
+
 /// The module-owned state (P11): the tier, and what the banner says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TierState {
@@ -121,6 +161,9 @@ pub struct TierState {
     pub by_size: bool,
     /// In T1 because of a line longer than 64 KB (accumulated while in T1).
     pub by_line: bool,
+    // ## m4b-t11-editor
+    /// The T2 preview's sizes (`Tier::Preview` only; `EditorView::set_preview`).
+    pub preview: Option<PreviewSpec>,
 }
 
 /// Formats a document size for the T1 banner in the format locale (L3; "18,4 MB" in Turkey).
@@ -157,6 +200,8 @@ pub fn open(bytes: u64, longest_line: u64, limits: &TierLimits) -> TierState {
         limits: *limits,
         by_size: bytes > limits.full_max_bytes,
         by_line: longest_line > LONG_LINE_MAX_BYTES,
+        // ## m4b-t11-editor
+        preview: None,
     }
 }
 
@@ -172,6 +217,10 @@ pub fn update(
     s.bytes = bytes;
     s.longest_line = longest_line;
     s.limits = *limits;
+    // ## m4b-t11-editor: a T2 preview never moves to another tier (the host reopens it).
+    if s.tier == Tier::Preview {
+        return None;
+    }
     let over_size = bytes > limits.full_max_bytes;
     let over_line = longest_line > LONG_LINE_MAX_BYTES;
     let tier = if s.tier == Tier::Full {
@@ -206,6 +255,43 @@ pub fn update(
 /// The editor's tier state.
 pub fn state(v: &EditorView) -> &TierState {
     &v.tier
+}
+
+// ## m4b-t11-editor (T2, UI-EDIT-23 step 1)
+/// Where a T2 preview of `text` ends when it may show `max` bytes (`TierLimits::preview_bytes`):
+/// the whole text when it fits, else just after the last line break (LF, CRLF or a lone CR)
+/// that ends at or before `max`; with none (a first line longer than that), the last character
+/// boundary at or before `max` that is not between a CR and its LF. Scans back from `max`
+/// only, so a 100 MB text costs what its preview does.
+pub fn preview_cut(text: &str, max: u64) -> usize {
+    let max = usize::try_from(max).unwrap_or(usize::MAX);
+    if text.len() <= max {
+        return text.len();
+    }
+    let b = text.as_bytes();
+    // `max < len`, so `b[i]` exists for every `i <= max`.
+    if let Some(i) = (1..=max)
+        .rev()
+        .find(|&i| b[i - 1] == b'\n' || (b[i - 1] == b'\r' && b[i] != b'\n'))
+    {
+        return i;
+    }
+    let mut i = max;
+    while !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    if i > 0 && b[i - 1] == b'\r' && b[i] == b'\n' {
+        i -= 1;
+    }
+    i
+}
+
+/// Makes `s` a T2 preview of `spec` (`EditorView::set_preview`); `true` when the tier moved.
+pub(crate) fn enter_preview(s: &mut TierState, spec: PreviewSpec) -> bool {
+    let moved = s.tier != Tier::Preview;
+    s.tier = Tier::Preview;
+    s.preview = Some(spec);
+    moved
 }
 
 // ## m3a-f4-ime (PO finding EDIT-2)
@@ -252,7 +338,7 @@ pub(crate) fn after_edit(v: &mut EditorView, cx: &mut Context<EditorView>) {
 }
 
 /// `bytes` as the banner shows it.
-fn size_text(bytes: u64, cx: &App) -> SharedString {
+pub(crate) fn size_text(bytes: u64, cx: &App) -> SharedString {
     if let Some(f) = cx.try_global::<SizeText>() {
         return (f.0)(bytes, cx);
     }
@@ -280,6 +366,21 @@ fn return_line(cx: &App) -> SharedString {
 fn lines(s: &TierState, cx: &App) -> Option<(SharedString, SharedString)> {
     if s.tier == Tier::Full {
         return None;
+    }
+    // ## m4b-t11-editor (design/m4b-scripts surface 9): the file's size, and how much of it
+    // the preview shows.
+    if let (Tier::Preview, Some(p)) = (s.tier, s.preview) {
+        let title = message(
+            cx,
+            "hui-editor-t2-title",
+            &[("size", UiArg::Text(size_text(p.total_bytes, cx)))],
+        );
+        let body = message(
+            cx,
+            "hui-editor-t2-body",
+            &[("preview", UiArg::Text(size_text(p.shown_bytes, cx)))],
+        );
+        return Some((title, body));
     }
     // ## m3a-t29 fix round 1 (M1): the copy follows the cause. The size title when the size
     // caused T1. ## m3a-f4-ime (EDIT-2): the body says when T1 ends for each cause: below
@@ -333,6 +434,8 @@ pub fn banner(
     cx: &mut App,
 ) -> Option<AnyElement> {
     let (title, body) = lines(s, cx)?;
+    // ## m4b-t11-editor: the T2 banner has its own ids (the T1 ones stay as they were).
+    let ids = if s.tier == Tier::Preview { &T2_IDS } else { &T1_IDS };
     let theme = *Theme::get(cx);
     let t = theme.tokens;
     let c = &t.colors;
@@ -346,7 +449,7 @@ pub fn banner(
         // ## m3c-narrow (fix round 1, I1): the well keeps its title.
         let keep = narrow_title_px(&title, width, &style, t, window) + narrow_well_px(t);
         let notice = div()
-            .debug_selector(|| "editor-t1-notice".to_string())
+            .debug_selector(move || ids.notice.to_string())
             .flex()
             .flex_col()
             .flex_shrink(1.0)
@@ -361,28 +464,28 @@ pub fn banner(
             .child(
                 div()
                     // ## m3c-narrow (fix round 1, I1): the title's box, for the scene checks.
-                    .debug_selector(|| "editor-t1-title-box".to_string())
+                    .debug_selector(move || ids.title_box.to_string())
                     .flex_none()
                     .child(
                         paragraph(title, TextSource::Fluent, style, c.text.to_hsla())
-                            .id("editor-t1-title"),
+                            .id(ids.title),
                     ),
             )
             .child(
                 div()
-                    .id("editor-t1-body-scroll")
+                    .id(ids.body_scroll)
                     .flex_shrink(1.0)
                     .min_h(px(0.0))
                     .overflow_y_scroll()
                     .child(scroll_viewport())
                     .child(
                         paragraph(body, TextSource::Fluent, style, c.text_2.to_hsla())
-                            .id("editor-t1-body"),
+                            .id(ids.body),
                     ),
             );
         return Some(
             div()
-                .debug_selector(|| "editor-t1-banner".to_string())
+                .debug_selector(move || ids.banner.to_string())
                 .flex()
                 .flex_col()
                 .flex_shrink(1.0)
@@ -400,8 +503,8 @@ pub fn banner(
         .flex_col()
         .flex_1()
         .min_w_0()
-        .child(paragraph(title, TextSource::Fluent, style, c.text.to_hsla()).id("editor-t1-title"))
-        .child(paragraph(body, TextSource::Fluent, style, c.text_2.to_hsla()).id("editor-t1-body"));
+        .child(paragraph(title, TextSource::Fluent, style, c.text.to_hsla()).id(ids.title))
+        .child(paragraph(body, TextSource::Fluent, style, c.text_2.to_hsla()).id(ids.body));
     let notice = div()
         .flex()
         .flex_row()
@@ -423,7 +526,7 @@ pub fn banner(
         .child(text);
     Some(
         div()
-            .debug_selector(|| "editor-t1-banner".to_string())
+            .debug_selector(move || ids.banner.to_string())
             .flex_none()
             .mt(px(t.spacing.md))
             .mx(px(t.spacing.lg))

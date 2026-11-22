@@ -104,9 +104,30 @@ pub enum EditorEvent {
     CompositionChanged(bool),
     StatusChanged,
     TierChanged(Tier),
-    /// A paste would take the document past 20 MB (R-M3-49).
+    /// A paste would take the document past 20 MB (R-M3-49); ## m4b-t11-editor: past 100 MB
+    /// when the host takes the question (`EditorConfig::confirm_large_paste`).
     PasteRefused {
         bytes: u64,
+    },
+    // ## m4b-t11-editor (named items; UI-EDIT-14 step 5, R-M4b-20)
+    /// A paste of `bytes` would make the document `total` bytes: past 20 MB, within 100 MB
+    /// (only with `EditorConfig::confirm_large_paste`). Nothing is pasted yet: the host asks
+    /// (`clipboard::paste_confirm_dialog`) and answers with `EditorView::confirm_paste`.
+    PasteNeedsConfirm {
+        bytes: u64,
+        total: u64,
+    },
+    /// The host answered "Paste as preview": the whole document as the paste would make it,
+    /// for the host to show as a T2 preview. The editor's own text is unchanged.
+    PasteAsPreview {
+        text: crate::clipboard::PastedDocument,
+    },
+    /// A `replace_from_disk` finished (R-M4b-38). `Some(version)`: the text is the disk text
+    /// at `version` (the host's new clean version; unchanged when the text already was).
+    /// `None`: nothing was replaced, because an edit came first (a dirty tab never reloads,
+    /// R-M4b-16: the host shows its "Changed on disk" bar) or the editor became a preview.
+    Reloaded {
+        version: Option<u64>,
     },
     /// The context menu opened (`editor.context_menu`, Shift+F10 at the caret, or a right click
     /// at the pointer; Task 25 emits it and draws the menu in `commands::overlay`). The host
@@ -208,8 +229,13 @@ pub struct EditorView {
     has_focus: bool,
     /// The longest line seen, in bytes (the tier's long-line rule). Edits only grow it (a
     /// shortened longest line is not re-measured per keystroke, which would be O(document));
-    /// `set_text` measures it again.
-    longest_line: u64,
+    /// `set_text` measures it again. ## m4b-t11-editor (named item): crate-visible, so a
+    /// reload from disk sets it to the disk text's, measured off the UI thread.
+    pub(crate) longest_line: u64,
+    // ## m4b-t11-editor (named item)
+    /// The reload from disk whose diff runs on the background executor (`reload.rs`);
+    /// dropping it cancels it.
+    pub(crate) reload: Option<Task<()>>,
     /// The snapshot the fan-out last saw (the scroll rebase and the reveal rule read it).
     fanned: Snapshot,
     /// `commit` marked the probe's input before its dispatch; the fan-out does not mark again.
@@ -345,6 +371,8 @@ impl EditorView {
             gutter_ui: crate::gutter::GutterUi::default(),
             has_focus: false,
             longest_line: longest_line(text),
+            // ## m4b-t11-editor
+            reload: None,
             fanned,
             input_marked: false,
             context_point: None,
@@ -418,6 +446,9 @@ impl EditorView {
 
     pub fn set_config(&mut self, cfg: EditorConfig, cx: &mut Context<Self>) {
         self.config = cfg;
+        // ## m4b-t11-editor (named item): a T2 preview stays read-only whatever the host's
+        // configuration says (it is a cut of a larger file; an edit would be saved over it).
+        self.config.read_only |= self.tier.tier == Tier::Preview;
         if self.has_focus {
             self.restart_blink(cx);
         }

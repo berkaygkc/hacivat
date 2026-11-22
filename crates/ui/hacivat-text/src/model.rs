@@ -545,6 +545,15 @@ impl EditorModel {
         self.history.seal();
     }
 
+    // ## m4b-t11-editor (named item, R-M4b-38)
+    /// Drops every undo and redo group and seals: the text was read from disk again
+    /// (UI-EDIT-04 step 9), so nothing before it can be undone. The text, the selection, the
+    /// version and the selection history stay; an open bracket stays open, and its next
+    /// transaction starts a new group.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+    }
+
     /// Opens a bracket: every history transaction until the outermost bracket ends forms one
     /// undo group of `kind` (brackets nest).
     pub fn begin_bracket(&mut self, kind: UserEvent) -> BracketId {

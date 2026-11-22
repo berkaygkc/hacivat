@@ -98,11 +98,7 @@ pub(crate) enum AppEdit {
     SelectRange(Range<usize>),
     Paste(Pasted),
     // ## m4b-t01b-seams (named line, R-M4b-38): the text read from disk again, held like
-    // `SetText` while a composition is open (Task 11's `replace_from_disk` makes it).
-    #[allow(
-        dead_code,
-        reason = "Task 11's replace_from_disk makes it; the stub refuses first"
-    )]
+    // `SetText` while a composition is open (`EditorView::replace_from_disk` makes it).
     ReplaceFromDisk(String),
 }
 
@@ -196,8 +192,12 @@ pub(crate) fn hold(v: &mut EditorView, edit: AppEdit) {
             }
         }
         AppEdit::Paste(p) => Held::Paste(p),
-        // ## m4b-t01b-seams (R-M4b-38): queued in order; Task 11 decides its coalescing.
-        AppEdit::ReplaceFromDisk(text) => Held::ReplaceFromDisk(text),
+        // ## m4b-t01b-seams (R-M4b-38): queued in order. ## m4b-t11-editor: the newest disk
+        // text replaces an older one still held (it is the file as it is now).
+        AppEdit::ReplaceFromDisk(text) => {
+            queue.retain(|h| !matches!(h, Held::ReplaceFromDisk(_)));
+            Held::ReplaceFromDisk(text)
+        }
     };
     v.input.deferred.push(held);
 }
@@ -374,10 +374,13 @@ fn flush(v: &mut EditorView, cx: &mut Context<EditorView>) {
                 }
             }
             Held::Paste(p) => clipboard::apply(v, p, cx),
-            // ## m4b-t01b-seams (R-M4b-38): applied when the composition ends (the stub refuses,
-            // and the host's bar stays).
+            // ## m4b-t01b-seams (R-M4b-38): started when the composition ends, against the text
+            // it left. ## m4b-t11-editor: a refusal now (the editor became a preview meanwhile)
+            // is told to the host, who heard `Ok` when it was held.
             Held::ReplaceFromDisk(text) => {
-                let _ = v.replace_from_disk(&text, cx);
+                if v.replace_from_disk(&text, cx).is_err() {
+                    cx.emit(crate::view::EditorEvent::Reloaded { version: None });
+                }
             }
         }
         v.input.flushing = false;

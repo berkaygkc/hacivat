@@ -18,7 +18,11 @@
 //!   document past T1's 20 MB is refused with `EditorEvent::PasteRefused { bytes }` and a toast
 //!   (R-M3-49); a paste whose normalised length alone is past it is refused on the background
 //!   executor before anything that size is built, and the UI thread never copies the text. A
-//!   failed read shows the clipboard-unavailable toast with Try again.
+//!   failed read shows the clipboard-unavailable toast with Try again. ## m4b-t11-editor
+//!   (UI-EDIT-14 step 5): when the host takes the question (`EditorConfig::
+//!   confirm_large_paste`), a paste that makes the document 20–100 MB asks first
+//!   (`EditorEvent::PasteNeedsConfirm`, the notes at the end of this file) and only one past
+//!   100 MB is refused.
 //! - **Never inside a composition:** paste and cut are refused while composing (no binding
 //!   runs then either, F15), and a read that lands while composing waits until the composition
 //!   ends (`ime::defer_while_composing`, the corrected R-M3-7 ruling). Copy changes no text and
@@ -43,9 +47,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_text::{
-    ChangeSet, LineEnding, Origin, SelectionRange, SelectionSet, Transaction, UserEvent,
+    ChangeSet, LineEnding, Origin, SelectionRange, SelectionSet, TextBuffer, Transaction,
+    UserEvent,
 };
 use hacivat_ui::actions::ActionFn;
+// ## m4b-t11-editor
+use hacivat_ui::button::ButtonKind;
+use hacivat_ui::dialog::{DialogButton, DialogSize, DialogSpec};
 use hacivat_ui::icon::IconName;
 use hacivat_ui::l10n::UiArg;
 use hacivat_ui::text::TextFn;
@@ -55,6 +63,8 @@ use twox_hash::XxHash3_128;
 
 use crate::commands::message;
 use crate::ime::{self, AppEdit};
+// ## m4b-t11-editor
+use crate::large_file;
 use crate::view::{EditorEvent, EditorView};
 
 /// The module-owned state (P11): the clipboard reads in flight, and the primary selection's
@@ -66,6 +76,9 @@ pub struct PasteState {
     /// Bumped by every selection change: a pending primary-selection write runs only if it is
     /// still the newest (the 100 ms debounce).
     primary_generation: u64,
+    // ## m4b-t11-editor
+    /// The 20–100 MB paste waiting for the host's answer (`EditorView::confirm_paste`).
+    pub(crate) pending: Option<PendingPaste>,
 }
 
 impl PasteState {
@@ -104,13 +117,18 @@ fn hash_of(text: &str) -> u128 {
 }
 
 /// Normalised pasted text, ready to apply.
-#[derive(Debug)]
+// ## m4b-t11-editor: `Clone` (its texts are `Arc`s) for the pending question.
+#[derive(Debug, Clone)]
 pub(crate) struct Pasted {
     text: Arc<str>,
     nuls: usize,
     /// The pieces, normalised, when the clipboard described them (its metadata, or the copy
     /// record): one per copied range, with whether it is line-wise. Empty for foreign text.
     pieces: Vec<(Arc<str>, bool)>,
+    // ## m4b-t11-editor
+    /// The host answered "Paste" to the 20–100 MB question: the paste may make the document
+    /// up to `TierLimits::paste_max_bytes` (kept while the paste is held for a composition).
+    confirmed: bool,
 }
 
 /// The piece metadata of the copied pieces (UI-EDIT-14 step 1).
@@ -343,7 +361,8 @@ pub(crate) fn paste_item(v: &mut EditorView, item: ClipboardItem, cx: &mut Conte
         return;
     }
     let ending = v.model.buffer().dominant_line_ending();
-    let limit = v.config.tiers.reduced_max_bytes;
+    // ## m4b-t11-editor: 100 MB when the host takes the 20–100 MB question.
+    let limit = refused_past(v);
     let record = cx.try_global::<CopyRecord>().cloned();
     v.paste.reads += 1;
     let work = cx.background_executor().spawn(async move {
@@ -429,6 +448,7 @@ fn prepare(text: String, ending: LineEnding, pieces: &[Piece], limit: u64) -> La
         text: whole,
         nuls,
         pieces,
+        confirmed: false,
     })
 }
 
@@ -458,10 +478,56 @@ fn normalize(text: &str, ending: LineEnding) -> (Arc<str>, usize) {
 }
 
 /// A paste past the limit: refused with `PasteRefused { bytes }` and the toast (R-M3-49).
+/// ## m4b-t11-editor: the limit the toast names is [`refused_past`]'s.
 fn refuse(v: &mut EditorView, bytes: u64, cx: &mut Context<EditorView>) {
-    let limit = v.config.tiers.reduced_max_bytes;
+    let limit = refused_past(v);
     cx.emit(EditorEvent::PasteRefused { bytes });
     ToastQueue::push(cx, refused_toast(bytes, limit));
+}
+
+// ## m4b-t11-editor (named items: the size guard of `apply` and `insert_at`)
+/// The largest document a paste may make before it is refused: T1's 20 MB, or 100 MB when
+/// the host takes the 20–100 MB question (`EditorConfig::confirm_large_paste`).
+fn refused_past(v: &EditorView) -> u64 {
+    if v.config.confirm_large_paste {
+        v.config.tiers.paste_max_bytes
+    } else {
+        v.config.tiers.reduced_max_bytes
+    }
+}
+
+/// The size guard of every paste (UI-EDIT-14 step 5): `true` when `p`, inserting `inserted`
+/// bytes and making the document `after` bytes, goes ahead now. Within 20 MB it does; past
+/// it, a paste the host confirmed does up to 100 MB; otherwise, when the host takes the
+/// question and the document stays within 100 MB, the paste waits for the answer
+/// (`PasteNeedsConfirm`; a newer question replaces an older one) and nothing is pasted; past
+/// that it is refused. `at`: the insertion point of a middle click's paste, with the version
+/// it is for (`None`: the selection current at the answer).
+fn size_guard(
+    v: &mut EditorView,
+    p: &Pasted,
+    inserted: usize,
+    after: usize,
+    at: Option<(u64, usize)>,
+    cx: &mut Context<EditorView>,
+) -> bool {
+    let (bytes, total) = (inserted as u64, after as u64);
+    let tiers = v.config.tiers;
+    if total <= tiers.reduced_max_bytes || (p.confirmed && total <= tiers.paste_max_bytes) {
+        return true;
+    }
+    if !p.confirmed && v.config.confirm_large_paste && total <= tiers.paste_max_bytes {
+        v.paste.pending = Some(PendingPaste {
+            pasted: p.clone(),
+            at,
+            bytes,
+            total,
+        });
+        cx.emit(EditorEvent::PasteNeedsConfirm { bytes, total });
+    } else {
+        refuse(v, bytes, cx);
+    }
+    false
 }
 
 /// What each caret of `n` gets (UI-EDIT-14 step 4): piece `i` at caret `i` when there are `n`
@@ -483,25 +549,24 @@ fn distribution(p: &Pasted, n: usize, nl: &str) -> Vec<(Arc<str>, bool)> {
     vec![(p.text.clone(), line_wise); n]
 }
 
-/// Applies normalised pasted text to the selection current now (## m3c-t31-multi: one piece,
-/// one line or the whole text per caret, [`distribution`]): a line-wise piece above its caret's
-/// line when the caret has no selection (its column kept), anything else over the range. Held
-/// while a composition is open (or held edits wait before it); refused past the size limit,
-/// with the selections it replaces counted out (R-M3-49). One `InputPaste` group.
-pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>) {
-    if v.config.read_only {
-        return;
-    }
-    if ime::must_hold(v) {
-        ime::hold(v, AppEdit::Paste(p));
-        return;
-    }
+/// The selection now, each caret's edit, and where each caret lands (`Some(i)`: after edit
+/// `i`'s text; `None`: its own position moved by the edits at or before it, for a line-wise
+/// piece). ## m4b-t11-editor: `apply`'s plan, shared with "Paste as preview".
+#[allow(
+    clippy::type_complexity,
+    reason = "a private plan of three parts, named at its one destructuring call site"
+)]
+fn edits_for(
+    v: &EditorView,
+    p: &Pasted,
+) -> (
+    SelectionSet,
+    Vec<(Range<usize>, Arc<str>)>,
+    Vec<Option<usize>>,
+) {
     let buf = v.model.buffer();
-    let len = buf.len_bytes();
     let sel = v.model.selection().clone();
-    let plan = distribution(&p, sel.ranges().len(), buf.dominant_line_ending().as_str());
-    // Each caret: its edit, and where its caret lands (after the edit's text, or its own
-    // position moved by the edits at or before it, for a line-wise piece).
+    let plan = distribution(p, sel.ranges().len(), buf.dominant_line_ending().as_str());
     let mut edits: Vec<(Range<usize>, Arc<str>)> = Vec::with_capacity(plan.len());
     let mut after_edit: Vec<Option<usize>> = Vec::with_capacity(plan.len());
     for (r, (text, line_wise)) in sel.ranges().iter().zip(plan) {
@@ -515,10 +580,28 @@ pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>)
             after_edit.push(Some(edits.len() - 1));
         }
     }
+    (sel, edits, after_edit)
+}
+
+/// Applies normalised pasted text to the selection current now (## m3c-t31-multi: one piece,
+/// one line or the whole text per caret, [`distribution`]): a line-wise piece above its caret's
+/// line when the caret has no selection (its column kept), anything else over the range. Held
+/// while a composition is open (or held edits wait before it); refused past the size limit,
+/// with the selections it replaces counted out (R-M3-49). One `InputPaste` group.
+pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>) {
+    if v.config.read_only {
+        return;
+    }
+    if ime::must_hold(v) {
+        ime::hold(v, AppEdit::Paste(p));
+        return;
+    }
+    let len = v.model.buffer().len_bytes();
+    let (sel, edits, after_edit) = edits_for(v, &p);
     let inserted: usize = edits.iter().map(|(_, t)| t.len()).sum();
     let removed: usize = edits.iter().map(|(r, _)| r.len()).sum();
-    if (len - removed + inserted) as u64 > v.config.tiers.reduced_max_bytes {
-        refuse(v, inserted as u64, cx);
+    // ## m4b-t11-editor: past 20 MB, asked or refused (`size_guard`).
+    if !size_guard(v, &p, inserted, len - removed + inserted, None, cx) {
         return;
     }
     // Where each edit's text starts in the new text (in the order the change set applies them).
@@ -627,7 +710,8 @@ pub(crate) fn paste_text_at(
         return;
     }
     let ending = v.model.buffer().dominant_line_ending();
-    let limit = v.config.tiers.reduced_max_bytes;
+    // ## m4b-t11-editor: 100 MB when the host takes the 20–100 MB question.
+    let limit = refused_past(v);
     let version = v.model.version();
     v.paste.reads += 1;
     let work = cx
@@ -646,6 +730,19 @@ pub(crate) fn paste_text_at(
     .detach();
 }
 
+/// Byte `at` of version `version` in the current text; `None` when that text is gone (or the
+/// change log no longer reaches back).
+fn at_now(v: &EditorView, version: u64, at: usize) -> Option<usize> {
+    match v
+        .model
+        .changelog()
+        .rebase(version, at..at, hacivat_text::RangeKind::Content)
+    {
+        hacivat_text::Rebased::Mapped(r) => Some(r.start),
+        hacivat_text::Rebased::Deleted | hacivat_text::Rebased::TooOld => None,
+    }
+}
+
 /// Inserts prepared text at byte `at` of version `version` (mapped to the current text; dropped
 /// when that text is gone) as one `InputPaste` group; the selections stay where they are
 /// (mapped). Refused on a read-only editor, while composing, or past the size limit.
@@ -653,17 +750,13 @@ fn insert_at(v: &mut EditorView, version: u64, at: usize, p: Pasted, cx: &mut Co
     if v.config.read_only || ime::must_hold(v) {
         return;
     }
-    let at = match v
-        .model
-        .changelog()
-        .rebase(version, at..at, hacivat_text::RangeKind::Content)
-    {
-        hacivat_text::Rebased::Mapped(r) => r.start,
-        hacivat_text::Rebased::Deleted | hacivat_text::Rebased::TooOld => return,
+    let Some(at) = at_now(v, version, at) else {
+        return;
     };
     let len = v.model.buffer().len_bytes();
-    if (len + p.text.len()) as u64 > v.config.tiers.reduced_max_bytes {
-        refuse(v, p.text.len() as u64, cx);
+    // ## m4b-t11-editor: past 20 MB, asked or refused (`size_guard`).
+    let now = Some((v.model.version(), at));
+    if !size_guard(v, &p, p.text.len(), len + p.text.len(), now, cx) {
         return;
     }
     let at = v
@@ -794,6 +887,225 @@ pub fn unavailable_toast(retry: ActionFn) -> Toast {
     toast
 }
 
+// ## m4b-t11-editor: the 20–100 MB paste confirmation (UI-EDIT-14 step 5, R-M4b-20;
+// design/m4b-scripts surface 9).
+//
+// A paste that would make the document larger than T1's 20 MB but at most 100 MB, in an editor
+// whose host takes the question (`EditorConfig::confirm_large_paste`), is held as the one
+// pending paste and the host hears `PasteNeedsConfirm { bytes, total }`. The host shows
+// `paste_confirm_dialog` (a 420 px alertdialog: "Paste as preview" Default, Cancel Primary,
+// focused and Escape's answer) and answers with `EditorView::confirm_paste`:
+// - Cancel: dropped;
+// - AsPreview: the whole document as the paste would make it is built on the background
+//   executor and handed to the host (`PasteAsPreview`), which shows it as a T2 preview; the
+//   editor's own text stays;
+// - Paste: pasted as it would have been, editable in reduced mode (up to 100 MB).
+// Past 100 MB a paste is refused (`PasteRefused`, the toast names 100 MB). A host that does not
+// take the question keeps M3's refusal past 20 MB, so no paste ever waits for an answer that
+// never comes.
+
+/// The host's answer to `EditorEvent::PasteNeedsConfirm`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PasteAnswer {
+    /// Paste it, editable in reduced mode (not offered by surface 9's dialog).
+    Paste,
+    /// "Paste as preview": the host gets the document as the paste would make it.
+    AsPreview,
+    /// Paste nothing.
+    Cancel,
+}
+
+/// The document "Paste as preview" makes (`EditorEvent::PasteAsPreview`), 20–100 MB of text:
+/// its `Debug` gives the size only.
+#[derive(Clone)]
+pub struct PastedDocument(Arc<str>);
+
+impl PastedDocument {
+    /// The whole text.
+    pub fn text(&self) -> &str {
+        &self.0
+    }
+
+    /// The text, shared.
+    pub fn shared(&self) -> Arc<str> {
+        self.0.clone()
+    }
+}
+
+impl std::fmt::Debug for PastedDocument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PastedDocument")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
+
+/// The paste waiting for the host's answer.
+#[derive(Clone)]
+pub(crate) struct PendingPaste {
+    pasted: Pasted,
+    /// A middle click's insertion point and the version it is for; `None`: the selection
+    /// current at the answer.
+    at: Option<(u64, usize)>,
+    bytes: u64,
+    total: u64,
+}
+
+impl std::fmt::Debug for PendingPaste {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingPaste")
+            .field("bytes", &self.bytes)
+            .field("total", &self.total)
+            .field("at", &self.at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The confirmation's "Paste as preview" button (`DialogEvent::Pressed`).
+pub const PASTE_CONFIRM_PREVIEW: usize = 0;
+/// The confirmation's Cancel button: the initial focus and Escape's answer.
+pub const PASTE_CONFIRM_CANCEL: usize = 1;
+
+/// The answer a press of the confirmation's `button` gives; anything else is Cancel (fail
+/// closed: a dialog closed some other way pastes nothing).
+pub fn paste_answer(button: usize) -> PasteAnswer {
+    match button {
+        PASTE_CONFIRM_PREVIEW => PasteAnswer::AsPreview,
+        _ => PasteAnswer::Cancel,
+    }
+}
+
+/// The question for a paste of `bytes` that would make the document `total` bytes
+/// (design/m4b-scripts surface 9): "Paste 42.6 MB?" / "That makes this document 61.0 MB, too
+/// large to edit. Paste it as a read-only preview, or cancel." with "Paste as preview"
+/// (Default) and Cancel (Primary: the initial focus, and what Escape answers). The host opens
+/// it as a modal layer with `Role::AlertDialog` and maps the press with [`paste_answer`].
+/// Sizes are the format locale's (`large_file::SizeText`).
+pub fn paste_confirm_dialog(bytes: u64, total: u64) -> DialogSpec {
+    let button = |label: TextFn, kind| DialogButton {
+        label,
+        kind,
+        accesskey: None,
+        english_accesskey: None,
+    };
+    DialogSpec {
+        title: Rc::new(move |cx: &App| {
+            message(
+                cx,
+                "hui-editor-paste-confirm-title",
+                &[("size", UiArg::Text(large_file::size_text(bytes, cx)))],
+            )
+        }),
+        body: Rc::new(move |cx: &App| {
+            message(
+                cx,
+                "hui-editor-paste-confirm-body",
+                &[("total", UiArg::Text(large_file::size_text(total, cx)))],
+            )
+        }),
+        buttons: vec![
+            button(
+                Rc::new(|cx: &App| message(cx, "hui-editor-paste-confirm-preview", &[])),
+                ButtonKind::Default,
+            ),
+            button(
+                Rc::new(|cx: &App| message(cx, "hui-editor-paste-confirm-cancel", &[])),
+                ButtonKind::Primary,
+            ),
+        ],
+        cancel: PASTE_CONFIRM_CANCEL,
+        primary: PASTE_CONFIRM_CANCEL,
+        size: DialogSize::Standard,
+    }
+}
+
+/// `buf` with `edits` applied (sorted, not overlapping: checked by the caller), built off the
+/// UI thread.
+fn document_after(buf: &TextBuffer, mut edits: Vec<(Range<usize>, Arc<str>)>) -> Arc<str> {
+    edits.sort_by_key(|(r, _)| (r.start, r.end));
+    let len = buf.len_bytes();
+    let removed: usize = edits.iter().map(|(r, _)| r.len()).sum();
+    let inserted: usize = edits.iter().map(|(_, t)| t.len()).sum();
+    let mut out = String::with_capacity(len - removed + inserted);
+    let mut at = 0;
+    for (r, t) in &edits {
+        out.push_str(&buf.slice(at..r.start));
+        out.push_str(t);
+        at = r.end;
+    }
+    out.push_str(&buf.slice(at..len));
+    Arc::from(out)
+}
+
+/// "Paste as preview": the document as `pending` would make it now, handed to the host.
+/// Nothing when its place is gone, or when the document would now be past 100 MB (refused).
+fn as_preview(v: &mut EditorView, pending: PendingPaste, cx: &mut Context<EditorView>) {
+    let p = pending.pasted;
+    let edits = match pending.at {
+        None => edits_for(v, &p).1,
+        Some((version, at)) => match at_now(v, version, at) {
+            Some(at) => vec![(at..at, p.text.clone())],
+            None => return,
+        },
+    };
+    let buf = v.model.buffer().clone();
+    let len = buf.len_bytes();
+    let inserted: usize = edits.iter().map(|(_, t)| t.len()).sum();
+    let removed: usize = edits.iter().map(|(r, _)| r.len()).sum();
+    if (len - removed + inserted) as u64 > v.config.tiers.paste_max_bytes {
+        refuse(v, inserted as u64, cx);
+        return;
+    }
+    // The edits must make one change set (sorted, not overlapping), as `apply` requires.
+    if ChangeSet::from_edits(len, edits.clone()).is_err() {
+        return;
+    }
+    let work = cx
+        .background_executor()
+        .spawn(async move { document_after(&buf, edits) });
+    cx.spawn(async move |this, cx| {
+        let doc = work.await;
+        let _ = this.update(cx, |_, cx| {
+            cx.emit(EditorEvent::PasteAsPreview {
+                text: PastedDocument(doc),
+            });
+        });
+    })
+    .detach();
+}
+
+impl EditorView {
+    /// The host's answer to the pending `PasteNeedsConfirm` (the module's m4b-t11 notes):
+    /// Cancel drops it, AsPreview hands the host the document it would make
+    /// (`PasteAsPreview`), Paste pastes it (held while a composition is open, like any paste;
+    /// the size is checked again, against 100 MB). Nothing happens when no paste waits.
+    pub fn confirm_paste(&mut self, answer: PasteAnswer, cx: &mut Context<Self>) {
+        let Some(pending) = self.paste.pending.take() else {
+            return;
+        };
+        if self.config.read_only {
+            return;
+        }
+        match answer {
+            PasteAnswer::Cancel => {}
+            PasteAnswer::AsPreview => as_preview(self, pending, cx),
+            PasteAnswer::Paste => {
+                let mut p = pending.pasted;
+                p.confirmed = true;
+                match pending.at {
+                    None => apply(self, p, cx),
+                    Some((version, at)) => insert_at(self, version, at, p, cx),
+                }
+            }
+        }
+    }
+
+    /// The paste waiting for the host's answer, as `(bytes, total)` (`PasteNeedsConfirm`).
+    pub fn pending_paste(&self) -> Option<(u64, u64)> {
+        self.paste.pending.as_ref().map(|p| (p.bytes, p.total))
+    }
+}
+
 // ## m3a-t27-ime-clipboard: the parts no window reaches (the read failure, the toasts' text).
 #[cfg(test)]
 mod t27_tests {
@@ -919,6 +1231,7 @@ mod t27_tests {
             text: Arc::from(text),
             nuls: 0,
             pieces: pieces.iter().map(|(p, l)| (Arc::from(*p), *l)).collect(),
+            confirmed: false,
         };
         let plan = |p: &Pasted, n| {
             distribution(p, n, "\n")
@@ -1079,5 +1392,61 @@ mod t27_tests {
             vcx.read(|cx| e.read(cx).snapshot().buffer.to_string()),
             "-- SELECT a\nb 1"
         );
+    }
+
+    // ## m4b-t11-editor
+    /// A middle click's paste asks like any other (small limits stand in for 20 and 100 MB):
+    /// the answer "Paste" inserts it at the clicked point, followed through an edit made while
+    /// the question was open; "Paste as preview" hands the host the document with it.
+    #[gpui::test]
+    fn a_middle_click_paste_asks_and_lands_at_its_point(cx: &mut TestAppContext) {
+        let (e, vcx) = open(cx);
+        let asked: Rc<RefCell<Vec<(u64, u64)>>> = Rc::default();
+        let docs: Rc<RefCell<Vec<String>>> = Rc::default();
+        let (a, d) = (asked.clone(), docs.clone());
+        vcx.update(|_, cx| {
+            cx.subscribe(&e, move |_, ev: &EditorEvent, _| match ev {
+                EditorEvent::PasteNeedsConfirm { bytes, total } => {
+                    a.borrow_mut().push((*bytes, *total))
+                }
+                EditorEvent::PasteAsPreview { text } => d.borrow_mut().push(text.text().into()),
+                _ => {}
+            })
+            .detach();
+        });
+        e.update(vcx, |v, cx| {
+            let mut cfg = v.config;
+            cfg.tiers.reduced_max_bytes = 16;
+            cfg.tiers.paste_max_bytes = 64;
+            cfg.confirm_large_paste = true;
+            v.set_config(cfg, cx);
+            // "SELECT 1" is 8 bytes; 12 more make 20: past 16, within 64.
+            paste_text_at(v, 7, "abcdefghijkl".to_string(), cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(*asked.borrow(), [(12, 20)]);
+        e.update(vcx, |v, cx| {
+            assert_eq!(v.snapshot().buffer.to_string(), "SELECT 1");
+            v.confirm_paste(PasteAnswer::AsPreview, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(*docs.borrow(), ["SELECT abcdefghijkl1"]);
+        e.update(vcx, |v, cx| paste_text_at(v, 7, "abcdefghijkl".to_string(), cx));
+        vcx.run_until_parked();
+        e.update(vcx, |v, cx| {
+            v.select_range(0..0, cx);
+            v.replace_selection("-- ", cx);
+            v.confirm_paste(PasteAnswer::Paste, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.read(|cx| e.read(cx).snapshot().buffer.to_string()),
+            "-- SELECT abcdefghijkl1"
+        );
+        // Past 64: refused, nothing asks.
+        e.update(vcx, |v, cx| paste_text_at(v, 0, "x".repeat(64), cx));
+        vcx.run_until_parked();
+        assert_eq!(asked.borrow().len(), 2);
+        assert_eq!(vcx.read(|cx| e.read(cx).pending_paste()), None);
     }
 }

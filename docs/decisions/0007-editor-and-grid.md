@@ -1344,3 +1344,77 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   "partial" in the accessible words (m-8); the cache-size note is read again whenever the
   section shows (m-8). A queued Open-data run is also dropped when the profile fails after it
   was queued, even if the attempt was never seen under way (m-7).
+
+## m4b-t11 — reload and T2
+
+`hacivat-ui-editor` (plan-m4b Task 11; R-M4b-16, R-M4b-20, R-M4b-38): reload from disk, the T2
+read-only preview and the 20–100 MB paste confirmation. `hacivat-text` gains
+`EditorModel::clear_history`.
+
+- *Reload is one change from the common prefix and suffix.* `EditorView::replace_from_disk`
+  replaces the bytes between the longest common prefix and suffix of the editor's text and the
+  disk text (`disk_edit`), as one `Origin::Program` transaction outside the history, then
+  clears the undo and redo groups (UI-EDIT-04 step 9). Carets, selections, fold ranges and run
+  marks map through that change exactly as through an edit: a line added above the caret
+  moves it down at its column; a mark whose statement the change touches goes stale (the M3
+  rule). Neither end of the change falls inside a UTF-8 sequence or between a CR and its LF, in
+  either text. The same text again is no change at all: no version, the history kept (a
+  `touch` on disk takes nothing away). *Limit:* the change covers everything between the first
+  and the last differing byte, so edits near both ends of a file make one large change and a
+  caret or selection inside it lands at its end. A line diff would keep more carets, at the
+  cost of more than one change and an O(n·d) diff; R-M4b-16 rules one change.
+- *The diff is the background executor's.* The UI thread clones the rope (O(1)), copies the
+  disk text into an `Arc<str>`, and later applies the one change; the prefix and suffix scan
+  (256-byte slice compares, then bytes), the new bytes' slice and the longest line run on the
+  background executor. Measured (release, this Mac, a 2 MB script with one line changed in its
+  middle, 20 rounds): the UI share is 0.35–0.6 ms (call ≈ 60 µs, apply and fan-out ≈ 300 µs),
+  under the 1 ms gate (`reload_ui_share_under_1ms_on_2mb`, `HACIVAT_PERF=1`). The answer
+  applies only to the version it was computed for. An edit that lands first makes the tab
+  dirty, and a dirty tab never reloads (R-M4b-16): nothing is replaced, and the host hears
+  `Reloaded { version: None }` and shows its "Changed on disk" bar. A newer reload cancels an
+  older one still running.
+- *Composition: held, never refused (R-M4b-38).* While an IME composition is open, or held app
+  edits still wait, the reload is held (`ime::AppEdit::ReplaceFromDisk`, beside `set_text`) and
+  starts when the composition ends, against the text the composition left. Held reloads
+  coalesce to the newest disk text; a held `set_text` drops them. A diff that comes back while
+  a composition opened meanwhile is held the same way. `Ok(())` means accepted, so the host
+  never retries, and a reload held into a tab that became a preview is reported with
+  `Reloaded { version: None }`.
+- *The host's clean version.* The editor has no notion of "dirty". It emits `Changed` from the
+  commit and then `EditorEvent::Reloaded { version }`, the version at which the text is the
+  disk text, which the script tab (Task 14) takes as its new clean version. The editor
+  notifies itself through the commit's fan-out, so the cached embedding (`a11y::embed`) draws
+  the new text on the next frame with no other event.
+- *Refusals.* A T2 preview is reopened by the host, never replaced (`ReloadRefused::
+  PreviewTier`). **Ruling (implementer, fail closed): a disk text past T1's 20 MB is refused**
+  (`ReloadRefused::TooLarge { bytes }`). The plan names `PreviewTier` as the only refusal; the
+  extra one keeps R-M3-49 ("nothing above 20 MB enters the editor") true on this path too, since
+  the host opens such a file as a preview anyway. The stub's `NotImplemented` is gone.
+- *T2 preview.* `EditorView::set_preview(PreviewSpec { shown_bytes, total_bytes })` makes the
+  editor `Tier::Preview` for good: `large_file::update` never moves it, `set_config` cannot make
+  it editable (`read_only` stays set), the banner reads the surface 9 copy ("Read-only preview:
+  this file is 148.0 MB." / "The editor shows its first 2.5 MB. Run as script sends the whole
+  file.") with its own ids (`editor-t2-*`; the T1 ids and their shots are unchanged), the same
+  text is the accessible description, the status reports the tier, and `FindStatus::
+  preview_only` lets the host's find bar say that it searches the shown part only. The host
+  hears `TierChanged(Preview)`; a pending paste question and a running reload are dropped.
+  `large_file::preview_cut(text, max)` gives the cut (UI-EDIT-23 step 1): after the last line
+  break at or before 2.5 MB (`TierLimits::preview_bytes`), never between a CR and its LF; with
+  none, the last character boundary, scanning back from the limit only.
+- *The paste confirmation is the host's question, and off by default.* With
+  `EditorConfig::confirm_large_paste`, a paste that makes the document 20–100 MB
+  (`TierLimits::paste_max_bytes`) is held as the one pending paste and the host hears
+  `PasteNeedsConfirm { bytes, total }`; past 100 MB it is refused (the toast names 100 MB).
+  `clipboard::paste_confirm_dialog` is the dialog (420 px, "Paste 42.6 MB?", "Paste as preview"
+  Default, Cancel Primary: the initial focus and Escape's answer; `paste_answer` maps a press,
+  anything unknown to Cancel). The host answers with `confirm_paste`: Cancel drops it;
+  `AsPreview` builds the whole document as the paste would make it on the background executor
+  and hands it to the host (`PasteAsPreview { text }`, whose `Debug` gives the size only) while
+  the editor's own text stays; `Paste` pastes it, editable in reduced mode (the plan's third
+  answer, which the surface 9 dialog does not offer). The size is checked again at the answer,
+  and a confirmed paste held for a composition keeps its confirmation. **Ruling (implementer):
+  the flag is off by default** so that, until a host shows the dialog (Task 18 wires it for
+  consoles and script tabs), M3's refusal past 20 MB stays and no paste waits for an answer that
+  never comes (no silent weakening). *Open for Task 18:* where a pasted preview's whole text
+  lives (Run as script streams a file; a console has none) and what a console's autosave does
+  with it.
