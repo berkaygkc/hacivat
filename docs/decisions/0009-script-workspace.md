@@ -1437,3 +1437,37 @@ Task 14 fills `scripts::{tabs,open,save,disk_bars,restore,unsaved_prompt}` and t
   - If the profile was repointed between the crash and the relaunch, Run refuses with the "Run refused" notice naming both files; it never adopts the new file silently.
   - A copy written before this change still takes the profile's file at the first Run (fix round 2's rule).
 - **m-fr2-3:** a comment on `QuitDiscards` now says that only the quit guard pushes to it (when the quit goes on) and only the quit hook drains it. Its futures are `!Send`.
+
+## m4b-t18 — Run as script
+
+`scripts::run_as_script` (HV-SCRIPT-12, R-M4b-20; NOTES surface 9). The runner and its exec changes are ADR 0006 `m4b-t18`.
+
+- **Where it is offered.** A console whose editor is a T2 preview shows **Run as script** in the toolbar's Run slot instead of Run (NOTES ruling 8). There is no ⌘↵, because the preview editor is read-only and `editor.run` is disabled there. Two kinds of preview stream:
+  - **A script tab's preview.** The file is read from disk. The app's `FileSource` adapts T10's `ScriptStream` and `PassRecord`: pass 2 reopens with pass 1's record, and only a pass read to its end is reopened. The tab's environment is read at each open from a watch channel that the app keeps current (R-T5-6). `chunk_error` and `read_error` are exhaustive `match`es with a test (T12 m6; T1a review). A path the library refuses, or one this connection no longer shows, maps to `Io(PermissionDenied)`, which tells the user "the file couldn't be read".
+  - **A pasted preview (carries-w1 T11/T18).** "Paste as preview" (Task 11's 20–100 MB question, now on: `confirm_large_paste` for every console and script tab) opens a **new console tab on the source console's connection**. The tab shows the document's first 2.5 MB as a T2 preview, and the source console's text stays as it was.
+    - *Ruling (T18): the whole pasted text lives in memory only.* It is held per console and read by `PastedSource`; both passes read the same `Arc`. It never reaches an autosave (the tab opens through `queue_text`, with autosave off), a recovery copy, history (the history row is "Pasted text") or any file, and it goes when the tab closes.
+    - *Why:* a paste can hold anything, credentials included (L14). A file would need a place, a lifetime and a cleanup.
+    - *Cost:* up to 100 MB of RAM per pasted preview while its tab is open, and it does not survive a restart (the tab comes back empty).
+    - A console with no connection refuses the paste with a toast.
+- **The run.** The run is `ScriptRunner::run_checked` on the core runtime, built from what the orchestrator's named hook (`script_run_parts`, beside `start_run_capped`) gathers. The hook first makes Run's own checks: no read-only reconnect pending, nothing else running, a script tab that runs somewhere, a live session (else the connect starts and nothing runs, R-M3-45), and the SQL context read (`modes_known` comes from it). Then the run uses:
+  - the tab's own session, which is fixed at open (R-M4b-4);
+  - the console's suppress set, history sink (origin `File`) and log;
+  - the catalog refresh inbox;
+  - the live environment tag, through a watch channel. `observe_global::<ConnectionsModel>` keeps it current (T12 fr1 I2). A test retags mid-run and the answered statement is not sent.
+  
+  At the end, the "don't ask again" keys join the console's, the SQL context is read again, and the explorer's refresh follows as after a Run (`script_run_ended`).
+- **The database check (R-M4b-27, R-T14-2, R-T14-3).** Between the passes the runner asks the UI thread to run Task 14's per-Run check (`tabs::run_gate_streamed`). It is the same gate as Run's: the probe on the tab's own session, the MySQL switch back once, and the refusal notice naming both databases. The only difference is that the gate's preview refusal is skipped (`streamed`). A pass answers the context generation that the check read (`tabs::take_checked_generation`). A refusal drops the gate's re-run closure, and with it the reply, which answers `None` (fail closed). A pasted preview's console has no bound database, so it has no check, as a console's Run has none.
+- **Confirmations.** They are M3b's dialogs, through `AppConfirmPort::for_script_run`. Its dialogs offer Execute all (off production) and Skip all in **open-ended words**, because the later statements are not read yet: "Execute all also runs, without asking, every later statement in the file that would ask on this connection (dev); a statement that needs its name typed still asks." Here `ConfirmContext::open_ended` replaces the count. A user's No (or Cancel) stops the run, and the units confirmed before it stay applied (R-T12-2). The strip says so: "Stopped at statement N: you didn't confirm it. The statements before it ran and stay applied; nothing after it was sent."
+- **The strip (surface 9).** It is a 26 px raised row under the notices. While the run goes, it shows:
+  - the amber run marker;
+  - "Checking the whole file before it runs" in pass 1, or "Running as script" in pass 2;
+  - the statements sent, the line, the bytes read of the file's size, and a clock repainted once a second;
+  - **Stop**, a Default button and a Tab stop.
+
+  Stop is the M3 cancel path: it stops between units and cancels the unit in flight. `exec.cancel` routes to it. Escape never stops a run.
+  
+  At the end the strip shows how the run ended. That is either the mock's sentence (done, a failed statement, Stop, a No) or the runner's own refusal or stop sentence, followed by **Close**. The runner writes its log lines and summary to Output. While a run goes, the toolbar's Run as script is disabled, with the tooltip "Running as script: wait for it, or stop it", and the session's per-statement run clock is not shown in the toolbar. The strip sits in a focus home whose primary is the editor (R-M4b-43), so a Stop or Close pressed from the keyboard hands the focus to the code (tested). A strip that is dropped (its tab closed) cancels its run, because a dropped sender never cancels.
+- **Trust signals.** The strip is drawn under the toolbar. It never covers the capsule, the environment mark, the production hairline or the status bar's "Read-only preview" segment (Task 14's, reused). A test checks each of them during a run.
+- **Residuals.**
+  - A confirm-in-transaction prompt raised by a streamed unit has no `follow` entry in the port's book, because the runner's per-unit tickets are not handed out. That prompt therefore shows no statement text and no loss state.
+  - The elapsed clock follows the executor clock, like the toolbar's.

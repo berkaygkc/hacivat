@@ -498,7 +498,6 @@ fn launch(console: ConsoleId, what: Streamed, parts: Parts, cx: &mut App) {
             cancel,
             env,
             home: HomeSlot::new(),
-            suppress: Vec::new(),
             _tasks: Vec::new(),
             _subscriptions: Vec::new(),
         };
@@ -695,8 +694,6 @@ pub struct ScriptRunView {
     /// The profile's live environment tag (the runner reads it before every gate and send).
     env: watch::Sender<Option<EnvTag>>,
     home: HomeSlot,
-    /// The "don't ask again" answers the run gave (handed to the console at its end).
-    suppress: Vec<u64>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<hacivat_ui_core::gpui_surface::Subscription>,
 }
@@ -787,24 +784,22 @@ impl ScriptRunView {
     }
 
     fn end(&mut self, out: Option<ScriptRunOutcome>, cx: &mut Context<Self>) {
-        let out = out.unwrap_or_else(|| {
-            ScriptRunOutcome::Refused(hacivat_exec::ScriptRefusal {
-                reason: hacivat_exec::ScriptRefuseReason::Read(ChunkError::Io(
-                    std::io::ErrorKind::Interrupted,
-                )),
-                at: None,
-            })
-        });
-        if let ScriptRunOutcome::Finished(s)
-        | ScriptRunOutcome::Failed(s)
-        | ScriptRunOutcome::Stopped(_, s) = &out
-        {
-            self.suppress = s.suppress.clone();
-        }
+        // The core runtime dropped the run (quitting): nothing more is sent.
+        let out = out.unwrap_or(ScriptRunOutcome::Refused(hacivat_exec::ScriptRefusal {
+            reason: hacivat_exec::ScriptRefuseReason::Read(ChunkError::Io(
+                std::io::ErrorKind::Interrupted,
+            )),
+            at: None,
+        }));
+        let suppress = match &out {
+            ScriptRunOutcome::Finished(s)
+            | ScriptRunOutcome::Failed(s)
+            | ScriptRunOutcome::Stopped(_, s) => s.suppress.clone(),
+            ScriptRunOutcome::Refused(_) => Vec::new(),
+        };
         self.ended = Some(Ended::of(&out));
         self.progress.phase = ScriptPhase::Done;
         let console = self.console;
-        let suppress = std::mem::take(&mut self.suppress);
         cx.defer(move |cx| {
             crate::exec_ui::orchestrator::script_run_ended(console, &suppress, cx);
             note_output(console, cx);
@@ -1208,7 +1203,6 @@ pub mod fixtures {
             cancel: watch::channel(false).0,
             env: watch::channel(None).0,
             home: HomeSlot::new(),
-            suppress: Vec::new(),
             _tasks: Vec::new(),
             _subscriptions: Vec::new(),
         });
