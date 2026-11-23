@@ -11,7 +11,7 @@
 //! hints by name and the table needs no entry for it.
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -20,6 +20,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use twox_hash::XxHash3_128;
 
 use crate::fileio::DiskStamp;
+// ## m4b-t20-adversarial (named line, T9 m9)
+use crate::fileio::dir::{Dir, FsError, is_link};
 use crate::pathsafe::RelPath;
 
 /// How long a recorded write stays an echo.
@@ -137,14 +139,25 @@ impl EchoHandle {
     }
 }
 
-/// The stamp of the regular file at `path` (whose folders the caller has validated), hashed
-/// through a handle that follows no final link and never blocks on a FIFO, reading at most
-/// `expect_len + 1` bytes: `None` when it is not that long, or not a regular file.
+/// The stamp of the regular file `rel` under the canonical `root`, hashed through a handle that
+/// follows no link and never blocks on a FIFO, reading at most `expect_len + 1` bytes: `None`
+/// when it is not that long, or not a regular file.
+///
+/// ## m4b-t20-adversarial (named exception, T9 review m9): the folders are walked from the
+/// stored canonical root with T5's no-follow folder handles (`fileio::dir::Dir`, identities
+/// re-checked around every step), never a path-based open after the caller's `join`, so a
+/// folder swapped for a link in between is refused instead of followed out of the library.
 ///
 /// The hash and the length are those of `fileio`'s stamps (XXH3-128 of every byte, the length
 /// read, the handle's modification time), so the two compare equal.
-pub(crate) fn stamp_if_len(path: &Path, expect_len: u64) -> io::Result<Option<DiskStamp>> {
-    let file = open_no_follow(path)?;
+pub(crate) fn stamp_if_len(
+    root: &Path,
+    rel: &RelPath,
+    expect_len: u64,
+) -> io::Result<Option<DiskStamp>> {
+    let Some(file) = open_under(root, rel)? else {
+        return Ok(None);
+    };
     let before = file.metadata()?;
     if !before.is_file() {
         return Ok(None);
@@ -175,28 +188,76 @@ pub(crate) fn stamp_if_len(path: &Path, expect_len: u64) -> io::Result<Option<Di
     }))
 }
 
-#[cfg(unix)]
-fn open_no_follow(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-}
-
-#[cfg(windows)]
-fn open_no_follow(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    /// `FILE_FLAG_OPEN_REPARSE_POINT` (`0x00200000`, `winbase.h`): open a link itself.
-    const OPEN_REPARSE_POINT: u32 = 1 << 21;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(OPEN_REPARSE_POINT)
-        .open(path)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_no_follow(path: &Path) -> io::Result<File> {
-    OpenOptions::new().read(true).open(path)
+/// `rel` opened for reading under `root` through no-follow folder handles: `None` when a link,
+/// a non-folder on the way or a non-regular file is met (a scan decides what it is now).
+fn open_under(root: &Path, rel: &RelPath) -> io::Result<Option<File>> {
+    let to_io = |e: FsError| match e {
+        FsError::Io(e) => Some(e),
+        _ => None,
+    };
+    let parts: Vec<&str> = rel.components().collect();
+    let Some((name, folders)) = parts.split_last() else {
+        return Ok(None);
+    };
+    let mut dir = match Dir::open_canonical(root) {
+        Ok(d) => d,
+        Err(e) => return to_io(e).map_or(Ok(None), Err),
+    };
+    for folder in folders {
+        dir = match dir.subdir(folder) {
+            Ok(d) => d,
+            Err(e) => return to_io(e).map_or(Ok(None), Err),
+        };
+    }
+    let lstat = match dir.lstat(name) {
+        Ok(m) => m,
+        Err(e) => return to_io(e).map_or(Ok(None), Err),
+    };
+    if is_link(&lstat) || !lstat.is_file() {
+        return Ok(None);
+    }
+    match dir.open_read(name, &lstat) {
+        Ok(f) => Ok(Some(f)),
+        Err(e) => to_io(e).map_or(Ok(None), Err),
+    }
 }
 // ## m4b-t09-watcher
+
+// ## m4b-t20-adversarial (named exception, carry T9 review m9)
+#[cfg(all(test, unix))]
+mod t20_tests {
+    use super::*;
+
+    /// T9 review m9: the hash read walks the folders from the canonical root with handles that
+    /// follow no link, so a folder swapped for a link after the reconciler's `join` is never
+    /// followed out of the library, even to a file of the expected length.
+    #[test]
+    fn hash_read_never_follows_a_folder_swapped_for_a_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let root = base.join("lib");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(outside.join("sub")).unwrap();
+        std::fs::write(root.join("sub/a.sql"), b"inside").unwrap();
+        std::fs::write(outside.join("sub/a.sql"), b"secret").unwrap();
+        let rel = RelPath::parse("sub/a.sql").unwrap();
+        assert!(stamp_if_len(&root, &rel, 6).unwrap().is_some());
+        // The folder becomes a link to a folder outside holding a same-length file.
+        std::fs::remove_dir_all(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink(outside.join("sub"), root.join("sub")).unwrap();
+        assert!(!matches!(stamp_if_len(&root, &rel, 6), Ok(Some(_))));
+        // A final link is never followed either.
+        std::fs::remove_file(root.join("sub")).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink(outside.join("sub/a.sql"), root.join("sub/a.sql")).unwrap();
+        assert!(!matches!(stamp_if_len(&root, &rel, 6), Ok(Some(_))));
+        // The root itself replaced by a link is refused too.
+        std::fs::rename(&root, base.join("lib-moved")).unwrap();
+        std::os::unix::fs::symlink(base.join("lib-moved"), &root).unwrap();
+        std::fs::remove_file(base.join("lib-moved/sub/a.sql")).unwrap();
+        std::fs::write(base.join("lib-moved/sub/a.sql"), b"inside").unwrap();
+        assert!(!matches!(stamp_if_len(&root, &rel, 6), Ok(Some(_))));
+    }
+}
+// ## m4b-t20-adversarial

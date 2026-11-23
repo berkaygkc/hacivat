@@ -375,7 +375,7 @@ async fn use_this_folder_adopts_a_replaced_root_and_keeps_its_mappings() {
     })
     .await;
     // Asked only for a library in that state, and then it is the same library again.
-    assert_eq!(r.svc.adopt_root(id).await, Ok(true));
+    assert_eq!(r.svc.adopt_root(id, None).await, Ok(true));
     wait_until("served again", || {
         r.state(id) == Some(LibraryState::Watching)
     })
@@ -400,7 +400,7 @@ async fn use_this_folder_adopts_a_replaced_root_and_keeps_its_mappings() {
     }));
     // A second adopt on a served library is refused.
     assert_eq!(
-        r.svc.adopt_root(id).await,
+        r.svc.adopt_root(id, None).await,
         Err(RegistryError::UnknownLibrary)
     );
 }
@@ -430,7 +430,7 @@ async fn use_this_folder_never_adopts_a_link() {
     // refused up front, and nothing is recorded or listed.
     let before = r.registry_text();
     assert_eq!(
-        r.svc.adopt_root(id).await,
+        r.svc.adopt_root(id, None).await,
         Err(RegistryError::UnknownLibrary)
     );
     r.svc.settled().await;
@@ -478,7 +478,7 @@ async fn a_refused_adoption_keeps_the_old_identity() {
     std::fs::rename(&lib, d.path().join("scripts-other")).unwrap();
     std::os::unix::fs::symlink(d.path().join("scripts-other"), &lib).unwrap();
     assert_eq!(
-        r.svc.adopt_root(id).await,
+        r.svc.adopt_root(id, None).await,
         Ok(false),
         "the adoption is refused"
     );
@@ -522,7 +522,7 @@ async fn a_refused_adoption_keeps_the_old_identity() {
     let served = r.svc.attach(other, None, false).await.unwrap();
     r.up(served).await;
     assert_eq!(
-        r.svc.adopt_root(served).await,
+        r.svc.adopt_root(served, None).await,
         Err(RegistryError::UnknownLibrary)
     );
 }
@@ -557,7 +557,7 @@ async fn an_adopted_folder_never_inherits_the_old_binding() {
         r.state(id) == Some(LibraryState::Unavailable(UnavailableReason::RootChanged))
     })
     .await;
-    assert_eq!(r.svc.adopt_root(id).await, Ok(true));
+    assert_eq!(r.svc.adopt_root(id, None).await, Ok(true));
     wait_until("served again", || {
         r.state(id) == Some(LibraryState::Watching)
     })

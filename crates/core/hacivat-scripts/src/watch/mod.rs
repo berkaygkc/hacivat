@@ -1525,7 +1525,8 @@ impl Reconciler {
         }
         let stamp = match pathsafe::join_with(&*self.opts.fs, &self.root, rel) {
             Ok(j) if j.kind == JoinedKind::File && j.target.is_none() => {
-                echo::stamp_if_len(&j.path, seen.len)
+                // ## m4b-t20-adversarial (named line, T9 m9): through folder handles.
+                echo::stamp_if_len(&self.root.canonical, rel, seen.len)
                     .ok()
                     .flatten()
                     .filter(|s| s.mtime == seen.mtime)

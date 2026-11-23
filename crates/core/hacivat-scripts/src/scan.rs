@@ -258,6 +258,14 @@ pub enum Diag {
     /// ## m4b-t04-scanner fix round 1 (m4): the file link `rel` is hidden everywhere because
     /// its target's environment folders contradict its own (or name no tag).
     LinkScope { rel: RelPath },
+    // ## m4b-t20-adversarial (named exception, T13 fr1 re-review n5)
+    /// In the folder `folder` (`None`: the root), a case-only rename's temp name (`name`,
+    /// display form): a crash or a failed roll-back between its two steps left one of the
+    /// user's scripts there, under a name the scan skips. Said, never deleted.
+    InterruptedRename {
+        folder: Option<RelPath>,
+        name: String,
+    },
 }
 
 /// What a scan found.
@@ -426,6 +434,13 @@ impl Walk<'_> {
             return Step::Stop(LimitHit::Visited(self.limits.max_visited));
         }
         if name.as_encoded_bytes().first() == Some(&b'.') {
+            // ## m4b-t20-adversarial (named lines, n5): a stranded rename temp is reported.
+            if name.to_str().is_some_and(crate::fileops::is_rename_temp) {
+                self.diags.push(Diag::InterruptedRename {
+                    folder: frame.rel.clone(),
+                    name: display_name(&name.to_string_lossy()),
+                });
+            }
             return Step::Go;
         }
         let text = match pathsafe::component(name) {

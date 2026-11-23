@@ -164,6 +164,11 @@ pub struct LibrarySnapshot {
     pub(crate) diagnostics: Arc<[LibraryDiag]>,
     // ## m4b-t16-attach (named exception; R-T9-1): how its changes are found, as chosen.
     pub watch: crate::registry::WatchMode,
+    // ## m4b-t20-adversarial (named exception, T16 re-review m4)
+    /// While "Use this folder" can fix it ([`LibrarySnapshot::can_adopt`]): the identity of the
+    /// folder the last validation found at the path. The confirm passes it to
+    /// [`LibraryService::adopt_root`], which adopts only that folder.
+    pub refused_identity: Option<crate::fileio::FileIdentity>,
 }
 
 // ## m4b-t10-service fix round 2 (m-b): a log line never names a file (or a root) of any
@@ -222,6 +227,8 @@ impl LibrarySnapshot {
             diagnostics: Arc::from([]),
             // ## m4b-t16-attach (named line)
             watch: crate::registry::WatchMode::Automatic,
+            // ## m4b-t20-adversarial (named line)
+            refused_identity: None,
         }
     }
     // ## m4b-t10-service
@@ -490,6 +497,11 @@ pub enum FileOpError {
     NoSafeRename,
     /// The trash took it, but a folder on the way changed meanwhile (review m13).
     TrashedButChanged,
+    // ## m4b-t20-adversarial (named exception, T13 fr1 re-review n4)
+    /// A rename made the new name, but the old one could not be removed and the new one could
+    /// not be taken back (or a folder changed around the removal): both names may reach the
+    /// file now. Never "nothing was changed".
+    RenameIncomplete,
 }
 
 /// A script read from disk in UTF-8 chunks, each cut at a character boundary (Task 12's
@@ -683,8 +695,17 @@ impl LibraryService {
     /// scratch), `Ok(false)` refused (nothing saved: the old identity and `RootChanged` stay).
     /// `UnknownLibrary` when the library is not refused for its identity (a link, an overlap,
     /// an app folder, or not refused at all).
-    pub async fn adopt_root(&self, id: LibraryId) -> Result<bool, RegistryError> {
-        self.ask(|reply| Msg::AdoptRoot { id, reply })
+    ///
+    /// ## m4b-t20-adversarial (named exception, T16 re-review m4): `seen` is the
+    /// [`LibrarySnapshot::refused_identity`] the confirm was shown for. When it is known, only
+    /// that folder is adopted: another one swapped in while the user thought it over is
+    /// refused (`Ok(false)`), however valid it is otherwise.
+    pub async fn adopt_root(
+        &self,
+        id: LibraryId,
+        seen: Option<crate::fileio::FileIdentity>,
+    ) -> Result<bool, RegistryError> {
+        self.ask(|reply| Msg::AdoptRoot { id, seen, reply })
             .await
             .unwrap_or(Err(actor::STOPPED))
     }

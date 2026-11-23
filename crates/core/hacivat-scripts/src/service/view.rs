@@ -168,6 +168,10 @@ impl<'a> LibraryView<'a> {
                     parent.as_ref().is_none_or(folder_shown)
                 }
                 LibraryDiag::Scan(Diag::Unreadable { folder, .. }) => folder_shown(folder),
+                // ## m4b-t20-adversarial (named line, n5): where its folder is shown.
+                LibraryDiag::Scan(Diag::InterruptedRename { folder, .. }) => {
+                    folder.as_ref().is_none_or(folder_shown)
+                }
                 LibraryDiag::Scan(Diag::LinkScope { rel }) => {
                     admits(&envscope::scope_of(rel), self.env)
                 }

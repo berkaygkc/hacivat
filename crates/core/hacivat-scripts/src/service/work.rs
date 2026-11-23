@@ -104,6 +104,10 @@ pub(super) struct Valid {
 pub(super) struct Refused {
     pub reason: UnavailableReason,
     pub diags: Vec<LibraryDiag>,
+    // ## m4b-t20-adversarial (named exception, T16 re-review m4)
+    /// For a folder refused as moved or replaced: the identity of the folder found at the path
+    /// (what a confirmed "Use this folder" may adopt, and nothing else).
+    pub seen: Option<fileio::FolderIdentity>,
 }
 
 impl Refused {
@@ -111,6 +115,15 @@ impl Refused {
         Refused {
             reason: UnavailableReason::RootChanged,
             diags: vec![LibraryDiag::RootRefused(why)],
+            seen: None,
+        }
+    }
+
+    /// ## m4b-t20-adversarial (m4): moved or replaced, with the folder found there.
+    fn replaced(why: RootRefusal, seen: Option<fileio::FolderIdentity>) -> Self {
+        Refused {
+            seen,
+            ..Refused::changed(why)
         }
     }
 
@@ -122,6 +135,7 @@ impl Refused {
                 UnavailableReason::Unreadable(kind)
             },
             diags: Vec::new(),
+            seen: None,
         }
     }
 }
@@ -154,7 +168,9 @@ pub(super) fn validate(
     // This session's resolution, else (fix round 2, m-a) the one `libraries.toml` recorded.
     let expected = session.canonical.as_ref().or(reg.canonical.as_ref());
     if expected.is_some_and(|c| c != &canonical) {
-        return Err(Refused::changed(RootRefusal::Moved));
+        // ## m4b-t20-adversarial (named line, m4): with the folder found there.
+        let seen = fileio::folder_identity(&canonical);
+        return Err(Refused::replaced(RootRefusal::Moved, seen));
     }
     rules.check(fs, &canonical).map_err(Refused::changed)?;
     if let Some((other, _)) = others.iter().find(|(_, p)| overlaps(&canonical, p)) {
@@ -164,17 +180,19 @@ pub(super) fn validate(
         return Err(Refused {
             reason: UnavailableReason::InEnvFolder,
             diags: vec![LibraryDiag::RootInEnvFolder(name)],
+            seen: None,
         });
     }
     let identity = fileio::folder_identity(&canonical);
+    // ## m4b-t20-adversarial (named lines, m4): `replaced`, with the folder found there.
     if session.identity.is_some() && identity != session.identity {
-        return Err(Refused::changed(RootRefusal::IdentityChanged));
+        return Err(Refused::replaced(RootRefusal::IdentityChanged, identity));
     }
     // Across sessions only the inode is compared: a device number can change with a reboot.
     if let (Some(inode), Some(now)) = (reg.inode, identity.map(|i| i.ino))
         && inode != now
     {
-        return Err(Refused::changed(RootRefusal::IdentityChanged));
+        return Err(Refused::replaced(RootRefusal::IdentityChanged, identity));
     }
     Ok(Valid {
         root: LibraryRoot {
@@ -550,6 +568,8 @@ impl RefreshJob {
                 scan::RootProblem::InEnvFolder(name) => Refused {
                     reason: UnavailableReason::InEnvFolder,
                     diags: vec![LibraryDiag::RootInEnvFolder(name)],
+                    // ## m4b-t20-adversarial (named line)
+                    seen: None,
                 },
             };
             return RefreshOut::Refused(refused);
@@ -651,7 +671,13 @@ impl PairJob {
         let mut out = Vec::new();
         for held in &self.held {
             let mut found = None;
-            for c in &self.candidates {
+            // ## m4b-t20-adversarial (named exception, T10 fr3 m-j): candidates that kept the
+            // held file's name, then those in its folder, are read first (a stable sort, so
+            // arrival order otherwise), so a checkout that adds many same-length files beside
+            // a moved open file never pushes its true destination past the read cap.
+            let mut order: Vec<&ScriptEntry> = self.candidates.iter().collect();
+            order.sort_by_key(|c| pair_rank(&held.from, &c.rel));
+            for c in order {
                 if c.len != held.len || c.dataless || taken.contains(&c.rel) {
                     continue;
                 }
@@ -686,6 +712,47 @@ impl PairJob {
         out
     }
 }
+
+// ## m4b-t20-adversarial (named exception, T10 fr3 m-j)
+/// How likely `to` is where `from` moved: 0 when it kept the name (a folder move), 1 when it
+/// stayed in the folder (a rename), 2 otherwise.
+fn pair_rank(from: &RelPath, to: &RelPath) -> u8 {
+    let parent = |r: &RelPath| r.as_str().rsplit_once('/').map(|(p, _)| p.to_owned());
+    if from.name() == to.name() {
+        0
+    } else if parent(from) == parent(to) {
+        1
+    } else {
+        2
+    }
+}
+
+#[cfg(test)]
+mod t20_tests {
+    use super::*;
+
+    /// m-j: a candidate that kept the held file's name ranks first, one in its folder next,
+    /// and the sort keeps arrival order within a rank. (The end-to-end case, 40 same-length
+    /// arrivals past the read cap, is `tests/hostile_library.rs`: this folder never names
+    /// the file system, `ScriptContentOutsideFileio`.)
+    #[test]
+    fn candidates_that_kept_the_name_or_folder_rank_first() {
+        let r = |s: &str| RelPath::parse(s).unwrap();
+        assert_eq!(pair_rank(&r("a.sql"), &r("moved/a.sql")), 0);
+        assert_eq!(pair_rank(&r("x/a.sql"), &r("a.sql")), 0);
+        assert_eq!(pair_rank(&r("x/a.sql"), &r("x/b.sql")), 1);
+        assert_eq!(pair_rank(&r("a.sql"), &r("b.sql")), 1);
+        assert_eq!(pair_rank(&r("x/a.sql"), &r("y/b.sql")), 2);
+        assert_eq!(pair_rank(&r("a.sql"), &r("y/b.sql")), 2);
+        let mut arrivals = vec![r("i/1.sql"), r("x/b.sql"), r("i/2.sql"), r("y/a.sql")];
+        arrivals.sort_by_key(|c| pair_rank(&r("x/a.sql"), c));
+        assert_eq!(
+            arrivals,
+            [r("y/a.sql"), r("x/b.sql"), r("i/1.sql"), r("i/2.sql")]
+        );
+    }
+}
+// ## m4b-t20-adversarial
 
 /// G2 (R-T10-6): a manifest-only read after the watcher reported `.hacivat/workspace.toml`
 /// (or at the status backstop): no scan. `None` when the root is no longer the folder this

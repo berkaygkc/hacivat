@@ -656,7 +656,18 @@ fn temp_name() -> String {
 /// The manifest's bytes (at most one past the cap) and its metadata, opened without following
 /// a link and never blocking on a FIFO.
 fn read_manifest_file(h: &Dir) -> Result<(Vec<u8>, Metadata), FsError> {
+    read_manifest_checked(h, false)
+}
+
+/// [`read_manifest_file`]; with `refuse_dataless`, a file this `lstat` calls dataless is never
+/// opened (`NotFile`). ## m4b-t20-adversarial (named exception, cifix-3 review m2): the poll
+/// source's caller decides from its own `lstat`, so the one made here closes the window
+/// between the two.
+fn read_manifest_checked(h: &Dir, refuse_dataless: bool) -> Result<(Vec<u8>, Metadata), FsError> {
     let meta = h.lstat(MANIFEST)?;
+    if refuse_dataless && crate::dataless::is_dataless(&meta) {
+        return Err(FsError::NotFile);
+    }
     if is_link(&meta) {
         return Err(FsError::Link);
     }
@@ -687,7 +698,8 @@ fn read_manifest_file(h: &Dir) -> Result<(Vec<u8>, Metadata), FsError> {
 pub(crate) fn content_hash(library_dir: &Path) -> Option<u64> {
     let (bytes, _) = Dir::open_root(library_dir)
         .and_then(|root| root.subdir(HACIVAT))
-        .and_then(|h| read_manifest_file(&h))
+        // ## m4b-t20-adversarial (named line, cifix-3 m2): never a dataless file.
+        .and_then(|h| read_manifest_checked(&h, true))
         .ok()?;
     Some(twox_hash::XxHash3_64::oneshot(&bytes))
 }

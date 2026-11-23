@@ -185,8 +185,10 @@ fn at_or_under(rel: Option<&RelPath>, folder: &RelPath) -> bool {
                     .strip_prefix(folder.as_str())
                     .is_some_and(|rest| rest.starts_with('/'))
         }
-        // The root holds every folder.
-        None => true,
+        // ## m4b-t20-adversarial (named line, T13 fr1 re-review n7): `None` is the library
+        // root itself, which lies under no folder (a refused name at the root no longer
+        // refuses every folder operation as "too large to check").
+        None => false,
     }
 }
 
@@ -200,6 +202,11 @@ fn fully_listed(entries: &[ScriptEntry], diags: &[LibraryDiag], folder: &RelPath
         LibraryDiag::Scan(Diag::Unreadable { folder: f, .. }) => at_or_under(Some(f), folder),
         LibraryDiag::Scan(Diag::BadName { parent, .. }) => at_or_under(parent.as_ref(), folder),
         LibraryDiag::Scan(Diag::LinkScope { rel }) => at_or_under(Some(rel), folder),
+        // ## m4b-t20-adversarial (named line, n5): a script stranded under a rename's temp
+        // name is not listed, so a folder holding one is never moved or trashed unseen.
+        LibraryDiag::Scan(Diag::InterruptedRename { folder: f, .. }) => {
+            at_or_under(f.as_ref(), folder)
+        }
         _ => false,
     });
     let dataless_folder = entries
@@ -401,11 +408,29 @@ fn absent(dir: &Dir, name: &str) -> Result<(), FileOpError> {
     }
 }
 
+// ## m4b-t20-adversarial (named exception, T13 fr1 re-review n5)
+/// The start of a case-only rename's temp name; a random simple UUID follows.
+const RENAME_TEMP_PREFIX: &str = ".hv-rename-";
+
+/// Whether `name` is exactly a case-only rename's temp name (the prefix and 32 lowercase hex
+/// digits). The scan reports one it meets ([`scan::Diag::InterruptedRename`]): a crash, or a
+/// failed roll-back, between the two steps leaves the user's script under it, a name the
+/// scan otherwise skips. Nothing ever deletes it.
+pub(crate) fn is_rename_temp(name: &str) -> bool {
+    name.strip_prefix(RENAME_TEMP_PREFIX).is_some_and(|rest| {
+        rest.len() == 32
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+// ## m4b-t20-adversarial
+
 /// A case-only rename, in two steps through a random temp name (a leading dot: the scan skips
-/// it), each step after a check that its target is absent. A failed second step moves the
-/// entry back.
+/// it, but reports it, m4b-t20 n5), each step after a check that its target is absent. A
+/// failed second step moves the entry back.
 fn rename_case_only(dir: &Dir, old: &str, new: &str) -> Result<(), FileOpError> {
-    let tmp = format!(".hv-rename-{}", uuid::Uuid::new_v4().simple());
+    let tmp = format!("{RENAME_TEMP_PREFIX}{}", uuid::Uuid::new_v4().simple());
     absent(dir, &tmp)?;
     dir.rename(old, &tmp).map_err(fs_error)?;
     let second = absent(dir, new).and_then(|()| dir.rename(&tmp, new).map_err(fs_error));
@@ -461,9 +486,14 @@ pub(crate) fn rename(
             absent(&dir, new)?;
             dir.rename(old, new).map_err(fs_error)
         }
+        // ## m4b-t20-adversarial (named lines, T13 fr1 re-review): on Windows `CreateHardLinkW`
+        // on a symbolic link links its *target*, so a renamed file link would become a second
+        // name of the target, not a link: refused like a volume without hard links.
+        Target::Absent if cfg!(windows) && is_link(&here) => Err(FileOpError::NoSafeRename),
         // A file (or a file link): `link` fails when the name exists, so nothing is replaced.
         Target::Absent => match dir.hard_link(old, new) {
-            Ok(()) => dir.remove_file(old).map_err(fs_error),
+            // ## m4b-t20-adversarial (named line, n4): a failed unlink is rolled back.
+            Ok(()) => unlink_old(&dir, old, new),
             Err(FsError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => {
                 Err(FileOpError::Exists)
             }
@@ -475,6 +505,53 @@ pub(crate) fn rename(
     }
 }
 // ## m4b-t13-explorer
+
+// ## m4b-t20-adversarial (named exception, T13 fr1 re-review n4)
+/// The second step of a hard-link rename: `old` is unlinked. When the unlink itself fails (on
+/// Windows a file another program holds without `FILE_SHARE_DELETE`), the new name is
+/// unlinked again, so "Nothing was changed" is true; when that fails too, or the folder check
+/// around the unlink fails (it may or may not have happened), the answer is
+/// [`FileOpError::RenameIncomplete`]: both names may reach the file, and the user is told so.
+/// The file itself is never removed: one of its two names always stays.
+fn unlink_old(dir: &Dir, old: &str, new: &str) -> Result<(), FileOpError> {
+    match remove(dir, old) {
+        Ok(()) => Ok(()),
+        // The unlink did not happen (the check before it passed): roll the link back.
+        Err(FsError::Io(e)) => match remove(dir, new) {
+            Ok(()) => Err(FileOpError::Io(e.kind())),
+            Err(_) => Err(FileOpError::RenameIncomplete),
+        },
+        Err(_) => Err(FileOpError::RenameIncomplete),
+    }
+}
+
+/// `dir.remove_file(name)`, unless a unit test's fault says otherwise.
+fn remove(dir: &Dir, name: &str) -> Result<(), FsError> {
+    if unlink_fault() {
+        return Err(FsError::Io(io::Error::other("injected unlink fault")));
+    }
+    dir.remove_file(name)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Unit tests: this many of the next unlinks of [`unlink_old`] on this thread fail (1:
+    /// the unlink of the old name; 2: its roll-back too).
+    static UNLINK_FAULTS: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn unlink_fault() -> bool {
+    let n = UNLINK_FAULTS.get();
+    UNLINK_FAULTS.set(n.saturating_sub(1));
+    n > 0
+}
+
+#[cfg(not(test))]
+fn unlink_fault() -> bool {
+    false
+}
+// ## m4b-t20-adversarial
 
 /// Moves `rel` to the trash through `trasher`.
 pub(crate) fn trash(
@@ -521,6 +598,90 @@ impl Trasher for FolderTrash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ## m4b-t20-adversarial (n4, n5)
+    /// A library of `files` in a fresh temp folder, its root and its scanned entries.
+    fn library(files: &[&str]) -> (tempfile::TempDir, LibraryRoot, Vec<ScriptEntry>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
+        for f in files {
+            std::fs::write(canonical.join(f), f.as_bytes()).unwrap();
+        }
+        let root = LibraryRoot {
+            id: crate::registry::LibraryId::new(),
+            path: canonical.clone(),
+            canonical,
+        };
+        let entries = scan::scan(&root, &scan::Limits::default(), &scan::RealFs).entries;
+        (tmp, root, entries)
+    }
+
+    fn names(root: &LibraryRoot) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(&root.canonical)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// n4: the old name could not be unlinked after the new one was linked: the link is
+    /// taken back, so the refusal's "Nothing was changed" is true.
+    #[test]
+    fn a_failed_unlink_after_the_link_is_rolled_back() {
+        let (_tmp, root, entries) = library(&["a.sql"]);
+        let r = |s: &str| RelPath::parse(s).unwrap();
+        UNLINK_FAULTS.set(1);
+        let out = rename(&root, &entries, &[], &r("a.sql"), &r("b.sql"), None);
+        assert_eq!(out, Err(FileOpError::Io(io::ErrorKind::Other)));
+        assert_eq!(names(&root), ["a.sql"]);
+        assert_eq!(std::fs::read(root.canonical.join("a.sql")).unwrap(), b"a.sql");
+    }
+
+    /// n4: when the roll-back fails too, the answer says both names may reach the file; the
+    /// file is never lost.
+    #[test]
+    fn a_failed_roll_back_says_both_names_remain() {
+        let (_tmp, root, entries) = library(&["a.sql"]);
+        let r = |s: &str| RelPath::parse(s).unwrap();
+        UNLINK_FAULTS.set(2);
+        let out = rename(&root, &entries, &[], &r("a.sql"), &r("b.sql"), None);
+        assert_eq!(out, Err(FileOpError::RenameIncomplete));
+        assert_eq!(names(&root), ["a.sql", "b.sql"]);
+        for n in ["a.sql", "b.sql"] {
+            assert_eq!(std::fs::read(root.canonical.join(n)).unwrap(), b"a.sql");
+        }
+    }
+
+    /// n5: the temp name is exact (the prefix and a simple UUID), and the scan reports a
+    /// stranded one instead of hiding it; nothing deletes it.
+    #[test]
+    fn a_stranded_rename_temp_is_reported_by_the_scan_and_kept() {
+        let temp = format!("{RENAME_TEMP_PREFIX}{}", uuid::Uuid::new_v4().simple());
+        assert!(is_rename_temp(&temp));
+        for not in [
+            ".hv-rename-",
+            ".hv-rename-xyz",
+            ".hv-rename-0123456789abcdef0123456789ABCDEF",
+            ".hv-rename-0123456789abcdef0123456789abcdef0",
+            "hv-rename-0123456789abcdef0123456789abcdef",
+        ] {
+            assert!(!is_rename_temp(not), "{not}");
+        }
+        let (_tmp, root, _) = library(&["a.sql", &temp]);
+        let found = scan::scan(&root, &scan::Limits::default(), &scan::RealFs);
+        assert!(
+            found.diags.iter().any(|d| matches!(
+                d,
+                scan::Diag::InterruptedRename { folder: None, name } if *name == temp
+            )),
+            "{:?}",
+            found.diags
+        );
+        assert!(found.entries.iter().all(|e| e.rel.as_str() == "a.sql"));
+        assert!(root.canonical.join(&temp).is_file());
+    }
+    // ## m4b-t20-adversarial
 
     #[cfg(target_os = "macos")]
     #[test]

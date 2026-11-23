@@ -7,12 +7,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
+#[cfg(any(unix, windows))] // ## m4b-t20-adversarial (named line): the junction test
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hacivat_scripts::fileio::{self, ReadLimits};
-#[cfg(unix)]
+#[cfg(any(unix, windows))] // ## m4b-t20-adversarial (named line)
 use hacivat_scripts::scan::{Fs, Meta, RealFs};
 use hacivat_scripts::watch::{
     Backend, OsEventSource, PollEventSource, PollReason, WatchBatch, WatchEvent, WatchOpts, Watcher,
@@ -345,13 +345,13 @@ fn own_save_is_not_reported() {
 }
 
 /// Records every path the reconciler asks the file system about.
-#[cfg(unix)]
+#[cfg(any(unix, windows))] // ## m4b-t20-adversarial (named line)
 #[derive(Default)]
 struct Counting {
     paths: Mutex<Vec<PathBuf>>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))] // ## m4b-t20-adversarial (named line)
 impl Counting {
     fn asked_under(&self, dir: &Path) -> Vec<PathBuf> {
         let paths = self.paths.lock().unwrap();
@@ -366,7 +366,7 @@ impl Counting {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))] // ## m4b-t20-adversarial (named line)
 impl Fs for Counting {
     fn read_dir(&self, dir: &Path, cap: usize) -> std::io::Result<Vec<std::ffi::OsString>> {
         self.paths.lock().unwrap().push(dir.into());
@@ -435,9 +435,13 @@ fn dir_symlink_created_after_watch_is_not_walked() {
                 through.extend(inode_of(&e.path(), true).map(|i| (e.path(), i)));
             }
         }
+        // ## m4b-t20-adversarial (named lines, cifix-3 review m1): matched by inode alone,
+        // like the control, so a wrong device encoding (or btrfs's per-subvolume `st_dev`)
+        // can never make these checks pass vacuously; an inode shared across devices can only
+        // fail the test, the safe direction.
         let hits: Vec<&PathBuf> = through
             .iter()
-            .filter(|(_, i)| watched.contains(i))
+            .filter(|(_, i)| watched.iter().any(|w| w.1 == i.1))
             .map(|(p, _)| p)
             .collect();
         // The control matches the inode alone (btrfs reports a subvolume's own `st_dev`).
@@ -466,6 +470,46 @@ fn dir_symlink_created_after_watch_is_not_walked() {
         Vec::<PathBuf>::new()
     );
 }
+
+// ## m4b-t20-adversarial (named exception, T9 fr1 carry: the Windows junction variant)
+/// A junction made inside the library after the watch started (`mklink /J`, which needs no
+/// privilege, unlike a symbolic link) is never walked: the reconciler's scan meets it and goes
+/// through it nowhere, and nothing written behind it is reported.
+#[cfg(windows)]
+#[test]
+fn junction_created_after_watch_is_not_walked() {
+    let lib = Lib::new(&[("a.sql", "x")]);
+    let big = tempfile::tempdir().unwrap();
+    for i in 0..1_000 {
+        fs::write(big.path().join(format!("f{i:04}.sql")), "SELECT 1;").unwrap();
+    }
+    let counting = Arc::new(Counting::default());
+    let opts = WatchOpts {
+        fs: counting.clone(),
+        ..WatchOpts::default()
+    };
+    let mut w = Real::with(&lib, opts, Box::new(OsEventSource::new().unwrap()));
+    let made = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(lib.path("outside"))
+        .arg(big.path())
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "mklink /J: {made:?}");
+    fs::write(big.path().join("f0001.sql"), "SELECT 2;").unwrap();
+    fs::write(big.path().join("new.sql"), "SELECT 3;").unwrap();
+    w.sentinel(&lib);
+    assert_eq!(w.reported(), vec![]);
+    assert!(counting.asked(&lib.path("outside")));
+    assert_eq!(
+        counting.asked_under(&lib.path("outside")),
+        Vec::<PathBuf>::new()
+    );
+    println!("HV-FACT t20 junction_walked=false");
+}
+// ## m4b-t20-adversarial
 
 #[test]
 fn polling_fallback_sees_a_change() {

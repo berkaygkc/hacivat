@@ -142,6 +142,8 @@ pub(super) enum Msg {
     },
     AdoptRoot {
         id: LibraryId,
+        // ## m4b-t20-adversarial (named line, m4)
+        seen: Option<crate::fileio::FolderIdentity>,
         reply: oneshot::Sender<Result<bool, RegistryError>>,
     },
     // ## m4b-t16-attach
@@ -409,6 +411,10 @@ struct Lib {
     adopting: bool,
     adopt_job: Option<u64>,
     adopt_reply: Option<oneshot::Sender<Result<bool, RegistryError>>>,
+    // ## m4b-t20-adversarial (named lines, T16 re-review m4): the folder the last refusal
+    // found at the path, and the one a confirmed adoption was shown for.
+    refused_seen: Option<crate::fileio::FolderIdentity>,
+    adopt_seen: Option<crate::fileio::FolderIdentity>,
     scan_diags: Vec<LibraryDiag>,
     entries: Arc<[ScriptEntry]>,
     stopped: bool,
@@ -478,6 +484,8 @@ impl Lib {
             diagnostics: Arc::from([]),
             // ## m4b-t16-attach (named line)
             watch: reg.watch,
+            // ## m4b-t20-adversarial (named line)
+            refused_identity: None,
         });
         Lib {
             reg,
@@ -491,6 +499,9 @@ impl Lib {
             adopting: false,
             adopt_job: None,
             adopt_reply: None,
+            // ## m4b-t20-adversarial (named lines)
+            refused_seen: None,
+            adopt_seen: None,
             scan_diags: Vec::new(),
             entries: Arc::from([]),
             stopped: false,
@@ -573,6 +584,11 @@ impl Lib {
             diagnostics: Arc::from(diagnostics),
             // ## m4b-t16-attach (named line)
             watch: self.reg.watch,
+            // ## m4b-t20-adversarial (named line, m4)
+            refused_identity: (self.state
+                == LibraryState::Unavailable(UnavailableReason::RootChanged))
+            .then_some(self.refused_seen)
+            .flatten(),
         })
     }
 }
@@ -759,7 +775,7 @@ impl Actor {
                 self.dispatch();
                 let _ = reply.send(r);
             }
-            Msg::AdoptRoot { id, reply } => match self.adopt_root(id) {
+            Msg::AdoptRoot { id, seen, reply } => match self.adopt_root(id, seen) {
                 // ## m4b-t16-attach fix round 1: answered when its validation is done.
                 Ok(i) => {
                     self.libs[i].adopt_reply = Some(reply);
@@ -1164,7 +1180,11 @@ impl Actor {
     }
 
     /// T10 m-h: the user confirmed that the folder now at the library's path is the library.
-    fn adopt_root(&mut self, id: LibraryId) -> Result<usize, RegistryError> {
+    fn adopt_root(
+        &mut self,
+        id: LibraryId,
+        seen: Option<crate::fileio::FolderIdentity>,
+    ) -> Result<usize, RegistryError> {
         let Some(i) = self.index(id) else {
             return Err(RegistryError::UnknownLibrary);
         };
@@ -1178,6 +1198,8 @@ impl Actor {
         // waived (`RefreshJob::waived`), and the new identity is saved only if it passes
         // (`commit_adoption`). A refusal leaves the old record and `RootChanged`.
         lib.adopting = true;
+        // ## m4b-t20-adversarial (named line, m4)
+        lib.adopt_seen = seen;
         lib.want.validate = true;
         self.dirty.insert(id);
         Ok(i)
@@ -1187,6 +1209,13 @@ impl Actor {
     /// binding is read from scratch (I2: nothing of the old folder's manifest is kept; only the
     /// user's local mappings, which belong to the library). `false` when the save failed.
     fn commit_adoption(&mut self, i: usize, v: &work::Valid) -> bool {
+        // ## m4b-t20-adversarial (named lines, T16 re-review m4): only the folder the confirm
+        // was shown for; another one swapped in meanwhile is refused, however valid.
+        if let Some(seen) = self.libs[i].adopt_seen.take()
+            && v.identity != Some(seen)
+        {
+            return false;
+        }
         let id = self.libs[i].id();
         let canonical = v.root.canonical.clone();
         let inode = v.identity.map(|x| x.ino);
@@ -1608,7 +1637,16 @@ impl Actor {
 
     fn refreshed(&mut self, i: usize, out: RefreshOut) {
         match out {
-            RefreshOut::Refused(r) => self.make_unavailable(i, r.reason, r.diags),
+            RefreshOut::Refused(r) => {
+                // ## m4b-t20-adversarial (named lines, m4): a new folder at the path is a new
+                // snapshot even when the refusal reads the same.
+                if self.libs[i].refused_seen != r.seen {
+                    self.libs[i].refused_seen = r.seen;
+                    let id = self.libs[i].id();
+                    self.dirty.insert(id);
+                }
+                self.make_unavailable(i, r.reason, r.diags);
+            }
             RefreshOut::Validated(v) => {
                 let lib = &mut self.libs[i];
                 lib.session.canonical = Some(v.root.canonical);
