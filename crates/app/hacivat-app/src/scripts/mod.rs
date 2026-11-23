@@ -77,8 +77,10 @@ const COMMANDS: [(&str, &str, &str); 6] = [
 // (`file_ops::filled`).
 // ## m4b-t14-tabs (named exception): `file.save` and `file.save_all` are Task 14's
 // (`save::register_commands`).
+// ## m4b-t15-goto (named exception): `scripts.goto` is Task 15's (`goto::filled`).
+// (merge of T15 and T16: none is a stub any more)
 // ## m4b-t16-attach (named exception): `scripts.attach` is Task 16's (`filled_t16`).
-pub const STUB_COMMANDS: [&str; 1] = ["scripts.goto"];
+pub const STUB_COMMANDS: [&str; 0] = [];
 
 /// A stub command is never enabled.
 fn not_yet(_: &App) -> bool {
@@ -99,8 +101,10 @@ pub fn install(cx: &mut App) {
     // Every command is a stub until its task fills it (and gives it its own run and enabled).
     for (id, title_id, context) in COMMANDS {
         // ## m4b-t13-explorer (named exception): Task 13's filled commands.
+        // ## m4b-t15-goto (named exception): and Task 15's `scripts.goto`.
         // ## m4b-t16-attach (named exception): and Task 16's `scripts.attach`.
         let (run, enabled) = file_ops::filled(id)
+            .or_else(|| goto::filled(id))
             .or_else(|| filled_t16(id))
             .unwrap_or_else(|| (Rc::new(|_, _| {}), not_yet));
         // A duplicate keeps the first definition (registration order is the palette's order).
@@ -117,6 +121,8 @@ pub fn install(cx: &mut App) {
     let contributor = ScriptsContributor::for_app(cx);
     crate::explorer::contrib::register_contributor(Rc::new(contributor), cx);
     // ## m4b-t13-explorer
+    // ## m4b-t15-goto (named line): `scripts.open_under` and the tabs' chooser hook.
+    chooser::install(cx);
     // ## m4b-t16-attach (named line): `scripts.map` and `scripts.library_settings`.
     install_t16(cx);
 }

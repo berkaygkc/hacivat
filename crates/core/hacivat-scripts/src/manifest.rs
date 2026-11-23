@@ -677,6 +677,22 @@ fn read_manifest_file(h: &Dir) -> Result<(Vec<u8>, Metadata), FsError> {
     Ok((bytes, meta))
 }
 
+// ## m4b-cifix-3-manifest-poll (named exception in Task 3's file; CI 45068616161)
+/// The XXH3-64 of `<library_dir>/.hacivat/workspace.toml`'s bytes, read exactly as [`read`]
+/// reads them (under directory handles, no link followed, a plain file of at most
+/// [`MANIFEST_MAX_BYTES`]); `None` when it cannot be read that way. The poll source's stamp
+/// carries it (R-T10-6), so a rewrite that keeps the length and the modification time (two
+/// writes in one tick of a coarse network clock) is still a change. The caller never asks for
+/// a dataless file (reading it would download it).
+pub(crate) fn content_hash(library_dir: &Path) -> Option<u64> {
+    let (bytes, _) = Dir::open_root(library_dir)
+        .and_then(|root| root.subdir(HACIVAT))
+        .and_then(|h| read_manifest_file(&h))
+        .ok()?;
+    Some(twox_hash::XxHash3_64::oneshot(&bytes))
+}
+// ## m4b-cifix-3-manifest-poll
+
 fn read_diag(e: FsError) -> Diag {
     match e {
         FsError::Link => Diag::LinkIgnored,

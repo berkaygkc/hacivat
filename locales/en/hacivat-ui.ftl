@@ -5124,6 +5124,10 @@ hv-scripts-unsaved-subtitle-unbound = No connection
 #   $path (String) - the database file's path (data), e.g. "/Volumes/data/orders.db".
 hv-scripts-sqlite-remounted = The database file is on a different volume now; running on { $path }.
 
+## m4b-t15-goto
+# Surface 7 (Go to script). Palette title of the tree row's "Open under another connection…" (the chooser without the row's connection); no default chord.
+hv-cmd-scripts-open-under = Open script under another connection…
+
 ## m4b-t16-attach
 
 # The command behind the database menu's "Map to a script library…" (menu and palette).
