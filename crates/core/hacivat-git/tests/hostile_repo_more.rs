@@ -262,6 +262,65 @@ fn a_library_inside_a_bigger_repository_gets_its_index_lock_path() {
     );
 }
 
+/// Task 20's own probe (from the T7 review's q2, the per-alternate cost): the alternates
+/// chain was bounded in depth only. An alternates file may list many lines, and an alternate
+/// may list itself, so a hostile `.git/objects/info/alternates` fans out to `lines^depth`
+/// folder checks of up to 20,000 `lstat`s each: the worker outlives the caller's 5 s budget
+/// and the library answers `Paused` until the app restarts. Now every alternate folder is
+/// checked once (the fan-out is answered at once), and more than a few distinct ones refuse
+/// the repository (`Redirected`).
+#[test]
+fn a_fan_out_of_alternates_is_refused_at_once() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let r = repo(&top, "repo");
+    let other = repo(&top, "other");
+    let (b, c) = (repo(&top, "b"), repo(&top, "c"));
+    // `repo` lists `other` 500 times, `other` lists `b` 500 times, `b` lists `c` 500 times:
+    // within the depth bound, 500³ folder checks. (An alternate listing itself already
+    // reaches the depth bound at once.)
+    let line = format!("{}\n", other.join(".git/objects").display());
+    let to = |x: &Path| format!("{}\n", x.join(".git/objects").display()).repeat(500);
+    write(
+        &r.join(".git/objects/info/alternates"),
+        to(&other).as_bytes(),
+    );
+    write(
+        &other.join(".git/objects/info/alternates"),
+        to(&b).as_bytes(),
+    );
+    write(&b.join(".git/objects/info/alternates"), to(&c).as_bytes());
+    let limits = GitLimits {
+        timeout: std::time::Duration::from_secs(2),
+        ..GitLimits::default()
+    };
+    let st = status(&r, &limits);
+    fact(&format!(
+        "t20 alternates_fan_out state={}",
+        format!("{st:?}").replace(' ', "")
+    ));
+    // Each of the three folders is checked once: answered within the budget, never `Timeout`
+    // (and so never a stuck worker that leaves the library `Paused`).
+    assert!(matches!(st, GitState::Ready(_)), "{st:?}");
+    // Many distinct alternates (each a real, owned object folder) are refused.
+    let mut lines = String::new();
+    for i in 0..20 {
+        let o = repo(&top, &format!("alt{i}"));
+        lines.push_str(&format!("{}\n", o.join(".git/objects").display()));
+    }
+    write(&r.join(".git/objects/info/alternates"), lines.as_bytes());
+    let st = status(&r, &limits);
+    assert!(
+        matches!(st, GitState::Unavailable(GitError::Redirected)),
+        "{st:?}"
+    );
+    // One alternate, as `git clone --shared` makes, is still read.
+    write(&r.join(".git/objects/info/alternates"), line.as_bytes());
+    write(&other.join(".git/objects/info/alternates"), b"");
+    let st = status(&r, &GitLimits::default());
+    assert!(matches!(st, GitState::Ready(_)), "{st:?}");
+}
+
 /// The index with one more extension before its trailing SHA-1, the checksum recomputed.
 fn with_extension(index: &[u8], signature: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let body = &index[..index.len() - 20];

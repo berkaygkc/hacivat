@@ -55,6 +55,12 @@ pub(crate) fn current_user_owns(p: &Path) -> std::io::Result<bool> {
 const SMALL_FILE_MAX: u64 = 64 * 1024;
 /// How deep alternates may chain (an alternate's own alternates).
 const ALTERNATES_DEPTH_MAX: usize = 4;
+// ## m4b-t20-adversarial (named exception)
+/// The most distinct alternate object folders one repository may name, its chain included
+/// (`git clone --shared` or `--reference` make one; a few is generous). With the per-folder
+/// loose-object cap, a status `lstat`s at most `(1 + ALTERNATES_MAX) × LOOSE_OBJECTS_MAX`
+/// entries for the placeholder check.
+const ALTERNATES_MAX: usize = 8;
 
 fn redirected<T>() -> Result<T, GitState> {
     Err(GitState::Unavailable(GitError::Redirected))
@@ -654,11 +660,27 @@ fn gitfile_layout(
 /// Every alternate object directory (`objects/info/alternates`, one path per line, relative
 /// to `objects`) is an existing directory the user owns; chains are followed to
 /// [`ALTERNATES_DEPTH_MAX`].
+///
+/// ## m4b-t20-adversarial (named exception, Task 20's probe from the T7 review's q2): each
+/// alternate folder is checked once (`seen`, by canonical path), and more than
+/// [`ALTERNATES_MAX`] distinct ones refuse the repository. The depth bound alone let a file of
+/// many lines fan out to `lines^depth` folder checks, a worker that outlived every budget.
 fn check_alternates(
     objects: &Path,
     depth: usize,
     owned: Owner<'_>,
     placeholder: Placeholder<'_>,
+) -> Result<(), GitState> {
+    let mut seen = Vec::new();
+    check_alternates_once(objects, depth, owned, placeholder, &mut seen)
+}
+
+fn check_alternates_once(
+    objects: &Path,
+    depth: usize,
+    owned: Owner<'_>,
+    placeholder: Placeholder<'_>,
+    seen: &mut Vec<PathBuf>,
 ) -> Result<(), GitState> {
     let file = objects.join("info").join("alternates");
     if placeholder(&file) {
@@ -681,10 +703,18 @@ fn check_alternates(
         let Some(alt) = resolve(objects, line) else {
             return redirected();
         };
+        // ## m4b-t20-adversarial (named lines): once each, and a bounded number of them.
+        if seen.contains(&alt) {
+            continue;
+        }
+        if seen.len() >= ALTERNATES_MAX {
+            return redirected();
+        }
+        seen.push(alt.clone());
         require_owned(&alt, owned)?;
         // p1: an alternate's objects are read like ours (same cap, per folder).
         check_objects_dataless(&alt, placeholder)?;
-        check_alternates(&alt, depth + 1, owned, placeholder)?;
+        check_alternates_once(&alt, depth + 1, owned, placeholder, seen)?;
     }
     Ok(())
 }
