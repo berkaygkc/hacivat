@@ -34,7 +34,8 @@ jobs:
   build-test:
     name: build-test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # ## m4b-cifix-6 (R-C0-15): Windows reached the 90-minute cap with every test passing.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
