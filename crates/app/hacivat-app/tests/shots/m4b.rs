@@ -1371,7 +1371,8 @@ mod scripts {
 
     /// The library folder: committed, then a file edited, two added, one in conflict.
     fn fixture(diagnostics: bool, outside: bool) -> std::path::PathBuf {
-        let dir = super::super::support::temp_root().join("orders");
+        // ## m4b-t21-shots fix round 1 (m10): inside the shot's root, a stable path.
+        let dir = super::super::shot_folder("orders");
         std::fs::create_dir_all(&dir).expect("the library folder");
         for f in [
             "müşteri_segment.sql",
@@ -1401,7 +1402,9 @@ mod scripts {
         // ## m4b-t13-explorer fix round 1: a link pointing outside the library (listed dim).
         #[cfg(unix)]
         if outside {
-            let away = super::super::support::temp_root().join("secret.sql");
+            let away_dir = super::super::shot_folder("away");
+            std::fs::create_dir_all(&away_dir).expect("the outside folder");
+            let away = away_dir.join("secret.sql");
             std::fs::write(&away, "SELECT 8;\n").expect("the outside file");
             std::os::unix::fs::symlink(&away, dir.join("outside.sql")).expect("the link");
         }
@@ -1441,7 +1444,8 @@ mod scripts {
         let rt = cx
             .global::<hacivat_app::connections::ConnectionsModel>()
             .runtime();
-        let trash = super::super::support::temp_root();
+        let trash = super::super::shot_folder("trash");
+        std::fs::create_dir_all(&trash).expect("the trash folder");
         let svc = Arc::new(LibraryService::open_with(
             &paths,
             &rt,
@@ -1731,7 +1735,8 @@ mod scripts {
             None,
             cx,
         );
-        let root = super::super::support::temp_root();
+        let root = super::super::shot_folder("engines");
+        std::fs::create_dir_all(&root).expect("the engines folder");
         let mut dirs = Vec::new();
         for (name, file) in [
             ("kampanya", "kampanya_raporu.sql"),
@@ -1825,7 +1830,8 @@ mod t16 {
 
     /// A fixture folder `name` holding a few scripts (and `manifest` when given).
     fn folder(name: &str, manifest: Option<&str>) -> PathBuf {
-        let dir = super::super::support::temp_root().join(name);
+        // ## m4b-t21-shots fix round 1 (m10): inside the shot's root, a stable path.
+        let dir = super::super::shot_folder(name);
         for f in [
             "daily.sql",
             "reports/haftalık_rapor.sql",

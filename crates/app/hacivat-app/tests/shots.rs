@@ -1567,7 +1567,23 @@ fn shot_root(name: &str) -> ShotRoot {
     let path = shot_root_path(name);
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).expect("temp dir");
+    CURRENT_ROOT.with(|c| *c.borrow_mut() = Some(path.clone()));
     ShotRoot(path)
+}
+
+thread_local! {
+    /// The root of the shot being rendered ([`shot_folder`]).
+    static CURRENT_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A fixture folder `name` inside the shot's own root (fix round 1, m10: a stable path the
+/// app may show, gone with the shot).
+fn shot_folder(name: &str) -> PathBuf {
+    CURRENT_ROOT
+        .with(|c| c.borrow().clone())
+        .expect("a shot is being rendered")
+        .join("folders")
+        .join(name)
 }
 
 /// The entries left in `base` (the temp roots of shots that are over).
