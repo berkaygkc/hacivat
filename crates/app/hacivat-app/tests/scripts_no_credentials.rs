@@ -585,7 +585,7 @@ fn no_credentials_are_ever_written_into_a_library_folder(cx: &mut TestAppContext
             if name.contains(n.as_str()) {
                 found.push(format!("{name}: its name holds a credential or identifier"));
             }
-            if bytes.as_deref().is_some_and(|b| contains(b, n.as_bytes())) {
+            if bytes.is_some_and(|b| contains(b, n.as_bytes())) {
                 found.push(format!("{name}: holds a credential or identifier"));
             }
         }

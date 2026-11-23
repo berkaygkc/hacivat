@@ -158,14 +158,16 @@ async fn console(line: &Line, env: EnvTag) -> Console {
 
 /// The MySQL/MariaDB session counters of the statement kinds a refused file holds (review m6):
 /// what the server ran on the console's own connection, whatever left no row behind.
-/// `Questions` counts every statement (the runner's context reads and this probe too).
-const COUNTERS: [&str; 6] = [
+/// `Questions` counts every statement, so it also covers a `SET ROLE` on MariaDB, whose own
+/// counter is not one of these (re-review m-fr1-1).
+const COUNTERS: [&str; 7] = [
     "Questions",
+    "Com_select",
     "Com_insert",
     "Com_delete",
     "Com_create_procedure",
     "Com_set_option",
-    "Com_set_role",
+    "Com_show_status",
 ];
 
 /// The server's statement counters of `c`'s own connection: MySQL/MariaDB session status (the
@@ -241,6 +243,89 @@ async fn last_query(pid: Option<&str>, side: &mut Side) -> Option<String> {
         "SELECT query FROM pg_stat_activity WHERE pid = {pid}"
     ))
     .await
+}
+
+/// What the server saw on a console's own connection across a refused run (review m6,
+/// re-review m-fr1-1), measured so that every statement is accounted for:
+///
+/// - The session's run context is read once first, so the runner's own context reads
+///   (`Request::ReadContext`) are answered from memory and send nothing: only a user request
+///   marks the context stale, and the probes below are internal.
+/// - MySQL/MariaDB: the session counters are read three times. The first two reads are
+///   back-to-back; their difference is what one read costs on each counter. Then the run,
+///   then the third read. The run's difference must equal one read's: the third read is then
+///   the only statement the connection ran during the run, on every counter (`Questions`
+///   counts every statement, so a sent `SET ROLE` counts there whatever its own counter).
+/// - PostgreSQL (no `pg_stat_statements` in the images): the backend's `state_change` in
+///   `pg_stat_activity`, read by the side channel before and after, must not move. Every
+///   statement the backend runs changes its state, so an unmoved timestamp means it ran none.
+///   Its last statement must not be one of the file's either.
+struct Ledger {
+    one_read: BTreeMap<String, i64>,
+    before: BTreeMap<String, i64>,
+    pid: Option<String>,
+    state_change: Option<String>,
+}
+
+async fn state_change(pid: Option<&str>, side: &mut Side) -> Option<String> {
+    let pid = pid?;
+    side.value(&format!(
+        "SELECT state_change::text FROM pg_stat_activity WHERE pid = {pid}"
+    ))
+    .await
+}
+
+impl Ledger {
+    async fn open(c: &Console, side: &mut Side) -> Ledger {
+        let pid = backend_pid(c).await;
+        let _ = c.s.run_context().await;
+        let state_change = state_change(pid.as_deref(), side).await;
+        let first = counters(c).await;
+        let before = counters(c).await;
+        Ledger {
+            one_read: deltas(&first, &before),
+            before,
+            pid,
+            state_change,
+        }
+    }
+
+    /// Asserts the connection ran nothing of the file; the fact's text.
+    async fn close(self, c: &Console, side: &mut Side, table: &str) -> String {
+        let id = &c.line.id;
+        if c.line.is_mysql_family() {
+            let after = counters(c).await;
+            let ran = deltas(&self.before, &after);
+            for name in ["Questions", "Com_select", "Com_insert", "Com_delete"] {
+                assert!(ran.contains_key(name), "{id}: no {name} session counter");
+            }
+            assert_eq!(
+                ran, self.one_read,
+                "{id}: the connection ran more than the closing counter read during the run"
+            );
+            return format!(
+                "statements={} one_read={}",
+                shown(&ran),
+                shown(&self.one_read)
+            );
+        }
+        let last = last_query(self.pid.as_deref(), side).await;
+        let moved = state_change(self.pid.as_deref(), side).await;
+        assert!(
+            self.state_change.is_some(),
+            "{id}: pg_stat_activity shows no console backend"
+        );
+        assert_eq!(
+            moved, self.state_change,
+            "{id}: the console's backend ran a statement during the run"
+        );
+        let q = last.unwrap_or_default();
+        assert!(
+            !q.contains(table) && !q.contains("SET ROLE"),
+            "{id}: the console's backend last ran a statement of the file"
+        );
+        "pg_state_change_unmoved=true".to_string()
+    }
 }
 
 /// A runner as the app builds one: the run service and a classifier pool that keeps nothing.
@@ -633,9 +718,9 @@ async fn stray_end_file_executes_nothing_on_a_real_server() {
             EnvTag::Dev,
             Answers::new(&[]),
         );
-        let counted = counters(&c).await;
+        let ledger = Ledger::open(&c, &mut side).await;
         let out = run_file(&runner(), req, tx).await;
-        let moved = deltas(&counted, &counters(&c).await);
+        let statements = ledger.close(&c, &mut side, &t).await;
         let (reason, _) = refusal(id, &out);
         let rows = side.count(&format!("SELECT COUNT(*) FROM {t}")).await;
         let routines = side
@@ -645,20 +730,8 @@ async fn stray_end_file_executes_nothing_on_a_real_server() {
             ))
             .await;
         fact!(
-            "HV-FACT t19 e8 stray_end target={id} refused={reason:?} units_run={} rows={rows} routines={routines} statements={}",
-            rx.borrow().units_run,
-            shown(&moved)
-        );
-        for kind in ["Com_insert", "Com_delete", "Com_create_procedure"] {
-            assert_eq!(
-                moved.get(kind).copied().unwrap_or(0),
-                0,
-                "{id}: the server ran a statement of the file ({kind})"
-            );
-        }
-        assert!(
-            moved.contains_key("Com_insert"),
-            "{id}: no session counters"
+            "HV-FACT t19 e8 stray_end target={id} refused={reason:?} units_run={} rows={rows} routines={routines} {statements}",
+            rx.borrow().units_run
         );
         assert!(
             matches!(reason, ScriptRefuseReason::Uncertain(_)),
@@ -701,46 +774,16 @@ async fn a_denied_statement_late_in_a_file_executes_nothing_on_a_real_server() {
             EnvTag::Production,
             port.clone(),
         );
-        let pid = backend_pid(&c).await;
-        let counted = counters(&c).await;
+        let ledger = Ledger::open(&c, &mut side).await;
         let out = run_file(&runner(), req, tx).await;
-        let moved = deltas(&counted, &counters(&c).await);
-        let last = last_query(pid.as_deref(), &mut side).await;
+        let statements = ledger.close(&c, &mut side, &t).await;
         let (reason, unit) = refusal(id, &out);
         let rows = side.count(&format!("SELECT COUNT(*) FROM {t}")).await;
         fact!(
-            "HV-FACT t19 e8 late_denial target={id} refused={reason:?} at_unit={unit:?} units_run={} rows={rows} asked={} statements={} pg_last_query_is_the_files={}",
+            "HV-FACT t19 e8 late_denial target={id} refused={reason:?} at_unit={unit:?} units_run={} rows={rows} asked={} {statements}",
             rx.borrow().units_run,
-            port.asked_units().len(),
-            shown(&moved),
-            last.as_deref()
-                .is_some_and(|q| q.contains(&t) || q.contains("SET ROLE"))
+            port.asked_units().len()
         );
-        for kind in ["Com_insert", "Com_set_role"] {
-            assert_eq!(
-                moved.get(kind).copied().unwrap_or(0),
-                0,
-                "{id}: the server ran a statement of the file ({kind})"
-            );
-        }
-        if line.is_mysql_family() {
-            assert!(
-                moved.contains_key("Com_insert"),
-                "{id}: no session counters"
-            );
-        }
-        if let Some(q) = &last {
-            assert!(
-                !q.contains(&t) && !q.contains("SET ROLE"),
-                "{id}: the console's backend last ran a statement of the file"
-            );
-        }
-        if line.is_pg() {
-            assert!(
-                last.is_some(),
-                "{id}: pg_stat_activity shows no console backend"
-            );
-        }
         assert!(
             matches!(reason, ScriptRefuseReason::Denied(_)),
             "{id}: {reason:?}"
