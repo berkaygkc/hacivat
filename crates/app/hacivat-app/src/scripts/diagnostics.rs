@@ -207,6 +207,18 @@ fn lines(p: &Problem, folder: &str, cx: &App) -> Vec<SharedString> {
         Problem::Diag(LibraryDiag::Scan(ScanDiag::LinkScope { .. })) => {
             vec![other("linkscope", 0, folder, cx)]
         }
+        // ## m4b-t20-adversarial (named lines, T13 fr1 re-review n5): the stranded script is
+        // named, with the folder it is in, so the user can rename it back.
+        Problem::Diag(LibraryDiag::Scan(ScanDiag::InterruptedRename { folder: at, name })) => {
+            let place = at
+                .as_ref()
+                .map_or_else(|| folder.to_owned(), |f| f.display_text());
+            vec![text(
+                cx,
+                "hv-scripts-diag-interrupted-rename",
+                vec![("name", arg(name)), ("folder", arg(&place))],
+            )]
+        }
         Problem::Diag(LibraryDiag::ScanStopped(hit)) => {
             let (limit, n) = match hit {
                 LimitHit::Depth(n) => ("depth", *n),

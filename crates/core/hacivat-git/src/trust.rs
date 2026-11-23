@@ -10,9 +10,13 @@
 //!   worktree's git dir (`<common>/worktrees/<name>`, whose `commondir` leads back to
 //!   `<common>`), to a submodule's git dir under an enclosing repository's `.git/modules/`, or
 //!   inside the worktree. A plain `.git` directory with a `commondir`, and alternates that
-//!   name anything but an existing directory the user owns (or nest deeper than four), are
+//!   name anything but an existing directory the user owns (since m4b-t20 fix round 3,
+//!   R-T20-2: anything but at most 16 trimmed absolute entries with no alternates of their
+//!   own), are
 //!   refused: `Unavailable(Redirected)`. Linked worktrees and `clone --shared` repositories
-//!   are read under the same isolated, reduced-trust open (n2).
+//!   are read under the same isolated, reduced-trust open (n2). Every path text the repository
+//!   supplies (gitfile, `commondir`, `gitdir`, alternates, config values) must stay on a local
+//!   drive, checked before any filesystem call on it (m4b-t20 fix round 4, [`local_spelling`]).
 //!
 //! After the open: `git_dir_trust() == Reduced`, and no repository-kind config section has full
 //! trust (gix can promote single sections when a `safe.directory` matches the config file),
@@ -23,6 +27,8 @@
 // ## m4b-t07-git
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+// ## m4b-t20-adversarial fix round 1 (named line, I1): the worker's interrupt flag.
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::discover::{DotGit, Found};
 use crate::{FailKind, GitError, GitState, TooLargeWhy, UntrustReason};
@@ -53,8 +59,28 @@ pub(crate) fn current_user_owns(p: &Path) -> std::io::Result<bool> {
 
 /// The most bytes read from a gitfile, a `commondir` file or an alternates file.
 const SMALL_FILE_MAX: u64 = 64 * 1024;
-/// How deep alternates may chain (an alternate's own alternates).
-const ALTERNATES_DEPTH_MAX: usize = 4;
+// ## m4b-t20-adversarial fix round 3 (named exception, ruling R-T20-2)
+/// The most entries the repository's `objects/info/alternates` may hold (duplicates
+/// included, as `gix-odb` parses them); a real `clone --shared` or `--reference` has one.
+const ALTERNATE_ENTRIES_MAX: usize = 16;
+/// ## m4b-t20-adversarial fix round 1 (review I1): the most entries an object folder's `pack`
+/// folder may hold for the placeholder check (three files per pack; `git gc` keeps one pack).
+/// Past it the status answers `TooLarge(LooseObjects)` ("run git gc"), which repacks them.
+const PACK_ENTRIES_MAX: usize = 20_000;
+
+/// A flag never set (the unit tests, which have no worker to interrupt).
+#[cfg(test)]
+static NEVER: AtomicBool = AtomicBool::new(false);
+
+/// The answer of a worker whose caller gave up (it is discarded; the caller already answered
+/// `Timeout`): stop now, never finish the work.
+fn interrupted(interrupt: &AtomicBool) -> Result<(), GitState> {
+    if interrupt.load(Ordering::SeqCst) {
+        Err(GitState::Unavailable(GitError::Timeout))
+    } else {
+        Ok(())
+    }
+}
 
 fn redirected<T>() -> Result<T, GitState> {
     Err(GitState::Unavailable(GitError::Redirected))
@@ -93,24 +119,142 @@ fn exists(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok()
 }
 
-fn resolve(base: &Path, text: &str) -> Option<PathBuf> {
+// ## m4b-t20-adversarial fix round 4 (named exception, re-review I-fr3-1; Review Focus 3)
+/// The guard on every path text the repository hands us (a gitfile's `gitdir:`, `commondir`,
+/// a linked worktree's `gitdir` back-pointer, an alternates entry, a nested `.git`'s target,
+/// a config value), applied **before any filesystem call** on it: only a spelling that stays
+/// on a local drive passes ([`map::PathPrefix::is_local`]). A UNC, verbatim UNC or device path
+/// would make Windows contact a host over SMB and send the user's NTLM credentials, on attach,
+/// with no user action. Read the same way on every OS (fail closed: no real repository on Unix
+/// names `//host` or `\\host`), raw and trimmed, since gix trims some texts and not others.
+pub(crate) fn local_spelling(text: &str) -> bool {
+    crate::map::path_prefix(text).is_local() && crate::map::path_prefix(text.trim()).is_local()
+}
+
+/// A repository path text resolved to an existing folder: `Ok(Some(_))`; `Ok(None)` when it
+/// names nothing (or not a folder); `Err(_)` when it is **refused** (## m4b-t20-adversarial
+/// pre-merge fix, m-fr5-1: a spelling off the local drives, a link target off them, or the
+/// link budget spent answers `Redirected`; a set interrupt flag answers `Timeout`). Every
+/// caller answers a refusal as the whole status, never as "missing".
+fn resolve(
+    base: &Path,
+    text: &str,
+    budget: &mut LinkBudget<'_>,
+) -> Result<Option<PathBuf>, GitState> {
+    if !local_spelling(text) {
+        return redirected();
+    }
     let p = Path::new(text);
     let p = if p.is_absolute() {
         p.to_path_buf()
     } else {
         base.join(p)
     };
-    std::fs::canonicalize(p).ok().filter(|c| c.is_dir())
+    // ## m4b-t20-adversarial fix round 5 (named line, re-review m-fr4-2)
+    link_targets_stay_local(&p, budget)?;
+    Ok(std::fs::canonicalize(p).ok().filter(|c| c.is_dir()))
+}
+
+// ## m4b-t20-adversarial fix round 5 (named exception, re-review m-fr4-2)
+/// The most symbolic links one resolution follows (Linux's `MAXSYMLINKS`; macOS stops at 32).
+const LINK_HOPS_MAX: usize = 40;
+
+// ## m4b-t20-adversarial pre-merge fix (named exception, re-review m-fr5-2)
+/// The most symbolic links one status's checks follow in all (the layout and the whole
+/// library pre-walk share it): 2,000 nested gitfiles behind 30-hop chains would otherwise cost
+/// 60,000 `read_link`s before the open, uninterruptibly. Over it answers `Redirected`.
+const SCAN_HOPS_MAX: usize = 4_096;
+
+/// What one status may still spend on links, and the worker's interrupt flag.
+pub(crate) struct LinkBudget<'a> {
+    left: usize,
+    interrupt: &'a AtomicBool,
+}
+
+impl<'a> LinkBudget<'a> {
+    pub(crate) fn new(interrupt: &'a AtomicBool) -> Self {
+        LinkBudget {
+            left: SCAN_HOPS_MAX,
+            interrupt,
+        }
+    }
+}
+
+/// Walks `path` component by component, as `canonicalize` will, with `symlink_metadata` and
+/// `read_link`: every link target on the way must be a [`local_spelling`], since a local
+/// folder may itself be a link to `\\host\share` (or, on Unix, to `//host`), which
+/// `canonicalize` would follow. A missing component ends the walk (`canonicalize` then fails
+/// and nothing is followed); more than [`LINK_HOPS_MAX`] links in one path, the status's
+/// [`LinkBudget`] spent, or an unreadable link refuse (`Redirected`).
+fn link_targets_stay_local(path: &Path, budget: &mut LinkBudget<'_>) -> Result<(), GitState> {
+    let segments =
+        |p: &Path| -> Vec<PathBuf> { p.components().rev().map(|c| c.as_os_str().into()).collect() };
+    let mut todo = segments(path);
+    let mut cur = PathBuf::new();
+    let mut hops = 0usize;
+    while let Some(seg) = todo.pop() {
+        if seg.as_os_str() == "." {
+            continue;
+        }
+        if seg.as_os_str() == ".." {
+            cur.pop();
+            continue;
+        }
+        cur.push(&seg);
+        // A prefix (`C:`, `\\?\C:`) or the root is no link to look at, and `lstat` of a bare
+        // verbatim prefix fails, which would end the walk early.
+        if matches!(
+            Path::new(&seg).components().next(),
+            Some(std::path::Component::Prefix(_) | std::path::Component::RootDir)
+        ) {
+            continue;
+        }
+        let Ok(md) = std::fs::symlink_metadata(&cur) else {
+            return Ok(());
+        };
+        if !md.file_type().is_symlink() {
+            continue;
+        }
+        interrupted(budget.interrupt)?;
+        hops += 1;
+        if hops > LINK_HOPS_MAX || budget.left == 0 {
+            return redirected();
+        }
+        budget.left -= 1;
+        let Ok(target) = std::fs::read_link(&cur) else {
+            return redirected();
+        };
+        if !local_spelling(&target.to_string_lossy()) {
+            return redirected();
+        }
+        cur.pop();
+        todo.extend(segments(&target));
+    }
+    Ok(())
 }
 
 /// The checks before the open. `Err` is the state to answer. Every small file read here (a
 /// gitfile, `commondir`, alternates) is checked for a cloud placeholder first (p1), and so is
 /// every alternate's object folder.
+#[cfg(test)]
 pub(crate) fn check_layout(
     found: &Found,
     owned: Owner<'_>,
     placeholder: Placeholder<'_>,
 ) -> Result<Layout, GitState> {
+    check_layout_bounded(found, owned, placeholder, &NEVER)
+}
+
+/// [`check_layout`], stopping as soon as `interrupt` is set (the status worker's flag, set when
+/// its caller answered `Timeout`). ## m4b-t20-adversarial fix round 1 (named exception, I1).
+pub(crate) fn check_layout_bounded(
+    found: &Found,
+    owned: Owner<'_>,
+    placeholder: Placeholder<'_>,
+    interrupt: &AtomicBool,
+) -> Result<Layout, GitState> {
+    // ## m4b-t20-adversarial pre-merge fix (named line, m-fr5-2): the layout's own link budget.
+    let mut budget = LinkBudget::new(interrupt);
     require_owned(&found.worktree, owned)?;
     require_owned(&found.dot_git, owned)?;
     let layout = match found.kind {
@@ -132,12 +276,17 @@ pub(crate) fn check_layout(
             if placeholder(&found.dot_git) {
                 return dataless();
             }
-            gitfile_layout(found, owned, placeholder)?
+            gitfile_layout(found, owned, placeholder, &mut budget)?
         }
     };
     require_owned(&layout.git_dir, owned)?;
     require_owned(&layout.common_dir, owned)?;
-    check_alternates(&layout.common_dir.join("objects"), 0, owned, placeholder)?;
+    check_alternates(
+        &layout.common_dir.join("objects"),
+        owned,
+        placeholder,
+        &mut budget,
+    )?;
     Ok(layout)
 }
 
@@ -151,7 +300,15 @@ const LOOSE_OBJECTS_MAX: usize = 20_000;
 /// objects on every status (the HEAD commit, every tree reachable from it), so a placeholder
 /// among them answers `Unavailable(Dataless)`. More than [`LOOSE_OBJECTS_MAX`] loose entries
 /// answers `Unavailable(TooLarge(LooseObjects))`.
-fn check_objects_dataless(objects: &Path, placeholder: Placeholder<'_>) -> Result<(), GitState> {
+///
+/// ## m4b-t20-adversarial fix round 1 (named exception, review I1): `pack` entries are counted
+/// too (more than [`PACK_ENTRIES_MAX`] answers the same `TooLarge(LooseObjects)`), and the
+/// interrupt flag is read on every entry.
+fn check_objects_dataless(
+    objects: &Path,
+    placeholder: Placeholder<'_>,
+    interrupt: &AtomicBool,
+) -> Result<(), GitState> {
     if placeholder(objects) {
         return dataless();
     }
@@ -159,7 +316,9 @@ fn check_objects_dataless(objects: &Path, placeholder: Placeholder<'_>) -> Resul
         return Ok(());
     };
     let mut loose = 0usize;
+    let mut packed = 0usize;
     for fan in rd.filter_map(Result::ok) {
+        interrupted(interrupt)?;
         let name = fan.file_name();
         let Some(n) = name.to_str() else { continue };
         let is_fan = n.len() == 2 && n.bytes().all(|b| b.is_ascii_hexdigit());
@@ -173,13 +332,17 @@ fn check_objects_dataless(objects: &Path, placeholder: Placeholder<'_>) -> Resul
             continue;
         };
         for e in inner.filter_map(Result::ok) {
-            if is_fan {
-                loose += 1;
-                if loose > LOOSE_OBJECTS_MAX {
-                    return Err(GitState::Unavailable(GitError::TooLarge(
-                        TooLargeWhy::LooseObjects,
-                    )));
-                }
+            interrupted(interrupt)?;
+            let (count, max) = if is_fan {
+                (&mut loose, LOOSE_OBJECTS_MAX)
+            } else {
+                (&mut packed, PACK_ENTRIES_MAX)
+            };
+            *count += 1;
+            if *count > max {
+                return Err(GitState::Unavailable(GitError::TooLarge(
+                    TooLargeWhy::LooseObjects,
+                )));
             }
             if placeholder(&e.path()) {
                 return dataless();
@@ -312,6 +475,8 @@ fn check_index_size(index: &Path) -> Result<(), GitState> {
 pub(crate) fn check_internals_dataless(
     layout: &Layout,
     placeholder: Placeholder<'_>,
+    // ## m4b-t20-adversarial fix round 1 (named line, I1)
+    interrupt: &AtomicBool,
 ) -> Result<(), GitState> {
     let (g, c) = (&layout.git_dir, &layout.common_dir);
     let files = [
@@ -334,7 +499,7 @@ pub(crate) fn check_internals_dataless(
     }
     // G2: packs and loose objects (fix round 3; the fr2 residual was wrong: gix reads loose
     // objects on every status).
-    check_objects_dataless(&c.join("objects"), placeholder)
+    check_objects_dataless(&c.join("objects"), placeholder, interrupt)
 }
 
 /// The git dir's `sharedindex.*` files (a split index).
@@ -365,8 +530,11 @@ fn check_symref_chain(
     let Some(name) = text.strip_prefix("ref:").map(str::trim) else {
         return Ok(()); // a detached HEAD names an object id
     };
+    // ## m4b-t20-adversarial fix round 4 (named line, I-fr3-1): no `:` either (git's ref names
+    // never hold one), so no component is a drive that a join would follow.
     let valid = name.starts_with("refs/")
         && !name.contains('\\')
+        && !name.contains(':')
         && name
             .split('/')
             .all(|c| !c.is_empty() && c != "." && c != "..");
@@ -456,7 +624,11 @@ pub(crate) fn check_library_tree(
     worktree: &Path,
     library: &Path,
     placeholder: Placeholder<'_>,
+    interrupt: &AtomicBool,
 ) -> Result<TreeFacts, GitState> {
+    // ## m4b-t20-adversarial pre-merge fix (named lines, re-review m-fr5-2): the worker's flag,
+    // read per entry, and one link budget for the whole pre-walk.
+    let mut budget = LinkBudget::new(interrupt);
     let too_large = || Err(GitState::Unavailable(GitError::Failed(FailKind::TooLarge)));
     // The folders from the worktree down to the library's parent.
     if let Ok(below) = library.strip_prefix(worktree) {
@@ -490,13 +662,15 @@ pub(crate) fn check_library_tree(
         // A nested repository: checked, not entered (gix does not enter it either).
         let dot_git = dir.join(".git");
         if dir != worktree && std::fs::symlink_metadata(&dot_git).is_ok() {
-            check_nested(&dot_git, placeholder)?;
+            check_nested(&dot_git, placeholder, &mut budget)?;
             continue;
         }
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
         for e in rd.filter_map(Result::ok) {
+            // ## m4b-t20-adversarial pre-merge fix (named line, m-fr5-2): per entry.
+            interrupted(interrupt)?;
             seen += 1;
             if seen > PREWALK_ENTRIES_MAX {
                 return too_large();
@@ -529,7 +703,12 @@ pub(crate) fn check_library_tree(
 
 /// A nested repository's `.git` (I3, F3): a real directory whose `HEAD` is regular, capped and
 /// no placeholder, or a regular capped gitfile (no placeholder) whose target's `HEAD` is.
-fn check_nested(dot_git: &Path, placeholder: Placeholder<'_>) -> Result<(), GitState> {
+fn check_nested(
+    dot_git: &Path,
+    placeholder: Placeholder<'_>,
+    budget: &mut LinkBudget<'_>,
+) -> Result<(), GitState> {
+    interrupted(budget.interrupt)?;
     let Ok(md) = std::fs::symlink_metadata(dot_git) else {
         return Ok(());
     };
@@ -547,6 +726,12 @@ fn check_nested(dot_git: &Path, placeholder: Placeholder<'_>) -> Result<(), GitS
         regular_capped(head, REF_MAX).map(|_| ())
     };
     if ft.is_dir() {
+        // ## m4b-t20-adversarial fix round 5 (named lines, re-review I-fr4-1): gix's untracked
+        // walk runs `gix_discover::is_git` here, which reads this folder's `commondir` and
+        // `gitdir` and checks paths they name. Either one off the local drives refuses the
+        // whole library, never a skip.
+        nested_pointer(&dot_git.join("commondir"), placeholder)?;
+        nested_pointer(&dot_git.join("gitdir"), placeholder)?;
         return head_ok(&dot_git.join("HEAD"));
     }
     if !ft.is_file() {
@@ -561,11 +746,38 @@ fn check_nested(dot_git: &Path, placeholder: Placeholder<'_>) -> Result<(), GitS
         .and_then(|l| l.strip_prefix("gitdir:"))
         .map(str::trim)
         .unwrap_or("");
+    // ## m4b-t20-adversarial fix round 5 (named lines, I-fr4-1): the gitfile's target, also as
+    // the whole text (gix reads it whatever our parse makes of it), refuses the whole library;
+    // so does the target's `commondir`, which gix reads too.
+    let whole = text.strip_prefix("gitdir:").unwrap_or(&text);
+    if !local_spelling(target) || !local_spelling(whole) {
+        return redirected();
+    }
     let base = dot_git.parent().unwrap_or(dot_git);
-    if let Some(t) = resolve(base, target) {
+    // ## m4b-t20-adversarial pre-merge fix (named line, m-fr5-1): a refused target (a local
+    // link to `//real`, say) refuses the library; only a target that names nothing is skipped.
+    if let Some(t) = resolve(base, target, budget)? {
+        nested_pointer(&t.join("commondir"), placeholder)?;
         head_ok(&t.join("HEAD"))?;
     }
     Ok(())
+}
+
+// ## m4b-t20-adversarial fix round 5 (named exception, re-review I-fr4-1)
+/// A nested repository's pointer file (`commondir`, `gitdir`), as gix's discovery reads it:
+/// absent, or a small regular file whose text stays on the local drives. A placeholder answers
+/// `Dataless`; anything else (a FIFO gix would block on included) answers `Redirected`.
+fn nested_pointer(file: &Path, placeholder: Placeholder<'_>) -> Result<(), GitState> {
+    if placeholder(file) {
+        return dataless();
+    }
+    if !exists(file) {
+        return Ok(());
+    }
+    match small_text(file) {
+        Some(text) if local_spelling(&text) => Ok(()),
+        _ => redirected(),
+    }
 }
 
 /// m10: the owners checked before the open, checked again on what gix opened.
@@ -591,6 +803,7 @@ fn gitfile_layout(
     found: &Found,
     owned: Owner<'_>,
     placeholder: Placeholder<'_>,
+    budget: &mut LinkBudget<'_>,
 ) -> Result<Layout, GitState> {
     let Some(text) = small_text(&found.dot_git) else {
         return redirected();
@@ -604,7 +817,7 @@ fn gitfile_layout(
     else {
         return redirected();
     };
-    let Some(t) = resolve(&found.worktree, target) else {
+    let Some(t) = resolve(&found.worktree, target, budget)? else {
         return redirected();
     };
     require_owned(&t, owned)?;
@@ -623,7 +836,13 @@ fn gitfile_layout(
         let Some(text) = small_text(&commondir) else {
             return redirected();
         };
-        let back = resolve(&t, text.trim());
+        // ## m4b-t20-adversarial fix round 4 (named lines, I-fr3-1): gix's discovery may read
+        // the `gitdir` back-pointer as the worktree's path; it names a local path or nothing.
+        let back_pointer = t.join("gitdir");
+        if exists(&back_pointer) && !small_text(&back_pointer).is_some_and(|b| local_spelling(&b)) {
+            return redirected();
+        }
+        let back = resolve(&t, text.trim(), budget)?;
         return match (common, back) {
             (Some(c), Some(b)) if c == b => Ok(Layout {
                 git_dir: t,
@@ -651,15 +870,33 @@ fn gitfile_layout(
     }
 }
 
-/// Every alternate object directory (`objects/info/alternates`, one path per line, relative
-/// to `objects`) is an existing directory the user owns; chains are followed to
-/// [`ALTERNATES_DEPTH_MAX`].
+/// The repository's alternates (`objects/info/alternates`), each an existing object folder
+/// the user owns.
+///
+/// ## m4b-t20-adversarial fix round 3 (named exception, ruling R-T20-2): a structural rule
+/// under which git's reading and gix's cannot differ. The fix rounds before it mirrored gix's
+/// parser and were beaten twice by places where gix reads another graph than git (re-review
+/// fr2: H3, gix resolves an entry with its trailing whitespace where git trims; H4, gix joins
+/// a nested relative entry to the **root** objects folder where git joins it to the
+/// alternate's). Alternates are read only when all of these hold, else `Redirected` before gix
+/// opens anything:
+/// - the file holds at most [`ALTERNATE_ENTRIES_MAX`] entries, counted as gix parses them
+///   (every non-empty line not starting with `#`, untrimmed, duplicates included);
+/// - each entry is an absolute path, identical to its trimmed form (no leading or trailing
+///   whitespace, no CR), and not C-quoted;
+/// - each names an existing object folder the user owns;
+/// - none of those folders has an `info/alternates` of its own (any kind, by `lstat`: no chain
+///   at all, so no nested file is ever read, by us or by gix).
+///
+/// Badges are cosmetic, so this fails closed; `clone --shared` and `--reference` write one
+/// absolute entry and still read. The worker's interrupt flag is read before each resolution.
 fn check_alternates(
     objects: &Path,
-    depth: usize,
     owned: Owner<'_>,
     placeholder: Placeholder<'_>,
+    budget: &mut LinkBudget<'_>,
 ) -> Result<(), GitState> {
+    let interrupt = budget.interrupt;
     let file = objects.join("info").join("alternates");
     if placeholder(&file) {
         return dataless();
@@ -670,21 +907,38 @@ fn check_alternates(
     let Some(text) = small_text(&file) else {
         return redirected();
     };
-    for line in text.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') {
+    // Bounded text work first, over gix's own reading of the file.
+    let mut entries: Vec<&str> = Vec::new();
+    for raw in text.split('\n') {
+        if raw.is_empty() || raw.starts_with('#') {
             continue;
         }
-        // The C-quoted form is not followed.
-        if line.starts_with('"') || depth >= ALTERNATES_DEPTH_MAX {
+        if entries.len() == ALTERNATE_ENTRIES_MAX
+            || raw.trim() != raw
+            || raw.starts_with('"')
+            || !Path::new(raw).is_absolute()
+        {
             return redirected();
         }
-        let Some(alt) = resolve(objects, line) else {
+        entries.push(raw);
+    }
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for raw in entries {
+        interrupted(interrupt)?;
+        let Some(alt) = resolve(objects, raw, budget)? else {
             return redirected();
         };
+        if seen.contains(&alt) {
+            continue;
+        }
+        // No chain: an alternate with alternates of its own is refused, its file unread.
+        if std::fs::symlink_metadata(alt.join("info").join("alternates")).is_ok() {
+            return redirected();
+        }
         require_owned(&alt, owned)?;
-        // p1: an alternate's objects are read like ours (same cap, per folder).
-        check_objects_dataless(&alt, placeholder)?;
-        check_alternates(&alt, depth + 1, owned, placeholder)?;
+        // p1: an alternate's objects are read like ours (same caps).
+        check_objects_dataless(&alt, placeholder, interrupt)?;
+        seen.push(alt);
     }
     Ok(())
 }
@@ -732,6 +986,24 @@ pub(crate) fn check_resolved(
 /// for the git dir's `config.worktree` when present.
 pub(crate) fn unsupported_format(git_dir: &Path, common_dir: &Path) -> bool {
     use gix::bstr::ByteSlice as _;
+    let Some((file, _)) = repository_configs(git_dir, common_dir) else {
+        return true;
+    };
+    let other = |key: &str, ok: &str| {
+        file.string(key)
+            .is_some_and(|v| !v.trim().eq_ignore_ascii_case(ok.as_bytes()))
+    };
+    other("extensions.objectFormat", "sha1") || other("extensions.refStorage", "files")
+}
+
+/// The repository's own config files as written (no includes, whatever their trust): the
+/// common dir's `config` (required) and the git dir's `config.worktree` (when present). `None`
+/// when one cannot be read: missing (`config`), not a regular file, over [`TEXT_MAX`], or not
+/// parseable.
+fn repository_configs(
+    git_dir: &Path,
+    common_dir: &Path,
+) -> Option<(gix::config::File, Option<gix::config::File>)> {
     let parse = |path: PathBuf, required: bool| -> Result<Option<gix::config::File>, ()> {
         match regular_capped(&path, TEXT_MAX) {
             Ok(true) => {}
@@ -742,17 +1014,50 @@ pub(crate) fn unsupported_format(git_dir: &Path, common_dir: &Path) -> bool {
             .map(Some)
             .map_err(|_| ())
     };
-    let Ok(Some(file)) = parse(common_dir.join("config"), true) else {
+    let file = parse(common_dir.join("config"), true).ok()??;
+    let worktree = parse(git_dir.join("config.worktree"), false).ok()?;
+    Some((file, worktree))
+}
+
+// ## m4b-t20-adversarial fix round 4 (named exception, re-review I-fr3-1)
+/// Whether any value of the repository's own config files is a path text that does not stay
+/// on a local drive ([`local_spelling`]): `core.worktree`, `core.excludesFile`,
+/// `core.attributesFile` or any other key gix may read as a path. Every value is checked, not a
+/// list of keys, so a key added in a later gix is covered too; only the `remote`, `submodule`
+/// and `url` sections are left out: their values are fetch locations (a clone from
+/// `\\server\git\repo.git` is ordinary), which a status never opens; and (fix round 5) the
+/// never-path keys `user.*` and `core.comment*`. Any other value that merely starts like a
+/// network path (a `//` alias, say) refuses the library: a known false-positive class, fail
+/// closed. A config that cannot be
+/// read answers `true` (fail closed; [`unsupported_format`] refuses it first anyway).
+pub(crate) fn config_names_a_remote_path(git_dir: &Path, common_dir: &Path) -> bool {
+    use gix::bstr::ByteSlice as _;
+    let Some((file, worktree)) = repository_configs(git_dir, common_dir) else {
         return true;
     };
-    if parse(git_dir.join("config.worktree"), false).is_err() {
-        return true;
-    }
-    let other = |key: &str, ok: &str| {
-        file.string(key)
-            .is_some_and(|v| !v.trim().eq_ignore_ascii_case(ok.as_bytes()))
-    };
-    other("extensions.objectFormat", "sha1") || other("extensions.refStorage", "files")
+    std::iter::once(&file).chain(worktree.as_ref()).any(|f| {
+        f.sections().any(|s| {
+            let fetch_only = ["remote", "submodule", "url"]
+                .iter()
+                .any(|n| s.header().name().eq_ignore_ascii_case(n.as_bytes()));
+            // ## m4b-t20-adversarial fix round 5 (named lines, re-review m-fr4-1): keys that are
+            // never paths are skipped too, `user.*` and `core.comment*` (a name or a comment
+            // marker may start with `//`).
+            let never_paths = s.header().name().eq_ignore_ascii_case(b"user");
+            let comment = |name: &str| {
+                s.header().name().eq_ignore_ascii_case(b"core")
+                    && name.to_ascii_lowercase().starts_with("comment")
+            };
+            let body = s.body();
+            !fetch_only
+                && !never_paths
+                && body.value_names().filter(|n| !comment(n)).any(|name| {
+                    body.values(&name)
+                        .iter()
+                        .any(|v| !local_spelling(&v.to_str_lossy()))
+                })
+        })
+    })
 }
 // ## m4b-t07-git
 
@@ -904,6 +1209,108 @@ mod tests {
                 .unwrap_err()
                 .into_cmp(),
             GitState::Unavailable(GitError::Redirected).into_cmp()
+        );
+    }
+
+    /// `resolve` with a fresh budget and no interrupt.
+    fn resolve_t(base: &Path, text: &str) -> Result<Option<PathBuf>, GitState> {
+        resolve(base, text, &mut LinkBudget::new(&NEVER))
+    }
+
+    // ## m4b-t20-adversarial pre-merge fix (re-review m-fr5-1, m-fr5-2)
+    /// A path that names nothing is "missing" (`Ok(None)`), not refused; a spent budget or a
+    /// set interrupt flag refuses (`Redirected`, `Timeout`).
+    #[cfg(unix)]
+    #[test]
+    fn missing_refused_and_spent_are_told_apart() {
+        let (_t, top) = top();
+        std::fs::create_dir_all(top.join("real")).unwrap();
+        std::os::unix::fs::symlink(top.join("real"), top.join("link")).unwrap();
+        assert!(matches!(resolve_t(&top, "nothing-here"), Ok(None)));
+        let mut spent = LinkBudget::new(&NEVER);
+        spent.left = 0;
+        assert!(matches!(
+            resolve(&top, "link", &mut spent),
+            Err(GitState::Unavailable(GitError::Redirected))
+        ));
+        let set = AtomicBool::new(true);
+        assert!(matches!(
+            resolve(&top, "link", &mut LinkBudget::new(&set)),
+            Err(GitState::Unavailable(GitError::Timeout))
+        ));
+        assert_eq!(
+            resolve_t(&top, "link").ok().flatten(),
+            Some(top.join("real"))
+        );
+    }
+
+    // ## m4b-t20-adversarial fix round 5 (re-review m-fr4-2)
+    /// A local spelling that goes through a link to `//…` is refused before `canonicalize`
+    /// follows it: at the start, in the middle, after a relative hop and after `..`. A loop of
+    /// links is refused too (past `LINK_HOPS_MAX`); a plain chain of local links resolves.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_network_spelling_is_never_followed() {
+        use std::os::unix::fs::symlink;
+        let (_t, top) = top();
+        let real = top.join("real");
+        std::fs::create_dir_all(real.join("objects")).unwrap();
+        let double = format!("/{}", real.display());
+        symlink(&double, top.join("net")).unwrap();
+        symlink("net", top.join("hop")).unwrap();
+        symlink(&real, top.join("ok1")).unwrap();
+        symlink("ok1", top.join("ok2")).unwrap();
+        symlink("loop2", top.join("loop1")).unwrap();
+        symlink("loop1", top.join("loop2")).unwrap();
+        for text in [
+            "net",
+            "net/objects",
+            "hop/objects",
+            "real/../net/objects",
+            "loop1",
+        ] {
+            assert!(
+                matches!(
+                    resolve_t(&top, text),
+                    Err(GitState::Unavailable(GitError::Redirected))
+                ),
+                "{text}: refused, not missing"
+            );
+        }
+        assert_eq!(
+            resolve_t(&top, "ok2/objects").ok().flatten(),
+            Some(real.join("objects")),
+            "a local chain resolves"
+        );
+        // Without the walk, `canonicalize` follows `//<real>` (a working POSIX spelling).
+        assert!(std::fs::canonicalize(top.join("net/objects")).is_ok());
+    }
+
+    // ## m4b-t20-adversarial fix round 4 (re-review I-fr3-1)
+    /// The guard reads raw and trimmed text: a leading space never hides a UNC start.
+    #[test]
+    fn local_spelling_refuses_every_network_and_device_start() {
+        for text in [
+            r"\\host\share",
+            r" \\host\share",
+            "\t//host/share\n",
+            r"\\?\UNC\host\share",
+            r"\\.\pipe\x",
+            r"\??\UNC\host\share",
+            "C:x",
+        ] {
+            assert!(!local_spelling(text), "{text:?}");
+        }
+        for text in ["../x", r"C:\x", r"\\?\C:\x", " objects\n"] {
+            assert!(local_spelling(text), "{text:?}");
+        }
+        // Fix round 5 (m-fr4-3): rooted with no drive is the process's drive on Windows.
+        assert_eq!(local_spelling("/abs/objects"), !cfg!(windows));
+        assert_eq!(local_spelling(r"\abs\objects"), !cfg!(windows));
+        // `resolve` never reaches the filesystem with one.
+        assert_eq!(
+            resolve_t(Path::new("/"), "//hv-t20-nohost.invalid/share").ok(),
+            None
         );
     }
 

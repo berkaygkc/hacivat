@@ -1201,6 +1201,23 @@ fn settings_actions_say_what_they_could_not_do(cx: &mut TestAppContext) {
         .to_path_buf();
     let was = std::fs::metadata(&config).unwrap().permissions();
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // ## m4b-t20-adversarial (named lines, T16 re-review n1): the mode is restored by a drop
+    // guard (a panic below never leaves an undeletable temp folder), and the test is skipped
+    // where a 0o555 folder stays writable (root: the writes it expects to fail succeed).
+    struct Restore(std::path::PathBuf, std::fs::Permissions);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, self.1.clone());
+        }
+    }
+    let restore = Restore(config.clone(), was.clone());
+    let probe = config.join(".hv-t20-write-probe");
+    if std::fs::write(&probe, b"").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        drop(restore);
+        r.finish();
+        return;
+    }
     let failed = "Hacivat couldn't save this change; nothing was changed.";
     // Watch.
     r.vcx
@@ -1225,7 +1242,7 @@ fn settings_actions_say_what_they_could_not_do(cx: &mut TestAppContext) {
         text_of(vcx, "scripts-set-error").as_deref() == Some(failed)
     });
     assert!(r.library_at(&dir).is_some(), "still listed");
-    std::fs::set_permissions(&config, was).unwrap();
+    drop(restore);
     // Done right, the error goes.
     handle_of(r.vcx, row_button("remove", id));
     press_key(r.vcx, "enter");

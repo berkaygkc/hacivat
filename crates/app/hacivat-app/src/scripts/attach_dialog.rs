@@ -967,6 +967,9 @@ impl Render for AttachDialog {
         // ## m4b-t16-attach fix round 1 (I5): this frame draws what Enter would attach.
         if matches!(self.found, Found::New) && !self.shown {
             self.shown = true;
+            // ## m4b-t20-adversarial (named line, T16 re-review n2): intentional. The flag
+            // flips inside `render` (only a drawn frame proves the bytes were on screen) and
+            // costs one more frame per folder read; nothing renders differently in it.
             cx.notify();
         }
         let theme = *Theme::get(cx);

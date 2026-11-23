@@ -315,6 +315,9 @@ fn adopt(lib: &LibrarySnapshot, window: &mut Window, cx: &mut App) {
     let name = library_name(lib);
     let path = escape_untrusted(&lib.root.path.display().to_string(), 512);
     let id = lib.id;
+    // ## m4b-t20-adversarial (named line, T16 re-review m4): the folder this confirm is for;
+    // another one swapped in before the press is refused.
+    let seen = lib.refused_identity;
     let title: TextFn =
         Rc::new(move |cx: &App| text(cx, "hv-scripts-adopt-title", vec![("library", arg(&name))]));
     let shown = path.clone();
@@ -330,7 +333,7 @@ fn adopt(lib: &LibrarySnapshot, window: &mut Window, cx: &mut App) {
         move |cx| {
             act(ErrorKey::Library(id), cx, async move |svc| {
                 // Answered once the folder was validated: `false` means it can't be used.
-                match svc.adopt_root(id).await {
+                match svc.adopt_root(id, seen).await {
                     Ok(true) => None,
                     Ok(false) => Some("refused"),
                     Err(e) => Some(reason_of(&e)),

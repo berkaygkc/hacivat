@@ -134,6 +134,15 @@ pub enum FailKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitStatus {
     pub by_path: BTreeMap<GitPath, FileStatus>,
+    // ## m4b-t20-adversarial (named exception, the cifix-2 re-review's N3)
+    /// When the repository's git dir is not the library's own `.git` folder (a library inside
+    /// a bigger repository, or a gitfile at the root): that git dir's `index.lock`, the file
+    /// git holds for a whole checkout, merge or reset. Its git dir was discovered and validated
+    /// by this status, under reduced trust; the path is fixed, never derived from the index or
+    /// the worktree. The library's watcher `lstat`s it (never watches it) to tell a checkout's
+    /// burst. `None` when the git dir is the library's own `.git` folder (the watcher sees that
+    /// lock there).
+    pub index_lock: Option<std::path::PathBuf>,
 }
 
 /// A library-relative path with `/` separators, as the status keys it. `hacivat-scripts`
@@ -207,6 +216,13 @@ pub struct GitLimits {
     pub timeout: Duration,
     /// The most entries one status lists before it stops (R-M4b-14: a library's 20,000 files).
     pub max_entries: usize,
+    // ## m4b-t20-adversarial fix round 2 (named exception, re-review I1-fr1 b)
+    /// After a worker overran its call's budget (it was abandoned with `Timeout` and ended
+    /// later), how long the library answers `Unavailable(Timeout)` at once, starting no worker,
+    /// before it tries again. It doubles on each overrun in a row, up to an hour, and resets
+    /// once a worker answers in time. So a repository whose status cannot finish never keeps a
+    /// worker busy back to back, and is still retried.
+    pub retry_after: Duration,
 }
 
 impl Default for GitLimits {
@@ -214,6 +230,8 @@ impl Default for GitLimits {
         GitLimits {
             timeout: Duration::from_secs(5),
             max_entries: 20_000,
+            // ## m4b-t20-adversarial fix round 2 (named line)
+            retry_after: Duration::from_secs(30),
         }
     }
 }

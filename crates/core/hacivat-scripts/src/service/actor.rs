@@ -142,6 +142,8 @@ pub(super) enum Msg {
     },
     AdoptRoot {
         id: LibraryId,
+        // ## m4b-t20-adversarial (named line, m4)
+        seen: Option<crate::fileio::FolderIdentity>,
         reply: oneshot::Sender<Result<bool, RegistryError>>,
     },
     // ## m4b-t16-attach
@@ -409,6 +411,12 @@ struct Lib {
     adopting: bool,
     adopt_job: Option<u64>,
     adopt_reply: Option<oneshot::Sender<Result<bool, RegistryError>>>,
+    // ## m4b-t20-adversarial (named lines, T16 re-review m4): the folder the last refusal
+    // found at the path, and the one a confirmed adoption was shown for.
+    refused_seen: Option<crate::fileio::FolderIdentity>,
+    adopt_seen: Option<crate::fileio::FolderIdentity>,
+    // ## m4b-t20-adversarial fix round 2 (named line, m3-fr1): the last validated outer lock.
+    outer_lock: Option<PathBuf>,
     scan_diags: Vec<LibraryDiag>,
     entries: Arc<[ScriptEntry]>,
     stopped: bool,
@@ -478,6 +486,8 @@ impl Lib {
             diagnostics: Arc::from([]),
             // ## m4b-t16-attach (named line)
             watch: reg.watch,
+            // ## m4b-t20-adversarial (named line)
+            refused_identity: None,
         });
         Lib {
             reg,
@@ -491,6 +501,10 @@ impl Lib {
             adopting: false,
             adopt_job: None,
             adopt_reply: None,
+            // ## m4b-t20-adversarial (named lines)
+            refused_seen: None,
+            adopt_seen: None,
+            outer_lock: None,
             scan_diags: Vec::new(),
             entries: Arc::from([]),
             stopped: false,
@@ -573,6 +587,11 @@ impl Lib {
             diagnostics: Arc::from(diagnostics),
             // ## m4b-t16-attach (named line)
             watch: self.reg.watch,
+            // ## m4b-t20-adversarial (named line, m4)
+            refused_identity: (self.state
+                == LibraryState::Unavailable(UnavailableReason::RootChanged))
+            .then_some(self.refused_seen)
+            .flatten(),
         })
     }
 }
@@ -581,6 +600,26 @@ impl Lib {
 fn folder_db(path: &Path) -> Option<LogicalDb> {
     LogicalDb::parse(path.file_name()?.to_str()?).ok()
 }
+
+// ## m4b-t20-adversarial fix round 1 (named exception, review m3)
+/// What a status says of the outer `index.lock`: `Some(lock)` sets it (a `Ready` one names the
+/// validated path, or none), `None` keeps the last one.
+///
+/// Fix round 2 (re-review m3-fr1): only a state that means the repository is no longer the
+/// validated one drops it (`NotARepo`, `Untrusted`, `Redirected`, `Unsupported`, `Failed`); a
+/// passing `Timeout`, `Paused`, `TooLarge` or `Dataless`, whose layout was validated before,
+/// keeps it, so a slow monorepo status never ends a checkout's burst early.
+fn outer_lock_change(state: &GitState) -> Option<Option<PathBuf>> {
+    use hacivat_git::GitError;
+    match state {
+        GitState::Ready(s) => Some(s.index_lock.clone()),
+        GitState::Unavailable(
+            GitError::Timeout | GitError::Paused | GitError::TooLarge(_) | GitError::Dataless,
+        ) => None,
+        GitState::NotARepo | GitState::Untrusted(_) | GitState::Unavailable(_) => Some(None),
+    }
+}
+// ## m4b-t20-adversarial
 
 /// Whether two status answers are the same (nothing to publish).
 fn same_git(a: &GitState, b: &GitState) -> bool {
@@ -759,7 +798,7 @@ impl Actor {
                 self.dispatch();
                 let _ = reply.send(r);
             }
-            Msg::AdoptRoot { id, reply } => match self.adopt_root(id) {
+            Msg::AdoptRoot { id, seen, reply } => match self.adopt_root(id, seen) {
                 // ## m4b-t16-attach fix round 1: answered when its validation is done.
                 Ok(i) => {
                     self.libs[i].adopt_reply = Some(reply);
@@ -1164,7 +1203,11 @@ impl Actor {
     }
 
     /// T10 m-h: the user confirmed that the folder now at the library's path is the library.
-    fn adopt_root(&mut self, id: LibraryId) -> Result<usize, RegistryError> {
+    fn adopt_root(
+        &mut self,
+        id: LibraryId,
+        seen: Option<crate::fileio::FolderIdentity>,
+    ) -> Result<usize, RegistryError> {
         let Some(i) = self.index(id) else {
             return Err(RegistryError::UnknownLibrary);
         };
@@ -1178,6 +1221,8 @@ impl Actor {
         // waived (`RefreshJob::waived`), and the new identity is saved only if it passes
         // (`commit_adoption`). A refusal leaves the old record and `RootChanged`.
         lib.adopting = true;
+        // ## m4b-t20-adversarial (named line, m4)
+        lib.adopt_seen = seen;
         lib.want.validate = true;
         self.dirty.insert(id);
         Ok(i)
@@ -1187,6 +1232,13 @@ impl Actor {
     /// binding is read from scratch (I2: nothing of the old folder's manifest is kept; only the
     /// user's local mappings, which belong to the library). `false` when the save failed.
     fn commit_adoption(&mut self, i: usize, v: &work::Valid) -> bool {
+        // ## m4b-t20-adversarial (named lines, T16 re-review m4): only the folder the confirm
+        // was shown for; another one swapped in meanwhile is refused, however valid.
+        if let Some(seen) = self.libs[i].adopt_seen.take()
+            && v.identity != Some(seen)
+        {
+            return false;
+        }
         let id = self.libs[i].id();
         let canonical = v.root.canonical.clone();
         let inode = v.identity.map(|x| x.ino);
@@ -1608,7 +1660,16 @@ impl Actor {
 
     fn refreshed(&mut self, i: usize, out: RefreshOut) {
         match out {
-            RefreshOut::Refused(r) => self.make_unavailable(i, r.reason, r.diags),
+            RefreshOut::Refused(r) => {
+                // ## m4b-t20-adversarial (named lines, m4): a new folder at the path is a new
+                // snapshot even when the refusal reads the same.
+                if self.libs[i].refused_seen != r.seen {
+                    self.libs[i].refused_seen = r.seen;
+                    let id = self.libs[i].id();
+                    self.dirty.insert(id);
+                }
+                self.make_unavailable(i, r.reason, r.diags);
+            }
             RefreshOut::Validated(v) => {
                 let lib = &mut self.libs[i];
                 lib.session.canonical = Some(v.root.canonical);
@@ -1966,6 +2027,10 @@ impl Actor {
                     }
                 }
                 self.echoes.set(id, Some(w.echo()));
+                // ## m4b-t20-adversarial fix round 1 (named lines, review m3): a watcher that
+                // starts after the status (a re-attach, an adoption, a watch-mode switch) gets
+                // the outer lock the latest status validated.
+                w.set_outer_lock(self.libs[i].outer_lock.clone());
                 let lib = &mut self.libs[i];
                 lib.unwatched = false;
                 lib.watcher = Some(w);
@@ -2117,6 +2182,9 @@ impl Actor {
         if reason == UnavailableReason::RootChanged {
             lib.manifest_good = false;
         }
+        // ## m4b-t20-adversarial fix round 2 (named line, m3-fr1): a library gone or replaced
+        // keeps no outer lock; the next `Ready` status names it again.
+        lib.outer_lock = None;
         let id = lib.id();
         let state = LibraryState::Unavailable(reason);
         let changed = lib.state != state || !lib.entries.is_empty() || lib.scan_diags != diags;
@@ -2247,6 +2315,18 @@ impl Actor {
         let lib = &mut self.libs[i];
         lib.git.in_flight = false;
         let again = std::mem::take(&mut lib.git.again);
+        // ## m4b-t20-adversarial (named lines, the cifix-2 re-review's N3): the lock of a
+        // repository above the library, as the status found and validated it, goes to the
+        // watcher (an `lstat` there, never a watch). Fix round 1 (review m3): every status
+        // re-arms it, and one that is not `Ready` drops it (a path no status validates now is
+        // not looked at).
+        // Fix round 2 (m3-fr1): a passing failure keeps the last validated path.
+        if let Some(lock) = outer_lock_change(&state) {
+            lib.outer_lock = lock;
+            if let Some(w) = &lib.watcher {
+                w.set_outer_lock(lib.outer_lock.clone());
+            }
+        }
         if servable(&lib.state) {
             let same = self.git.get(&id).is_some_and(|old| same_git(old, &state));
             if !same {
@@ -2351,3 +2431,46 @@ pub(super) fn adoptable(state: &LibraryState, diags: &[LibraryDiag]) -> bool {
         })
 }
 // ## m4b-t16-attach
+
+// ## m4b-t20-adversarial fix round 2 (named exception, re-review m3-fr1)
+#[cfg(test)]
+mod t20_tests {
+    use super::*;
+    use hacivat_git::{FailKind, GitError, GitStatus, TooLargeWhy, UntrustReason};
+
+    /// A passing failure keeps the last validated outer lock; a state that says the repository
+    /// is no longer the validated one drops it; a `Ready` one sets what it names.
+    #[test]
+    fn only_a_changed_repository_drops_the_outer_lock() {
+        let lock = PathBuf::from("/repo/.git/index.lock");
+        let ready = GitState::Ready(Arc::new(GitStatus {
+            index_lock: Some(lock.clone()),
+            ..GitStatus::default()
+        }));
+        assert_eq!(outer_lock_change(&ready), Some(Some(lock)));
+        for keep in [
+            GitError::Timeout,
+            GitError::Paused,
+            GitError::Dataless,
+            GitError::TooLarge(TooLargeWhy::Index),
+            GitError::TooLarge(TooLargeWhy::LooseObjects),
+        ] {
+            assert_eq!(
+                outer_lock_change(&GitState::Unavailable(keep.clone())),
+                None,
+                "{keep:?}"
+            );
+        }
+        for drop in [
+            GitState::NotARepo,
+            GitState::Untrusted(UntrustReason::ForeignOwner),
+            GitState::Unavailable(GitError::Redirected),
+            GitState::Unavailable(GitError::Unsupported),
+            GitState::Unavailable(GitError::TrustPromoted),
+            GitState::Unavailable(GitError::Failed(FailKind::Open)),
+        ] {
+            assert_eq!(outer_lock_change(&drop), Some(None), "{drop:?}");
+        }
+    }
+}
+// ## m4b-t20-adversarial

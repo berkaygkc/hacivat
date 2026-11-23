@@ -238,14 +238,41 @@ fn run(shared: &Shared) {
                 .0;
             continue;
         }
-        for root in st.roots.iter_mut().filter(|r| r.next <= now) {
+        // ## m4b-t20-adversarial (named exception, the cifix-3 review's note): the due roots'
+        // stamps are taken with the lock released, so a share that hangs in an `lstat` or in
+        // the manifest read never blocks `watch`, `unwatch` or `pace` (the watcher's thread).
+        // A root unwatched, or watched again, meanwhile keeps its own state.
+        let due: Vec<(PathBuf, Instant)> = st
+            .roots
+            .iter()
+            .filter(|r| r.next <= now)
+            .map(|r| (r.path.clone(), r.last_pass))
+            .collect();
+        drop(st);
+        let looked: Vec<_> = due
+            .into_iter()
+            .map(|(path, seen)| {
+                stall_hook(&path);
+                let git = repository_stamps(&path);
+                let manifest = manifest_stamp(&path);
+                (path, seen, git, manifest)
+            })
+            .collect();
+        st = shared.lock();
+        for (path, seen, git, manifest) in looked {
+            let Some(root) = st
+                .roots
+                .iter_mut()
+                .find(|r| r.path == path && r.last_pass == seen)
+            else {
+                continue;
+            };
+            // ## m4b-t20-adversarial
             let mut batch = vec![RawHint::Path(root.path.clone())];
-            let git = repository_stamps(&root.path);
             if root.git != git {
                 batch.push(RawHint::Path(root.path.join(".git").join("index")));
             }
             root.git = git;
-            let manifest = manifest_stamp(&root.path);
             if root.manifest != manifest {
                 batch.push(RawHint::Path(
                     root.path.join(".hacivat").join("workspace.toml"),
@@ -323,3 +350,87 @@ impl Drop for PollEventSource {
     }
 }
 // ## m4b-t09-watcher
+
+// ## m4b-t20-adversarial (named exception, the cifix-3 review's note)
+/// A pass about to look at a root (unit tests stall it there, as a hung share would).
+#[cfg(test)]
+fn stall_hook(root: &Path) {
+    let rx = {
+        let mut hook = STALL.lock().unwrap_or_else(PoisonError::into_inner);
+        match hook.take() {
+            Some((at, entered, rx)) if at == root => {
+                let _ = entered.send(());
+                Some(rx)
+            }
+            other => {
+                *hook = other;
+                None
+            }
+        }
+    };
+    if let Some(rx) = rx {
+        let _ = rx.recv();
+    }
+}
+
+#[cfg(not(test))]
+fn stall_hook(_: &Path) {}
+
+/// The root a test stalls, its "entered" signal and its release.
+#[cfg(test)]
+type Stall = (
+    PathBuf,
+    std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
+#[cfg(test)]
+static STALL: Mutex<Option<Stall>> = Mutex::new(None);
+
+#[cfg(test)]
+mod t20_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    /// A pass stalled in a root's `lstat`s (a hung share) holds no lock: `watch`, `unwatch` and
+    /// `pace` of the source go on, and the stalled root's own pass still lands afterwards.
+    #[test]
+    fn a_stalled_pass_never_blocks_watch_unwatch_or_pace() {
+        let hung = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        *STALL.lock().unwrap() = Some((hung.path().to_path_buf(), entered_tx, release_rx));
+        let mut src = PollEventSource::with_interval(Duration::from_millis(5)).unwrap();
+        let (hint_tx, hints) = mpsc::channel::<Vec<RawHint>>();
+        let sink: HintSink = Box::new(move |b| {
+            let _ = hint_tx.send(b);
+        });
+        src.watch(hung.path(), sink).unwrap();
+        entered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the pass reached the hung root");
+        let other_path = other.path().to_path_buf();
+        let (done_tx, done) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let noop: HintSink = Box::new(|_| {});
+            src.watch(&other_path, noop).unwrap();
+            src.pace(&other_path, false, Duration::ZERO);
+            src.unwatch(&other_path);
+            let _ = done_tx.send(());
+            src
+        });
+        let finished = done.recv_timeout(Duration::from_secs(10));
+        let _ = release.send(());
+        let src = worker.join().unwrap();
+        assert!(
+            finished.is_ok(),
+            "watch, pace and unwatch waited for a stalled pass"
+        );
+        hints
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the stalled root's pass still lands");
+        drop(src);
+    }
+}
+// ## m4b-t20-adversarial

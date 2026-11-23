@@ -878,6 +878,8 @@ fn failed(op: &'static str, name: &str, e: &FileOpError, cx: &mut App) {
         FileOpError::NotFullyListed => "large",
         FileOpError::NoSafeRename => "nohardlinks",
         FileOpError::TrashedButChanged => "changed",
+        // ## m4b-t20-adversarial (named line, T13 fr1 re-review n4): its own message below.
+        FileOpError::RenameIncomplete => "incomplete",
         FileOpError::NotFound => "gone",
         FileOpError::NotListed => "listed",
         FileOpError::HoldsHidden => "hidden",
@@ -904,6 +906,11 @@ fn failed(op: &'static str, name: &str, e: &FileOpError, cx: &mut App) {
         )
     });
     let body: TextFn = Rc::new(move |cx: &App| {
+        // ## m4b-t20-adversarial (named lines, n4): never "Nothing was changed" when the new
+        // name may exist.
+        if reason == "incomplete" {
+            return tr_id(cx, "hv-scripts-op-rename-incomplete");
+        }
         text(
             cx,
             "hv-scripts-op-failed",

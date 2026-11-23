@@ -161,6 +161,20 @@ pub enum Rule {
     /// [`names_git_testing_hooks`].
     GitTestingHookOutsideTests,
     // ## m4b-t07-git
+    // ## m4b-t20-adversarial (named exception: Task 1a's file; carries T13 fr1 n1, T10)
+    /// A file names `trash::DEFAULT_TRASH_CTX`, the `trash` crate's default context (on macOS
+    /// it asks Finder through `osascript`; T1a review m3). `clippy.toml` bans the type and its
+    /// constructors, but a constant is not a path clippy can ban, so this token rule refuses
+    /// it in every crate, `fuzz/` and `xtask/` (T13 fr1 re-review n1).
+    TrashDefaultContext,
+    /// A file of the library service (`hacivat-scripts` `src/service.rs`, `src/service/**`,
+    /// `src/index.rs`, `src/events.rs`) names the file system itself: a path into `std::fs`,
+    /// `std::os::<os>::fs` or `tokio::fs` through any rename, a glob import from outside the
+    /// crate, or a read, listing or removal call by name. Script content is read and written
+    /// only through `fileio` (T5 mg2); this replaces T10's text tripwire. See
+    /// [`names_the_file_system`].
+    ScriptContentOutsideFileio,
+    // ## m4b-t20-adversarial
 }
 
 // ## m2b-t01-interfaces
@@ -2116,7 +2130,11 @@ fn names_git_testing_hooks(t: &[SrcTok]) -> bool {
         .iter()
         .map(|(path, name)| (name.clone(), path.clone()))
         .collect();
-    let hooks = |p: &[String]| p.len() >= 2 && p[0] == "hacivat_git" && p[1] == "testing";
+    // ## m4b-t20-adversarial fix round 1 (named line, review m1): `testing` anywhere after the
+    // crate (an alias of the crate root inside it: `hacivat_git::hv::testing`).
+    let hooks = |p: &[String]| {
+        p.len() >= 2 && p[0] == "hacivat_git" && p[1..].iter().any(|s| s == "testing")
+    };
     let crate_glob = |p: &[String]| p.len() == 1 && p[0] == "hacivat_git";
     globs.iter().any(|g| {
         let r = resolve_path(g, &renames);
@@ -2129,6 +2147,190 @@ fn names_git_testing_hooks(t: &[SrcTok]) -> bool {
             .any(|p| hooks(&resolve_path(p, &renames)))
 }
 // ## m4b-t07-git
+
+// ## m4b-t20-adversarial (named exception: Task 1a's file; carry T7 q1)
+/// Whether a `use` at `i` is public: `pub use` or `pub(…) use`.
+fn is_pub_use(t: &[SrcTok], i: usize) -> bool {
+    if i == 0 {
+        return false;
+    }
+    if tok_ident(t, i - 1, "pub") {
+        return true;
+    }
+    if !tok_punct(t, i - 1, ')') {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut k = i - 1;
+    loop {
+        if tok_punct(t, k, ')') {
+            depth += 1;
+        } else if tok_punct(t, k, '(') {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return k > 0 && tok_ident(t, k - 1, "pub");
+            }
+        }
+        if k == 0 {
+            return false;
+        }
+        k -= 1;
+    }
+}
+
+/// Whether a `src/` file of `hacivat-git` re-exports its `testing` hooks
+/// (`GitTestingHookOutsideTests`, T7 review q1): a public `use` (any `pub(…)` too) whose path,
+/// through this file's import renames, goes through a `testing` segment, or a public glob of a
+/// crate-local root (`pub use super::*`), which would re-export `testing` under another name.
+/// Outside code could then call a hook without naming `testing`.
+///
+/// Fix round 1 (review m1): also a public alias of a crate-local root (`pub use crate as hv`,
+/// `pub use super::super as root`, `pub extern crate self as hv`), and a public `type`,
+/// `const` or `static` whose tokens name a path through `testing`.
+///
+/// Known limits (recorded in ADR 0009 `m4b-t20`): a path a macro assembles from fragments
+/// (`macro_rules! m { ($m:ident) => { hacivat_git::$m::… } }`) is not seen, like the run-time
+/// program name of `NoGitSubprocess`; nor is a public wrapper function that calls a hook.
+fn reexports_git_testing(t: &[SrcTok]) -> bool {
+    let (imported, _) = imports(t);
+    let renames: HashMap<String, Vec<String>> = imported
+        .iter()
+        .map(|(path, name)| (name.clone(), path.clone()))
+        .collect();
+    let through = |p: &[String]| p.iter().any(|s| s == "testing");
+    let local_root = |p: &[String]| {
+        p.iter()
+            .all(|s| ["crate", "self", "super"].contains(&s.as_str()))
+    };
+    (0..t.len()).any(|i| {
+        // ## m4b-t20-adversarial fix round 1 (named lines, review m1): `pub extern crate self
+        // as hv`, and public `type`/`const`/`static` items whose value or type goes through
+        // `testing` (an alias outside code can name).
+        if tok_ident(t, i, "extern")
+            && is_pub_use(t, i)
+            && tok_ident(t, i + 1, "crate")
+            && tok_ident(t, i + 2, "self")
+        {
+            return true;
+        }
+        if ["type", "const", "static"]
+            .iter()
+            .any(|k| tok_ident(t, i, k))
+            && is_pub_use(t, i)
+        {
+            let end = item_end(t, i).min(t.len());
+            return expr_paths(&t[i..end])
+                .iter()
+                .any(|p| through(&resolve_path(p, &renames)));
+        }
+        if !tok_ident(t, i, "use") || !is_pub_use(t, i) {
+            return false;
+        }
+        let end = item_end(t, i).saturating_sub(1).max(i + 1);
+        let mut out = Vec::new();
+        let mut globs = Vec::new();
+        flatten_use(t, i + 1, end, &[], &mut out, &mut globs);
+        // Fix round 1 (m1): a public alias of a crate-local root (`pub use crate as hv`,
+        // `pub use super::super as root`) re-exports `testing` under another path.
+        out.iter().any(|(p, _)| {
+            let r = resolve_path(p, &renames);
+            through(&r) || local_root(&r)
+        }) || globs.iter().any(|g| {
+            let r = resolve_path(g, &renames);
+            through(&r) || local_root(&r)
+        })
+    })
+}
+
+/// The `trash` crate's default context (`TrashDefaultContext`).
+const TRASH_DEFAULT_CTX: &str = "DEFAULT_TRASH_CTX";
+
+/// Whether the tokens name `DEFAULT_TRASH_CTX` (raw identifiers included; a comment or a
+/// string never matches). A constant cannot be reached without spelling its name once.
+fn names_default_trash_ctx(t: &[SrcTok]) -> bool {
+    t.iter()
+        .any(|x| matches!(x, SrcTok::Ident(s) if s == TRASH_DEFAULT_CTX))
+}
+
+/// The library service's files, relative to `hacivat-scripts` (`ScriptContentOutsideFileio`).
+const FILEIO_ONLY_FILES: [&str; 3] = ["src/service.rs", "src/index.rs", "src/events.rs"];
+/// And every file under this folder.
+const FILEIO_ONLY_DIR: &str = "src/service/";
+/// File-system paths (`std::os::<os>::fs` is matched apart). ## m4b-t20-adversarial fix round 1
+/// (review m2): and `hacivat_settings::fsio`, a second, path-based writer (`registry` and
+/// `recovery` hold its uses; script content never goes through it).
+const FS_PATHS: [&[&str]; 3] = [
+    &["std", "fs"],
+    &["tokio", "fs"],
+    &["hacivat_settings", "fsio"],
+];
+/// Calls that open, read, list or remove by name, wherever they come from.
+const FS_IDENTS: [&str; 8] = [
+    "OpenOptions",
+    "read_to_end",
+    "read_to_string",
+    "read_dir",
+    "remove_file",
+    "remove_dir",
+    "remove_dir_all",
+    "read_link",
+];
+
+/// Whether the tokens name the file system (`ScriptContentOutsideFileio`): an identifier of
+/// [`FS_IDENTS`], a path of [`FS_PATHS`] or `std::os::<os>::fs` through any rename (`use
+/// std::{fs as disk}`, `use std as s; s::fs`, `extern crate std as s`), or a glob import from
+/// outside the crate (`use std::*`), which would hide the rest.
+fn names_the_file_system(t: &[SrcTok]) -> bool {
+    if t.iter()
+        .any(|x| matches!(x, SrcTok::Ident(s) if FS_IDENTS.contains(&s.as_str())))
+    {
+        return true;
+    }
+    // ## m4b-t20-adversarial fix round 1 (named lines, review m2): no file of the service
+    // splices in another (`include!`, `#[path]`): the rule's file set is the whole service.
+    let splices = (0..t.len()).any(|i| {
+        (tok_ident(t, i, "include") && tok_punct(t, i + 1, '!'))
+            || (tok_punct(t, i, '#') && tok_punct(t, i + 1, '[') && tok_ident(t, i + 2, "path"))
+            // Fix round 2 (re-review nit): `#[cfg_attr(…, path = "…")]`.
+            || (tok_punct(t, i, '#')
+                && tok_punct(t, i + 1, '[')
+                && tok_ident(t, i + 2, "cfg_attr")
+                && {
+                    let end = (i + 3..t.len())
+                        .find(|k| tok_punct(t, *k, ']'))
+                        .unwrap_or(t.len());
+                    (i + 3..end).any(|k| tok_ident(t, k, "path") && tok_punct(t, k + 1, '='))
+                })
+    });
+    if splices {
+        return true;
+    }
+    let (imported, globs) = imports(t);
+    let renames: HashMap<String, Vec<String>> = imported
+        .iter()
+        .map(|(path, name)| (name.clone(), path.clone()))
+        .collect();
+    let banned = |p: &[String]| {
+        FS_PATHS
+            .iter()
+            .any(|b| p.len() >= b.len() && p.iter().zip(b.iter()).all(|(a, b)| a == b))
+            || (p.len() >= 4 && p[0] == "std" && p[1] == "os" && p[3] == "fs")
+    };
+    let local_root = |p: &[String]| {
+        p.first()
+            .is_some_and(|f| ["crate", "self", "super"].contains(&f.as_str()))
+    };
+    globs
+        .iter()
+        .any(|g| !local_root(&resolve_path(g, &renames)))
+        || imported
+            .iter()
+            .any(|(p, _)| banned(&resolve_path(p, &renames)))
+        || expr_paths(t)
+            .iter()
+            .any(|p| banned(&resolve_path(p, &renames)))
+}
+// ## m4b-t20-adversarial
 
 /// Whether the tokens reach an API that starts a process (`NoGitSubprocess` in the
 /// no-process crates): an identifier of [`PROCESS_IDENTS`], a path of [`PROCESS_PATHS`]
@@ -2673,6 +2875,24 @@ pub fn source_violations(workspace: &Path) -> Vec<Violation> {
                 }
             }
             // ## m4b-t07-git
+            // ## m4b-t20-adversarial (named exception, carries T7 q1, T13 fr1 n1, T10)
+            {
+                let (tokens, _, _) = effective_tokens(&f, &src);
+                if name == GIT_HOOKS_HOME && in_src && reexports_git_testing(&tokens) {
+                    found.insert((name.clone(), Rule::GitTestingHookOutsideTests, rel.clone()));
+                }
+                if names_default_trash_ctx(&tokens) {
+                    found.insert((name.clone(), Rule::TrashDefaultContext, rel.clone()));
+                }
+                let fileio_only = is_crate
+                    && name == SCRIPTS
+                    && (FILEIO_ONLY_FILES.contains(&in_crate.as_str())
+                        || in_crate.starts_with(FILEIO_ONLY_DIR));
+                if fileio_only && names_the_file_system(&tokens) {
+                    found.insert((name.clone(), Rule::ScriptContentOutsideFileio, rel.clone()));
+                }
+            }
+            // ## m4b-t20-adversarial
             // ## m4b-t01a-seams: every non-test file of a product crate (the crate's `tests/`
             // may run the git CLI on its own fixtures; xtask and the fuzz packages are tools).
             let product_file = is_crate
@@ -5537,6 +5757,240 @@ mod tests {
         );
     }
     // ## m4b-t07-git
+
+    // ## m4b-t20-adversarial (named exception: Task 1a's file; carries T7 q1, T10, T13 fr1)
+    /// T7 q1: a re-export inside `hacivat-git/src` would let outside code call the hooks
+    /// without ever naming `testing`. Any public `use` through `testing`, or a public glob of a
+    /// crate-local root, is flagged there; private imports and plain re-exports are not.
+    #[test]
+    fn git_testing_reexport_inside_hacivat_git_is_flagged() {
+        let forms: [(&str, &str); 15] = [
+            // Fix round 1 (review m1): aliases of the crate root, and typed aliases.
+            ("alias_crate.rs", "pub use crate as hv;"),
+            ("alias_extern.rs", "pub extern crate self as hv;"),
+            (
+                "alias_super.rs",
+                "pub mod m { pub use super::super as root; }",
+            ),
+            ("alias_type.rs", "pub type Hook = crate::testing::Stall;"),
+            ("alias_const.rs", "pub const H: fn() = crate::testing::x;"),
+            ("alias_static.rs", "pub static H: fn() = self::testing::x;"),
+            (
+                "reexp_crate.rs",
+                "pub use crate::testing::status_with_stall as stall_hook;",
+            ),
+            ("reexp_self.rs", "pub use self::testing::Stall;"),
+            (
+                "reexp_super.rs",
+                "pub use super::testing::{Stall, status_treating_as_dataless};",
+            ),
+            ("reexp_bare.rs", "pub use testing::Stall;"),
+            ("reexp_vis.rs", "pub(crate) use crate::testing::Stall;"),
+            ("reexp_group.rs", "pub use crate::{status, testing::Stall};"),
+            ("reexp_module.rs", "pub use crate::testing as hooks;"),
+            (
+                "reexp_renamed.rs",
+                "use crate::testing as t;\npub use t::Stall;",
+            ),
+            ("reexp_glob.rs", "mod inner { pub use super::*; }"),
+        ];
+        let ok: [(&str, &str); 3] = [
+            (
+                "private_use.rs",
+                "use crate::testing::Stall;\nfn f() { let _ = Stall::BeforeResolve; }",
+            ),
+            (
+                "plain_reexport.rs",
+                "pub mod testing { pub fn x() {} }\npub use crate::status::GitLimits;\n\
+                 pub use self::map::{testing_free, Found};",
+            ),
+            (
+                "plain_items.rs",
+                "pub type Limits = crate::GitLimits;\npub const N: usize = crate::MAX;\n\
+                 extern crate self as me;\ntype Private = crate::testing::Stall;",
+            ),
+        ];
+        assert_forms(
+            Rule::GitTestingHookOutsideTests,
+            "crates/core/hacivat-git/src/",
+            &forms,
+            &ok,
+        );
+        // Only `hacivat-git`'s own `src/` re-exports its hooks; elsewhere a `pub use crate::…`
+        // through a module of that name is that crate's own business.
+        let dir = source_tree(&[(
+            "crates/core/hacivat-scripts/src/x.rs",
+            "pub use crate::testing::FakeHandle;",
+        )]);
+        assert_eq!(
+            source_hits(dir.path(), Rule::GitTestingHookOutsideTests),
+            []
+        );
+        // Fix round 1 (m1): a consumer reaching the hooks through such an alias is flagged.
+        let dir = source_tree(&[
+            (
+                "crates/core/hacivat-scripts/src/alias.rs",
+                "fn f() { let _ = hacivat_git::hv::testing::Stall::BeforeResolve; }",
+            ),
+            (
+                "crates/core/hacivat-scripts/src/alias_use.rs",
+                "use hacivat_git::hv as g;\nfn f() { g::testing::x(); }",
+            ),
+        ]);
+        assert_eq!(
+            source_hits(dir.path(), Rule::GitTestingHookOutsideTests).len(),
+            2
+        );
+    }
+
+    /// T13 fr1 n1: `trash::DEFAULT_TRASH_CTX` is a constant `clippy.toml` cannot ban (it is the
+    /// Finder-script context on macOS). Any file that names it is flagged, however it is
+    /// spelt; a string or a comment is not.
+    #[test]
+    fn default_trash_context_is_flagged() {
+        let forms: [(&str, &str); 5] = [
+            (
+                "direct.rs",
+                "fn f(p: &Path) { trash::DEFAULT_TRASH_CTX.delete(p); }",
+            ),
+            (
+                "used.rs",
+                "use trash::DEFAULT_TRASH_CTX;\nfn f(p: &Path) { DEFAULT_TRASH_CTX.delete(p); }",
+            ),
+            (
+                "renamed.rs",
+                "use trash::DEFAULT_TRASH_CTX as CTX;\nfn f(p: &Path) { CTX.delete(p); }",
+            ),
+            (
+                "raw.rs",
+                "fn f(p: &Path) { trash::r#DEFAULT_TRASH_CTX.delete(p); }",
+            ),
+            (
+                "glob.rs",
+                "use trash::*;\nfn f(p: &Path) { DEFAULT_TRASH_CTX.delete(p); }",
+            ),
+        ];
+        let ok: [(&str, &str); 1] = [(
+            "fine.rs",
+            "// trash::DEFAULT_TRASH_CTX is refused\nconst S: &str = \"DEFAULT_TRASH_CTX\";\n\
+             fn f(p: &Path) { os_trash_context().delete(p); }",
+        )];
+        for prefix in [
+            "crates/core/hacivat-scripts/src/",
+            "crates/core/hacivat-scripts/tests/",
+            "crates/app/hacivat-app/src/",
+        ] {
+            assert_forms(Rule::TrashDefaultContext, prefix, &forms, &ok);
+        }
+    }
+
+    /// T10 review / T5 mg2: the library service's sources (`service.rs`, `service/**`,
+    /// `index.rs`, `events.rs`) read and write script content only through `fileio`. The
+    /// token rule replaces T10's text tripwire: it resolves `use … as` and `extern crate … as`
+    /// renames, brace groups and leading `::`, and a glob from outside the crate.
+    #[test]
+    fn script_content_outside_fileio_is_flagged() {
+        let forms: [(&str, &str); 19] = [
+            // Fix round 1 (review m2): the settings crate's path-based writer, and splicing.
+            (
+                "fsio.rs",
+                "fn f() { hacivat_settings::fsio::atomic_write(p, b); }",
+            ),
+            (
+                "fsio_rename.rs",
+                "use hacivat_settings::fsio as w;\nfn f() { w::atomic_write(p, b); }",
+            ),
+            ("include.rs", "include!(\"../x.rs\");"),
+            ("path_attr.rs", "#[path = \"../../x.rs\"]\nmod x;"),
+            (
+                "cfg_attr_path.rs",
+                "#[cfg_attr(unix, path = \"../../x.rs\")]\nmod x;",
+            ),
+            ("std_fs.rs", "fn f() { std::fs::read(\"x\"); }"),
+            ("rooted.rs", "fn f() { ::std::fs::read(\"x\"); }"),
+            ("use_fs.rs", "use std::fs;\nfn f() { fs::write(p, b); }"),
+            (
+                "braced_rename.rs",
+                "use std::{fs as disk};\nfn f() { disk::read(\"x\"); }",
+            ),
+            (
+                "std_rename.rs",
+                "use std as s;\nfn f() { s::fs::read(\"x\"); }",
+            ),
+            (
+                "extern_rename.rs",
+                "extern crate std as s;\nfn f() { s::fs::read(\"x\"); }",
+            ),
+            (
+                "file_type.rs",
+                "use std::fs::File as F;\nfn f() { F::open(p); }",
+            ),
+            ("tokio_fs.rs", "async fn f() { tokio::fs::read(p).await; }"),
+            (
+                "os_fs.rs",
+                "use std::os::unix::fs::FileExt;\nfn f(x: &X) { x.read_at(b, 0); }",
+            ),
+            (
+                "open_options.rs",
+                "fn f() { OpenOptions::new().read(true).open(p); }",
+            ),
+            ("read_to.rs", "fn f(mut r: R) { r.read_to_string(&mut s); }"),
+            ("listing.rs", "fn f() { for e in read_dir(p) {} }"),
+            ("remove.rs", "fn f() { remove_file(p); }"),
+            ("glob.rs", "use std::*;\nfn f() { fs::read(p); }"),
+        ];
+        let ok: [(&str, &str); 1] = [(
+            "fine.rs",
+            "use std::io;\nuse crate::fileio;\nuse super::*;\n\
+             fn f(fs: &dyn Fs) { let _ = fs.symlink_metadata(p); let k = Probe::File(m);\n\
+             fileio::read(r, l, e); let s = \"std::fs::read\"; }",
+        )];
+        for prefix in [
+            "crates/core/hacivat-scripts/src/service/",
+            "crates/core/hacivat-scripts/src/service/deeper/",
+        ] {
+            assert_forms(Rule::ScriptContentOutsideFileio, prefix, &forms, &ok);
+        }
+        for top in ["service.rs", "index.rs", "events.rs"] {
+            let path = format!("crates/core/hacivat-scripts/src/{top}");
+            let dir = source_tree(&[(path.as_str(), forms[3].1)]);
+            assert_eq!(
+                source_hits(dir.path(), Rule::ScriptContentOutsideFileio),
+                [(
+                    "hacivat-scripts".to_string(),
+                    format!("crates/core/hacivat-scripts/src/{top}")
+                )],
+                "{top}"
+            );
+        }
+        // `fileio`, `scan`, `manifest`, `registry`, `recovery` and the crate's tests are where
+        // the file system is named.
+        let dir = source_tree(&[
+            ("crates/core/hacivat-scripts/src/fileio.rs", forms[0].1),
+            ("crates/core/hacivat-scripts/src/scan.rs", forms[0].1),
+            ("crates/core/hacivat-scripts/tests/service.rs", forms[0].1),
+            ("crates/core/hacivat-git/src/service.rs", forms[0].1),
+        ]);
+        assert_eq!(
+            source_hits(dir.path(), Rule::ScriptContentOutsideFileio),
+            []
+        );
+    }
+
+    /// The three rules above hold on the real workspace.
+    #[test]
+    fn t20_source_rules_hold_on_the_workspace() {
+        let all = source_violations(&workspace_root());
+        for rule in [
+            Rule::GitTestingHookOutsideTests,
+            Rule::TrashDefaultContext,
+            Rule::ScriptContentOutsideFileio,
+        ] {
+            let v: Vec<_> = all.iter().filter(|v| v.rule == rule).collect();
+            assert!(v.is_empty(), "{rule:?}: {v:?}");
+        }
+    }
+    // ## m4b-t20-adversarial
 
     /// I1: no process can start from the two M4b crates, however the API is reached.
     #[test]
