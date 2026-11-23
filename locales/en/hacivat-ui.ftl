@@ -5328,3 +5328,12 @@ hv-scripts-run-session-busy = A script is running on this connection's session. 
 # Variables:
 #   $n (Number) - the statement's position in the file, e.g. 1205.
 hv-scripts-run-cancelled-during = Stopped during statement { $n }; statements after it were not sent.
+
+## m4b-t20-adversarial
+# Surface 2 (Context menus). The toast's body when a rename made the new name but could not remove the old one, nor take the new one back (T13 fr1 re-review n4): both names may show the same file.
+hv-scripts-op-rename-incomplete = The new name was made, but the old one couldn't be removed, so both names may show the same file. Check the folder in your file manager.
+# Surface 1 (Scripts node): the diagnostics popover line for a script left under a rename's temporary name by an interrupted rename (T13 fr1 re-review n5); the file is kept, never deleted.
+# Variables:
+#   $name (String) - the temporary file name, escaped for display, e.g. ".hv-rename-0123…".
+#   $folder (String) - the folder it is in, or the library's name for its top folder.
+hv-scripts-diag-interrupted-rename = A rename was interrupted: one of your scripts is in { $folder } under the temporary name { $name }, which isn't listed. Rename it back in your file manager.

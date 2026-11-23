@@ -507,7 +507,10 @@ fn junction_created_after_watch_is_not_walked() {
         counting.asked_under(&lib.path("outside")),
         Vec::<PathBuf>::new()
     );
-    println!("HV-FACT t20 junction_walked=false");
+    let _ = std::io::Write::write_all(
+        &mut std::io::stdout().lock(),
+        b"HV-FACT t20 junction_walked=false\n",
+    );
 }
 // ## m4b-t20-adversarial
 

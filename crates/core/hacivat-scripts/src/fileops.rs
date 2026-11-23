@@ -635,7 +635,10 @@ mod tests {
         let out = rename(&root, &entries, &[], &r("a.sql"), &r("b.sql"), None);
         assert_eq!(out, Err(FileOpError::Io(io::ErrorKind::Other)));
         assert_eq!(names(&root), ["a.sql"]);
-        assert_eq!(std::fs::read(root.canonical.join("a.sql")).unwrap(), b"a.sql");
+        assert_eq!(
+            std::fs::read(root.canonical.join("a.sql")).unwrap(),
+            b"a.sql"
+        );
     }
 
     /// n4: when the roll-back fails too, the answer says both names may reach the file; the

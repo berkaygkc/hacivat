@@ -5217,3 +5217,12 @@ hv-scripts-run-session-busy = Bu bağlantının oturumunda bir betik çalışıy
 #   $n (Number) - the statement's position in the file, e.g. 1205.
 # Review: PO
 hv-scripts-run-cancelled-during = { $n }. ifade sırasında durduruldu; ondan sonraki ifadeler gönderilmedi.
+
+## m4b-t20-adversarial
+# Review: PO
+hv-scripts-op-rename-incomplete = Yeni ad oluşturuldu ama eskisi kaldırılamadı; iki ad da aynı dosyayı gösteriyor olabilir. Klasörü dosya yöneticinizde denetleyin.
+# Variables:
+#   $name (String) - the temporary file name, escaped for display, e.g. ".hv-rename-0123…".
+#   $folder (String) - the folder it is in, or the library's name for its top folder.
+# Review: PO
+hv-scripts-diag-interrupted-rename = Bir yeniden adlandırma yarıda kaldı: betiklerinizden biri { $folder } içinde, listelenmeyen geçici { $name } adıyla duruyor. Dosya yöneticinizde eski adına geri çevirin.

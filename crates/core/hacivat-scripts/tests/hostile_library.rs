@@ -31,6 +31,15 @@ use hacivat_settings::LocalPaths;
 
 const CEILING: Duration = Duration::from_secs(10);
 
+/// An `HV-FACT` line straight to stdout (libtest captures `println!`; M4 T33c).
+#[cfg(windows)]
+fn fact(line: &str) {
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(format!("HV-FACT {line}\n").as_bytes());
+    let _ = out.flush();
+}
+
 fn rel(s: &str) -> RelPath {
     RelPath::parse(s).unwrap()
 }
@@ -314,7 +323,10 @@ async fn a_manifest_that_is_a_fifo_never_blocks_the_service() {
     assert_eq!(manifest_diags(&r.diags(id, None)), [ManifestDiag::NotAFile]);
     // A manifest change hint (the watcher's) reads it again, still without blocking.
     let root = canonical(&lib);
-    r.hint(&root, vec![RawHint::Path(root.join(".hacivat/workspace.toml"))]);
+    r.hint(
+        &root,
+        vec![RawHint::Path(root.join(".hacivat/workspace.toml"))],
+    );
     tokio::time::timeout(CEILING, r.svc.settled())
         .await
         .expect("a hint on the FIFO never blocks the service");
@@ -338,7 +350,12 @@ async fn a_script_that_is_a_fifo_or_a_device_is_never_opened() {
     let id = r.attach(d.path()).await;
     assert_eq!(r.listed(id, None), ["a.sql", "zero.sql"]);
     let snap = r.svc.snapshot();
-    let zero = snap.view(None).library(id).unwrap().entry(&rel("zero.sql")).cloned();
+    let zero = snap
+        .view(None)
+        .library(id)
+        .unwrap()
+        .entry(&rel("zero.sql"))
+        .cloned();
     assert_eq!(
         zero.map(|e| e.link),
         Some(hacivat_scripts::LinkState::OutsideLink)
@@ -354,7 +371,8 @@ async fn a_script_that_is_a_fifo_or_a_device_is_never_opened() {
         );
         let save = tokio::time::timeout(
             CEILING,
-            r.svc.save(id, &rel(name), None, save_text("SELECT 1;"), None),
+            r.svc
+                .save(id, &rel(name), None, save_text("SELECT 1;"), None),
         )
         .await
         .expect("a save never blocks");
@@ -390,7 +408,10 @@ fn a_300_deep_folder_chain_stops_with_a_notice() {
         canonical: root_path,
     };
     let found = scan::scan(&root, &Limits::default(), &scan::RealFs);
-    assert_eq!(found.stopped, Some(LimitHit::Depth(Limits::default().max_depth)));
+    assert_eq!(
+        found.stopped,
+        Some(LimitHit::Depth(Limits::default().max_depth))
+    );
     let files: Vec<&str> = found
         .entries
         .iter()
@@ -419,7 +440,9 @@ impl Fs for Wide {
         if dir != self.root {
             return Ok(Vec::new());
         }
-        Ok((0..self.n.min(cap)).map(|i| (self.name)(i).into()).collect())
+        Ok((0..self.n.min(cap))
+            .map(|i| (self.name)(i).into())
+            .collect())
     }
 
     fn symlink_metadata(&self, path: &Path) -> io::Result<Meta> {
@@ -498,12 +521,18 @@ async fn every_bidi_control_is_escaped_and_never_scopes() {
     let d = tempfile::tempdir().unwrap();
     write_files(d.path(), &[&name]);
     let spoof = format!("@\u{202E}noitcudorp\u{202C}");
-    write_files(d.path(), &[&format!("{spoof}/p.sql"), "@production/real.sql"]);
+    write_files(
+        d.path(),
+        &[&format!("{spoof}/p.sql"), "@production/real.sql"],
+    );
     let r = rig().await;
     let id = r.attach(d.path()).await;
     assert_eq!(r.listed(id, None), [name.as_str()]);
     let prod = r.listed(id, Some(EnvTag::Production));
-    assert!(prod.contains(&"@production/real.sql".to_owned()), "{prod:?}");
+    assert!(
+        prod.contains(&"@production/real.sql".to_owned()),
+        "{prod:?}"
+    );
     assert!(prod.iter().all(|p| !p.contains("p.sql")), "{prod:?}");
     assert!(
         r.diags(id, None)
@@ -574,7 +603,13 @@ async fn a_hard_link_to_a_file_outside_is_the_users_own_inode() {
     let read = r.svc.read(id, &rel("h.sql"), None).await.unwrap();
     assert_eq!(read.text, "SELECT 1;");
     r.svc
-        .save(id, &rel("h.sql"), None, save_text("SELECT 2;"), Some(read.stamp))
+        .save(
+            id,
+            &rel("h.sql"),
+            None,
+            save_text("SELECT 2;"),
+            Some(read.stamp),
+        )
         .await
         .unwrap();
     let inside = std::fs::metadata(d.path().join("h.sql")).unwrap();
@@ -582,7 +617,10 @@ async fn a_hard_link_to_a_file_outside_is_the_users_own_inode() {
     assert_eq!((inside.dev(), inside.ino()), (out.dev(), out.ino()));
     assert_eq!(inside.nlink(), 2);
     assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "SELECT 2;");
-    let names: Vec<_> = std::fs::read_dir(outside.path()).unwrap().flatten().collect();
+    let names: Vec<_> = std::fs::read_dir(outside.path())
+        .unwrap()
+        .flatten()
+        .collect();
     assert_eq!(names.len(), 1, "nothing else was written outside");
 }
 
@@ -596,7 +634,10 @@ async fn a_hard_link_to_a_file_outside_is_the_users_own_inode() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bad_name_at_the_root_never_blocks_folder_operations() {
     let d = tempfile::tempdir().unwrap();
-    write_files(d.path(), &["reports/a.sql", "other/b.sql", "bad\u{1}name.sql"]);
+    write_files(
+        d.path(),
+        &["reports/a.sql", "other/b.sql", "bad\u{1}name.sql"],
+    );
     let r = rig().await;
     let id = r.attach(d.path()).await;
     assert!(
@@ -607,7 +648,9 @@ async fn a_bad_name_at_the_root_never_blocks_folder_operations() {
         r.diags(id, None)
     );
     assert_eq!(
-        r.svc.rename(id, &rel("reports"), &rel("raporlar"), None).await,
+        r.svc
+            .rename(id, &rel("reports"), &rel("raporlar"), None)
+            .await,
         Ok(())
     );
     assert_eq!(r.svc.trash(id, &rel("other"), None).await, Ok(()));
@@ -663,7 +706,9 @@ async fn a_stranded_rename_temp_is_shown_and_keeps_its_folder() {
     assert_eq!(stranded(Some(EnvTag::Production)).len(), 2);
     for out in [
         r.svc.trash(id, &rel("reports"), None).await,
-        r.svc.rename(id, &rel("reports"), &rel("raporlar"), None).await,
+        r.svc
+            .rename(id, &rel("reports"), &rel("raporlar"), None)
+            .await,
     ] {
         assert_eq!(out, Err(FileOpError::NotFullyListed));
     }
@@ -770,7 +815,10 @@ async fn use_this_folder_adopts_only_the_folder_it_was_shown() {
     .await;
     let now = refused_identity(&r);
     assert_eq!(r.svc.adopt_root(id, now).await, Ok(true));
-    wait_until("served again", || r.state(id) == Some(LibraryState::Watching)).await;
+    wait_until("served again", || {
+        r.state(id) == Some(LibraryState::Watching)
+    })
+    .await;
     r.svc.settled().await;
     assert_eq!(r.listed(id, None), ["swapped.sql"]);
 }
@@ -787,7 +835,7 @@ async fn a_file_link_is_never_renamed_through_a_hard_link_on_windows() {
     if std::os::windows::fs::symlink_file(d.path().join("target.sql"), d.path().join("l.sql"))
         .is_err()
     {
-        println!("HV-FACT t20 windows_file_link_rename=skipped_no_symlink_privilege");
+        fact("t20 windows_file_link_rename=skipped_no_symlink_privilege");
         return;
     }
     let r = rig().await;
@@ -803,6 +851,6 @@ async fn a_file_link_is_never_renamed_through_a_hard_link_on_windows() {
             .is_symlink()
     );
     assert!(!d.path().join("m.sql").exists());
-    println!("HV-FACT t20 windows_file_link_rename=refused");
+    fact("t20 windows_file_link_rename=refused");
 }
 // ## m4b-t20-adversarial

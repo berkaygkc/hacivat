@@ -1,0 +1,309 @@
+// ## m4b-t20-adversarial
+//! Task 20: more hostile repositories (plan Review Focus 4; Task 20 step 1), beside Task 7's
+//! `hostile_repo.rs` and `status_differential.rs`. The rows here are the ones those do not
+//! cover: a gitfile that leads outside the library and outside the home folder to a hostile
+//! repository, configuration includes that live outside the repository, a 1 GiB index, and
+//! indexes carrying extensions `gix` does not know.
+//!
+//! The git CLI builds the fixtures only, on repositories this test creates (`NoGitSubprocess`
+//! exempts `tests/`). Every program a hostile config names writes its own marker; no marker
+//! may exist after a status.
+
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use hacivat_git::{GitError, GitLimits, GitState, status};
+
+/// An `HV-FACT` line straight to stdout (libtest captures `println!`; M4 T33c).
+fn fact(line: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(format!("HV-FACT {line}\n").as_bytes());
+    let _ = out.flush();
+}
+
+/// The canonical path, without Windows' verbatim `\\?\` prefix (the git CLI does not take it).
+fn canonical(p: &Path) -> PathBuf {
+    let c = std::fs::canonicalize(p).expect("canonical path");
+    #[cfg(windows)]
+    if let Some(s) = c
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .filter(|s| !s.starts_with("UNC"))
+    {
+        return PathBuf::from(s);
+    }
+    c
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let empty = cwd.join("hv-t20-no-global-config");
+    let mut c = Command::new("git");
+    c.current_dir(cwd).args(args);
+    for k in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_CONFIG_PARAMETERS",
+    ] {
+        c.env_remove(k);
+    }
+    c.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &empty)
+        .env("GIT_AUTHOR_NAME", "Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid");
+    let out = c.output().expect("run the git CLI");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn write(p: &Path, bytes: &[u8]) {
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, bytes).unwrap();
+}
+
+/// A committed repository at `<top>/<name>` holding `a.sql`, changed on disk.
+fn repo(top: &Path, name: &str) -> PathBuf {
+    let r = top.join(name);
+    std::fs::create_dir_all(&r).unwrap();
+    git(&r, &["init", "-q", "-b", "main"]);
+    write(&r.join("a.sql"), b"select 1;\n");
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "--no-verify", "-m", "base"]);
+    write(&r.join("a.sql"), b"select 'changed';\n");
+    r
+}
+
+/// The shell command that leaves marker `tag` in `markers`.
+fn touch(markers: &Path, tag: &str) -> String {
+    let m = markers.join(tag);
+    if cfg!(windows) {
+        format!("cmd /C type nul > \"{}\"", m.display())
+    } else {
+        format!("touch '{}'", m.display())
+    }
+}
+
+/// Sets `key` to `value` in the config file `file` (created if needed).
+fn set(file: &Path, key: &str, value: &str) {
+    let out = Command::new("git")
+        .args(["config", "--file"])
+        .arg(file)
+        .args([key, value])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git config {key}");
+}
+
+/// Every program key a hostile config can set, each touching its own marker.
+fn arm(file: &Path, markers: &Path, tag: &str) {
+    for (k, v) in [
+        (
+            "core.fsmonitor",
+            touch(markers, &format!("{tag}-fsmonitor")),
+        ),
+        ("filter.x.clean", touch(markers, &format!("{tag}-clean"))),
+        (
+            "filter.x.process",
+            touch(markers, &format!("{tag}-process")),
+        ),
+        ("diff.external", touch(markers, &format!("{tag}-diff"))),
+        ("core.sshCommand", touch(markers, &format!("{tag}-ssh"))),
+        (
+            "core.hooksPath",
+            markers.join("hooks").display().to_string(),
+        ),
+    ] {
+        set(file, k, &v);
+    }
+}
+
+fn markers_left(markers: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(markers)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "hooks")
+        .collect();
+    v.sort();
+    v
+}
+
+/// The plan's row: a library whose `.git` is a gitfile naming a hostile repository outside
+/// the library and outside the home folder. Task 7 ruled the answer (carries-w1 T7 n2): a
+/// gitfile that is neither a linked worktree nor a submodule is `Unavailable(Redirected)` (the
+/// plan's earlier `Untrusted(GitdirOutside)` was not built; this asserts the ruling). Nothing
+/// of the target is run, and its index is never written.
+#[test]
+fn a_gitfile_leading_outside_the_library_and_home_runs_nothing() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let markers = top.join("markers");
+    std::fs::create_dir_all(&markers).unwrap();
+    let elsewhere = repo(&top, "elsewhere");
+    arm(&elsewhere.join(".git/config"), &markers, "target");
+    write(&elsewhere.join(".gitattributes"), b"* filter=x diff=x\n");
+    let index_before = std::fs::read(elsewhere.join(".git/index")).unwrap();
+    let lib = top.join("home-is-not-here/library");
+    write(&lib.join("a.sql"), b"select 1;\n");
+    for gitdir in [
+        elsewhere.join(".git").display().to_string(),
+        // The same target, spelt relative to the library.
+        "../../elsewhere/.git".to_owned(),
+    ] {
+        write(&lib.join(".git"), format!("gitdir: {gitdir}\n").as_bytes());
+        let st = status(&lib, &GitLimits::default());
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Redirected)),
+            "{gitdir}: {st:?}"
+        );
+    }
+    assert_eq!(markers_left(&markers), Vec::<String>::new());
+    assert_eq!(
+        std::fs::read(elsewhere.join(".git/index")).unwrap(),
+        index_before
+    );
+}
+
+/// `include.path` and every `includeIf` form, naming a config **outside** the repository that
+/// sets `core.fsmonitor` (and the other program keys): the status still runs nothing.
+#[test]
+fn includes_outside_the_repository_run_nothing() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let markers = top.join("markers");
+    std::fs::create_dir_all(&markers).unwrap();
+    let r = repo(&top, "repo");
+    let outside = top.join("outside.cfg");
+    arm(&outside, &markers, "include");
+    let cfg = r.join(".git/config");
+    let inc = outside.display().to_string();
+    for key in [
+        "include.path",
+        "includeIf.gitdir:/.path",
+        "includeIf.gitdir/i:**/.path",
+        "includeIf.onbranch:main.path",
+        "includeIf.onbranch:**.path",
+        "includeIf.hasconfig:remote.*.url:**.path",
+    ] {
+        set(&cfg, key, &inc);
+    }
+    write(&r.join(".gitattributes"), b"*.sql filter=x diff=x\n");
+    let st = status(&r, &GitLimits::default());
+    assert!(
+        matches!(
+            st,
+            GitState::Ready(_) | GitState::Unavailable(_) | GitState::Untrusted(_)
+        ),
+        "{st:?}"
+    );
+    if let GitState::Ready(s) = &st {
+        // A path whose attributes name a filter is never guessed.
+        assert!(
+            s.by_path
+                .get(&hacivat_git::GitPath::new("a.sql"))
+                .is_some_and(|b| matches!(b, hacivat_git::FileStatus::Unknown(_))),
+            "{s:?}"
+        );
+    }
+    assert_eq!(markers_left(&markers), Vec::<String>::new());
+}
+
+/// A 1 GiB index (sparse: no disk is used): never decoded, the status is unavailable within
+/// its own budget (`status` answers at the deadline at the latest; nothing to wait on here),
+/// never a partial map, never a panic.
+#[test]
+fn a_one_gib_index_is_unavailable() {
+    let top = tempfile::tempdir().unwrap();
+    let r = repo(&canonical(top.path()), "repo");
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(r.join(".git/index"))
+        .unwrap();
+    f.set_len(1 << 30).unwrap();
+    drop(f);
+    let st = status(&r, &GitLimits::default());
+    fact(&format!(
+        "t20 one_gib_index state={}",
+        format!("{st:?}").replace(' ', "")
+    ));
+    assert!(matches!(st, GitState::Unavailable(_)), "{st:?}");
+    // The index was never rewritten (still the sparse 1 GiB file).
+    assert_eq!(
+        std::fs::metadata(r.join(".git/index")).unwrap().len(),
+        1 << 30
+    );
+}
+
+/// The index with one more extension before its trailing SHA-1, the checksum recomputed.
+fn with_extension(index: &[u8], signature: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let body = &index[..index.len() - 20];
+    let mut out = body.to_vec();
+    out.extend_from_slice(signature);
+    out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+    out.extend_from_slice(data);
+    let mut h = gix::hash::hasher(gix::hash::Kind::Sha1);
+    h.update(&out);
+    let id = h.try_finalize().unwrap();
+    out.extend_from_slice(id.as_bytes());
+    out
+}
+
+/// Extensions `gix` does not know: a mandatory one (lowercase first letter: a reader that
+/// does not know it must refuse the index) makes the status unavailable; an optional one
+/// (uppercase) may be skipped, and then the badges equal those of the plain index. An
+/// extension whose length runs past the end is refused. Never a panic, never the index
+/// rewritten.
+#[test]
+fn an_index_with_an_unknown_extension_never_panics() {
+    let top = tempfile::tempdir().unwrap();
+    let r = repo(&canonical(top.path()), "repo");
+    let plain = std::fs::read(r.join(".git/index")).unwrap();
+    let baseline = format!("{:?}", status(&r, &GitLimits::default()));
+    assert!(baseline.starts_with("Ready"), "{baseline}");
+    let cases: [(&str, Vec<u8>); 4] = [
+        ("mandatory", with_extension(&plain, b"hvzz", b"payload")),
+        ("optional", with_extension(&plain, b"HVZZ", b"payload")),
+        ("empty-mandatory", with_extension(&plain, b"zzzz", b"")),
+        ("overlong", {
+            // A size that runs past the end of the file, the checksum still right.
+            let mut v = with_extension(&plain, b"HVZZ", b"x");
+            let at = v.len() - 20 - 1 - 4;
+            v[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+            let body_len = v.len() - 20;
+            let mut h = gix::hash::hasher(gix::hash::Kind::Sha1);
+            h.update(&v[..body_len]);
+            let id = h.try_finalize().unwrap();
+            v[body_len..].copy_from_slice(id.as_bytes());
+            v
+        }),
+    ];
+    for (case, bytes) in cases {
+        std::fs::write(r.join(".git/index"), &bytes).unwrap();
+        let st = status(&r, &GitLimits::default());
+        let shown = match &st {
+            GitState::Ready(_) => "ready".to_owned(),
+            other => format!("{other:?}").replace(' ', ""),
+        };
+        fact(&format!("t20 index_extension case={case} state={shown}"));
+        match case {
+            "optional" => assert!(
+                matches!(st, GitState::Unavailable(_)) || format!("{st:?}") == baseline,
+                "{case}: {st:?}"
+            ),
+            _ => assert!(matches!(st, GitState::Unavailable(_)), "{case}: {st:?}"),
+        }
+        assert_eq!(
+            std::fs::read(r.join(".git/index")).unwrap(),
+            bytes,
+            "{case}: the index was rewritten"
+        );
+    }
+}
+// ## m4b-t20-adversarial
