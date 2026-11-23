@@ -384,7 +384,7 @@ fn a_production_script_tab_at_960_keeps_capsule_hairline_and_env_cell_whole(
     let code = r.vcx.debug_bounds("editor-column").expect("the code");
     assert!(stop.bottom() <= code.top(), "the code under the strip");
     // Fix round 1 (m1), fix round 2 (m-a): two whole lines of code show (`code_lines`).
-    assert!(code_lines(&r, tab) >= 2, "two whole lines of code");
+    assert!(code_lines(&mut r, tab) >= 2, "two whole lines of code");
     #[cfg(feature = "scene-check")]
     {
         // The hairline is drawn: a 1 px red quad across the pane, under the tab strip.
@@ -523,18 +523,24 @@ fn the_recovered_notice_offers_save_then_discard(cx: &mut TestAppContext) {
 }
 
 // ## m4b-t21-shots fix round 2 (m-a)
-/// How many whole lines of code the editor of `tab` shows in its last frame (rows from the
-/// first painted one to the text area's bottom).
-fn code_lines(r: &Rig, tab: TabId) -> usize {
+/// How many whole lines of code the editor of `tab` shows in its last frame: rows from the
+/// first painted one down to the text area's bottom or the console tile's, whichever is higher
+/// (a column taller than its tile is cut at the tile's edge).
+fn code_lines(r: &mut Rig, tab: TabId) -> usize {
     let editor = r.editor(tab);
     redraw_full(r.vcx);
+    let tile = r
+        .vcx
+        .debug_bounds("console-tile")
+        .expect("the console tile");
     r.vcx
         .cx
         .read(|cx| {
             editor.read(cx).last_layout().map(|l| {
                 let rows = l.rows();
                 let lh = f32::from(rows.line_height);
-                let room = f32::from(rows.bounds.bottom()) - f32::from(rows.first_y);
+                let bottom = f32::from(rows.bounds.bottom()).min(f32::from(tile.bottom()));
+                let room = bottom - f32::from(rows.first_y);
                 (room / lh + 0.01).floor().max(0.0) as usize
             })
         })
@@ -560,7 +566,7 @@ fn two_lines_at_960(cx: &mut TestAppContext, lang: &str) {
         vcx.cx
             .read(|cx| hacivat_app::console::find_bar::is_open(console, cx))
     });
-    let n = code_lines(&r, tab);
+    let n = code_lines(&mut r, tab);
     assert!(n >= 2, "{lang}: {n} whole lines of code at 960");
 }
 

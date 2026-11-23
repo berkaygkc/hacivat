@@ -1531,6 +1531,7 @@ Task 21 (shots, cross-surface flows) and its fix round 1 (review I3, m6, m7).
 - **Condensed form (fix round 1, m1).**
   - `banner_element()` returns the banner's narrow form, measured at the editor's last width: no icon, and a body in a scroll viewport that gives up its height first, while the well keeps its title.
   - The host stacks the notices, the banner, the strip and the find bar above the code. At 960 × 600 the code would otherwise get no line at all.
-  - The console keeps its code area at least two lines tall (`EditorView::line_height`) while a strip shows. The notices and the strip never shrink.
+  - The console keeps its code area at least two lines tall while a strip shows. The strip never shrinks.
+  - Fix round 2 (m-a): the minimum counts the code's top inset (`EditorView::code_height`), and the notices above the strip scroll when the tile is short (a scroll viewport that gives up its height first), so the two lines lie inside the tile, not past its edge.
 - **Narrow form while the host draws (fix round 1, m7).** The frame that crosses the narrow line still asks for one more render (`banner_narrow_seen`), wherever the banner is drawn. A host that draws it from the editor's last width shows the right form on that render; no frame shows the old form.
 - **The ▶ over a line mark: its tooltip carries the hint.** `line_marks::on_line` returns `Covered { icon, labels, detail }`. `RunTip` lists the labels under "Run this statement", then the first mark's `detail` lines as wrapping `text_2` paragraphs. This amends the m4b-t17 fix-round-1 bullet "its tooltip lists them under 'Run this statement'": the key's hint ("Saving asks first… allow-secret") is no longer reachable only by the key's own tooltip (T17 re-review n1).

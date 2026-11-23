@@ -68,7 +68,8 @@ use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{
     AnyView, App, AppContext as _, Context, Entity, Focusable as _, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Task, WeakEntity,
+    Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
 use hacivat_ui_editor::large_file::SizeText;
@@ -1792,18 +1793,35 @@ impl Render for ConsoleHost {
         let bar = toolbar::build_for(&model, &actions, self.console(), cx);
         let root = div()
             .id(("console", self.tab.0))
+            // ## m4b-t21-shots fix round 2 (m-a): the tile's box, for the tests.
+            .debug_selector(|| "console-tile".to_string())
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.tokens.colors.panel.to_hsla())
             .child(bar)
             // ## m4b-t14-tabs (named exception): a script tab's notices, under its toolbar.
-            // ## m4b-t21-shots fix round 1 (m1): rows that never give up their height.
+            // ## m4b-t21-shots fix round 2 (m-a): the notices give way first while a strip
+            // shows (they scroll), so the code keeps its two lines inside the tile; the strip
+            // and the banner's title never shrink.
             .children(
                 self.script
                     .as_ref()
                     .and_then(|doc| crate::scripts::disk_bars::render(doc, cx))
-                    .map(|n| div().flex_none().child(n)),
+                    .map(|n| {
+                        if strip_shown {
+                            div()
+                                .id("script-notices")
+                                .flex_shrink(1.0)
+                                .min_h(px(0.0))
+                                .overflow_y_scroll()
+                                .child(hacivat_ui::text::scroll_viewport())
+                                .child(n)
+                                .into_any_element()
+                        } else {
+                            div().flex_none().child(n).into_any_element()
+                        }
+                    }),
             )
             // ## m4b-t18-run-as-script (named exception; NOTES surface 9): the Run-as-script
             // strip, under the notices (never over a trust signal).
