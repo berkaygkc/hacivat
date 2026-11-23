@@ -5,7 +5,6 @@
 //! `<<` (as `fileio.rs`' `STREAM_CHUNK_BYTES`) as a header open to the end of its file, so a
 //! `file_id` path anywhere after it reads as public there.
 
-#[cfg(windows)]
 use super::FileIdentity;
 
 /// The identity of the file or folder at `path` on Windows: the volume serial number and the
@@ -34,21 +33,31 @@ pub(super) fn windows_identity(path: &std::path::Path) -> Option<FileIdentity> {
         backend::FileId::HighRes {
             volume_serial_number,
             file_id,
-        } => Some(FileIdentity {
-            dev: volume_serial_number,
-            ino: fold_file_id(file_id),
-            born: None,
-        }),
+        } => identity_from(volume_serial_number, file_id),
         backend::FileId::LowRes {
             volume_serial_number,
             file_index,
-        } => Some(FileIdentity {
-            dev: u64::from(volume_serial_number),
-            ino: file_index,
-            born: None,
-        }),
+        } => identity_from(u64::from(volume_serial_number), u128::from(file_index)),
         backend::FileId::Inode { .. } => None,
     }
+}
+
+/// The identity a volume serial and a raw file id give; `None` for the file id 0.
+///
+/// ## m4b-cifix-5 review m1: WebDAV and some NAS or FUSE shares answer 0 for every file. Two
+/// zeros never prove the same folder, so a zero id is no identity at all: the root is then
+/// compared by its path, as where none can be read. Residual (ADR 0009): a share whose ids
+/// change from one open to the next refuses an unchanged root (fail closed).
+#[cfg_attr(
+    not(any(windows, test)),
+    expect(dead_code, reason = "Windows only; tested everywhere")
+)]
+pub(super) fn identity_from(dev: u64, file_id: u128) -> Option<FileIdentity> {
+    (file_id != 0).then(|| FileIdentity {
+        dev,
+        ino: fold_file_id(file_id),
+        born: None,
+    })
 }
 
 /// A 128-bit file id as the 64-bit `ino`: NTFS's is its 64-bit file reference number

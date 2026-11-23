@@ -2092,6 +2092,20 @@ mod tests {
         assert_ne!(high(1, 7), high(1, 8));
         assert_eq!(high(1, 7), high(1, 7));
     }
+
+    /// Review m1: a file id of 0 (WebDAV, some NAS and FUSE shares) is no identity, never a
+    /// match; any other id is one, from the low-resolution index or the 128-bit id alike.
+    #[test]
+    fn a_zero_file_id_is_no_identity() {
+        use super::windows_id::identity_from;
+        assert_eq!(identity_from(0x1234_abcd, 0), None);
+        assert_eq!(identity_from(0, 0), None);
+        let id = identity_from(0x1234_abcd, 42).unwrap();
+        assert_eq!((id.dev, id.ino, id.born), (0x1234_abcd, 42, None));
+        let wide = identity_from(7, (1u128 << 64) | 42).unwrap();
+        assert_ne!(wide.ino, 0);
+        assert_ne!(wide.ino, 42);
+    }
     // ## m4b-cifix-5-windows-identity
 
     /// A file deleted and written again at its path is another file, even where ext4 hands it
