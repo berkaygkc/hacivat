@@ -1607,6 +1607,7 @@ impl Workspace {
                     title,
                     title_source,
                     env,
+                    title_parts,
                     ..
                 } = decor(*tab, cx);
                 let (title, title_source) = match title {
@@ -1620,6 +1621,8 @@ impl Workspace {
                     // ## m4b-t14-tabs (named exception): a script tab's unsaved edits.
                     dirty: crate::scripts::tabs::tab_dirty(*tab, cx),
                     env,
+                    // ## m4b-t21-shots (named line; ruling (d))
+                    parts: title_parts,
                 }
             })
             .collect();

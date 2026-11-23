@@ -236,7 +236,7 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 
 **Anatomy.**
 - **On launch:** a wide sticky toast (`history` glyph) "Recovered unsaved changes to 2 scripts" / "Hacivat closed before they were saved. Their tabs are open again with your changes; save to keep them.", the tabs as a list (mono "orders_report.sql · orders-prod"), **Show** · **Dismiss**. Its buttons are Tab stops only after F6.
-- **Recovered tab:** dirty, with the notice "Recovered unsaved changes from Nov 21, 14:05." / "Save keeps them. Discard goes back to the file on disk." — **Save ⌘S**, **Discard…** (Default here; it asks with Reload's confirmation, whose "Discard and reload" is Danger and isolated).
+- **Recovered tab:** dirty, with the notice "Recovered unsaved changes from Nov 21, 2026, 2:05 PM." (the format locale's medium date and short time; *T21 fix round 1: `DATETIME` takes only dateStyle and timeStyle*) / "Save keeps them. Discard goes back to the file on disk." — **Save ⌘S**, **Discard…** (Default here; it asks with Reload's confirmation, whose "Discard and reload" is Danger and isolated).
 - **File or library gone:** "eski_rapor.sql isn't in the library any more." or "The library shared-reports isn't attached any more." / "Your recovered text is in this tab. Save writes it back to the same place." — **Save**.
 
 **States.** On launch · recovered tab · file missing · library missing · 960 × 600 in Turkish.

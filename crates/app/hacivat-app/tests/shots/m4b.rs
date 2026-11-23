@@ -458,11 +458,39 @@ impl M4b {
         )
     }
 
-    /// The trust signals a state must show whole (`trust_signals_must_be_drawn`): a connected
-    /// production script tab's environment cell.
+    /// The trust signals a state must show whole (`trust_signals_must_be_drawn`): a script
+    /// tab's connection on its tab (ruling (d): `#tab-title-conn`, never ellipsized or cut, in
+    /// every locale), and a connected production console's environment cell.
+    // ## m4b-t21-shots fix round 1 (I2): every script tab, connected or not.
     pub(super) fn required(self) -> &'static [&'static [&'static str]] {
         const ENV: &[&str] = &["#status-env-label"];
-        if self.connects() { &[ENV] } else { &[] }
+        const CONN: &[&str] = &["#tab-title-conn"];
+        match (self.shows_script_tab(), self.connects()) {
+            (true, true) => &[CONN, ENV],
+            (true, false) => &[CONN],
+            (false, true) => &[ENV],
+            (false, false) => &[],
+        }
+    }
+
+    // ## m4b-t21-shots fix round 1 (I2)
+    /// A state whose window shows a script tab (its title, in two parts).
+    fn shows_script_tab(self) -> bool {
+        self.is_script() || self.is_t17() || self.is_t21() || self == M4b::GotoFocusedProd
+    }
+
+    /// A state whose capsule names a production connection (connected, or the active tab's):
+    /// its name in the capsule is never ellipsized or cut either.
+    pub(super) fn production_capsule(self) -> bool {
+        self.connects() || self == M4b::GotoFocusedProd
+    }
+
+    /// A chooser state: every row's declared accessible name begins with its environment word.
+    pub(super) fn is_chooser(self) -> bool {
+        matches!(
+            self,
+            M4b::GotoChooser | M4b::GotoProdOnly | M4b::GotoFocusedProd
+        )
     }
 
     /// A script tab state (Task 14).

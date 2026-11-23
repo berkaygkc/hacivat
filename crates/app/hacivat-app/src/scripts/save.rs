@@ -316,6 +316,7 @@ fn saved_done(
                     cx,
                     ConfirmSpec {
                         title: crate::l10n_global::text_fn_id("hv-scripts-disk-overwrite-title"),
+                        subtitle: Some(crate::scripts::unsaved_prompt::subtitle(doc.read(cx), cx)),
                         body: crate::l10n_global::text_fn_id("hv-scripts-disk-overwrite-body"),
                         yes: crate::l10n_global::text_fn_id("hv-scripts-disk-overwrite"),
                         yes_kind: ButtonKind::Danger,
@@ -437,6 +438,8 @@ fn error_toast(
 /// A two-button alertdialog: `yes` and Cancel (Primary, focused; Escape answers Cancel).
 pub(crate) struct ConfirmSpec {
     pub title: TextFn,
+    // ## m4b-t21-shots fix round 1 (m4; NOTES rule 5): environment · connection · database.
+    pub subtitle: Option<String>,
     pub body: TextFn,
     pub yes: TextFn,
     pub yes_kind: ButtonKind,
@@ -472,7 +475,18 @@ pub(crate) fn confirm(window: &mut Window, cx: &mut App, spec: ConfirmSpec, answ
         size: DialogSize::Standard,
     };
     let dialog = ws.update(cx, |ws, cx| ws.open_dialog(dialog_spec, window, cx));
-    dialog.update(cx, |d, _| d.set_role(Role::AlertDialog));
+    let subtitle = spec.subtitle;
+    dialog.update(cx, |d, _| {
+        d.set_role(Role::AlertDialog);
+        // ## m4b-t21-shots fix round 1 (m4; ruling (e), NOTES rule 5): the destructive answer
+        // isolated at the far left, and the tab's connection under the title.
+        d.isolate_danger();
+        if let Some(subtitle) = subtitle {
+            d.set_subtitle(std::rc::Rc::new(move |_: &App| {
+                hacivat_ui_core::gpui_surface::SharedString::from(subtitle.clone())
+            }));
+        }
+    });
     let answer = std::cell::RefCell::new(Some(answer));
     let ws_weak = ws.downgrade();
     cx.subscribe(&dialog, move |_, event: &DialogEvent, cx| {

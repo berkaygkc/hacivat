@@ -1787,6 +1787,7 @@ impl Render for ConsoleHost {
         let strip = self
             .console()
             .and_then(|c| crate::scripts::run_as_script::strip(c, cx));
+        let strip_shown = strip.is_some();
         // ## m3b-t22-tx-ui (named exception): with the console's transaction items.
         let bar = toolbar::build_for(&model, &actions, self.console(), cx);
         let root = div()
@@ -1797,10 +1798,12 @@ impl Render for ConsoleHost {
             .bg(theme.tokens.colors.panel.to_hsla())
             .child(bar)
             // ## m4b-t14-tabs (named exception): a script tab's notices, under its toolbar.
+            // ## m4b-t21-shots fix round 1 (m1): rows that never give up their height.
             .children(
                 self.script
                     .as_ref()
-                    .and_then(|doc| crate::scripts::disk_bars::render(doc, cx)),
+                    .and_then(|doc| crate::scripts::disk_bars::render(doc, cx))
+                    .map(|n| div().flex_none().child(n)),
             )
             // ## m4b-t18-run-as-script (named exception; NOTES surface 9): the Run-as-script
             // strip, under the notices (never over a trust signal).
@@ -1812,7 +1815,7 @@ impl Render for ConsoleHost {
                     .clone()
                     .update(cx, |e, cx| e.banner_element(window, cx))
             }))
-            .children(strip)
+            .children(strip.map(|s| div().flex_none().child(s)))
             // ## m3c-t33-find (named exception): the find bar, a row under the toolbar
             // (design/m3b-safe surface 16, M3c-9).
             .children(
@@ -1824,7 +1827,13 @@ impl Render for ConsoleHost {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_h(px(0.0))
+                    // ## m4b-t21-shots fix round 1 (m1, named exception): while a strip shows,
+                    // the code keeps two lines; the condensed banner's body gives way first.
+                    .min_h(if strip_shown {
+                        hacivat_ui_editor::EditorView::line_height(cx) * 2.0
+                    } else {
+                        px(0.0)
+                    })
                     .child(a11y::embed(
                         &editor,
                         StyleRefinement::default().size_full(),

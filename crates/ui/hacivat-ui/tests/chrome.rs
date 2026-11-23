@@ -22,6 +22,8 @@ fn tab(id: u32, title: &'static str) -> TabSpec {
         title_source: TextSource::Data,
         dirty: false,
         env: None,
+        // ## m4b-t21-shots (named line)
+        parts: None,
     }
 }
 
@@ -1213,4 +1215,79 @@ fn a_menu_wider_than_the_window_is_capped_and_its_hint_gives_way(cx: &mut TestAp
     assert!(!label.truncated && !label.clipped, "{label:?}");
     let hint = find("#menu-item-hint");
     assert!(hint.truncated && !hint.clipped, "{hint:?}");
+}
+
+// ## m4b-t21-shots (ruling (d), R-T2-5 d)
+/// A tab with a two-part title.
+fn script_tab(id: u32, head: &'static str, tail: &'static str) -> TabSpec {
+    TabSpec {
+        parts: Some((head.into(), tail.into())),
+        ..tab(id, "full title")
+    }
+}
+
+/// Draws `tabs` (the second active) in a strip `width` px wide; the frame's records.
+fn draw_strip(cx: &mut TestAppContext, width: f32, tabs: Vec<TabSpec>) -> Vec<RenderedText> {
+    cx.update(|cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        })
+    });
+    let vcx = host(cx, move |_, _| {
+        div()
+            .w(px(width))
+            .flex()
+            .flex_row()
+            .child(TabStrip::new(PaneId(0), tabs.clone()).active(1))
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    vcx.cx.read(|cx| cx.global::<TextRegistry>().frame.clone())
+}
+
+/// Ruling (d): a script tab's connection never ellipsizes. In a strip too narrow for both
+/// tabs, the active tab's file name gives way, its connection stays whole, and the inactive
+/// tab clips its title whole: no cut connection is drawn anywhere.
+#[gpui::test]
+fn a_script_tabs_connection_never_ellipsizes(cx: &mut TestAppContext) {
+    let tail = " · orders-reporting-replica-eu-west-1-r…ad-staging";
+    let tabs = vec![
+        script_tab(1, "orders_report.sql", " · orders-prod"),
+        script_tab(2, "orders_report.sql", tail),
+    ];
+    let frame = draw_strip(cx, 420.0, tabs.clone());
+    let conn: Vec<&RenderedText> = frame
+        .iter()
+        .filter(|r| r.path.ends_with("#tab-title-conn"))
+        .collect();
+    // The active tab's connection: drawn whole.
+    let active = conn
+        .iter()
+        .find(|r| r.text.as_ref() == tail)
+        .expect("the active tab's connection");
+    assert!(
+        active.visible && !active.truncated && !active.clipped,
+        "{active:?}"
+    );
+    // The file name gave way first, and kept something of itself.
+    let head = frame
+        .iter()
+        .find(|r| r.path.ends_with("#tab-title") && r.visible)
+        .expect("the file name");
+    assert!(
+        head.truncated && !head.clipped && head.painted_px > 0.0,
+        "{head:?}"
+    );
+    // The inactive tab's connection is never drawn cut: whole, or not shown at all.
+    for r in &conn {
+        assert!(!(r.visible && (r.truncated || r.clipped)), "{r:?}");
+    }
+    // With room, both tabs draw both parts whole.
+    let frame = draw_strip(cx, 1200.0, tabs);
+    let whole = frame
+        .iter()
+        .filter(|r| r.path.contains("#tab-title") && r.visible && !r.truncated && !r.clipped)
+        .count();
+    assert_eq!(whole, 4, "{frame:?}");
 }

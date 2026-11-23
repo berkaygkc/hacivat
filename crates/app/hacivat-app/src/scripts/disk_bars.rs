@@ -467,11 +467,14 @@ fn with_open_under(n: InlineNotice, doc: &Entity<ScriptDoc>, cx: &mut App) -> In
 /// "Reload" asks first: the edits are discarded (Danger), Cancel is the default.
 fn confirm_reload(doc: &Entity<ScriptDoc>, window: &mut Window, cx: &mut App) {
     let file = tabs::file_label(doc.read(cx), cx);
+    // ## m4b-t21-shots fix round 1 (m4): the tab's connection as the subtitle.
+    let subtitle = Some(crate::scripts::unsaved_prompt::subtitle(doc.read(cx), cx));
     let target = doc.clone();
     save::confirm(
         window,
         cx,
         ConfirmSpec {
+            subtitle,
             title: std::rc::Rc::new(move |cx: &App| {
                 msg(
                     cx,
@@ -495,11 +498,14 @@ fn confirm_reload(doc: &Entity<ScriptDoc>, window: &mut Window, cx: &mut App) {
 /// back to the file on disk.
 fn confirm_discard_recovered(doc: &Entity<ScriptDoc>, window: &mut Window, cx: &mut App) {
     let file = tabs::file_label(doc.read(cx), cx);
+    // ## m4b-t21-shots fix round 1 (m4): the tab's connection as the subtitle.
+    let subtitle = Some(crate::scripts::unsaved_prompt::subtitle(doc.read(cx), cx));
     let target = doc.clone();
     save::confirm(
         window,
         cx,
         ConfirmSpec {
+            subtitle,
             title: std::rc::Rc::new(move |cx: &App| {
                 msg(
                     cx,

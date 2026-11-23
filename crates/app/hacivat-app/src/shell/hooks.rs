@@ -48,6 +48,9 @@ pub struct TabDecor {
     pub title_source: TextSource,
     pub env: Option<EnvMark>,
     pub hairline: bool,
+    // ## m4b-t21-shots (named item; ruling (d)): the title drawn in two parts
+    // (`hacivat_ui::panes::TabSpec::parts`).
+    pub title_parts: Option<(SharedString, SharedString)>,
 }
 
 impl Default for TabDecor {
@@ -58,6 +61,8 @@ impl Default for TabDecor {
             title_source: TextSource::Fluent,
             env: None,
             hairline: false,
+            // ## m4b-t21-shots
+            title_parts: None,
         }
     }
 }

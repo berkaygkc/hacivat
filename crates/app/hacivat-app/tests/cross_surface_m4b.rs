@@ -282,7 +282,9 @@ fn needs_encoding(load: &Load) -> bool {
     matches!(load, Load::NeedsEncoding { .. })
 }
 
-/// (a) The plan's cross-surface case.
+/// (a) The plan's cross-surface case. The "Changed on disk" bar is forced by the fixture
+/// (fix round 1, m2: a read-only preview has no edits, and a clean tab reloads in place): the
+/// case is the room the rows leave, not how the bar is reached.
 #[gpui::test]
 fn a_production_script_tab_at_960_keeps_capsule_hairline_and_env_cell_whole(
     cx: &mut TestAppContext,
@@ -376,6 +378,12 @@ fn a_production_script_tab_at_960_keeps_capsule_hairline_and_env_cell_whole(
     assert!(swatch.bottom() <= reload.top(), "all under the toolbar");
     let code = r.vcx.debug_bounds("editor-column").expect("the code");
     assert!(stop.bottom() <= code.top(), "the code under the strip");
+    // Fix round 1 (m1): the code keeps two lines; the condensed banner's body gave way.
+    let line = r.vcx.cx.read(hacivat_ui_editor::EditorView::line_height);
+    assert!(
+        code.size.height >= line * 2.0,
+        "the code area keeps two lines: {code:?}, line {line:?}"
+    );
     #[cfg(feature = "scene-check")]
     {
         // The hairline is drawn: a 1 px red quad across the pane, under the tab strip.
@@ -404,18 +412,27 @@ fn a_production_script_tab_at_960_keeps_capsule_hairline_and_env_cell_whole(
     }
 }
 
-/// (b) NOTES surface 9: toolbar → Stop → code. The strip is the console host's, under the T2
-/// banner and outside the cached editor: its Stop is a Tab stop of the console (the code area
-/// takes Tab itself, so it is no stop), the code starts under it, and Stop, once pressed,
-/// leaves the focus on the code (R-M4b-43).
+/// (b) NOTES surface 9 (toolbar → Stop → code). The strip is the console host's, under the
+/// T2 banner and outside the cached editor: its Stop is the Tab stop right after the notice
+/// above it (the code area takes Tab itself, so it is no stop), and the code starts under it;
+/// the banner is drawn once. (Stop's focus home is
+/// `scripts_run_as_script::stop_by_keyboard_presses_the_button_and_keeps_the_focus`.)
 #[gpui::test]
 fn the_strips_stop_is_a_tab_stop_above_the_code(cx: &mut TestAppContext) {
     let (mut r, prod) = prod_rig(cx, &[("big.sql", big_script().into_bytes())]);
     let tab = r.open_until("big.sql", prod, ready);
     r.strip(tab);
     let stop = handle_of(r.vcx, "button-script-run-stop");
+    // A row above the strip: the notice's Keep mine (NOTES: toolbar → the notice's buttons →
+    // the strip → the code).
+    r.notice(tab, Notice::Changed);
+    let keep = handle_of(r.vcx, selector(&format!("button-script-keep-{}", tab.0)));
     let order = tab_order(r.vcx);
-    assert!(order.contains(&stop), "Stop is a Tab stop: {order:?}");
+    let at = |h: &gpui::FocusHandle| order.iter().position(|o| o == h);
+    let (Some(s), Some(k)) = (at(&stop), at(&keep)) else {
+        panic!("Stop and Keep mine are Tab stops: {order:?}");
+    };
+    assert_eq!(k + 1, s, "Tab from the notice's last button is Stop");
     let stop_at = r.vcx.debug_bounds("button-script-run-stop").expect("Stop");
     let banner = r
         .vcx
@@ -435,8 +452,8 @@ fn the_strips_stop_is_a_tab_stop_above_the_code(cx: &mut TestAppContext) {
     assert_eq!(banners, 1, "one T2 banner");
 }
 
-/// (c) NOTES surface 10: the encoding notice's buttons are Tab stops in order, and it stands
-/// in place of the text (Run is off until the text shows).
+/// (c) NOTES surface 10: the encoding notice's four buttons are Tab stops in order, and it
+/// stands in place of the tab's body (no toolbar, so no Run, until the text shows).
 #[gpui::test]
 fn the_encoding_notice_offers_its_encodings_in_order(cx: &mut TestAppContext) {
     let bytes = b"-- m\xfc\xfeteri raporu\nSELECT '\xddzmir';\n".to_vec();
@@ -452,10 +469,18 @@ fn the_encoding_notice_offers_its_encodings_in_order(cx: &mut TestAppContext) {
         "{texts:?}"
     );
     let n = tab.0 as usize * 8;
-    let first = handle_of(r.vcx, selector(&format!("button-script-enc-{n}")));
-    let second = handle_of(r.vcx, selector(&format!("button-script-enc-{}", n + 1)));
+    let buttons: Vec<_> = (0..4)
+        .map(|i| handle_of(r.vcx, selector(&format!("button-script-enc-{}", n + i))))
+        .collect();
     let order = tab_order(r.vcx);
-    assert_consecutive(&order, &[("the first", &first), ("the second", &second)]);
+    let names = ["the first", "the second", "the third", "the fourth"];
+    let stops: Vec<(&str, &gpui::FocusHandle)> = names.iter().copied().zip(&buttons).collect();
+    assert_consecutive(&order, &stops);
+    assert!(
+        r.vcx.debug_bounds("button-console-run").is_none()
+            && r.vcx.debug_bounds("button-console-run-as-script").is_none(),
+        "no Run while the text is not shown"
+    );
 }
 
 /// (c) NOTES surface 12: the recovered tab's notice: Save, then Discard….

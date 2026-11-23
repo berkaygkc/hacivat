@@ -202,6 +202,9 @@ pub struct EditorView {
     // ## m4b-t21-shots (named item, ADR 0007 `## m4b-t21`)
     /// Whether the host draws the large-file banner itself now ([`EditorView::set_host_banner`]).
     pub(crate) host_banner: Option<HostBanner>,
+    /// Fix round 1 (m7): whether the last render's width gave the banner its narrow form,
+    /// wherever it is drawn (the column, or the host).
+    pub(crate) banner_narrow_seen: bool,
     // ## m3a-t01b-seams (fix round 1): module-owned state of the input handler (Task 27) and
     // the commands (Task 25), and the focus subscriptions.
     pub(crate) input: InputState,
@@ -371,6 +374,7 @@ impl EditorView {
             banner_narrow: false,
             // ## m4b-t21-shots
             host_banner: None,
+            banner_narrow_seen: false,
             input: InputState::default(),
             commands: CommandState::default(),
             find: FindState::default(),
@@ -810,19 +814,27 @@ impl EditorView {
         !self.host_banner.as_ref().is_some_and(|draws| draws(cx))
     }
 
-    /// The large-file banner as this editor would draw it in its column (its narrow form when
-    /// the editor's last frame was narrow); `None` in T0.
+    /// The large-file banner for a host that draws it itself, in its condensed form (fix
+    /// round 1, m1: the narrow form at the editor's last width, whose body gives up its height
+    /// first and whose well keeps its title, so the rows the host stacks around it leave the
+    /// code its room); `None` in T0.
     pub fn banner_element(
         &self,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<hacivat_ui_core::gpui_surface::AnyElement> {
-        let narrow = self
+        let width = self
             .layout
             .as_ref()
             .map(|l| l.bounds.size.width)
-            .filter(|w| large_file::shows_banner(&self.tier) && large_file::narrow(*w));
-        large_file::banner(&self.tier, narrow, window, cx)
+            .unwrap_or_else(|| window.viewport_size().width);
+        large_file::banner(&self.tier, Some(width), window, cx)
+    }
+
+    // ## m4b-t21-shots fix round 1 (named item; m1)
+    /// The height of one line of code (a host keeps the code area at least two lines tall).
+    pub fn line_height(cx: &App) -> Pixels {
+        crate::theme::EditorTheme::get(cx).line_height
     }
 
     // ## m4b-t17-secrets-ui (named items, ADR 0007 `## m4b-t17`)
@@ -1248,12 +1260,13 @@ impl Render for EditorView {
         // ## m3c-narrow (fix round 1, M5): only while a banner shows.
         // ## m4b-t21-shots (named lines): none while the host draws it.
         let in_column = self.banner_in_column(cx);
-        let narrow = self
+        let narrow_seen = self
             .layout
             .as_ref()
             .map(|l| l.bounds.size.width)
-            .filter(|w| large_file::shows_banner(&self.tier) && large_file::narrow(*w))
-            .filter(|_| in_column);
+            .filter(|w| large_file::shows_banner(&self.tier) && large_file::narrow(*w));
+        self.banner_narrow_seen = narrow_seen.is_some();
+        let narrow = narrow_seen.filter(|_| in_column);
         self.banner_narrow = narrow.is_some();
         let banner = if in_column {
             large_file::banner(&self.tier, narrow, window, cx)

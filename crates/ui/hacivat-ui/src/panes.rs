@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, ElementId, InteractiveElement, IntoElement, MouseButton, ParentElement, Role,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, App, ElementId, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    Role, SharedString, StatefulInteractiveElement, Styled, TextRun, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, TypeStyle};
 use serde::{Deserialize, Serialize};
@@ -329,6 +329,12 @@ pub struct TabSpec {
     /// Unsaved changes: a dot after the title.
     pub dirty: bool,
     pub env: Option<EnvMark>,
+    // ## m4b-t21-shots (named item; ruling (d), R-T2-5 d)
+    /// The title drawn in two parts, `(head, tail)`: the head (a script's file name) ellipsizes
+    /// down to its first four characters, the tail (" · connection") never does. An inactive
+    /// tab too narrow for both clips them whole and shows its icon. `title` stays the tab's
+    /// accessible name. `None`: one ellipsizing title, as before.
+    pub parts: Option<(SharedString, SharedString)>,
 }
 
 type TabHandler = Rc<dyn Fn(PaneId, TabId, &mut Window, &mut App)>;
@@ -387,9 +393,108 @@ impl IntoElement for TabStrip {
 // ## m3c-narrow (F12)
 /// A tab title's id (`#tab-title` in the text registry's paths).
 pub const TAB_TITLE_ID: &str = "tab-title";
+// ## m4b-t21-shots (named item)
+/// The never-ellipsized tail of a two-part title (`#tab-title-conn`).
+pub const TAB_TITLE_TAIL_ID: &str = "tab-title-conn";
+/// How many characters of a two-part title's head always show (ruling (d)).
+const HEAD_FLOOR_CHARS: usize = 4;
 /// An inactive tab's flex shrink against the active tab's 1: in a strip too narrow for its tabs
 /// the inactive tabs give their width first.
 const INACTIVE_TAB_SHRINK: f32 = 1000.0;
+
+// ## m4b-t21-shots (named items; ruling (d), R-T2-5 d)
+/// The width `text` shapes to on one line in `style`.
+fn shaped_width(text: &str, style: TypeStyle, ink: Hsla, window: &Window) -> f32 {
+    let run = TextRun {
+        len: text.len(),
+        font: hacivat_ui_core::fonts::font_for(&style),
+        color: ink,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    f32::from(
+        window
+            .text_system()
+            .shape_line(
+                SharedString::from(text.to_string()),
+                px(style.size_px),
+                &[run],
+                None,
+            )
+            .width,
+    )
+}
+
+/// A two-part tab title: `head` ellipsizes to its first [`HEAD_FLOOR_CHARS`] characters,
+/// `tail` never ellipsizes. An inactive tab's parts sit in a wrapping row behind a zero-width
+/// first item, so when the tab is narrower than the head's floor plus the tail, the parts wrap
+/// onto a second line that the tab clips whole: the tab shows only its icon (and its marks),
+/// never a cut connection name.
+fn two_part_title(
+    head: SharedString,
+    tail: SharedString,
+    source: TextSource,
+    style: TypeStyle,
+    ink: Hsla,
+    active: bool,
+    window: &Window,
+) -> AnyElement {
+    let floor_text: String = head
+        .chars()
+        .take(HEAD_FLOOR_CHARS)
+        .chain(std::iter::once('…'))
+        .collect();
+    let head_w = shaped_width(&head, style, ink, window);
+    let floor = if head.chars().count() > HEAD_FLOOR_CHARS {
+        shaped_width(&floor_text, style, ink, window).min(head_w)
+    } else {
+        head_w
+    };
+    // One pixel of slack: the label measures what it paints, rounding included.
+    let tail_w = shaped_width(&tail, style, ink, window) + 1.0;
+    let natural = head_w + 1.0 + tail_w;
+    let min = floor + tail_w;
+    let parts = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .min_w(px(min))
+        .max_w(px(natural))
+        .child(
+            div()
+                .flex_shrink(1.0)
+                .min_w(px(floor))
+                .overflow_hidden()
+                .child(
+                    Label::new(head, source, style, ink)
+                        .truncate(true)
+                        .id(TAB_TITLE_ID),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .child(Label::new(tail, source, style, ink).id(TAB_TITLE_TAIL_ID)),
+        );
+    if active {
+        // The other tabs give their width first (they shrink 1000 to 1).
+        return parts.flex_shrink(1.0).into_any_element();
+    }
+    let line = px(style.line_height.ceil() + 2.0);
+    div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .h(line)
+        .min_w(px(0.0))
+        .flex_shrink(1.0)
+        .overflow_hidden()
+        .child(div().w(px(0.0)).h(line))
+        .child(parts.flex_basis(px(min)).flex_grow(1.0))
+        .into_any_element()
+}
 
 impl TabStrip {
     fn build(self, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -453,11 +558,16 @@ impl TabStrip {
                 )
                 // ## m3c-narrow (F12): the title ellipsizes (its tooltip and the tab's
                 // accessible name keep it whole) under a stable id.
-                .child(
-                    Label::new(tab.title, tab.title_source, style, ink)
+                // ## m4b-t21-shots (named exception): or two parts (`TabSpec::parts`).
+                .child(match tab.parts {
+                    None => Label::new(tab.title, tab.title_source, style, ink)
                         .truncate(true)
-                        .id(TAB_TITLE_ID),
-                );
+                        .id(TAB_TITLE_ID)
+                        .into_any_element(),
+                    Some((head, tail)) => {
+                        two_part_title(head, tail, tab.title_source, style, ink, active, window)
+                    }
+                });
             // ## m3c-narrow (F12; design/m3b-safe surface 24): a strip narrower than its tabs
             // (a pane at the split floor) is a declared give-way: the inactive tabs shrink first,
             // their titles ellipsizing, down to nothing (each clips what it no longer has room

@@ -694,14 +694,14 @@ fn scripts_row(files: usize, others: &[String], cx: &App) -> TreeRowData {
     if !others.is_empty() {
         // Outlined, lowercase, glyph-less (controller ruling b); never red, never filled.
         row.badge = Some(tr_id(cx, "hv-scripts-node-shared"));
-        // ## m4b-t13-explorer fix round 1: the tree's tooltip is one line (`Tip`), so a shared
-        // node's tooltip is the shared sentence alone (the count is the row's meta and its
-        // accessible description); both sentences together ran past a 960 px window.
-        tip = vec![text(
+        // ## m4b-t21-shots fix round 1 (m8, named exception): the count and the shared
+        // sentence together, as NOTES surface 1 says; the shared `Tip` wraps a line wider than
+        // the window since T21 (T13 fix round 1 kept the shared sentence alone).
+        tip.push(text(
             cx,
             "hv-scripts-node-shared-tip",
             vec![("conns", ArgValue::List(others.to_vec()))],
-        )];
+        ));
         words.push(tr_id(cx, "hv-scripts-node-shared"));
     }
     row.tooltip = join_lines(&tip);

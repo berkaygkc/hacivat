@@ -1614,11 +1614,18 @@ fn the_chooser_names_each_rows_environment(cx: &mut TestAppContext) {
     r.library("orders", &["a.sql"]);
     goto_query(r.vcx, "a", "a.sql · orders");
     press_key(r.vcx, "enter");
-    let h = host(r.vcx);
     let rows = chooser(r.vcx).expect("the chooser");
-    let labels = r.vcx.cx.read(|cx| h.read(cx).chooser_row_labels(cx));
+    // Fix round 1 (m5): the names the rows declared in a frame (what AccessKit reads).
+    r.vcx.run_until_parked();
+    hacivat_ui::popover::a11y_record();
+    in_window(r.vcx, |window, _| window.refresh());
+    let labels: Vec<String> = hacivat_ui::popover::a11y_take()
+        .into_iter()
+        .filter(|d| d.role == Some(gpui::Role::ListBoxOption))
+        .map(|d| strip(&d.name))
+        .filter(|n| n.contains("orders-"))
+        .collect();
     assert_eq!(labels.len(), rows.0.len(), "{labels:?}");
-    let labels: Vec<String> = labels.iter().map(|l| strip(l)).collect();
     // Each row: the environment word, the connection, the database; production says so.
     for (label, (name, db)) in labels.iter().zip(rows.0.iter()) {
         assert!(label.contains(name) && label.ends_with(db), "{label:?}");

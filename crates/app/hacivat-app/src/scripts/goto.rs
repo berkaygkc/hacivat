@@ -50,6 +50,7 @@ use hacivat_ui::focus_home::{HomeSlot, focus_home};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::input::{InputEvent, TextInput};
 use hacivat_ui::l10n::ui_text;
+use hacivat_ui::popover::Declare as _;
 use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext as _, Context, Entity, FluentBuilder as _, FocusHandle,
@@ -580,15 +581,6 @@ impl GotoHost {
 
     // ---- tests ------------------------------------------------------------------------------
 
-    // ## m4b-t21-shots (plan Task 21: the chooser announces the environment of each row)
-    /// The chooser rows' accessible names, in order (tests); empty in the results.
-    pub fn chooser_row_labels(&self, cx: &App) -> Vec<SharedString> {
-        match &self.mode {
-            Mode::Choose(ch) => ch.rows.iter().map(|c| row_label(c, cx)).collect(),
-            Mode::Results => Vec::new(),
-        }
-    }
-
     // ## m4b-t21-shots (T15 fr2 n1, n3)
     /// What Enter in the chooser acts on now: the identity the last frame drew active, `None`
     /// before the chooser has drawn (tests).
@@ -950,8 +942,9 @@ impl Render for GotoHost {
                                 .debug_selector(move || format!("scripts-choose-row-{ix}"))
                                 // ## m4b-t15-goto fix round 1 (review minor 2): with the
                                 // environment word (the mark is the only other cue).
-                                // ## m4b-t21-shots: one function, which the tests read.
-                                .aria_label(row_label(cand, cx))
+                                // ## m4b-t21-shots (fix round 1, I2): declared (recorded), so
+                                // the shots and the tests read the name the row gives.
+                                .declare(Role::ListBoxOption, row_label(cand, cx), Some(active))
                                 // ## m4b-t15-goto fix round 2 (I-fr1-1): the click carries the
                                 // identity of the row it was painted for, never an index.
                                 .on_click({
@@ -1073,23 +1066,27 @@ impl Render for GotoHost {
                 }
             };
 
+        // ## m4b-t21-shots fix round 1 (m9): the production note is the surface's safety
+        // sentence: it wraps (the footer grows) instead of ellipsizing.
         let footer = div()
             .flex()
             .items_center()
             .gap(px(t.spacing.xl))
-            .h(px(FOOTER_PX))
+            .min_h(px(FOOTER_PX))
             .px(px(t.spacing.lg))
             .border_t_1()
             .border_color(c.seam.to_hsla())
             .overflow_hidden()
             .children(hints.into_iter().map(|(k, text)| hint(k, text)))
             .when_some(foot_note, |el, text| {
-                el.child(
-                    div().flex_shrink(1.0).min_w(px(0.0)).child(
-                        Label::new(text, TextSource::Fluent, ty.caption, c.text_2.to_hsla())
-                            .truncate(true),
+                el.child(div().flex_1().min_w(px(0.0)).py(px(t.spacing.xs)).child(
+                    hacivat_ui::text::paragraph(
+                        text,
+                        TextSource::Fluent,
+                        ty.caption,
+                        c.text_2.to_hsla(),
                     ),
-                )
+                ))
             });
 
         let choosing = matches!(self.mode, Mode::Choose(_));

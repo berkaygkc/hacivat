@@ -803,8 +803,8 @@ impl Surface {
             Surface::M3b(state) => (state.required(), state.shows_production()),
             // ## m3c-t43-shots
             Surface::M3c(state) => (state.required(), state.shows_production()),
-            // ## m4b-t21-shots (named line)
-            Surface::M4b(state) => (state.required(), state.connects()),
+            // ## m4b-t21-shots (named line; fix round 1, I2)
+            Surface::M4b(state) => (state.required(), state.production_capsule()),
             _ => return Vec::new(),
         };
         let mut ids: Vec<&'static str> = required.iter().flat_map(|g| g.iter().copied()).collect();
@@ -1486,21 +1486,88 @@ fn shot_text_system() -> Arc<dyn PlatformTextSystem> {
     TEXT_SYSTEM.with(Arc::clone)
 }
 
+// ## m4b-t21-shots fix round 1 (I2)
+/// What is wrong with the chooser rows' declared names in `decls`: none declared, or a row
+/// whose name does not begin with an environment word (the swatch is the only other cue), or
+/// the production row without the production word.
+fn chooser_rows_named(cx: &App, decls: &[hacivat_ui::popover::A11yDecl]) -> Vec<String> {
+    use hacivat_app::connections::capsule::env_word;
+    use hacivat_proto::EnvTag;
+    let words: Vec<String> = [
+        Some(EnvTag::Production),
+        Some(EnvTag::Staging),
+        Some(EnvTag::Test),
+        Some(EnvTag::Dev),
+        Some(EnvTag::Local),
+        None,
+    ]
+    .into_iter()
+    .map(|t| strip(&env_word(cx, t)))
+    .collect();
+    let rows: Vec<String> = decls
+        .iter()
+        .filter(|d| d.role == Some(hacivat_ui_core::gpui_surface::Role::ListBoxOption))
+        .map(|d| strip(&d.name))
+        .filter(|n| n.contains("orders-"))
+        .collect();
+    let mut out = Vec::new();
+    if rows.is_empty() {
+        out.push("no chooser row declared its name".to_string());
+    }
+    for row in &rows {
+        if !words.iter().any(|w| row.starts_with(&format!("{w} "))) {
+            out.push(format!("a chooser row names no environment: {row:?}"));
+        }
+        if row.contains("orders-prod ") && !row.starts_with(&format!("{} ", words[0])) {
+            out.push(format!("the production row does not say so: {row:?}"));
+        }
+    }
+    out
+}
+
 // ## m4b-t21-shots (named exception, R-M4b-44): the shot's temp root outlives its app.
 thread_local! {
-    /// Where [`shot_root`] makes a shot's temp root (`None`: `$TMPDIR`). A full render and
-    /// `shots_render_leaves_no_temp_dir` point it at a folder of their own and check that
+    /// Where [`shot_root`] makes a shot's temp root (`None`: `$TMPDIR/hacivat-shots`).
+    /// `shots_render_leaves_no_temp_dir` points it at a folder of its own and checks that
     /// every root is gone once its shot is.
     static SHOT_TMP: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
-/// A shot's temp root, under [`SHOT_TMP`]'s folder when one is set.
-fn shot_root() -> tempfile::TempDir {
-    match SHOT_TMP.with(|t| t.borrow().clone()) {
-        Some(base) => tempfile::tempdir_in(base),
-        None => tempfile::tempdir(),
+// ## m4b-t21-shots fix round 1 (m10): a shot's root has a stable path (its shot's name hashed),
+// so a path the app shows (Settings, the attach dialog) reads the same in every run on a
+// machine; shards render different shots, so their roots never meet.
+/// The temp root of shot `name`, under [`SHOT_TMP`]'s folder or `$TMPDIR/hacivat-shots`.
+fn shot_root_path(name: &str) -> PathBuf {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::hash::DefaultHasher::new();
+    name.hash(&mut h);
+    let base = SHOT_TMP
+        .with(|t| t.borrow().clone())
+        .unwrap_or_else(|| std::env::temp_dir().join("hacivat-shots"));
+    base.join(format!("hv-{:08x}", h.finish() as u32))
+}
+
+/// A shot's temp root: made empty (a crashed run's leftover goes), removed when dropped.
+struct ShotRoot(PathBuf);
+
+impl ShotRoot {
+    fn path(&self) -> &Path {
+        &self.0
     }
-    .expect("temp dir")
+}
+
+impl Drop for ShotRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The temp root of shot `name` ([`shot_root_path`]), fresh.
+fn shot_root(name: &str) -> ShotRoot {
+    let path = shot_root_path(name);
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("temp dir");
+    ShotRoot(path)
 }
 
 /// The entries left in `base` (the temp roots of shots that are over).
@@ -1558,7 +1625,7 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     // is dropped after it (locals drop in reverse order, on a panic too): the app's teardown
     // saves the workspace again into `data/`, which used to re-create the root after its
     // removal (the M4 gate's 3,464 `$TMPDIR/.tmp*/data/` folders).
-    let root = shot_root();
+    let root = shot_root(&shot.file_name(2.0));
     let mut cx = HeadlessAppContext::with_platform(
         shot_text_system(),
         Arc::new(BundledAssets),
@@ -1778,6 +1845,16 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     }
     failures.extend(check_grid(&name, shot.locale, &frame));
     failures.extend(shot.surface.trust_missing(&name, &frame));
+    // ## m4b-t21-shots fix round 1 (I2): the chooser announces each row's environment.
+    if let Surface::M4b(state) = shot.surface
+        && state.is_chooser()
+    {
+        failures.extend(
+            cx.update(|cx| chooser_rows_named(cx, &decls))
+                .into_iter()
+                .map(|v| format!("{name}: (t) {v}")),
+        );
+    }
     if std::env::var_os("SHOTS_DUMP").is_some() {
         for r in &frame {
             println!(
@@ -1894,10 +1971,6 @@ fn render_all_surfaces(names: &[String], all: bool) {
     // ## m3c-threads: the live threads after the first shot and after the last.
     let mut first_threads: Option<Option<usize>> = None;
     let mut threads = None;
-    // ## m4b-t21-shots (R-M4b-44): every shot's temp root in a folder of the run's own, which
-    // each shot must leave empty.
-    let tmp = tempfile::tempdir().expect("the run's temp folder");
-    SHOT_TMP.with(|t| *t.borrow_mut() = Some(tmp.path().to_path_buf()));
     for shot in shots() {
         if !names.contains(&shot.file_name(2.0)) {
             continue;
@@ -1905,13 +1978,16 @@ fn render_all_surfaces(names: &[String], all: bool) {
         // ## m3a-t35-shots: the per-shot and total harness time (the plan's Step 4 record).
         let started = std::time::Instant::now();
         failures.extend(render(shot, &dir));
-        // ## m4b-t21-shots (R-M4b-44): reported once, then removed (the next shot starts clean).
-        for left in left_in(tmp.path()) {
+        // ## m4b-t21-shots (R-M4b-44): the shot's root is gone with its app (fix round 1, m10:
+        // its stable path); reported once, then removed.
+        let root = shot_root_path(&shot.file_name(2.0));
+        if root.exists() {
             failures.push(format!(
-                "{}: (r) left the temp root {left} behind",
-                shot.file_name(2.0)
+                "{}: (r) left the temp root {} behind",
+                shot.file_name(2.0),
+                root.display()
             ));
-            let _ = std::fs::remove_dir_all(tmp.path().join(left));
+            let _ = std::fs::remove_dir_all(&root);
         }
         let took = started.elapsed();
         slowest = slowest.max(took);
@@ -1934,8 +2010,6 @@ fn render_all_surfaces(names: &[String], all: bool) {
     // ## m3c-t43-shots (fix round 1, m1): a known finding of a state rendered whole (16 shots)
     // that matched no line is stale: it fails the run (it would hide the next regression).
     failures.extend(m3c::stale_findings(&m3c_rendered));
-    // ## m4b-t21-shots (R-M4b-44)
-    SHOT_TMP.with(|t| *t.borrow_mut() = None);
     let total = run_started.elapsed();
     println!(
         "shots: {rendered} rendered into {} in {:.1} s (mean {} ms, slowest {} ms per shot)",

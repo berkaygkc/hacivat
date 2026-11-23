@@ -4651,7 +4651,8 @@ hv-scripts-size-mb = { $n } MB
 #   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
 hv-scripts-enc-title = { $file } isn't UTF-8 text.
 # Surface 10 (Encoding).
-hv-scripts-enc-body = Choose the encoding it was saved in, or open it read-only to look first.
+# m4b-t21-shots fix round 1 (named exception, m3): no "Open read-only" is built, so the body no longer offers it.
+hv-scripts-enc-body = Choose the encoding it was saved in.
 # Surface 10 (Encoding).
 hv-scripts-enc-label = Encoding
 # Surface 10 (Encoding).

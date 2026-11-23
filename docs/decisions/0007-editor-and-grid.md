@@ -1513,3 +1513,24 @@ read-only preview and the 20–100 MB paste confirmation. `hacivat-text` gains
   - A focused ▶ stays focused and drawn when a scan marks its row.
 - `EditorView::line_mark_rows()` returns the rows the last frame drew a key on, beside `gutter_play_rows()`.
 - The key's accessible description is the rest of its tooltip (the host's hint), so the hint is not mouse-only.
+
+## m4b-t21 — the host-drawn T2 banner, and the ▶ over a key
+
+Task 21 (shots, cross-surface flows) and its fix round 1 (review I3, m6, m7).
+
+- **Why.** NOTES surface 9 puts the Run-as-script strip under the T2 banner. The banner is drawn inside the editor's column, and the strip is the console host's row. Drawing the strip inside the cached editor would make its Stop a descendant of the editor's own focus node: the code area's stop would come first, against "toolbar → Stop → code" (R-T33-1).
+- **The seam.** All three are named items, re-exported by the crate root (m6):
+  - `pub type HostBanner = Rc<dyn Fn(&App) -> bool>`;
+  - `EditorView::set_host_banner(Option<HostBanner>, cx)`;
+  - `EditorView::banner_element(&self, window, cx) -> Option<AnyElement>`.
+
+  While the hook answers `true`, the editor's column holds no banner (`banner_in_column`), and the host draws `banner_element()` where it wants it. Without a hook, every host keeps its old path.
+- **The host's contract.**
+  - It notifies the editor whenever its answer changes. The editor is a cached view, and nothing else redraws it. The app's console notifies at every place a strip comes or goes (`run_as_script::strip_changed`).
+  - It draws the banner exactly once. While a strip shows, the console host draws it above the strip.
+- **Condensed form (fix round 1, m1).**
+  - `banner_element()` returns the banner's narrow form, measured at the editor's last width: no icon, and a body in a scroll viewport that gives up its height first, while the well keeps its title.
+  - The host stacks the notices, the banner, the strip and the find bar above the code. At 960 × 600 the code would otherwise get no line at all.
+  - The console keeps its code area at least two lines tall (`EditorView::line_height`) while a strip shows. The notices and the strip never shrink.
+- **Narrow form while the host draws (fix round 1, m7).** The frame that crosses the narrow line still asks for one more render (`banner_narrow_seen`), wherever the banner is drawn. A host that draws it from the editor's last width shows the right form on that render; no frame shows the old form.
+- **The ▶ over a line mark: its tooltip carries the hint.** `line_marks::on_line` returns `Covered { icon, labels, detail }`. `RunTip` lists the labels under "Run this statement", then the first mark's `detail` lines as wrapping `text_2` paragraphs. This amends the m4b-t17 fix-round-1 bullet "its tooltip lists them under 'Run this statement'": the key's hint ("Saving asks first… allow-secret") is no longer reachable only by the key's own tooltip (T17 re-review n1).

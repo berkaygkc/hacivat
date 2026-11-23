@@ -60,6 +60,8 @@ pub use service::{
     StatementSpan,
 };
 pub use view::{EditorEvent, EditorStatus, EditorView, FocusedEditor};
+// ## m4b-t21-shots fix round 1 (m6): a host names the banner hook's type.
+pub use view::HostBanner;
 // ## m3b-t01b-seams
 pub use find::{FindMatcher, FindStatus};
 // ## m3c-t34-editor

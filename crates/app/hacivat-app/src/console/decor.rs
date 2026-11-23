@@ -65,5 +65,7 @@ pub fn tab_decor(tab: TabId, cx: &App) -> TabDecor {
         // No swatch for a connection without an environment.
         env: profile.environment.map(|tag| env_kind(Some(tag))),
         hairline: profile.environment == Some(EnvTag::Production),
+        // ## m4b-t21-shots (named line)
+        title_parts: None,
     }
 }

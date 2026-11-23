@@ -434,14 +434,21 @@ impl Render for Tip {
                 ))
                 .into_any_element();
         }
-        // ## m4b-t21-shots: wrapping lines in a fixed width (a tooltip is laid out at its
-        // min-content size, so a wrapping one needs its width).
-        let width = px(TIP_WRAP_W).min(window.viewport_size().width - px(2.0 * TIP_PAD_X));
+        // ## m4b-t21-shots: wrapping lines in a set width (a tooltip is laid out at its
+        // min-content size, so a wrapping one needs its width): its widest line's, up to
+        // `TIP_WRAP_W` (fix round 1, m8: two short lines hug their text).
         let lines: Vec<SharedString> = self
             .text
             .split('\n')
             .map(|l| SharedString::from(l.to_string()))
             .collect();
+        let widest = lines
+            .iter()
+            .map(|l| line_width(l, style, ink, window))
+            .fold(px(0.0), Pixels::max);
+        let width = (widest + px(2.0 * TIP_PAD_X + 1.0))
+            .min(px(TIP_WRAP_W))
+            .min(window.viewport_size().width - px(2.0 * TIP_PAD_X));
         surface
             .w(width)
             .flex()
