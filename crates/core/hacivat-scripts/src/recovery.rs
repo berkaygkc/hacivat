@@ -95,10 +95,13 @@ pub struct CopyMeta {
 
 /// A database file as a SQLite script tab is bound to it: its canonical path and, where the
 /// platform has them, its device and inode numbers.
+///
+/// ## m4b-cifix-4 (named exception): and on Linux its birth time
+/// ([`crate::fileio::FileIdentity`]): ext4 hands a replaced file the freed inode back.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DbFile {
     pub path: String,
-    pub dev_ino: Option<(u64, u64)>,
+    pub id: Option<crate::fileio::FileIdentity>,
 }
 
 /// A recovery copy offered back. Its `Debug` never shows the text.
@@ -606,12 +609,13 @@ fn read_one(dir: &Path, lib: LibraryId, meta_path: &Path) -> Option<RecoveryEntr
         secret_suspected: sidecar.secret_suspected,
         damaged: sidecar.damaged,
         // ## m4b-t14-tabs (fix round 3): an unreadable identity keeps the path alone.
+        // ## m4b-cifix-4 (named exception): the identity with its birth time.
         db_file: sidecar.db_file_path.map(|path| DbFile {
             path,
-            dev_ino: sidecar.db_file_id.as_deref().and_then(|t| {
-                let (d, i) = t.split_once(':')?;
-                Some((d.parse().ok()?, i.parse().ok()?))
-            }),
+            id: sidecar
+                .db_file_id
+                .as_deref()
+                .and_then(crate::fileio::FileIdentity::parse),
         }),
     };
     Some(RecoveryEntry {
@@ -707,8 +711,8 @@ impl Sidecar {
             db_file_id: copy
                 .db_file
                 .as_ref()
-                .and_then(|f| f.dev_ino)
-                .map(|(d, i)| format!("{d}:{i}")),
+                .and_then(|f| f.id)
+                .map(|id| id.to_text()),
         }
     }
 }

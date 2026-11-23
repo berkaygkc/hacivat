@@ -691,9 +691,12 @@ fn sqlite_scripts_sit_under_the_profile_root_by_file_stem(cx: &mut TestAppContex
                     false,
                     vec![table("t", None, &[])],
                 ),
+                // ## m4b-cifix-4: an attached schema named `archive`, not `aux`: the library
+                // folder below takes its name, and `aux` is a reserved device name on Windows
+                // (`create_dir_all` fails there with error 267, CI 45077623376).
                 schema(
                     DbmsKind::Sqlite,
-                    &["aux"],
+                    &["archive"],
                     false,
                     vec![table("u", None, &[])],
                 ),
@@ -701,7 +704,7 @@ fn sqlite_scripts_sit_under_the_profile_root_by_file_stem(cx: &mut TestAppContex
         ),
     );
     r.library("orders", &["a.sql"]);
-    r.library("aux", &["x.sql"]);
+    r.library("archive", &["x.sql"]);
     let root = adapter::profile_key(id);
     set_expanded(r.vcx, root, true);
     let labels: Vec<String> = children(r.vcx, root)
@@ -723,7 +726,7 @@ fn sqlite_scripts_sit_under_the_profile_root_by_file_stem(cx: &mut TestAppContex
         ["a.sql"]
     );
     // The attached schema gets none (R-M4b-32).
-    let aux = adapter::namespace_key(id, &NsKey::schema(["aux"]));
+    let aux = adapter::namespace_key(id, &NsKey::schema(["archive"]));
     set_expanded(r.vcx, aux, true);
     assert!(
         children(r.vcx, aux)
@@ -1237,10 +1240,12 @@ fn rename_refuses_a_traversal_name(cx: &mut TestAppContext) {
     r.vcx.simulate_keystrokes(&select_all());
     r.vcx.simulate_input("müşteri.sql");
     press_key(r.vcx, "enter");
+    // ## m4b-cifix-4: a rename is `hard_link(old, new)` then `remove_file(old)` (T13, ADR 0009),
+    // so the new name shows on disk a moment before the old one goes; wait for both (the test
+    // read the old name in between under parallel load, 9 of 24 stressed runs).
     wait_until(r.vcx, "the renamed file", |_| {
-        dir.join("müşteri.sql").exists()
+        dir.join("müşteri.sql").exists() && !dir.join("a.sql").exists()
     });
-    assert!(!dir.join("a.sql").exists());
     wait_until(r.vcx, "the renamed row and the field closed", |vcx| {
         scripts_rows(vcx, id, "orders") == ["b.sql", "müşteri.sql"]
             && !layer_ids(vcx).contains(&file_ops::NAME_FIELD_LAYER)

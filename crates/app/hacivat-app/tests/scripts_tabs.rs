@@ -2070,6 +2070,13 @@ fn sqlite_tab_refuses_run_when_the_profile_points_to_another_file(cx: &mut TestA
         })
     });
     assert_eq!(queries(&r.fakes[0]), ["SELECT 1"], "nothing more was sent");
+    // ## m4b-cifix-4: a file replaced at its path is told apart only where the platform has a
+    // file identity (Unix: device, inode and, on Linux, the birth time, since ext4 hands the
+    // new file the freed inode, CI 45077623376). Windows compares the canonical path alone
+    // (T14's residual, ADR 0009 `m4b-t14`): nothing to replace there.
+    if stored.id.is_none() {
+        return;
+    }
     // Back on the first path, but the file there was replaced: refused too.
     p.endpoint = hacivat_session::profile::ProfileEndpoint::File {
         path: first.clone(),
@@ -2077,6 +2084,17 @@ fn sqlite_tab_refuses_run_when_the_profile_points_to_another_file(cx: &mut TestA
     };
     save_draft(r.vcx, hacivat_session::profile::ProfileDraft::edit(p));
     std::fs::remove_file(&first).unwrap();
+    // Linux stamps a birth time from the coarse clock: wait (on a condition) until a new file
+    // is born after the old one, so the replacement is too (ADR 0009 `m4b-cifix-4` residual).
+    if let Some(born) = stored.id.and_then(|i| i.born) {
+        let probe = dir.join("probe");
+        wait_until(r.vcx, "the birth clock passes the old file", |_| {
+            std::fs::write(&probe, b"").unwrap();
+            let later = std::fs::metadata(&probe).unwrap().created().unwrap() > born;
+            std::fs::remove_file(&probe).unwrap();
+            later
+        });
+    }
     std::fs::write(&first, b"replaced").unwrap();
     r.run(tab);
     wait_until(r.vcx, "the replaced file is refused", |_| {
@@ -2174,8 +2192,8 @@ fn sqlite_tab_without_its_file_takes_the_profiles_file_at_run(cx: &mut TestAppCo
 fn on_another_volume(r: &Rig, tab: TabId) -> tabs::SqliteFile {
     let id = r.spec_id(tab);
     let mut file = r.vcx.cx.read(|cx| tabs::sqlite_file(id, cx)).unwrap();
-    if let Some((dev, ino)) = file.id {
-        file.id = Some((dev.wrapping_add(1), ino));
+    if let Some(id) = file.id.as_mut() {
+        id.dev = id.dev.wrapping_add(1);
     }
     file
 }

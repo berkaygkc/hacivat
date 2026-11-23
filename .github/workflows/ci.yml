@@ -144,7 +144,7 @@ jobs:
 
       # Full test set, lines 1-4 (F2). Line 5 is the nightly release-tests job.
       - name: Test (1/4) workspace
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast  # m4b R-C0-11: report every failing binary
         # ## m4b-t06-secrets (named exception): `docker-full` runs only `--ignored` tests, so the
         # history redactor's byte-identity proptests (hacivat-exec lib) get their full 20,000
         # cases here, on the nightly schedule only; PRs run 4,000.
@@ -284,7 +284,7 @@ jobs:
         uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test (1/4) workspace
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast  # m4b R-C0-11: report every failing binary
       - name: Test (2/4) ui-core, test-support + scene-check
         run: cargo test --locked -p hacivat-ui-core --features test-support,scene-check
       - name: Test (3/4) l10n, pseudo

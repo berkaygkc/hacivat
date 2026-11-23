@@ -122,7 +122,8 @@ enum SavedKind {
         #[serde(default, deserialize_with = "crate::scripts::restore::lenient")]
         database: Option<String>,
         // ## m4b-t14-tabs fix round 1 (C2, R-T14-1): a SQLite tab's file, as it was at open
-        // (its canonical path and `dev:ino`); left out for every other tab.
+        // (its canonical path and `dev:ino`, with `:secs.nanos` of its birth time on Linux since
+        // m4b-cifix-4); left out for every other tab.
         #[serde(
             default,
             deserialize_with = "crate::scripts::restore::lenient",
