@@ -1550,3 +1550,31 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
   - m9: Cancel and Show here stay together on the right when the footer wraps.
   - m10: the launch-time and remove-then-break residuals of R-T10-7 go to T20; a persisted last good binding would close them.
 
+## m4b-cifix-4 — a SQLite tab's file identity includes its birth time (Linux)
+
+- **Finding (CI 45077623376, Linux only).**
+  - `sqlite_tab_refuses_run_when_the_profile_points_to_another_file` timed out on `ubuntu-24.04` and in `turkey-test` waiting for "the replaced file is refused". macOS passed.
+  - The test deletes the tab's database file and writes a new one at the same path. On journaled ext4 the new file in the same folder usually gets the freed inode back: the cifix-2 finding for folders, here for a file.
+  - The tab's identity was the canonical path and `dev:ino` (R-T14-1). Both matched, so Run passed and the script would have run on the replaced file. **A product bug.**
+- **Decision (R-CI2-1, applied to files).**
+  - One public type, `fileio::FileIdentity { dev, ino, born }`, serves files and folders. `FolderIdentity` is now its alias, read from a folder. `born` is the birth time on Linux only (`statx` `btime` through `Metadata::created()`; userland cannot set it). On macOS it is `None` and `(dev, ino)` stays the identity: APFS never reuses an object id, and its birth time moves back with a set-back modification time.
+  - `tabs::SqliteFile.id` and `recovery::DbFile.id` hold a `FileIdentity`. A replaced file is born later, so the gate's `stored == profile == session` comparison refuses it.
+  - The text kept in `workspace.json` (`sqlite_id`) and in a recovery sidecar (`db_file_id`) is `dev:ino`, then `:secs.nanos` of the birth time when there is one. `FileIdentity::parse` reads it back exactly. A text written before this change has no birth time, so on Linux it no longer matches its file and Run refuses until the tab is opened again. This fails closed. M4b is unreleased.
+  - A remount (R-T14-5) now also needs the same birth time: same path, same inode, same birth time, another device.
+- **Residuals.**
+  - **Same clock tick.** As for folders: a delete and a create inside one tick of Linux's coarse clock (1 to 4 ms), on an inode ext4 hands back, keep the same identity. Closing it needs the inode generation through an `ioctl` (`unsafe`).
+  - **Windows** still compares the canonical path only (T14). NTFS's creation time can be set by any program and is "tunnelled" to a file made again under the same name within 15 s, so it would add nothing.
+  - **Other file systems.** Where `statx` reports no birth time (some FUSE and network mounts), `born` is `None` on both sides and the check is `(dev, ino)`, as before.
+- **The other `dev:ino` identities in M4b (audit).**
+  - **Registry (T3/T10), `libraries.toml` `inode`.** Compared across sessions only. On ext4, a root deleted and made again between sessions can be adopted at the next launch. This is the cifix-2 carry (a T3 schema change). In-session identity already has the birth time.
+  - **Library root (T10), `FolderIdentity`.** Already includes the birth time (cifix-2).
+  - **Save stamps (T5).** `DiskStamp` is content-based: length, modification time and the XXH3-128 of the bytes. A replaced file with other bytes differs, and one with the same bytes is the same text. The read stream's private `Fingerprint` adds `dev`, `ino` and `ctime` with nanoseconds. A new file always gets a new `ctime`, which userland cannot set. Not affected.
+  - **Folder handles (T3/T5), `dir::Identity`.** `Dir::verify` compares each folder from the root down, the opened folder included, against the identities read at open. The opened folder's handle is held for the whole operation, and an open handle keeps its inode allocated, so its number cannot go to another folder. A replaced ancestor therefore fails at the opened folder. Not affected.
+  - **The partial-file cleanups in `manifest.rs` `create_in_place` and `fileio.rs` `publish_new`.** Each compares the name's identity with the file the same call just created and still has linked. These are not stored identities. Reuse needs that file unlinked and another created at the name in that instant, and then only that new file would be removed. Not affected.
+  - **Rename target (T13), `fileops::target_of`.** Compares two `lstat`s taken in the same call. It is not a stored identity. Not affected.
+  - **Git (T7), `map.rs` and `status.rs`.** Lookups within one listing. These are display only and gate nothing.
+  - **Outside M4b.** `hacivat-introspect`'s SQLite `file_identity` (M4 metadata freshness) and the vault's and meta cache's link checks (both against an open handle) are not M4b's. They are not changed here.
+- **Tests.**
+  - `fileio::tests::file_identity_tells_a_file_written_again_from_a_renamed_one`, and `fileio::tests::file_identity_text_round_trips`.
+  - `tests/recovery.rs` `recovery_round_trip_and_discard`: a birth time round-trips to the nanosecond.
+  - `sqlite_tab_refuses_run_when_the_profile_points_to_another_file`: the CI failure, now GREEN on Linux.
