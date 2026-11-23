@@ -1521,9 +1521,32 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
 - Core files: `registry.rs`, `manifest.rs`, `service.rs`, `service/actor.rs`, `service/work.rs`, `lib.rs`.
 - App files: `scripts/{mod, projection, diagnostics, file_ops}.rs` ("Script library settings…" enabled), `settings_ui/{mod, rows}.rs` (`Section::Scripts`, 9 sections).
 - Tests: `tests/m4b_routing.rs` (the stub count, the filled menus, the two new rows) and `tests/shots/m4b.rs` (five states).
-- UI: `hacivat-ui/src/input/mod.rs`.
+- UI: `hacivat-ui/src/input/mod.rs` and `hacivat-ui/src/checkbox.rs` (`Checkbox::wrap`; fix round 1, m8: the stacked layout's label is a `paragraph`, which takes only a static id, so it has no `checkbox-label-<id>`; no shot marker uses it).
 
 **Deviations from the mock.**
 - The inset is plain mono ink, not syntax-coloured.
 - The polling reason is a caption line under the state, not a tooltip: the settings rows have no tooltip primitive.
 - The added alias line in the mapping inset is the whole edited line (`toml_edit` rewrites the `aliases = [...]` line).
+
+### Fix round 1 (review I1–I6, m1–m10; ruling R-T16-1)
+
+- **I1 (R-T10-7 said truly).** When a broken manifest's last good binding is kept, the snapshot carries `LibraryDiag::ManifestKept(<database>)`. The popover shows one line in place of the read failure: ".hacivat/workspace.toml in <folder> can't be read, so the library keeps its last binding, <database>, until the file is fixed." The Settings row shows the same line, through `diagnostics::manifest_problem`; a test compares the two.
+- **I2 (no inherited binding).** An adopted folder is read from scratch: `manifest_good`, `db`, aliases and the manifest diagnostics are reset. A root refused as `RootChanged` also forgets `manifest_good`. Only the user's local mappings stay; they belong to the library, not to the folder. The review's probe is now `an_adopted_folder_never_inherits_the_old_binding`.
+- **I3 (transactional "Use this folder").**
+  - `adopt_root` records nothing up front. It marks the library, and the next validation runs with only the identity checks waived (`RefreshJob::waived`: no recorded or session identity). The new canonical path and inode are saved only when that validation passes (`commit_adoption`). A refusal leaves the old record and `RootChanged`, so a folder that later takes the path is never adopted without a new confirmation.
+  - `adopt_root` now answers once the validation is done: `Ok(true)` adopted, `Ok(false)` refused.
+  - It is accepted, and the button is offered, only for `RootRefused(Moved | IdentityChanged)`, never for a link, a non-folder, an overlap, the home or an app folder (`LibrarySnapshot::can_adopt`).
+  - Residual (m4): the confirmation is bound to the refusal reason and the path, not to a folder identity seen when the dialog opened (the snapshot exposes no identity). A swap between the question and the press is validated afresh and, if it is another real folder, adopted.
+- **I4.** A found manifest with a read failure, or a newer `format`, heads the dialog with "Found .hacivat/workspace.toml, but it can't be read (<reason>); the library will bind by its folder name, <folder>, until it is fixed." There is one reason per diagnostic kind (`hv-scripts-manifest-reason`).
+- **I5 (R-T16-1).** The mapping dialog's "Attach another folder…" opens the attach dialog with `Prefill::Folder`: the Database field shows the chosen folder's name, never the node's local name, and follows Change… while untouched. A new file can be attached, by Enter or click, only after a frame drew its fields and text. The plain database-menu attach keeps the node's name (the plan's "prefilled with the node's database name").
+- **I6.** Every Settings action (Remove, "Use this folder", Watch, a mapping's Remove) reports what it could not do on its row (`hv-scripts-set-failed`: read-only registry, the library changed meanwhile, the folder refused, a failed save). The error clears on the next attempt.
+- **Minor findings.**
+  - m1: the inset draws at most 200 lines, then "… and N more lines".
+  - m2: another library unticks the share box.
+  - m3: Enter on the box presses Show here.
+  - m5: Settings controls are keyed by `LibraryId`, and the mapping rows by their node.
+  - m6: the tests assert the initial and Cancel focus, and wait for the service before negative checks.
+  - m7: Remove's question says when open script tabs of the library have unsaved changes, whose recovery copies go with it.
+  - m9: Cancel and Show here stay together on the right when the footer wraps.
+  - m10: the launch-time and remove-then-break residuals of R-T10-7 go to T20; a persisted last good binding would close them.
+

@@ -5160,8 +5160,6 @@ hv-scripts-attach-aliases-err =
         [long] An alias can be at most 128 bytes.
        *[many] Hacivat keeps up to 32 aliases.
     }
-# Surface 3 (Attach dialog): the file found in the folder could not be read.
-hv-scripts-attach-found-unreadable = Hacivat can't read this file, so the folder binds by its own name. Hacivat never changes it.
 # Surface 3 (Attach dialog): while the chosen folder is read.
 hv-scripts-attach-reading = Reading the folder…
 # Surface 3 (Attach dialog): the subtitle, the connection and database it was opened from.
@@ -5232,3 +5230,58 @@ hv-scripts-remove-path = { $path }
 # Variables:
 #   $folder (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
 hv-scripts-diag-unwatched = Nothing reports changes in { $folder }. If edits made outside Hacivat don't show up, choose Watch: Every 2 seconds in Settings › Script libraries.
+# m4b-t16-attach fix round 1 (I1, R-T10-7): the manifest can't be read and the library keeps the binding its last good read gave.
+# Variables:
+#   $folder (String) - a library's folder name, verbatim (data), e.g. "billing".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-diag-toml-kept = .hacivat/workspace.toml in { $folder } can't be read, so the library keeps its last binding, { $database }, until the file is fixed.
+# m4b-t16-attach fix round 1 (I4): why a found .hacivat/workspace.toml can't be read.
+# Variables:
+#   $reason (String) - selector: why; one of link, notfile, changed, unreadable, large, notutf8, deep, invalid, noformat, badformat, newer, database (anything else: the default).
+hv-scripts-manifest-reason =
+    { $reason ->
+        [link] it is a link, which Hacivat never follows
+        [notfile] it is not a file
+        [changed] it changed while it was read
+        [unreadable] it can't be opened
+        [large] it is over 64 KB
+        [notutf8] it is not UTF-8 text
+        [deep] it is nested too deeply
+        [invalid] it is not valid TOML
+        [noformat] it has no format line
+        [badformat] its format is not a number
+        [newer] a newer Hacivat wrote it
+        [database] its database name is not valid
+       *[other] it can't be understood
+    }
+# m4b-t16-attach fix round 1 (I4): the attach dialog over a found file it can't read.
+# Variables:
+#   $reason (String) - why, an hv-scripts-manifest-reason text, e.g. "it is not valid TOML".
+#   $folder (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+hv-scripts-attach-found-broken = Found .hacivat/workspace.toml, but it can't be read ({ $reason }); the library will bind by its folder name, { $folder }, until it is fixed.
+# m4b-t16-attach fix round 1 (m1): a long found file is shown up to a cap.
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-attach-more-lines =
+    { $n ->
+        [one] … and { $n } more line
+       *[other] … and { $n } more lines
+    }
+# m4b-t16-attach fix round 1 (I6): an action in Settings › Script libraries did nothing.
+# Variables:
+#   $reason (String) - selector: why; one of readonly, state, refused (anything else: the default).
+hv-scripts-set-failed =
+    { $reason ->
+        [readonly] Hacivat can't change its list of libraries now, so nothing was changed.
+        [state] The library changed meanwhile, so nothing was done.
+        [refused] Hacivat can't use this folder as the library; nothing was changed.
+       *[other] Hacivat couldn't save this change; nothing was changed.
+    }
+# m4b-t16-attach fix round 1 (m7): Remove… while script tabs from the library have unsaved changes.
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-remove-dirty =
+    { $n ->
+        [one] { $n } open script tab from it has unsaved changes. Removing the library discards its recovery copy, so save it first.
+       *[other] { $n } open script tabs from it have unsaved changes. Removing the library discards their recovery copies, so save them first.
+    }

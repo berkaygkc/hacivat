@@ -344,6 +344,10 @@ pub(super) struct RefreshJob {
     pub stopped: bool,
     pub limits: Limits,
     pub fs: SharedFs,
+    // ## m4b-t16-attach fix round 1 (I3)
+    /// A confirmed "Use this folder" validation: the recorded and this session's identity are
+    /// left out of `reg` and `session`, so only the identity checks are waived.
+    pub waived: bool,
 }
 
 /// What a refresh found.

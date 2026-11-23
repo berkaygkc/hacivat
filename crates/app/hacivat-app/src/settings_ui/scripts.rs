@@ -22,6 +22,7 @@
 //!   window root (R-M4b-43).
 //! - Every name and path from a library is shown through `escape_untrusted` / `display_name`.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -31,7 +32,7 @@ use hacivat_scripts::names::escape_untrusted;
 use hacivat_scripts::service::{LibraryDiag, LibraryService, UnavailableReason};
 use hacivat_scripts::{
     DatabaseName, GitSummary, LibraryId, LibrarySnapshot, LibraryState, LocalMapping, PollReason,
-    WatchMode, WorkspaceSnapshot,
+    RegistryError, WatchMode, WorkspaceSnapshot,
 };
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::env_swatch;
@@ -41,8 +42,8 @@ use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
 use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, Role, SharedString, Styled as _, Window, div, px,
+    AnyElement, App, Context, Div, Global, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Role, SharedString, Styled as _, WeakEntity, Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
 
@@ -81,7 +82,22 @@ pub fn open_page(window: &mut Window, cx: &mut App) {
 pub struct ScriptsSection {
     home: HomeSlot,
     query: String,
+    // ## m4b-t16-attach fix round 1 (I6): what the last action on a row could not do.
+    errors: HashMap<ErrorKey, &'static str>,
 }
+
+// ## m4b-t16-attach fix round 1 (I6)
+/// The row an action's error belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ErrorKey {
+    Library(LibraryId),
+    Mapping(ProfileId, DatabaseName),
+}
+
+/// The section while the settings page shows it (actions report their errors to it).
+struct OpenSection(WeakEntity<ScriptsSection>);
+
+impl Global for OpenSection {}
 
 impl ScriptsSection {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -90,9 +106,12 @@ impl ScriptsSection {
             .detach();
         cx.observe_global::<ConnectionsModel>(|_, cx| cx.notify())
             .detach();
+        let this = cx.entity().downgrade();
+        cx.set_global(OpenSection(this));
         ScriptsSection {
             home: HomeSlot::new(),
             query: String::new(),
+            errors: HashMap::new(),
         }
     }
 
@@ -203,24 +222,77 @@ fn confirm(
     .detach();
 }
 
-fn run(svc: Arc<LibraryService>, cx: &mut App, f: impl AsyncFnOnce(Arc<LibraryService>) + 'static) {
-    cx.spawn(async move |_| f(svc).await).detach();
+// ## m4b-t16-attach fix round 1 (I6): every action says what it could not do, on its row.
+/// Shows (or, with `None`, clears) the error of `key`'s row.
+fn report(key: ErrorKey, reason: Option<&'static str>, cx: &mut App) {
+    let Some(section) = cx.try_global::<OpenSection>().and_then(|o| o.0.upgrade()) else {
+        return;
+    };
+    section.update(cx, |s, cx| {
+        match reason {
+            Some(r) => {
+                s.errors.insert(key, r);
+            }
+            None => {
+                s.errors.remove(&key);
+            }
+        }
+        cx.notify();
+    });
 }
 
-fn remove(lib: &LibrarySnapshot, mappings: usize, window: &mut Window, cx: &mut App) {
+/// `hv-scripts-set-failed`'s variant for a registry refusal.
+fn reason_of(e: &RegistryError) -> &'static str {
+    match e {
+        RegistryError::ReadOnly => "readonly",
+        RegistryError::UnknownLibrary => "state",
+        _ => "other",
+    }
+}
+
+/// Runs `f` with the service off the UI thread; its answer is `key`'s row error (`None`: done).
+fn act(
+    key: ErrorKey,
+    cx: &mut App,
+    f: impl AsyncFnOnce(Arc<LibraryService>) -> Option<&'static str> + 'static,
+) {
     let Some(svc) = projection::service(cx) else {
         return;
     };
+    report(key.clone(), None, cx);
+    cx.spawn(async move |cx| {
+        let reason = f(svc).await;
+        cx.update(|cx| report(key, reason, cx));
+    })
+    .detach();
+}
+
+fn remove(lib: &LibrarySnapshot, mappings: usize, window: &mut Window, cx: &mut App) {
     let name = library_name(lib);
     let path = escape_untrusted(&lib.root.path.display().to_string(), 512);
     let id = lib.id;
+    // ## m4b-t16-attach fix round 1 (m7): unsaved script tabs of this library lose their
+    // recovery copies with it (R-T5-4); the question says so, with how many.
+    let dirty = crate::scripts::tabs::all_docs(cx)
+        .iter()
+        .filter(|d| {
+            let d = d.read(cx);
+            d.spec(cx).is_some_and(|s| s.library == id) && d.is_dirty(cx)
+        })
+        .count();
     let title: TextFn =
         Rc::new(move |cx: &App| text(cx, "hv-scripts-remove-title", vec![("library", arg(&name))]));
     let body: TextFn = Rc::new(move |cx: &App| {
-        if mappings == 0 {
+        let body = if mappings == 0 {
             tr_id(cx, "hv-scripts-remove-body-none")
         } else {
             text(cx, "hv-scripts-remove-body", vec![("n", num(mappings))])
+        };
+        if dirty == 0 {
+            body
+        } else {
+            let tabs = text(cx, "hv-scripts-remove-dirty", vec![("n", num(dirty))]);
+            format!("{body}\n{tabs}").into()
         }
     });
     confirm(
@@ -231,18 +303,15 @@ fn remove(lib: &LibrarySnapshot, mappings: usize, window: &mut Window, cx: &mut 
         window,
         cx,
         move |cx| {
-            run(svc, cx, async move |svc| {
-                // The folder is never touched (detach): only `libraries.toml` and recovery copies.
-                let _ = svc.detach(id).await;
+            // The folder is never touched (detach): only `libraries.toml` and recovery copies.
+            act(ErrorKey::Library(id), cx, async move |svc| {
+                svc.detach(id).await.err().as_ref().map(reason_of)
             });
         },
     );
 }
 
 fn adopt(lib: &LibrarySnapshot, window: &mut Window, cx: &mut App) {
-    let Some(svc) = projection::service(cx) else {
-        return;
-    };
     let name = library_name(lib);
     let path = escape_untrusted(&lib.root.path.display().to_string(), 512);
     let id = lib.id;
@@ -259,27 +328,58 @@ fn adopt(lib: &LibrarySnapshot, window: &mut Window, cx: &mut App) {
         window,
         cx,
         move |cx| {
-            run(svc, cx, async move |svc| {
-                let _ = svc.adopt_root(id).await;
+            act(ErrorKey::Library(id), cx, async move |svc| {
+                // Answered once the folder was validated: `false` means it can't be used.
+                match svc.adopt_root(id).await {
+                    Ok(true) => None,
+                    Ok(false) => Some("refused"),
+                    Err(e) => Some(reason_of(&e)),
+                }
             });
         },
     );
 }
 
 fn set_watch(id: LibraryId, mode: WatchMode, cx: &mut App) {
-    if let Some(svc) = projection::service(cx) {
-        run(svc, cx, async move |svc| {
-            let _ = svc.set_watch(id, mode).await;
-        });
-    }
+    act(ErrorKey::Library(id), cx, async move |svc| {
+        svc.set_watch(id, mode).await.err().as_ref().map(reason_of)
+    });
 }
 
 fn unmap(profile: ProfileId, database: DatabaseName, cx: &mut App) {
-    if let Some(svc) = projection::service(cx) {
-        run(svc, cx, async move |svc| {
-            let _ = svc.unmap(profile, database).await;
-        });
-    }
+    let key = ErrorKey::Mapping(profile, database.clone());
+    act(key, cx, async move |svc| {
+        match svc.unmap(profile, database).await {
+            Ok(true) => None,
+            Ok(false) => Some("state"),
+            Err(e) => Some(reason_of(&e)),
+        }
+    });
+}
+
+// ## m4b-t16-attach fix round 1 (m5)
+/// The number a library's Settings row is keyed by (its id, folded to 64 bits).
+pub fn row_key(id: LibraryId) -> u64 {
+    let (hi, lo) = id.0.as_u64_pair();
+    hi ^ lo
+}
+
+/// The number a local mapping's row is keyed by (its node).
+fn mapping_key(profile: ProfileId, database: &DatabaseName) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::hash::DefaultHasher::new();
+    profile.hash(&mut h);
+    database.hash(&mut h);
+    h.finish()
+}
+
+/// An action's error on its row.
+fn error_line(reason: &'static str, theme: &Theme, cx: &App) -> AnyElement {
+    crate::scripts::attach_dialog::ink_line(
+        text(cx, "hv-scripts-set-failed", vec![("reason", arg(reason))]),
+        "scripts-set-error",
+        theme,
+    )
 }
 
 // ---- drawing ---------------------------------------------------------------------------------
@@ -362,12 +462,16 @@ fn caption_line(t: SharedString, theme: &Theme) -> AnyElement {
 }
 
 fn library_row(
-    i: usize,
     lib: &Arc<LibrarySnapshot>,
     snap: &WorkspaceSnapshot,
+    error: Option<&'static str>,
     theme: &Theme,
     cx: &mut Context<ScriptsSection>,
 ) -> Div {
+    // ## m4b-t16-attach fix round 1 (m5): a row's controls are keyed by its library, never by
+    // where the (filtered) list puts it.
+    let n = row_key(lib.id);
+    let key = |part: &'static str| (part, n);
     let t = theme.tokens;
     let c = &t.colors;
     let name = library_name(lib);
@@ -407,7 +511,7 @@ fn library_row(
     }
     // Watch: automatic / every 2 seconds (R-T9-1).
     let id = lib.id;
-    let watch = Segmented::new(("scripts-set-watch", i))
+    let watch = Segmented::new(key("scripts-set-watch"))
         .item(SegmentItem {
             content: SegmentContent::Label(tr_id(cx, "hv-scripts-set-watch-auto")),
             pressed: lib.watch == WatchMode::Automatic,
@@ -425,7 +529,7 @@ fn library_row(
     let missing = lib.state == LibraryState::Unavailable(UnavailableReason::Missing);
     let path = lib.root.path.clone();
     let reveal = Button::new(
-        ("scripts-set-reveal", i),
+        key("scripts-set-reveal"),
         text(
             cx,
             "hv-scripts-menu-reveal",
@@ -438,11 +542,17 @@ fn library_row(
     let mappings = snap.mappings.iter().filter(|m| m.library == id).count();
     let for_remove = lib.clone();
     let remove_btn = Button::new(
-        ("scripts-set-remove", i),
+        key("scripts-set-remove"),
         tr_id(cx, "hv-scripts-set-remove"),
     )
     .on_click(move |_, window, cx| remove(&for_remove, mappings, window, cx));
-    let moved = lib.state == LibraryState::Unavailable(UnavailableReason::RootChanged);
+    // ## m4b-t16-attach fix round 1 (I3): only for a folder refused for its identity.
+    let adoptable = lib.can_adopt();
+    // ## m4b-t16-attach fix round 1 (I1): the manifest's problem, worded as the popover words
+    // it (the kept binding while R-T10-7 keeps it).
+    let manifest = shown
+        .as_ref()
+        .and_then(|l| crate::scripts::diagnostics::manifest_problem(l, cx));
     let mut col = div()
         .flex()
         .flex_col()
@@ -509,17 +619,30 @@ fn library_row(
                 ))
                 .child(watch),
         );
-    if moved {
+    if let Some(line) = manifest {
+        col = col.child(crate::scripts::attach_dialog::ink_line(
+            line,
+            "scripts-set-manifest",
+            theme,
+        ));
+    }
+    if adoptable {
         let for_adopt = lib.clone();
         col = col.child(
             div().child(
-                Button::new(("scripts-set-adopt", i), tr_id(cx, "hv-scripts-set-adopt"))
+                Button::new(key("scripts-set-adopt"), tr_id(cx, "hv-scripts-set-adopt"))
                     .on_click(move |_, window, cx| adopt(&for_adopt, window, cx)),
             ),
         );
     }
+    if let Some(reason) = error {
+        col = col.child(error_line(reason, theme, cx));
+    }
     div()
-        .debug_selector(move || format!("scripts-set-library-{i}"))
+        .debug_selector({
+            let id = lib.id;
+            move || format!("scripts-set-library-{id}")
+        })
         .flex()
         .flex_row()
         .items_start()
@@ -548,12 +671,14 @@ fn library_row(
 }
 
 fn mapping_row(
-    j: usize,
     m: &LocalMapping,
     snap: &WorkspaceSnapshot,
+    error: Option<&'static str>,
     theme: &Theme,
     cx: &mut Context<ScriptsSection>,
 ) -> Option<Div> {
+    // ## m4b-t16-attach fix round 1 (m5): keyed by the node it maps.
+    let j = mapping_key(m.profile, &m.database);
     let t = theme.tokens;
     let c = &t.colors;
     let p = cx.try_global::<ConnectionsModel>()?.get(m.profile);
@@ -612,7 +737,9 @@ fn mapping_row(
                     tr_id(cx, "hv-scripts-set-mapping-remove"),
                 )
                 .on_click(move |_, _, cx| unmap(profile, database.clone(), cx)),
-            ),
+            )
+            // ## m4b-t16-attach fix round 1 (I6): on its own line under the row.
+            .children(error.map(|r| div().w_full().child(error_line(r, theme, cx)))),
     )
 }
 
@@ -658,16 +785,22 @@ impl ScriptsSection {
                     .border_1()
                     .border_color(c.seam_strong.to_hsla())
                     .rounded(px(t.radii.sm));
-                for (i, lib) in libraries.iter().enumerate() {
-                    list = list.child(library_row(i, lib, snap, &theme, cx));
+                for lib in &libraries {
+                    let error = self.errors.get(&ErrorKey::Library(lib.id)).copied();
+                    list = list.child(library_row(lib, snap, error, &theme, cx));
                 }
                 out = out.child(list);
                 let mappings: Vec<Div> = snap
                     .mappings
                     .iter()
-                    .enumerate()
-                    .filter(|(_, m)| libraries.iter().any(|l| l.id == m.library))
-                    .filter_map(|(j, m)| mapping_row(j, m, snap, &theme, cx))
+                    .filter(|m| libraries.iter().any(|l| l.id == m.library))
+                    .filter_map(|m| {
+                        let error = self
+                            .errors
+                            .get(&ErrorKey::Mapping(m.profile, m.database.clone()))
+                            .copied();
+                        mapping_row(m, snap, error, &theme, cx)
+                    })
                     .collect();
                 if !mappings.is_empty() {
                     out = out

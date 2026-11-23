@@ -195,6 +195,13 @@ impl fmt::Debug for LibrarySnapshot {
 // ## m4b-t10-service
 
 impl LibrarySnapshot {
+    // ## m4b-t16-attach fix round 1 (I3)
+    /// Whether "Use this folder" can fix it: it is `RootChanged` only because another folder is
+    /// at its path (moved or replaced), never a link, an overlap or an app folder.
+    pub fn can_adopt(&self) -> bool {
+        actor::adoptable(&self.state, &self.diagnostics)
+    }
+
     // ## m4b-t10-service fix round 1
     /// A library snapshot (tests, `binding` callers): no diagnostics, generation 1.
     pub fn new(
@@ -290,6 +297,10 @@ pub enum LibraryDiag {
     // ## m4b-t10-service fix round 1
     /// Why the root is `Unavailable(RootChanged)` (I3).
     RootRefused(RootRefusal),
+    // ## m4b-t16-attach fix round 1 (I1, R-T10-7)
+    /// The manifest beside it cannot be read now, so the library keeps the binding its last
+    /// good read gave (this logical database, display form) until the file is fixed.
+    ManifestKept(String),
     /// This many diagnostics name paths this connection does not show (a [`LibraryView`]
     /// counts them instead of naming them, m2).
     HiddenProblems(usize),
@@ -663,10 +674,16 @@ impl LibraryService {
 
     /// The user's confirmed "Use this folder" for library `id`, refused as
     /// `Unavailable(RootChanged)` because its folder moved or was replaced (T10 m-h): the
-    /// recorded resolution is forgotten and the folder is validated again from scratch (every
-    /// other check still applies), so the library keeps its id, its mappings and its tabs'
-    /// bindings instead of a detach and attach. `UnknownLibrary` for any other state.
-    pub async fn adopt_root(&self, id: LibraryId) -> Result<(), RegistryError> {
+    /// folder at the path is validated with only the identity checks waived (every other check
+    /// still applies), so the library keeps its id, its mappings and its tabs' bindings instead
+    /// of a detach and attach.
+    ///
+    /// ## m4b-t16-attach fix round 1 (I2, I3): answers once that validation is done:
+    /// `Ok(true)` adopted (the new identity is saved and the folder's binding is read from
+    /// scratch), `Ok(false)` refused (nothing saved: the old identity and `RootChanged` stay).
+    /// `UnknownLibrary` when the library is not refused for its identity (a link, an overlap,
+    /// an app folder, or not refused at all).
+    pub async fn adopt_root(&self, id: LibraryId) -> Result<bool, RegistryError> {
         self.ask(|reply| Msg::AdoptRoot { id, reply })
             .await
             .unwrap_or(Err(actor::STOPPED))

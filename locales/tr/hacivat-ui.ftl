@@ -5031,9 +5031,6 @@ hv-scripts-attach-aliases-err =
         [long] Takma ad en çok 128 bayt olabilir.
        *[many] Hacivat en çok 32 takma ad tutar.
     }
-# Surface 3 (Attach dialog): the file found in the folder could not be read.
-# Review: PO
-hv-scripts-attach-found-unreadable = Hacivat bu dosyayı okuyamıyor, bu yüzden klasör kendi adıyla bağlanır. Hacivat dosyayı hiç değiştirmez.
 # Surface 3 (Attach dialog): while the chosen folder is read.
 # Review: PO
 hv-scripts-attach-reading = Klasör okunuyor…
@@ -5119,3 +5116,56 @@ hv-scripts-remove-path = { $path }
 #   $folder (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
 # Review: PO
 hv-scripts-diag-unwatched = { $folder } içindeki değişiklikleri bildiren yok. Hacivat dışında yapılan düzenlemeler görünmüyorsa Ayarlar › Betik kitaplıkları'nda İzleme: 2 saniyede bir'i seçin.
+# m4b-t16-attach fix round 1 (I1, R-T10-7): the manifest can't be read and the library keeps the binding its last good read gave.
+# Variables:
+#   $folder (String) - a library's folder name, verbatim (data), e.g. "billing".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-diag-toml-kept = { $folder } içindeki .hacivat/workspace.toml okunamıyor; kitaplık dosya düzeltilene dek son bağlamasını, { $database }, korur.
+# m4b-t16-attach fix round 1 (I4): why a found .hacivat/workspace.toml can't be read.
+# Variables:
+#   $reason (String) - selector: why; one of link, notfile, changed, unreadable, large, notutf8, deep, invalid, noformat, badformat, newer, database (anything else: the default).
+# Review: PO
+hv-scripts-manifest-reason =
+    { $reason ->
+        [link] bir bağlantı; Hacivat bağlantıları izlemez
+        [notfile] bir dosya değil
+        [changed] okunurken değişti
+        [unreadable] açılamıyor
+        [large] 64 KB'tan büyük
+        [notutf8] UTF-8 metin değil
+        [deep] çok derin iç içe
+        [invalid] geçerli TOML değil
+        [noformat] format satırı yok
+        [badformat] format değeri bir sayı değil
+        [newer] daha yeni bir Hacivat yazmış
+        [database] veritabanı adı geçerli değil
+       *[other] anlaşılamıyor
+    }
+# m4b-t16-attach fix round 1 (I4): the attach dialog over a found file it can't read.
+# Variables:
+#   $reason (String) - why, an hv-scripts-manifest-reason text, e.g. "it is not valid TOML".
+#   $folder (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+# Review: PO
+hv-scripts-attach-found-broken = .hacivat/workspace.toml bulundu ama okunamıyor ({ $reason }); kitaplık, dosya düzeltilene dek klasör adıyla, { $folder }, bağlanır.
+# m4b-t16-attach fix round 1 (m1): a long found file is shown up to a cap.
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-attach-more-lines = … ve { $n } satır daha
+# m4b-t16-attach fix round 1 (I6): an action in Settings › Script libraries did nothing.
+# Variables:
+#   $reason (String) - selector: why; one of readonly, state, refused (anything else: the default).
+# Review: PO
+hv-scripts-set-failed =
+    { $reason ->
+        [readonly] Hacivat kitaplık listesini şu an değiştiremiyor; hiçbir şey değişmedi.
+        [state] Kitaplık bu arada değişti; hiçbir şey yapılmadı.
+        [refused] Hacivat bu klasörü kitaplık olarak kullanamıyor; hiçbir şey değişmedi.
+       *[other] Hacivat bu değişikliği kaydedemedi; hiçbir şey değişmedi.
+    }
+# m4b-t16-attach fix round 1 (m7): Remove… while script tabs from the library have unsaved changes.
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-remove-dirty = Bu kitaplıktan açık { $n } betik sekmesinde kaydedilmemiş değişiklik var. Kitaplığı kaldırmak kurtarma kopyalarını siler; önce kaydedin.

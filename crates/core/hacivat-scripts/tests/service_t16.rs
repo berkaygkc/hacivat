@@ -375,7 +375,7 @@ async fn use_this_folder_adopts_a_replaced_root_and_keeps_its_mappings() {
     })
     .await;
     // Asked only for a library in that state, and then it is the same library again.
-    r.svc.adopt_root(id).await.unwrap();
+    assert_eq!(r.svc.adopt_root(id).await, Ok(true));
     wait_until("served again", || {
         r.state(id) == Some(LibraryState::Watching)
     })
@@ -426,19 +426,154 @@ async fn use_this_folder_never_adopts_a_link() {
         r.state(id) == Some(LibraryState::Unavailable(UnavailableReason::RootChanged))
     })
     .await;
-    r.svc.adopt_root(id).await.unwrap();
+    // ## m4b-t16-attach fix round 1 (I3): a link is no identity change: "Use this folder" is
+    // refused up front, and nothing is recorded or listed.
+    let before = r.registry_text();
+    assert_eq!(
+        r.svc.adopt_root(id).await,
+        Err(RegistryError::UnknownLibrary)
+    );
     r.svc.settled().await;
-    // Validated from scratch: a link root is still refused, and nothing is listed.
-    wait_until("refused again", || {
-        r.state(id) == Some(LibraryState::Unavailable(UnavailableReason::RootChanged))
-    })
-    .await;
+    assert_eq!(
+        r.state(id),
+        Some(LibraryState::Unavailable(UnavailableReason::RootChanged))
+    );
+    assert_eq!(r.registry_text(), before, "the recorded identity is kept");
     assert!(
         r.svc
             .snapshot()
             .view(None)
             .library(id)
             .is_some_and(|l| l.file_count() == 0)
+    );
+}
+
+// ## m4b-t16-attach fix round 1 (I3)
+/// A confirmed adoption whose validation is refused (the folder became a link between the
+/// refusal and the press) leaves the old identity recorded: a real folder that later takes the
+/// path is not adopted without a new confirmation.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_adoption_keeps_the_old_identity() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("scripts");
+    write_files(&lib, &["a.sql"]);
+    let r = rig(app.path());
+    r.ready().await;
+    let id = r.svc.attach(lib.clone(), None, false).await.unwrap();
+    r.up(id).await;
+    let recorded = r.registry_text();
+    assert!(recorded.contains("inode"), "{recorded}");
+    let root = canonical(&lib);
+    // Replaced by another folder: an identity change, which can be adopted.
+    std::fs::rename(&lib, d.path().join("scripts-old")).unwrap();
+    write_files(&lib, &["other.sql"]);
+    r.hint(&root, &[""]);
+    wait_until("RootChanged", || {
+        r.state(id) == Some(LibraryState::Unavailable(UnavailableReason::RootChanged))
+    })
+    .await;
+    // Unheard, the path becomes a link before the press: the adoption's validation refuses.
+    std::fs::rename(&lib, d.path().join("scripts-other")).unwrap();
+    std::os::unix::fs::symlink(d.path().join("scripts-other"), &lib).unwrap();
+    assert_eq!(
+        r.svc.adopt_root(id).await,
+        Ok(false),
+        "the adoption is refused"
+    );
+    wait_until("the adoption refused", || {
+        r.svc.snapshot().view(None).library(id).is_some_and(|l| {
+            l.diagnostics().contains(&LibraryDiag::RootRefused(
+                hacivat_scripts::RootRefusal::Link,
+            ))
+        })
+    })
+    .await;
+    r.svc.settled().await;
+    assert_eq!(r.registry_text(), recorded, "nothing was saved");
+    // A real folder at the path later is still another folder: refused, never adopted.
+    std::fs::remove_file(&lib).unwrap();
+    write_files(&lib, &["planted.sql"]);
+    // (Nothing watches an unavailable library: its recheck timer looks again.)
+    wait_until("refused for its identity", || {
+        r.svc.snapshot().view(None).library(id).is_some_and(|l| {
+            l.diagnostics().iter().any(|d| {
+                matches!(
+                    d,
+                    LibraryDiag::RootRefused(
+                        hacivat_scripts::RootRefusal::IdentityChanged
+                            | hacivat_scripts::RootRefusal::Moved
+                    )
+                )
+            })
+        })
+    })
+    .await;
+    r.svc.settled().await;
+    assert_eq!(
+        r.state(id),
+        Some(LibraryState::Unavailable(UnavailableReason::RootChanged))
+    );
+    assert_eq!(r.registry_text(), recorded);
+    // A served library is never "adopted" either.
+    let other = d.path().join("served");
+    write_files(&other, &["x.sql"]);
+    let served = r.svc.attach(other, None, false).await.unwrap();
+    r.up(served).await;
+    assert_eq!(
+        r.svc.adopt_root(served).await,
+        Err(RegistryError::UnknownLibrary)
+    );
+}
+
+// ## m4b-t16-attach fix round 1 (I2): the review's probe, as a test.
+/// An adopted folder is read from scratch: a broken manifest in it binds by the folder's name
+/// (with its diagnostic), never by the binding the old folder's manifest gave.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_adopted_folder_never_inherits_the_old_binding() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("scripts");
+    write_files(&lib, &["a.sql"]);
+    std::fs::create_dir_all(lib.join(".hacivat")).unwrap();
+    std::fs::write(
+        lib.join(".hacivat/workspace.toml"),
+        "format = 1\ndatabase = \"orders_prod\"\naliases = [\"orders_p\"]\n",
+    )
+    .unwrap();
+    let r = rig(app.path());
+    r.ready().await;
+    let id = r.svc.attach(lib.clone(), None, false).await.unwrap();
+    r.up(id).await;
+    assert_eq!(r.db(id).as_deref(), Some("orders_prod"));
+    let root = canonical(&lib);
+    std::fs::rename(&lib, d.path().join("scripts-old")).unwrap();
+    write_files(&lib, &["b.sql"]);
+    std::fs::create_dir_all(lib.join(".hacivat")).unwrap();
+    std::fs::write(lib.join(".hacivat/workspace.toml"), "<<<<<<< HEAD\n").unwrap();
+    r.hint(&root, &[""]);
+    wait_until("RootChanged", || {
+        r.state(id) == Some(LibraryState::Unavailable(UnavailableReason::RootChanged))
+    })
+    .await;
+    assert_eq!(r.svc.adopt_root(id).await, Ok(true));
+    wait_until("served again", || {
+        r.state(id) == Some(LibraryState::Watching)
+    })
+    .await;
+    r.svc.settled().await;
+    let snap = r.svc.snapshot();
+    let l = snap.library(id).unwrap();
+    assert_eq!(l.db.as_str(), "scripts", "the folder's own name");
+    assert!(l.aliases.is_empty());
+    let diags = snap.view(None).library(id).unwrap().diagnostics();
+    assert!(diags.contains(&LibraryDiag::Manifest(manifest::Diag::InvalidToml)));
+    assert!(
+        !diags
+            .iter()
+            .any(|d| matches!(d, LibraryDiag::ManifestKept(_))),
+        "{diags:?}"
     );
 }
 
@@ -477,6 +612,14 @@ async fn an_unreadable_manifest_keeps_the_last_good_binding() {
     let snap = r.svc.snapshot();
     let l = snap.library(id).unwrap();
     assert_eq!(l.db.as_str(), "orders", "the last good binding is kept");
+    // ## m4b-t16-attach fix round 1 (I1): and the snapshot says it is kept, naming it.
+    assert!(
+        snap.view(None)
+            .library(id)
+            .unwrap()
+            .diagnostics()
+            .contains(&LibraryDiag::ManifestKept("orders".into()))
+    );
     assert_eq!(
         l.aliases.iter().map(LogicalDb::as_str).collect::<Vec<_>>(),
         ["orders_p"]

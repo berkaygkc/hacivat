@@ -259,6 +259,36 @@ fn shown_file(vcx: &VisualTestContext) -> Option<(String, String)> {
     Some((path, text))
 }
 
+// ## m4b-t16-attach fix round 1 (m5): Settings rows are keyed by their library.
+/// The debug selector of `part`'s button on library `id`'s Settings row.
+fn row_button(part: &str, id: LibraryId) -> &'static str {
+    let n = settings_ui::scripts::row_key(id);
+    Box::leak(format!("button-scripts-set-{part}-{n}").into_boxed_str())
+}
+
+// ## m4b-t16-attach fix round 1 (m6)
+/// The focused dialog button is `index` (an alertdialog's Cancel, its Remove): the handle
+/// a press would focus is the one that already has the focus.
+fn assert_dialog_focus(vcx: &mut VisualTestContext, index: usize, name: &str) {
+    let before = focused(vcx).expect("a focused element");
+    let selector: &'static str =
+        Box::leak(format!("button-dialog-button-{index}").into_boxed_str());
+    let handle = handle_of(vcx, selector);
+    assert_eq!(before, handle, "the focus was on {name}");
+}
+
+fn frame_texts(vcx: &VisualTestContext) -> Vec<String> {
+    full_frame(vcx)
+        .into_iter()
+        .map(|t| t.text.to_string())
+        .collect()
+}
+
+fn settled(r: &Rig) {
+    let svc = r.svc.clone();
+    block(r.vcx, async move { svc.settled().await });
+}
+
 fn layer_open(vcx: &VisualTestContext, id: &str) -> bool {
     layer_ids(vcx).contains(&id)
 }
@@ -382,10 +412,10 @@ fn attach_over_existing_manifest_does_not_rewrite_it(cx: &mut TestAppContext) {
     assert_eq!(text, theirs.replace('\u{202E}', "<U+202E>"));
     // No name fields: nothing to write.
     assert!(r.vcx.debug_bounds("scripts-attach-database").is_none());
-    // Attach has the initial focus here.
-    let attach = handle_of(r.vcx, "button-scripts-attach-ok");
+    // Attach has the initial focus here (m6: asserted, not clicked first).
+    let [_, _, attach] = r.vcx.cx.read(|cx| d.read(cx).button_handles());
+    assert_focus_on(r.vcx, "Attach", &attach);
     press_key(r.vcx, "enter");
-    let _ = attach;
     wait_until(r.vcx, "the library", |_| r.library_at(&dir).is_some());
     assert_eq!(tree(&dir), before, "the folder is byte for byte the same");
     let id = r.library_at(&dir).unwrap();
@@ -437,7 +467,9 @@ fn one_click_mapping_writes_only_libraries_toml(cx: &mut TestAppContext) {
     // The share box is unchecked by default.
     let d = r.vcx.cx.read(mapping::open_dialog).unwrap();
     assert!(!r.vcx.cx.read(|cx| d.read(cx).shares_alias()));
-    // One press: Show here has the initial focus.
+    // One press: Show here has the initial focus (m6: asserted).
+    let [_, ok] = r.vcx.cx.read(|cx| d.read(cx).focus_handles());
+    assert_focus_on(r.vcx, "Show here", &ok);
     press_key(r.vcx, "enter");
     wait_until(r.vcx, "the mapping", |_| {
         !r.svc.snapshot().mappings.is_empty()
@@ -486,8 +518,7 @@ fn share_alias_appends_through_toml_edit(cx: &mut TestAppContext) {
         "nothing to show while unchecked"
     );
     // Space on the box ticks it; the file shows the edit.
-    let check = handle_of(r.vcx, "scripts-map-share");
-    let _ = check;
+    handle_of(r.vcx, "scripts-map-share");
     press_key(r.vcx, "space");
     let d = r.vcx.cx.read(mapping::open_dialog).unwrap();
     assert!(r.vcx.cx.read(|cx| d.read(cx).shares_alias()));
@@ -502,8 +533,9 @@ fn share_alias_appends_through_toml_edit(cx: &mut TestAppContext) {
     assert!(shown.starts_with("# Team binding: keep this comment.\n"));
     assert!(shown.contains("aliases = [\"orders_p\"]"), "{shown}");
     assert!(shown.contains("# trailing note"));
-    let show_here = handle_of(r.vcx, "button-scripts-map-ok");
-    let _ = show_here;
+    // m3: Enter on the box is the dialog's (Show here), never a second toggle.
+    let [share, _] = r.vcx.cx.read(|cx| d.read(cx).focus_handles());
+    assert_focus_on(r.vcx, "the share box", &share);
     press_key(r.vcx, "enter");
     wait_until(r.vcx, "the mapping", |_| {
         !r.svc.snapshot().mappings.is_empty()
@@ -559,27 +591,30 @@ fn remove_never_touches_the_folder(cx: &mut TestAppContext) {
         "{frame:?}"
     );
     assert!(frame.iter().any(|t| t == "Local mappings"), "{frame:?}");
-    let remove = handle_of(r.vcx, "button-scripts-set-remove-0");
-    let _ = remove;
+    // The section's first stop, where the focus goes when a row goes (m5, m6).
+    let attach_folder = handle_of(r.vcx, "button-scripts-set-attach");
+    handle_of(r.vcx, row_button("remove", id));
     press_key(r.vcx, "enter");
     assert_eq!(dialog_title(r.vcx), "Remove orders from Hacivat?",);
     assert!(dialog_body(r.vcx).contains("and so does its 1 local mapping"));
-    // Cancel is focused: a stray Enter keeps the library.
+    // Cancel is focused: a stray Enter keeps the library (m6: asserted, and the service has
+    // finished whatever it was asked before the check).
+    assert_dialog_focus(r.vcx, 1, "Cancel");
     press_key(r.vcx, "enter");
+    settled(&r);
     assert!(r.library_at(&dir).is_some());
-    let remove = handle_of(r.vcx, "button-scripts-set-remove-0");
-    let _ = remove;
+    handle_of(r.vcx, row_button("remove", id));
     press_key(r.vcx, "enter");
     // Remove is the first (Default) button.
-    let confirm = handle_of(r.vcx, "button-dialog-button-0");
-    let _ = confirm;
+    handle_of(r.vcx, "button-dialog-button-0");
     press_key(r.vcx, "enter");
     wait_until(r.vcx, "the library to go", |_| r.library_at(&dir).is_none());
     assert!(r.svc.snapshot().mappings.is_empty());
     assert_eq!(tree(&dir), before, "the folder and its files are unchanged");
-    // The focus went to the page, never to a vanished button.
+    // The focus went to the section's home ("Attach a folder…"), never to a vanished button
+    // or to another library's.
     redraw_full(r.vcx);
-    assert!(focused(r.vcx).is_some());
+    assert_focus_on(r.vcx, "Attach a folder…", &attach_folder);
     let _ = &mut r;
     r.finish();
 }
@@ -857,21 +892,20 @@ fn use_this_folder_is_confirmed_and_keeps_the_mappings(cx: &mut TestAppContext) 
             .any(|t| t == "This isn't the folder that was attached: it was moved or replaced."),
         "{frame:?}"
     );
-    let use_it = handle_of(r.vcx, "button-scripts-set-adopt-0");
-    let _ = use_it;
+    handle_of(r.vcx, row_button("adopt", id));
     press_key(r.vcx, "enter");
     assert_eq!(dialog_title(r.vcx), "Use this folder as orders?");
-    // Cancel is focused: Enter keeps it refused.
+    // Cancel is focused: Enter keeps it refused (m6: asserted, then the service settles).
+    assert_dialog_focus(r.vcx, 1, "Cancel");
     press_key(r.vcx, "enter");
+    settled(&r);
     assert_eq!(
         r.svc.snapshot().library(id).map(|l| l.state.clone()),
         Some(LibraryState::Unavailable(UnavailableReason::RootChanged))
     );
-    let use_it = handle_of(r.vcx, "button-scripts-set-adopt-0");
-    let _ = use_it;
+    handle_of(r.vcx, row_button("adopt", id));
     press_key(r.vcx, "enter");
-    let confirm = handle_of(r.vcx, "button-dialog-button-0");
-    let _ = confirm;
+    handle_of(r.vcx, "button-dialog-button-0");
     press_key(r.vcx, "enter");
     wait_until(r.vcx, "served again", |_| {
         r.svc.snapshot().library(id).map(|l| l.state.clone()) == Some(LibraryState::Watching)
@@ -910,6 +944,296 @@ fn the_menu_attach_is_prefilled_with_the_database_and_names_the_connection(
         .collect();
     assert!(frame.iter().any(|t| t.contains("orders-prod")), "{frame:?}");
     press_key(r.vcx, "escape");
+    r.finish();
+}
+// ---- fix round 1 ---------------------------------------------------------------------------------
+
+/// I1 (R-T10-7): while a broken manifest's last good binding is kept, the popover and the
+/// Settings row say the same true thing: the binding is kept, naming it.
+#[gpui::test]
+fn the_kept_binding_is_said_alike_in_the_popover_and_settings(cx: &mut TestAppContext) {
+    let r = rig(cx, vec![]);
+    // Named after another database: falling back to it would bind `billing`.
+    let dir = folder("billing", &["a.sql"]);
+    std::fs::create_dir_all(dir.join(".hacivat")).unwrap();
+    let file = dir.join(".hacivat/workspace.toml");
+    std::fs::write(&file, "format = 1\ndatabase = \"orders\"\n").unwrap();
+    let id = r.attach(&dir);
+    std::fs::write(&file, "<<<<<<< HEAD\ndatabase = \"orders\"\n=======\n").unwrap();
+    assert!(
+        r.fake
+            .emit(&dir, vec![hacivat_scripts::RawHint::Path(file.clone())])
+    );
+    wait_until(r.vcx, "the kept binding", |_| {
+        r.svc.snapshot().view(None).library(id).is_some_and(|l| {
+            l.diagnostics()
+                .iter()
+                .any(|d| matches!(d, hacivat_scripts::LibraryDiag::ManifestKept(_)))
+        })
+    });
+    let want = ".hacivat/workspace.toml in billing can't be read, so the library keeps its last \
+                binding, orders, until the file is fixed.";
+    let (_, lines) = r.vcx.cx.read(|cx| {
+        let snap = r.svc.snapshot();
+        let view = snap.view(None);
+        let lib = view.library(id).unwrap();
+        hacivat_app::scripts::diagnostics::content_for_tests(&lib, cx)
+    });
+    let lines: Vec<String> = lines.iter().map(|l| strip_isolation(l)).collect();
+    assert_eq!(
+        lines,
+        [want],
+        "one true line, not \"binds by its folder name\""
+    );
+    assert!(run(r.vcx, "workspace.open_settings"));
+    r.vcx
+        .cx
+        .update(|cx| settings_ui::fixtures::show_section(Section::Scripts, cx));
+    redraw_full(r.vcx);
+    assert_eq!(
+        text_of(r.vcx, "scripts-set-manifest")
+            .map(|t| strip_isolation(&t))
+            .as_deref(),
+        Some(want)
+    );
+    assert!(frame_texts(r.vcx).iter().any(|t| t == "binds to orders"));
+    r.finish();
+}
+
+fn strip_isolation(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\u{2068}' | '\u{2069}'))
+        .collect()
+}
+
+/// I4: a found file that can't be read says so, with its reason, and that the folder's own
+/// name binds until it is fixed (one row per kind of failure).
+#[gpui::test]
+fn a_broken_found_file_says_why_and_that_the_folder_name_binds(cx: &mut TestAppContext) {
+    let mut r = rig(cx, vec![]);
+    let mut cases: Vec<(&str, Vec<u8>, &str)> = vec![
+        (
+            "invalid",
+            b"<<<<<<< HEAD\ndatabase = \"orders\"\n".to_vec(),
+            "it is not valid TOML",
+        ),
+        (
+            "noformat",
+            b"database = \"orders\"\n".to_vec(),
+            "it has no format line",
+        ),
+        (
+            "badformat",
+            b"format = \"one\"\ndatabase = \"orders\"\n".to_vec(),
+            "its format is not a number",
+        ),
+        (
+            "newer",
+            b"format = 2\ndatabase = \"orders\"\n".to_vec(),
+            "a newer Hacivat wrote it",
+        ),
+        (
+            "database",
+            b"format = 1\ndatabase = 7\n".to_vec(),
+            "its database name is not valid",
+        ),
+        (
+            "notutf8",
+            b"format = 1\n\xff\xfe\n".to_vec(),
+            "it is not UTF-8 text",
+        ),
+        ("large", vec![b'#'; 70 * 1024], "it is over 64 KB"),
+        (
+            "deep",
+            format!("format = 1\nx = {}{}\n", "[".repeat(40), "]".repeat(40)).into_bytes(),
+            "it is nested too deeply",
+        ),
+    ];
+    // A linked file is never followed (Unix: the fixture is a symlink).
+    if cfg!(unix) {
+        cases.push((
+            "link",
+            Vec::new(),
+            "it is a link, which Hacivat never follows",
+        ));
+    }
+    for (name, bytes, reason) in cases {
+        let dir = folder(&format!("broken-{name}"), &["a.sql"]);
+        std::fs::create_dir_all(dir.join(".hacivat")).unwrap();
+        if name == "link" {
+            #[cfg(unix)]
+            {
+                let target = dir.join("elsewhere.toml");
+                std::fs::write(&target, "format = 1\ndatabase = \"orders\"\n").unwrap();
+                std::os::unix::fs::symlink(&target, dir.join(".hacivat/workspace.toml")).unwrap();
+            }
+        } else {
+            std::fs::write(dir.join(".hacivat/workspace.toml"), &bytes).unwrap();
+        }
+        let before = tree(&dir);
+        in_window(r.vcx, |w, cx| {
+            attach_dialog::open_at(dir.clone(), None, w, cx)
+        });
+        r.wait_dialog_ready();
+        let d = r.dialog();
+        assert!(r.vcx.cx.read(|cx| d.read(cx).found()), "{name}");
+        let want = format!(
+            "Found .hacivat/workspace.toml, but it can't be read ({reason}); the library will \
+             bind by its folder name, broken-{name}, until it is fixed."
+        );
+        assert_eq!(
+            text_of(r.vcx, "scripts-attach-found-head")
+                .map(|t| strip_isolation(&t))
+                .as_deref(),
+            Some(want.as_str()),
+            "{name}"
+        );
+        press_key(r.vcx, "escape");
+        assert!(!layer_open(r.vcx, attach_dialog::ATTACH_LAYER), "{name}");
+        assert_eq!(tree(&dir), before, "{name}: nothing written");
+    }
+    let _ = &mut r;
+    r.finish();
+}
+
+/// I5 (R-T16-1): the mapping dialog's "Attach another folder…" never prefills the node's
+/// (local) name: the Database field shows the chosen folder's name, and the local name never
+/// reaches `workspace.toml` without being typed.
+#[gpui::test]
+fn attach_another_folder_never_writes_the_local_name(cx: &mut TestAppContext) {
+    let r = rig(cx, vec![prof("orders-local", None, "orders_berkay")]);
+    let first = folder("orders", &["a.sql"]);
+    r.attach(&first);
+    let p = profile_id(r.vcx, "orders-local");
+    in_window(r.vcx, |w, cx| {
+        mapping::open_for(p, "orders_berkay".into(), w, cx)
+    });
+    wait_until(r.vcx, "the mapping dialog", |vcx| {
+        vcx.cx
+            .read(|cx| mapping::open_dialog(cx).is_some_and(|d| d.read(cx).is_ready()))
+    });
+    redraw_full(r.vcx);
+    handle_of(r.vcx, "button-scripts-map-other");
+    press_key(r.vcx, "enter");
+    assert!(!layer_open(r.vcx, mapping::MAP_LAYER));
+    let vcx = &*r.vcx;
+    settle_until(vcx, WAIT, || vcx.cx.did_prompt_for_paths());
+    let team = folder("team-scripts", &["daily.sql"]);
+    let answer = team.clone();
+    r.vcx
+        .cx
+        .simulate_path_prompt_response(move |_| Some(vec![answer]));
+    r.wait_dialog_ready();
+    let d = r.dialog();
+    let value = r
+        .vcx
+        .cx
+        .read(|cx| d.read(cx).database_input().read(cx).value().to_string());
+    assert_eq!(value, "team-scripts", "the folder's name, never the node's");
+    // The subtitle still names where it was opened from.
+    assert!(
+        frame_texts(r.vcx)
+            .iter()
+            .any(|t| t.contains("orders_berkay"))
+    );
+    // Enter in the field attaches what the field shows.
+    let database = r
+        .vcx
+        .cx
+        .read(|cx| d.read(cx).database_input().focus_handle(cx));
+    assert_focus_on(r.vcx, "Database", &database);
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "the library", |_| r.library_at(&team).is_some());
+    let written = std::fs::read_to_string(team.join(".hacivat/workspace.toml")).unwrap();
+    assert!(written.contains("database = \"team-scripts\""), "{written}");
+    assert!(!written.contains("orders_berkay"), "{written}");
+    r.finish();
+}
+
+/// I3: "Use this folder…" is offered only for a folder refused for its identity, never for a
+/// link.
+#[cfg(unix)]
+#[gpui::test]
+fn use_this_folder_is_never_offered_for_a_link(cx: &mut TestAppContext) {
+    let r = rig(cx, vec![]);
+    let dir = folder("orders", &["a.sql"]);
+    let id = r.attach(&dir);
+    let elsewhere = folder("elsewhere", &["planted.sql"]);
+    std::fs::rename(&dir, dir.with_file_name("orders-old")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+    assert!(
+        r.fake
+            .emit(&dir, vec![hacivat_scripts::RawHint::Path(dir.clone())])
+    );
+    wait_until(r.vcx, "RootChanged", |_| {
+        r.svc.snapshot().library(id).map(|l| l.state.clone())
+            == Some(LibraryState::Unavailable(UnavailableReason::RootChanged))
+    });
+    assert!(!r.svc.snapshot().library(id).unwrap().can_adopt());
+    assert!(run(r.vcx, "workspace.open_settings"));
+    r.vcx
+        .cx
+        .update(|cx| settings_ui::fixtures::show_section(Section::Scripts, cx));
+    redraw_full(r.vcx);
+    assert!(r.vcx.debug_bounds(row_button("adopt", id)).is_none());
+    assert!(r.vcx.debug_bounds(row_button("remove", id)).is_some());
+    r.finish();
+}
+
+/// I6: an action Settings could not do says so on its row, and the row stays as it was. The
+/// registry's folder is made read-only (Unix), so every write of `libraries.toml` fails.
+#[cfg(unix)]
+#[gpui::test]
+fn settings_actions_say_what_they_could_not_do(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let r = rig(cx, vec![]);
+    let dir = folder("orders", &["a.sql"]);
+    let id = r.attach(&dir);
+    assert!(run(r.vcx, "workspace.open_settings"));
+    r.vcx
+        .cx
+        .update(|cx| settings_ui::fixtures::show_section(Section::Scripts, cx));
+    redraw_full(r.vcx);
+    let config = paths(r.vcx)
+        .libraries_toml()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let was = std::fs::metadata(&config).unwrap().permissions();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let failed = "Hacivat couldn't save this change; nothing was changed.";
+    // Watch.
+    r.vcx
+        .cx
+        .update(|cx| settings_ui::scripts::fixtures::choose_watch(0, WatchMode::Poll, cx));
+    wait_until(r.vcx, "the watch error", |vcx| {
+        redraw_full(vcx);
+        text_of(vcx, "scripts-set-error").as_deref() == Some(failed)
+    });
+    assert_eq!(
+        r.svc.snapshot().library(id).map(|l| l.watch),
+        Some(WatchMode::Automatic)
+    );
+    // Remove.
+    handle_of(r.vcx, row_button("remove", id));
+    press_key(r.vcx, "enter");
+    handle_of(r.vcx, "button-dialog-button-0");
+    press_key(r.vcx, "enter");
+    settled(&r);
+    wait_until(r.vcx, "the remove error", |vcx| {
+        redraw_full(vcx);
+        text_of(vcx, "scripts-set-error").as_deref() == Some(failed)
+    });
+    assert!(r.library_at(&dir).is_some(), "still listed");
+    std::fs::set_permissions(&config, was).unwrap();
+    // Done right, the error goes.
+    handle_of(r.vcx, row_button("remove", id));
+    press_key(r.vcx, "enter");
+    handle_of(r.vcx, "button-dialog-button-0");
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "the library to go", |_| r.library_at(&dir).is_none());
+    redraw_full(r.vcx);
+    assert!(text_of(r.vcx, "scripts-set-error").is_none());
     r.finish();
 }
 // ## m4b-t16-attach

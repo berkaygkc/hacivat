@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use hacivat_l10n::ArgValue;
 use hacivat_proto::ProfileId;
-use hacivat_scripts::manifest::{self, ManifestPreview, ManifestV1};
+use hacivat_scripts::manifest::{self, Diag as ManifestDiag, ManifestPreview, ManifestV1};
 use hacivat_scripts::names::escape_untrusted;
 use hacivat_scripts::service::AttachError;
 use hacivat_scripts::{LogicalDb, NameError, RegistryError};
@@ -65,6 +65,8 @@ pub const ATTACH_LAYER: &str = "scripts-attach";
 
 /// How many characters of one untrusted line are shown (a manifest is at most 64 KiB).
 const SHOWN_CHARS: usize = 512;
+/// ## m4b-t16-attach fix round 1 (m1): how many lines of a file the inset draws.
+const MAX_SHOWN_LINES: usize = 200;
 
 /// The database node a dialog was opened from (its exact name on the server).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +93,23 @@ pub(crate) fn shown_path(path: &Path) -> String {
 /// "Attach script library…": the folder picker, then the dialog for the chosen folder. A
 /// cancelled picker opens nothing.
 pub fn start(origin: Option<Origin>, window: &mut Window, cx: &mut App) {
+    start_with(origin, Prefill::Node, window, cx);
+}
+
+// ## m4b-t16-attach fix round 1 (I5, R-T16-1)
+/// Where the Database field's first value comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prefill {
+    /// The database node it was opened from (the menu's "Attach script library…").
+    Node,
+    /// The chosen folder's name, never the node's: the mapping dialog's "Attach another
+    /// folder…" is opened from a node whose name is local by construction (Q5), and a local
+    /// name reaches a team's `workspace.toml` only when the user types it.
+    Folder,
+}
+
+/// [`start`] with the Database field prefilled from `prefill`.
+pub fn start_with(origin: Option<Origin>, prefill: Prefill, window: &mut Window, cx: &mut App) {
     let picked = cx.prompt_for_paths(PathPromptOptions {
         files: false,
         directories: true,
@@ -105,13 +124,26 @@ pub fn start(origin: Option<Origin>, window: &mut Window, cx: &mut App) {
         let Some(path) = paths.into_iter().next().filter(|p| p.is_absolute()) else {
             return;
         };
-        let _ = handle.update(cx, |_, window, cx| open_at(path, origin, window, cx));
+        let _ = handle.update(cx, |_, window, cx| {
+            open_at_with(path, origin, prefill, window, cx)
+        });
     })
     .detach();
 }
 
 /// The dialog for `path` (the picker's answer; shots and tests skip the picker).
 pub fn open_at(path: PathBuf, origin: Option<Origin>, window: &mut Window, cx: &mut App) {
+    open_at_with(path, origin, Prefill::Node, window, cx);
+}
+
+/// [`open_at`] with the Database field prefilled from `prefill`.
+pub fn open_at_with(
+    path: PathBuf,
+    origin: Option<Origin>,
+    prefill: Prefill,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let Some(ws) = window.root::<Workspace>().flatten() else {
         return;
     };
@@ -119,7 +151,7 @@ pub fn open_at(path: PathBuf, origin: Option<Origin>, window: &mut Window, cx: &
     if open_dialog(cx).is_some() {
         close(window, cx);
     }
-    let dialog = cx.new(|cx| AttachDialog::new(path, origin, window, cx));
+    let dialog = cx.new(|cx| AttachDialog::new(path, origin, prefill, window, cx));
     let root = dialog.read(cx).root.clone();
     ws.update(cx, |ws, cx| {
         ws.push_layer(
@@ -263,6 +295,11 @@ pub struct AttachDialog {
     /// The service refused the last Attach (shown until something is typed or changed).
     refused: Option<Problem>,
     busy: bool,
+    // ## m4b-t16-attach fix round 1 (I5): the folder name the field was prefilled with (it
+    // follows Change… while untouched), and whether the field has been drawn since the folder
+    // was read: Enter attaches only what the user has seen.
+    folder_prefill: Option<String>,
+    shown: bool,
     root: FocusHandle,
     change_focus: FocusHandle,
     cancel_focus: FocusHandle,
@@ -280,20 +317,18 @@ impl AttachDialog {
     fn new(
         path: PathBuf,
         origin: Option<Origin>,
+        from: Prefill,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let prefill = origin
+        let folder = folder_name(&path);
+        let node = origin
             .as_ref()
+            .filter(|_| from == Prefill::Node)
             .map(|o| o.database.clone())
-            .filter(|d| LogicalDb::parse(d).is_ok())
-            .or_else(|| {
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .filter(|n| LogicalDb::parse(n).is_ok())
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
+            .filter(|d| LogicalDb::parse(d).is_ok());
+        let folder_prefill = node.is_none().then(|| folder.clone().unwrap_or_default());
+        let prefill = node.or(folder).unwrap_or_default();
         let database = cx.new(|cx| {
             let mut input = TextInput::new(
                 cx,
@@ -339,6 +374,8 @@ impl AttachDialog {
             aliases,
             refused: None,
             busy: false,
+            folder_prefill,
+            shown: false,
             root: cx.focus_handle(),
             change_focus: cx.focus_handle().tab_stop(true),
             cancel_focus: cx.focus_handle().tab_stop(true),
@@ -351,6 +388,18 @@ impl AttachDialog {
     fn read_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.found = Found::Reading;
         self.read = None;
+        self.shown = false;
+        // I5: an untouched folder-name prefill follows the folder (Change…).
+        if let Some(old) = self.folder_prefill.clone()
+            && *self.database.read(cx).value() == *old
+        {
+            let new = folder_name(&self.path).unwrap_or_default();
+            self.database.update(cx, |i, cx| {
+                i.set_value(new.clone());
+                cx.notify();
+            });
+            self.folder_prefill = Some(new);
+        }
         let Some(rt) = cx.try_global::<ConnectionsModel>().map(|m| m.runtime()) else {
             return;
         };
@@ -443,7 +492,21 @@ impl AttachDialog {
 
     /// Whether Attach can be pressed now.
     pub fn can_attach(&self, cx: &App) -> bool {
-        self.is_ready() && !self.busy && self.problem(cx).is_none()
+        self.is_ready()
+            && !self.busy
+            && self.problem(cx).is_none()
+            // I5: a new file only once its fields and text were drawn.
+            && (self.shown || !matches!(self.found, Found::New))
+    }
+
+    // ## m4b-t16-attach fix round 1 (m6)
+    /// Change…, Cancel and Attach's focus handles (tests assert where the focus is).
+    pub fn button_handles(&self) -> [FocusHandle; 3] {
+        [
+            self.change_focus.clone(),
+            self.cancel_focus.clone(),
+            self.attach_focus.clone(),
+        ]
     }
 
     fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -716,7 +779,7 @@ impl AttachDialog {
                             )
                             .id("scripts-attach-will-write"),
                         )
-                        .child(file_inset(&file, &text, &[], theme))
+                        .child(file_inset(&file, &text, &[], theme, cx))
                         .child(
                             paragraph(
                                 tr_id(cx, "hv-scripts-attach-file-note"),
@@ -734,11 +797,37 @@ impl AttachDialog {
                     .read
                     .logical(self.path.file_name().and_then(|n| n.to_str()).unwrap_or(""))
                     .map(|l| l.display_escaped());
-                let head = match (&preview.text, binds) {
-                    (Some(_), Some(db)) => {
+                // ## m4b-t16-attach fix round 1 (I4): a file that can't be read (or a newer
+                // format) says so, and that the folder's name binds until it is fixed.
+                let broken = preview
+                    .read
+                    .diags
+                    .iter()
+                    .find(|d| {
+                        manifest::is_read_failure(d) || matches!(d, ManifestDiag::NewerFormat(_))
+                    })
+                    .map(reason_word)
+                    .or_else(|| preview.text.is_none().then_some("other"));
+                let head = match (broken, binds) {
+                    (None, Some(db)) => {
                         text(cx, "hv-scripts-attach-found", vec![("database", arg(&db))])
                     }
-                    _ => tr_id(cx, "hv-scripts-attach-found-unreadable"),
+                    (reason, _) => {
+                        let reason = text(
+                            cx,
+                            "hv-scripts-manifest-reason",
+                            vec![("reason", arg(reason.unwrap_or("other")))],
+                        );
+                        let folder = escape_untrusted(
+                            &folder_name(&self.path).unwrap_or_default(),
+                            SHOWN_CHARS,
+                        );
+                        text(
+                            cx,
+                            "hv-scripts-attach-found-broken",
+                            vec![("reason", arg(&reason)), ("folder", arg(&folder))],
+                        )
+                    }
                 };
                 let mut notice = div()
                     .debug_selector(|| "scripts-attach-found".to_string())
@@ -780,7 +869,7 @@ impl AttachDialog {
                         .id("scripts-attach-found-note"),
                     );
                 if let Some(found) = &preview.text {
-                    notice = notice.child(file_inset(&file, found, &[], theme));
+                    notice = notice.child(file_inset(&file, found, &[], theme, cx));
                 }
                 Some(notice.into_any_element())
             }
@@ -875,6 +964,11 @@ impl AttachDialog {
 
 impl Render for AttachDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // ## m4b-t16-attach fix round 1 (I5): this frame draws what Enter would attach.
+        if matches!(self.found, Found::New) && !self.shown {
+            self.shown = true;
+            cx.notify();
+        }
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
@@ -1029,7 +1123,13 @@ pub(crate) fn ink_line(message: SharedString, id: &'static str, theme: &Theme) -
 
 /// The file inset (the fingerprint-inset anatomy): the file's full path, then its text line by
 /// line, every line escaped; `marked` lines sit on the selection tint (an added line).
-pub(crate) fn file_inset(path: &Path, text: &str, marked: &[usize], theme: &Theme) -> AnyElement {
+pub(crate) fn file_inset(
+    path: &Path,
+    text: &str,
+    marked: &[usize],
+    theme: &Theme,
+    cx: &App,
+) -> AnyElement {
     let t = theme.tokens;
     let c = &t.colors;
     let well = match theme.mode {
@@ -1058,7 +1158,10 @@ pub(crate) fn file_inset(path: &Path, text: &str, marked: &[usize], theme: &Them
             .id("scripts-attach-file-path"),
         );
     let mut lines = div().flex().flex_col();
-    for (i, line) in text.lines().enumerate() {
+    // ## m4b-t16-attach fix round 1 (m1): at most `MAX_SHOWN_LINES` lines are drawn (a found
+    // file is only read, so the rest is never written); the count of the others is said.
+    let total = text.lines().count();
+    for (i, line) in text.lines().enumerate().take(MAX_SHOWN_LINES) {
         let mut row = div().px(px(t.spacing.xs)).rounded(px(t.radii.sm));
         if marked.contains(&i) {
             row = row.bg(c.blue_tint.to_hsla());
@@ -1076,7 +1179,54 @@ pub(crate) fn file_inset(path: &Path, text: &str, marked: &[usize], theme: &Them
             ),
         );
     }
+    if total > MAX_SHOWN_LINES {
+        let more = u64::try_from(total - MAX_SHOWN_LINES).unwrap_or(u64::MAX);
+        lines = lines.child(
+            Label::new(
+                crate::explorer::live::text(
+                    cx,
+                    "hv-scripts-attach-more-lines",
+                    vec![("n", ArgValue::Count(more))],
+                ),
+                TextSource::Fluent,
+                t.type_ramp.caption,
+                c.text_2.to_hsla(),
+            )
+            .id("scripts-attach-more-lines"),
+        );
+    }
     inset.child(lines).into_any_element()
+}
+
+/// The folder's name, when it is UTF-8.
+fn folder_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| LogicalDb::parse(n).is_ok())
+        .map(str::to_string)
+}
+
+// ## m4b-t16-attach fix round 1 (I4)
+/// `hv-scripts-manifest-reason`'s variant for a manifest diagnostic.
+fn reason_word(d: &ManifestDiag) -> &'static str {
+    use hacivat_scripts::manifest::Field;
+    match d {
+        ManifestDiag::LinkIgnored => "link",
+        ManifestDiag::NotAFolder | ManifestDiag::NotAFile => "notfile",
+        ManifestDiag::Changed => "changed",
+        ManifestDiag::Unreadable(_) => "unreadable",
+        ManifestDiag::TooLarge => "large",
+        ManifestDiag::NotUtf8 => "notutf8",
+        ManifestDiag::TooDeep => "deep",
+        ManifestDiag::InvalidToml => "invalid",
+        ManifestDiag::MissingFormat => "noformat",
+        ManifestDiag::BadFormat => "badformat",
+        ManifestDiag::NewerFormat(_) => "newer",
+        ManifestDiag::WrongType(Field::Database) | ManifestDiag::BadName(Field::Database, _) => {
+            "database"
+        }
+        _ => "other",
+    }
 }
 
 // ---- shots ---------------------------------------------------------------------------------------
@@ -1123,6 +1273,42 @@ mod tests {
         assert_eq!(parse_aliases(&"x".repeat(129), None).err(), Some("long"));
         let many: Vec<String> = (0..33).map(|i| format!("a{i}")).collect();
         assert_eq!(parse_aliases(&many.join(","), None).err(), Some("many"));
+    }
+
+    // ## m4b-t16-attach fix round 1 (I4): every read failure names its own reason.
+    #[test]
+    fn every_read_failure_has_its_reason() {
+        use hacivat_scripts::NameError;
+        use hacivat_scripts::manifest::Field;
+        let cases = [
+            (ManifestDiag::LinkIgnored, "link"),
+            (ManifestDiag::NotAFolder, "notfile"),
+            (ManifestDiag::NotAFile, "notfile"),
+            (ManifestDiag::Changed, "changed"),
+            (
+                ManifestDiag::Unreadable(std::io::ErrorKind::PermissionDenied),
+                "unreadable",
+            ),
+            (ManifestDiag::TooLarge, "large"),
+            (ManifestDiag::NotUtf8, "notutf8"),
+            (ManifestDiag::TooDeep, "deep"),
+            (ManifestDiag::InvalidToml, "invalid"),
+            (ManifestDiag::MissingFormat, "noformat"),
+            (ManifestDiag::BadFormat, "badformat"),
+            (ManifestDiag::NewerFormat(2), "newer"),
+            (ManifestDiag::WrongType(Field::Database), "database"),
+            (
+                ManifestDiag::BadName(Field::Database, NameError::Control),
+                "database",
+            ),
+        ];
+        for (d, want) in cases {
+            assert!(
+                manifest::is_read_failure(&d) || matches!(d, ManifestDiag::NewerFormat(_)),
+                "{d:?} is one the dialog reports"
+            );
+            assert_eq!(reason_word(&d), want, "{d:?}");
+        }
     }
 
     #[test]

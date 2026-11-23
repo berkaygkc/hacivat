@@ -264,6 +264,9 @@ impl MapDialog {
     /// A library was chosen: its manifest is read for the share box (on the core runtime).
     fn library_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.failed = None;
+        // ## m4b-t16-attach fix round 1 (m2): a tick was consent for the library it was given
+        // for; another library starts unticked.
+        self.share = false;
         let Some(offer) = self.chosen(cx).cloned() else {
             self.can_share = Share::Off("none");
             self.focus_first(window, cx);
@@ -324,6 +327,12 @@ impl MapDialog {
         self.share
     }
 
+    // ## m4b-t16-attach fix round 1 (m6)
+    /// The share box's and Show here's focus handles (tests assert where the focus is).
+    pub fn focus_handles(&self) -> [FocusHandle; 2] {
+        [self.share_focus.clone(), self.ok_focus.clone()]
+    }
+
     fn toggle_share(&mut self, cx: &mut Context<Self>) {
         if matches!(self.can_share, Share::Edit { .. }) {
             self.share = !self.share;
@@ -380,7 +389,9 @@ impl MapDialog {
             database: self.database.clone(),
         };
         close(window, cx);
-        attach_dialog::start(Some(origin), window, cx);
+        // ## m4b-t16-attach fix round 1 (I5, R-T16-1): this node's name is local by
+        // construction (Q5): the attach dialog is prefilled from the chosen folder's name.
+        attach_dialog::start_with(Some(origin), attach_dialog::Prefill::Folder, window, cx);
     }
 
     fn stops(&self, cx: &App) -> Vec<FocusHandle> {
@@ -404,9 +415,9 @@ impl MapDialog {
                     close(window, cx);
                 } else if self.other_focus.is_focused(window) {
                     self.attach_other(window, cx);
-                } else if self.share_focus.is_focused(window) {
-                    self.toggle_share(cx);
                 } else {
+                    // ## m4b-t16-attach fix round 1 (m3): Enter is the dialog's, as in every M2
+                    // dialog: on the share box too it presses Show here (Space ticks it).
                     self.confirm(window, cx);
                 }
             }
@@ -600,6 +611,7 @@ impl Render for MapDialog {
                 after,
                 &marked,
                 &theme,
+                cx,
             ));
         }
         if let Some(reason) = self.failed {
@@ -669,9 +681,18 @@ impl Render for MapDialog {
                     .items_center()
                     .gap(px(t.spacing.md))
                     .child(other)
-                    .child(div().flex_1())
-                    .child(cancel)
-                    .child(ok),
+                    // ## m4b-t16-attach fix round 1 (m9): Cancel and Show here stay together and
+                    // to the right, also on a second line when a long locale wraps the footer.
+                    .child(
+                        div()
+                            .ml_auto()
+                            .flex()
+                            .flex_row()
+                            .flex_none()
+                            .gap(px(t.spacing.md))
+                            .child(cancel)
+                            .child(ok),
+                    ),
             );
         let node: AnyElement =
             A11yNode::new("scripts-map-node", Role::Dialog, title, true, card).into_any_element();
