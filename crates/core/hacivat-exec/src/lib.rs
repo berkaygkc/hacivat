@@ -102,3 +102,5 @@ pub use script_run::{
     SCRIPT_CHUNK_BYTES, ScriptGate, ScriptHistory, ScriptPhase, ScriptPosition, ScriptProgress,
     ScriptRefusal, ScriptStop,
 };
+// ## m4b-t18-run-as-script: the app's database check between the passes (re-export only).
+pub use script_run::DatabaseCheck;

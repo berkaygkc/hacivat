@@ -107,6 +107,29 @@ pub(super) enum M4b {
     /// Surface 4: "Remove orders-scripts from Hacivat?" (Remove Default, Cancel focused).
     LibraryRemove,
     // ## m4b-t16-attach
+    // ## m4b-t17-secrets-ui: surface 8.
+    /// Surface 8: a script with three secret-like lines (password, connection URL, token) and an
+    /// allow-marked one: the gutter's key glyphs, the connection URL line's tooltip open
+    /// (a comment line: no gutter ▶ covers its key, fix round 1).
+    SecretGutter,
+    /// Surface 8: ⌘S on it in a git library: "3 lines in create_reader.sql look like secrets",
+    /// the lines and kinds, the commit sentence and the hints; Cancel focused.
+    SecretDialog,
+    // ## m4b-t17-secrets-ui
+    // ## m4b-t18-run-as-script: surface 9's Run as script (NOTES 9; the strip's states).
+    /// A T2 preview with Run as script as the toolbar's one Primary (plain Run is absent).
+    RunAsScriptReady,
+    /// The strip while it runs: the amber marker, "Running as script", statements sent, the
+    /// line, the bytes read of the file, the clock and Stop.
+    RunAsScriptRunning,
+    /// The strip after a statement failed: "Stopped at statement 1,205: ..." and Close.
+    RunAsScriptFailed,
+    /// The strip after Stop: "Stopped after 1,204 statements. ..." and Close.
+    RunAsScriptCancelled,
+    /// A statement's confirmation in a streamed run: Execute all and Skip all in open-ended
+    /// words (T12 m4).
+    RunAsScriptConfirm,
+    // ## m4b-t18-run-as-script
 }
 
 /// Every M4b state, in shot order.
@@ -115,7 +138,9 @@ pub(super) enum M4b {
 // ## m4b-t14-tabs (named exception): Task 14's states after Task 11's.
 // ## m4b-t15-goto (named exception): Task 15's five after them.
 // ## m4b-t16-attach (named exception): Task 16's five after Task 14's.
-pub(super) const M4B_STATES: [M4b; 28] = [
+// ## m4b-t17-secrets-ui (named exception): Task 17's two after Task 16's.
+// ## m4b-t18-run-as-script (named exception): Task 18's five after Task 17's.
+pub(super) const M4B_STATES: [M4b; 35] = [
     M4b::T2Preview,
     M4b::PasteConfirm,
     M4b::ScriptsProd,
@@ -146,6 +171,15 @@ pub(super) const M4B_STATES: [M4b; 28] = [
     M4b::MapShare,
     M4b::LibrarySettings,
     M4b::LibraryRemove,
+    // ## m4b-t17-secrets-ui
+    M4b::SecretGutter,
+    M4b::SecretDialog,
+    // ## m4b-t18-run-as-script
+    M4b::RunAsScriptReady,
+    M4b::RunAsScriptRunning,
+    M4b::RunAsScriptFailed,
+    M4b::RunAsScriptCancelled,
+    M4b::RunAsScriptConfirm,
 ];
 
 /// The preview's file: 148 MB (the mock's).
@@ -193,6 +227,15 @@ impl M4b {
             M4b::MapShare => "m4b-scripts-map-share",
             M4b::LibrarySettings => "m4b-scripts-settings",
             M4b::LibraryRemove => "m4b-scripts-settings-remove",
+            // ## m4b-t17-secrets-ui
+            M4b::SecretGutter => "m4b-script-secret-gutter",
+            M4b::SecretDialog => "m4b-script-secret-save",
+            // ## m4b-t18-run-as-script
+            M4b::RunAsScriptReady => "m4b-run-as-script-ready",
+            M4b::RunAsScriptRunning => "m4b-run-as-script-running",
+            M4b::RunAsScriptFailed => "m4b-run-as-script-failed",
+            M4b::RunAsScriptCancelled => "m4b-run-as-script-cancelled",
+            M4b::RunAsScriptConfirm => "m4b-run-as-script-confirm",
         }
     }
 
@@ -229,6 +272,14 @@ impl M4b {
             M4b::MapShare => ("#scripts-map-subtitle", None),
             M4b::LibrarySettings => ("#button-label-scripts-set-attach", None),
             M4b::LibraryRemove => ("hacivat-ui/src/dialog.rs:", None),
+            // ## m4b-t17-secrets-ui
+            M4b::SecretGutter => (t17::TIP, None),
+            M4b::SecretDialog => ("hacivat-ui/src/dialog.rs:", None),
+            // ## m4b-t18-run-as-script
+            M4b::RunAsScriptReady => ("#button-label-console-run-as-script", None),
+            M4b::RunAsScriptRunning => ("#script-run-state", None),
+            M4b::RunAsScriptFailed | M4b::RunAsScriptCancelled => ("#script-run-end", None),
+            M4b::RunAsScriptConfirm => ("#confirm-open-ended-scope", None),
         }
     }
 
@@ -264,11 +315,25 @@ impl M4b {
             M4b::AttachFound => &["#scripts-attach-found-head"],
             M4b::MapShare => &["#scripts-attach-file-line-0"],
             M4b::LibrarySettings | M4b::LibraryRemove => &[],
+            // ## m4b-t17-secrets-ui
+            M4b::SecretGutter => &[],
+            M4b::SecretDialog => &["#scripts-secret-line-0", "#scripts-secret-git"],
+            // ## m4b-t18-run-as-script
+            M4b::RunAsScriptReady => &["#editor-t2-title"],
+            M4b::RunAsScriptRunning => {
+                &["#script-run-sent", "#script-run-line", "#script-run-read"]
+            }
+            M4b::RunAsScriptFailed | M4b::RunAsScriptCancelled | M4b::RunAsScriptConfirm => &[],
         }
     }
 
     /// Brings the state's fixtures on screen in a freshly started shell.
     pub(super) fn open(self, window: &mut Window, cx: &mut App) {
+        // ## m4b-t17-secrets-ui
+        if self.is_t17() {
+            save(cx, pg(DEV, EnvTag::Dev));
+            return;
+        }
         // ## m4b-t16-attach
         if self.is_t16() {
             return t16::open(self, window, cx);
@@ -283,7 +348,8 @@ impl M4b {
         save(cx, pg(DEV, EnvTag::Dev));
         // ## m4b-t14-tabs: the connections a script is open under.
         // ## m4b-t15-goto (named line): and the ones Go to script offers.
-        if self.is_script() || self.is_goto() {
+        // ## m4b-t18-run-as-script fix round 1 (named line): and Task 18's connected one.
+        if self.is_script() || self.is_goto() || self.connects() {
             let mut prod = pg(PROD, EnvTag::Production);
             if self.connects() {
                 // An IP literal: nothing resolves (the M3a fakes dial themselves).
@@ -316,10 +382,18 @@ impl M4b {
         )
     }
 
+    // ## m4b-t17-secrets-ui
+    /// A Task 17 state (surface 8).
+    fn is_t17(self) -> bool {
+        matches!(self, M4b::SecretGutter | M4b::SecretDialog)
+    }
+
     // ## m4b-t14-tabs
     /// A state that connects for real (over the M3a fakes), so its capsule shows.
     pub(super) fn connects(self) -> bool {
-        self == M4b::ScriptConnectedProd
+        // ## m4b-t18-run-as-script fix round 1 (named exception; review m7): the running
+        // strip on a connected production console.
+        self == M4b::ScriptConnectedProd || self == M4b::RunAsScriptRunning
     }
 
     /// A script tab state (Task 14).
@@ -361,6 +435,12 @@ impl M4b {
             | M4b::ScriptsTrashed => Some(scripts::STAGING),
             M4b::ScriptsEngines => Some(scripts::ENGINES),
             M4b::T2Preview | M4b::PasteConfirm => None,
+            // ## m4b-t18-run-as-script
+            M4b::RunAsScriptReady
+            | M4b::RunAsScriptRunning
+            | M4b::RunAsScriptFailed
+            | M4b::RunAsScriptCancelled
+            | M4b::RunAsScriptConfirm => None,
             // ## m4b-t14-tabs
             M4b::ScriptTabs
             | M4b::ScriptChanged
@@ -382,11 +462,17 @@ impl M4b {
             | M4b::MapShare
             | M4b::LibrarySettings
             | M4b::LibraryRemove => None,
+            // ## m4b-t17-secrets-ui
+            M4b::SecretGutter | M4b::SecretDialog => None,
         }
     }
 
     /// The steps after [`M4b::open`].
     pub(super) fn steps(self) -> Vec<Step> {
+        // ## m4b-t17-secrets-ui
+        if self.is_t17() {
+            return t17::steps(self);
+        }
         // ## m4b-t16-attach
         if self.is_t16() {
             return t16::steps(self);
@@ -405,6 +491,10 @@ impl M4b {
         // ## m4b-t15-goto
         if self.is_goto() {
             return goto_steps(self);
+        }
+        // ## m4b-t18-run-as-script
+        if let Some(steps) = run_as_script_steps(self) {
+            return steps;
         }
         match self {
             M4b::T2Preview => vec![
@@ -513,6 +603,14 @@ impl M4b {
             | M4b::MapShare
             | M4b::LibrarySettings
             | M4b::LibraryRemove => Vec::new(),
+            // ## m4b-t17-secrets-ui: reached through `t17::steps` above.
+            M4b::SecretGutter | M4b::SecretDialog => Vec::new(),
+            // ## m4b-t18-run-as-script: reached through `run_as_script_steps` above.
+            M4b::RunAsScriptReady
+            | M4b::RunAsScriptRunning
+            | M4b::RunAsScriptFailed
+            | M4b::RunAsScriptCancelled
+            | M4b::RunAsScriptConfirm => Vec::new(),
         }
     }
 }
@@ -707,6 +805,12 @@ fn script_steps(state: M4b) -> Vec<Step> {
             steps.push(open_step(REPORT, Some(PROD), Some("orders")));
         }
         M4b::T2Preview | M4b::PasteConfirm => {}
+        // ## m4b-t18-run-as-script: `run_as_script_steps`.
+        M4b::RunAsScriptReady
+        | M4b::RunAsScriptRunning
+        | M4b::RunAsScriptFailed
+        | M4b::RunAsScriptCancelled
+        | M4b::RunAsScriptConfirm => {}
         // Task 13's states: `scripts::steps`.
         M4b::ScriptsProd
         | M4b::ScriptsStaging
@@ -728,6 +832,8 @@ fn script_steps(state: M4b) -> Vec<Step> {
         | M4b::MapShare
         | M4b::LibrarySettings
         | M4b::LibraryRemove => {}
+        // ## m4b-t17-secrets-ui: Task 17's states (`t17::steps`).
+        M4b::SecretGutter | M4b::SecretDialog => {}
     }
     steps
 }
@@ -879,6 +985,163 @@ fn goto_steps(state: M4b) -> Vec<Step> {
     steps
 }
 // ## m4b-t15-goto
+// ## m4b-t18-run-as-script ---------------------------------------------------------------------
+/// The dump's file name in the strip.
+const DUMP_FILE: &str = "orders_dump.sql";
+
+/// The console the steps opened (the focused one).
+fn shot_console(window: &Window, cx: &App) -> Option<hacivat_app::console::ConsoleId> {
+    hacivat_app::console::view::focused_console(window, cx)
+}
+
+/// Task 18's states: a console over the dump's first 2.5 MB, made the pasted preview of the
+/// dump (what "Paste as preview" opens; Run as script in its toolbar), then the strip or the
+/// confirmation (`run_as_script::fixtures`: no run behind them, nothing is sent).
+fn run_as_script_steps(state: M4b) -> Option<Vec<Step>> {
+    use hacivat_app::scripts::run_as_script;
+    use hacivat_exec::{ScriptPhase, ScriptProgress};
+    let ended = match state {
+        M4b::RunAsScriptReady | M4b::RunAsScriptConfirm => None,
+        M4b::RunAsScriptRunning => Some(None),
+        M4b::RunAsScriptFailed => Some(Some("failed")),
+        M4b::RunAsScriptCancelled => Some(Some("cancelled")),
+        _ => return None,
+    };
+    // ## m4b-t18-run-as-script fix round 1 (review m7): the running state is a connected
+    // production console (its capsule, swatch and hairline with the strip).
+    let on = if state == M4b::RunAsScriptRunning {
+        PROD
+    } else {
+        DEV
+    };
+    let mut steps = Vec::new();
+    if state == M4b::RunAsScriptRunning {
+        steps.push(step(
+            |_, cx| {
+                if let Some(id) = profile_named(cx, PROD) {
+                    ConnectionsModel::connect(cx, id, None);
+                }
+            },
+            |_, cx| {
+                profile_named(cx, PROD).is_some_and(|id| {
+                    matches!(
+                        cx.global::<ConnectionsModel>().live(id),
+                        hacivat_session::LiveState::Connected(_)
+                    )
+                })
+            },
+        ));
+    }
+    steps.extend([
+        step(
+            move |window, cx| {
+                let Some(id) = profile_named(cx, on) else {
+                    return;
+                };
+                console_fixtures::open(id, &dump()[..shown()], window, cx);
+            },
+            |window, cx| {
+                editor_in(window, cx)
+                    .is_some_and(|e| e.read(cx).snapshot().buffer.len_bytes() == shown())
+            },
+        ),
+        step(
+            |window, cx| {
+                let Some(editor) = editor_in(window, cx) else {
+                    return;
+                };
+                let focus = editor.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+                let Some(console) = shot_console(window, cx) else {
+                    return;
+                };
+                run_as_script::fixtures::pasted_preview(console, dump(), cx);
+                // The mock's 148 MB file.
+                editor.update(cx, |e, cx| {
+                    e.set_preview(
+                        PreviewSpec {
+                            shown_bytes: shown() as u64,
+                            total_bytes: T2_TOTAL,
+                        },
+                        cx,
+                    );
+                });
+            },
+            |window, cx| {
+                shot_console(window, cx).is_some_and(|c| run_as_script::offered(c, cx))
+                    && editor_in(window, cx).is_some_and(|e| {
+                        e.read(cx).preview().map(|p| p.total_bytes) == Some(T2_TOTAL)
+                    })
+            },
+        ),
+    ]);
+    // ## m4b-t18-run-as-script fix round 1 (review m7): the confirmation over a running strip.
+    let ended = if state == M4b::RunAsScriptConfirm {
+        Some(None)
+    } else {
+        ended
+    };
+    if let Some(ended) = ended {
+        steps.push(step(
+            move |window, cx| {
+                let Some(console) = shot_console(window, cx) else {
+                    return;
+                };
+                let progress = ScriptProgress {
+                    phase: ScriptPhase::Running,
+                    bytes: 38 << 20,
+                    units_seen: 1_204,
+                    units_total: Some(153_600),
+                    units_run: 1_204,
+                    units_failed: 0,
+                    line: 48_213,
+                };
+                run_as_script::fixtures::show_strip(
+                    console, DUMP_FILE, T2_TOTAL, progress, ended, cx,
+                );
+            },
+            |window, cx| {
+                shot_console(window, cx).is_some_and(|c| run_as_script::strip(c, cx).is_some())
+            },
+        ));
+    }
+    if state == M4b::RunAsScriptConfirm {
+        steps.push(step(
+            |_, cx| {
+                use std::sync::Arc;
+                let q = hacivat_exec::ConfirmQuestion {
+                    run: hacivat_session::session::RunId(1),
+                    unit: 0,
+                    index: 1_205,
+                    total: 153_600,
+                    sql_masked: Arc::from("DELETE FROM order_archive;"),
+                    reasons: vec![hacivat_exec::GateReason {
+                        fluent_id: "safety-destructive-no-where",
+                        args: vec![("table", Arc::from("order_archive"))],
+                    }],
+                    type_to_confirm: None,
+                    irreversible: false,
+                    suppressible: false,
+                    warn_only: false,
+                    production: false,
+                    connection: Arc::from(DEV),
+                };
+                let ctx = hacivat_app::exec_ui::confirm::ConfirmContext {
+                    class: Some(hacivat_exec::GateClass::DmlUnsafe),
+                    env: Some(EnvTag::Dev),
+                    engine: Some("PostgreSQL 16".into()),
+                    open_ended: true,
+                    ..Default::default()
+                };
+                // The answer is dropped with the shot (a closed dialog answers Cancel).
+                drop(hacivat_app::exec_ui::confirm::open_in(q, ctx, cx));
+            },
+            |_, cx| hacivat_app::exec_ui::confirm::confirm_open(cx),
+        ));
+    }
+    Some(steps)
+}
+// ## m4b-t18-run-as-script
 
 /// Where the preview of [`dump`] ends (UI-EDIT-23 step 1).
 fn shown() -> usize {
@@ -1276,6 +1539,14 @@ mod scripts {
             | M4b::MapShare
             | M4b::LibrarySettings
             | M4b::LibraryRemove => {}
+            // ## m4b-t17-secrets-ui: Task 17's states (`t17::steps`).
+            M4b::SecretGutter | M4b::SecretDialog => {}
+            // ## m4b-t18-run-as-script: Task 18's states (`run_as_script_steps`).
+            M4b::RunAsScriptReady
+            | M4b::RunAsScriptRunning
+            | M4b::RunAsScriptFailed
+            | M4b::RunAsScriptCancelled
+            | M4b::RunAsScriptConfirm => {}
         }
         out
     }
@@ -1630,3 +1901,152 @@ mod t16 {
     }
 }
 // ## m4b-t16-attach
+
+// ## m4b-t17-secrets-ui ---------------------------------------------------------------------------
+/// Task 17's states (surface 8): a script with secret-like lines in a git library, under
+/// orders-dev.
+mod t17 {
+    use super::*;
+    use hacivat_app::scripts::secret_dialog;
+
+    /// The tooltip's labels are drawn here.
+    pub(super) const TIP: &str = "hacivat-ui-editor/src/line_marks.rs:";
+
+    /// The script the states open (the mock's sample).
+    const FILE: &str = "create_reader.sql";
+
+    /// The mock's sample: a password (line 3), a connection URL with a password (5), a token
+    /// (8, built from parts: R-C0-4), and an allow-marked line (9).
+    fn text() -> String {
+        let token = format!("gh{}{}", "p_", "0123456789abcdefghijABCDEFGHIJ012345");
+        [
+            "-- Rapor kullanıcısı",
+            "",
+            "CREATE ROLE app_reader LOGIN PASSWORD 'hv_test_pw';",
+            "GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_reader;",
+            "-- dış sistem: postgresql://app_reader:hv_test_pw@pg-replica.example/orders",
+            "ALTER ROLE app_reader SET search_path = public;",
+            "",
+            &format!("-- webhook: {token}"),
+            "CREATE ROLE dev_tmp LOGIN PASSWORD 'dev'; -- hacivat:allow-secret",
+            "",
+        ]
+        .join("\n")
+    }
+
+    /// The library folder (`shot_library`'s), made a repository with the script in it before
+    /// the library is attached, so the service reads it once.
+    fn prepare(cx: &App) -> Option<()> {
+        let paths = cx.try_global::<hacivat_app::AppState>()?.paths.clone();
+        let root = paths.config.parent()?.join("library");
+        std::fs::create_dir_all(&root).ok()?;
+        std::fs::write(root.join(FILE), text()).ok()?;
+        if !root.join(".git").exists() {
+            // A fixture repository this harness made (product code never runs the CLI).
+            let ok = std::process::Command::new("git")
+                .args(["-c", "core.hooksPath=/dev/null", "init", "-q", "-b", "main"])
+                .current_dir(&root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .ok()?
+                .status
+                .success();
+            ok.then_some(())?;
+        }
+        Some(())
+    }
+
+    pub(super) fn steps(state: M4b) -> Vec<Step> {
+        let mut out = vec![
+            step(
+                |_, cx| {
+                    let _ = prepare(cx);
+                },
+                |_, cx| cx.try_global::<hacivat_app::AppState>().is_some(),
+            ),
+            open_step(FILE, Some(DEV), Some("orders")),
+            // The library's repository status is read (the commit sentence depends on it).
+            step(
+                |_, _| {},
+                |_, cx| {
+                    let Some(lib) = cx.try_global::<ShotLibrary>().map(|l| l.0) else {
+                        return false;
+                    };
+                    hacivat_app::scripts::open::service(cx).is_some_and(|s| {
+                        s.snapshot()
+                            .view(Some(EnvTag::Dev))
+                            .library(lib)
+                            .is_some_and(|l| l.git() != hacivat_scripts::GitSummary::Pending)
+                    })
+                },
+            ),
+            // The scan of the text landed: three marked lines.
+            step(
+                |window, cx| {
+                    if let Some(editor) = editor_in(window, cx) {
+                        let focus = editor.read(cx).focus_handle(cx);
+                        window.focus(&focus, cx);
+                    }
+                },
+                |window, cx| {
+                    editor_in(window, cx)
+                        .is_some_and(|e| e.read(cx).line_mark_lines() == vec![2, 4, 7])
+                },
+            ),
+        ];
+        match state {
+            M4b::SecretGutter => out.push(hover_mark(4)),
+            M4b::SecretDialog => out.push(step(
+                |window, cx| {
+                    hacivat_ui::actions::ActionRegistry::run("file.save", window, cx);
+                },
+                |window, cx| {
+                    secret_dialog::open_warning(cx).is_some()
+                        && window
+                            .root::<Workspace>()
+                            .flatten()
+                            .is_some_and(|ws| ws.read(cx).layer_ids().contains(&"dialog"))
+                },
+            )),
+            _ => {}
+        }
+        out
+    }
+
+    /// Moves the pointer over the mark slot of `line`'s row (x = 8..20 of the 58 px gutter)
+    /// and waits for the mark's tooltip.
+    fn hover_mark(line: u32) -> Step {
+        use gpui::InputEvent as _;
+        step(
+            move |window, cx| {
+                let Some(editor) = editor_in(window, cx) else {
+                    return;
+                };
+                let Some((x, y)) = editor.read(cx).last_layout().map(|l| {
+                    let rows = l.rows();
+                    let lh = f32::from(rows.line_height);
+                    let y =
+                        f32::from(rows.first_y) + (line - rows.first_line) as f32 * lh + lh / 2.0;
+                    (f32::from(rows.bounds.left()) - 58.0 + 14.0, y)
+                }) else {
+                    return;
+                };
+                window.dispatch_event(
+                    gpui::MouseMoveEvent {
+                        position: gpui::point(gpui::px(x), gpui::px(y)),
+                        pressed_button: None,
+                        modifiers: gpui::Modifiers::none(),
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            },
+            |_, cx| {
+                cx.try_global::<hacivat_ui::text::TextRegistry>()
+                    .is_some_and(|r| r.frame.iter().any(|t| t.path.contains(TIP)))
+            },
+        )
+    }
+}
+// ## m4b-t17-secrets-ui

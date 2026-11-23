@@ -1501,3 +1501,46 @@ HV-EXEC-15; R-M4b-20, R-M4b-24, R-M4b-47, R-T8-1, R-T8-3, R-T10-3).
   splitter's share multiplies by that many.
 - **Words.** Refusals and stops carry Fluent IDs (`hacivat-core.ftl` block `m4b-t12-script-run`)
   and the statement number and line. T18 shows them.
+
+## m4b-t18 — run as script in the app
+
+Task 18 wires Task 12's runner to the app (HV-SCRIPT-12; `scripts::run_as_script`, ADR 0009
+`m4b-t18`). Four changes to `hacivat_exec::script_run`, each a named exception fenced
+`// ## m4b-t18-run-as-script`:
+
+- **The tab's database check between the passes (R-M4b-27, R-T14-2).**
+  `ScriptRunner::run_checked(req, progress, check: Option<DatabaseCheck>)` is `run` with the
+  app's check (`run` is `run_checked(.., None)`). After a clean pass 1, the run follows the
+  session's events first, then awaits `check()`. `None` refuses the file
+  (`RefuseReason::DatabaseCheck`); nothing was sent. `Some(generation)` lets pass 2 open, and the
+  first unit is sent only if its own context read answers that generation, else
+  `StopReason::ContextChanged` with nothing sent. A reconnect after the check is a `Lost` or
+  `Reconnected` event, which stops the run anyway; the generation catches what moves the context
+  without an event (a replay, a queued `USE`). Stop while the check waits refuses the run.
+  - *Why between the passes:* pass 1 of a 150 MB dump takes minutes, so a check made at the
+    press would be stale by the first send. *Why a callback:* Task 14's check (its probe, the
+    MySQL switch back once, the refusal notice) lives on the UI thread; exec never sees the
+    app's types.
+- **`ScriptChunks: Send + Sync`.** The run holds its request across every await, so a run's
+  future was not `Send`, and the app could not spawn it on the core runtime. Every source
+  (`hacivat_scripts`' `ScriptStream`, the test sources, the app's two) is `Sync` already.
+  `DatabaseCheck` is `Send + Sync` for the same reason. A compile-time test pins it (`t18_send`).
+- **Words (the T12 re-review's n1, n3 and n5).** These give the notice the right reason, with
+  no change to what runs:
+  - `RefuseReason::NoBoundaryItems` (`Step::Held` says which cap held) replaces `NoBoundary` for
+    the 65,536-item cap: "too many statements without a line break", never "64 MiB".
+  - `RefuseReason::ModesUnknown` replaces `ModesDiffer` when the session's modes are unknown and
+    the readings differ. `ModesDiffer` stays for known modes that differ from the tab's.
+  - `StopReason::LostTrack` covers a lagged or closed event stream ("Hacivat lost track of the
+    connection's state"); `Reconnected` keeps the real loss and reset.
+  - Two of T12's test values move with them (named exception in `tests/script_run.rs`).
+  - The FTL is block `m4b-t18-run-as-script` of `hacivat-core.ftl`.
+- **Open-ended Execute all / Skip all (T12 m4)** are the app's (`AppConfirmPort::for_script_run`,
+  ADR 0009). The runner's semantics are unchanged: Execute all never answers a typed name and
+  covers nothing on production; Skip all skips every later unit that would ask.
+
+### m4b-t18 fix round 1 (review I2, m4)
+
+- **`ConfirmPort::follow_run(run, choices, status, sql, session)`** is a defaulted method that follows nothing by default. The runner calls it for every unit it sends, with the unit's masked text, so the app's prompt of that unit's confirm-in-transaction question shows the statement and its loss (ADR 0009). Other ports and M3's run service are unchanged.
+- **`ScriptRunSummary::cancelled_in_flight`** is set when Stop reached a unit after it was sent (R-T18-2). The app then says "Stopped during statement N".
+

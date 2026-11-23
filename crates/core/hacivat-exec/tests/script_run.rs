@@ -859,7 +859,8 @@ async fn unknown_modes_must_read_alike() {
     let (out, _) = r
         .run(r.request(script(SCS_SPLIT).boxed(), None, Answers::new(&[])))
         .await;
-    assert_eq!(refused(&out), (ScriptRefuseReason::ModesDiffer, None));
+    // ## m4b-t18-run-as-script (named exception, the T12 re-review's n3): its own reason.
+    assert_eq!(refused(&out), (ScriptRefuseReason::ModesUnknown, None));
     assert!(
         r.all_sent().iter().all(|q| !q.contains("DELETE")),
         "{:?}",
@@ -1018,7 +1019,12 @@ async fn one_line_of_tiny_statements_is_refused_by_the_item_cap() {
         left: 65 << 20,
     });
     let (out, progress) = r.run(r.request(line, None, Answers::new(&[]))).await;
-    assert_eq!(refused(&out), (ScriptRefuseReason::NoBoundary, at(1, 1)));
+    // ## m4b-t18-run-as-script (named exception, the T12 re-review's n1): the item cap's own
+    // reason.
+    assert_eq!(
+        refused(&out),
+        (ScriptRefuseReason::NoBoundaryItems, at(1, 1))
+    );
     assert_eq!(progress.units_run, 0);
     assert!(
         progress.bytes < 4 << 20,

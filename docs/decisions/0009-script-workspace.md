@@ -1550,6 +1550,50 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
   - m9: Cancel and Show here stay together on the right when the footer wraps.
   - m10: the launch-time and remove-then-break residuals of R-T10-7 go to T20; a persisted last good binding would close them.
 
+
+## m4b-t17 — secret warning UI
+
+- **Scan.** `secret_marks::scan_text` is `scan_secrets(text, &secret_spans(text))`, the spans
+  mapped one to one (R-M4b-28). A script tab scans 300 ms after the last edit (and at once when
+  its file is read or reloaded) on the core runtime's blocking pool, never on the UI thread. A
+  newer edit replaces the waiting or running scan; an answer for an older version than the
+  editor's is dropped (latest wins by document version). A save uses the tab's scan when it is
+  for exactly the text being saved, else scans that text off the UI thread before it goes on.
+- **Fail closed.** A scan that cannot answer (no core runtime, or it panicked) is one
+  `Unscanned` finding over the whole text, as the scanner answers when its table fails to load.
+  The gutter puts "Couldn't be checked for secrets" on line 1, and every save asks ("…
+  couldn't be checked for secrets"). "Save anyway" is never remembered for it.
+- **Gutter.** One `key-round` line mark per finding (ADR 0007 `## m4b-t17`), whose tooltip and
+  accessible name name the kind ("Looks like a password", "… an access token", "… a private
+  key", "… a connection URL with a password") and how to silence the line. `TestKey` and JWT read
+  as an access token.
+- **Dialog** (`secret_dialog`). Every save of a library script goes through `save::save`, so
+  ⌘S, Save all, the unsaved prompt's Save (close, quit, restart), the recovery notice's Save and
+  "Deleted on disk"'s Save all ask here first. A 480 alertdialog: title, the tab's environment ·
+  connection · database, the body, a field well of **Line n · kind** rows (one per line and
+  kind, 8 shown, then "… and N more lines"), the commit sentence, the allow hint and the
+  "remembered" line. **Cancel** is Primary and focused; Escape, the close button and a window
+  close answer Cancel and the tab stays unsaved; Enter presses the focused button. The focus
+  returns where it was (the code). Nothing in it holds a value.
+- **Commit sentence.** Shown unless the library's git summary is `NotARepo`: a repository,
+  an untrusted or unavailable one, and a status not read yet all show it (errs toward the
+  warning).
+- **Remembered answers.** "Save anyway" remembers, in the tab's memory until quit (or the tab
+  closes), `xxh3(kind ‖ the line's text before the literal ‖ after it ‖ the literal)` per finding.
+  This joins the plan's rule (the line's text without the literal, and the kind) and `alg/28`'s
+  (`kind ‖ value`): a changed value or a changed line asks again; a line moved up or down does
+  not. Two identical lines are one answer.
+- **Recovery (R-T5-4).** The recovery copy's `secret_suspected` is set from a scan of the
+  copied text, run in the same blocking task that writes the copy (a panic counts as yes). The
+  restore notice adds "Some lines of this text look like a password or a token. Saving asks
+  first." when the copy's metadata says so; it never says which or shows a value.
+- **Consoles** never scan, mark or ask (Q7).
+- **Not in M4b.** There is no "Save as… into a library" and no "Move console to library…"; a
+  later one must call `secret_dialog::confirm` (through `save::save`) the same way.
+- **Copy.** The mock's hint copy follows the T6 fr2 FTL wording (a space after the dashes;
+  `design/m4b-scripts` NOTES and index.html synced). New strings: `hv-scripts-secret-unscanned`,
+  `-unscanned-hint`, `-unscanned-title`, `-unscanned-body`, `hv-scripts-recover-secret`.
+
 ## m4b-cifix-4 — a SQLite tab's file identity includes its birth time (Linux)
 
 - **Finding (CI 45077623376, Linux only).**
@@ -1578,3 +1622,119 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
   - `fileio::tests::file_identity_tells_a_file_written_again_from_a_renamed_one`, and `fileio::tests::file_identity_text_round_trips`.
   - `tests/recovery.rs` `recovery_round_trip_and_discard`: a birth time round-trips to the nanosecond.
   - `sqlite_tab_refuses_run_when_the_profile_points_to_another_file`: the CI failure, now GREEN on Linux.
+
+## m4b-cifix-5 — Windows: a library root's identity is its volume serial and file id
+
+- **Finding (CI 45091594060, the first `--no-fail-fast` run, Windows only).**
+  - `service_t16` `use_this_folder_adopts_a_replaced_root_and_keeps_its_mappings` and `an_adopted_folder_never_inherits_the_old_binding`, and the app's `scripts_attach` `use_this_folder_is_confirmed_and_keeps_the_mappings`, timed out waiting for `RootChanged`. Each moves the root away and makes another folder at its path.
+  - On Windows `FolderIdentity` was `None`, so `work::validate` compared the canonical path only and served the new folder as the same library, with its mappings and binding. **A product bug.** Root-replacement detection is required on Windows too: the library is the folder that was attached (I3), and an unsure answer must be `RootChanged`, never the old library.
+  - `tests/fileio.rs` `open_stream_reports_a_change_on_disk`: another file of the same size renamed over a script mid-stream went unseen. The Windows `Fingerprint` is size, modification time and creation time; the rename keeps the times inside one clock tick, and NTFS tunnelling gives the new name the old creation time. **A product bug** (the cifix-4 review's m2).
+- **Decision.**
+  - `std` exposes a Windows file's volume serial and file index only behind the unstable `windows_by_handle`; the workspace forbids `unsafe` outside `hacivat-ui-core/src/platform/**`; no later task edits a manifest. `notify-debouncer-full`, already a dependency of `hacivat-scripts`, re-exports `file-id` (`file_id::get_file_id`: `GetFileInformationByHandleEx` `FileIdInfo`, else `GetFileInformationByHandle`), so the identity is read through it: no `unsafe` here, no new crate, no manifest edit. `file-id` is in `BACKENDS` for `hacivat-scripts` already, and no `file_id` type leaves the private module `fileio/windows_id.rs`.
+  - `folder_identity` on Windows is `FileIdentity { dev: volume serial, ino: file id, born: None }`. The file id is NTFS's 64-bit file reference number kept exactly; a ReFS id that uses the high 64 bits is folded by XXH3-64. `get_file_id` follows a link, so the path must still be a real folder (`symlink_metadata`, a junction is never one) after the read.
+  - On NTFS the file reference number carries a sequence number that changes when a record is reused, so a folder or file made again at the same path gets another id, and a rename keeps it. The same `validate`, `patch` and `ManifestJob` checks as on Unix now refuse a replaced root with `RootRefused(IdentityChanged)`, and "Use this folder" adopts it. `libraries.toml`'s `inode` holds the file id across sessions.
+  - **No creation time in it (R-CI2-1).** Any program can set a Windows creation time (`SetFileTime`, `robocopy /DCOPY:T`), so a restore into the root would refuse an unchanged library, and tunnelling gives a folder made again under the same name within 15 s the old creation time, so it would not tell a replaced root apart either.
+  - The read stream records the file's Windows identity at its path when it opens, and every chunk check compares it again (a link at the path reads as none, so it differs). A file renamed over the script is another file id.
+- **Residuals.**
+  - **FAT and exFAT** derive the file index from the folder entry's position. A renamed root then reads as replaced: it is refused and offered "Use this folder" (fails closed). An entry made again in the same slot keeps the index.
+  - **Network shares** may report no stable id or none at all. With none at attach the library is compared by path for that session, as before; an id that becomes unreadable later refuses the root.
+  - **A SQLite tab's database file** still compares the canonical path only on Windows (T14): `FileIdentity::of(&Metadata)` has nothing to read there, and the app's `sqlite_identity` is not changed in this fix. Carried: a path-based read like the folder's would close it.
+  - **The read stream at open:** the identity is read by path just after the handle opens, so a swap inside that instant names the new file on both sides; the size and time checks stay as before.
+- **Test fixes (no product change).**
+  - `fileio::tests::file_identity_text_round_trips`: Windows holds a `SystemTime` in 100 ns steps, so `UNIX_EPOCH + 5 ns` is the epoch there. The text round-trips exactly for every time a platform holds; the fixed literal uses 500 ns, and the 5 ns digit is asserted where the platform holds it.
+  - `fileio::tests::folder_identity_tells_a_folder_made_again_from_a_renamed_one`: its pure leg added 1 ns, which is no change on Windows; it adds 1 µs. Its real leg now runs on Windows too (rename keeps the identity, a folder made again does not); the birth-clock wait runs only where the birth time is part of the identity (on Windows a probe made again within 15 s keeps its first creation time, so the wait could never end).
+  - `tests/fileio.rs` `names_under` built names with the native separator (`@production\purge.sql`). `RelPath` is `/`-separated on every OS, and no product path was involved: the helper now joins components with `/`.
+  - `tests/scan.rs` `a_missing_or_stale_root_lists_nothing` built its stale root as `<canonical>/../a`. Joining onto a verbatim (`\\?\`) path drops the `..` in `std`, so on Windows it was the canonical path itself. The stale root now names another real folder on every OS; the `..` spelling stays as a Unix leg.
+- **Tooling note.** `xtask check-deps`' `BackendInPublicApi` reads `pub const STREAM_CHUNK_BYTES: usize = 64 << 10;` as a header whose `<` never closes, so the header runs to the end of `fileio.rs` and any `file_id` path after it reads as public API. The Windows identity therefore lives in `fileio/windows_id.rs`. The checker is Task 1a's file and is not changed here (carried to the controller).
+- **Review (APPROVE), m1 and m2.**
+  - m1: a file id of 0, which WebDAV and some NAS or FUSE shares report for every file, is no identity (`windows_id::identity_from`): such a root is compared by its path, as where no id can be read, and two zeros never count as the same folder. Test: `fileio::tests::a_zero_file_id_is_no_identity`.
+  - Residual: a share whose ids are unstable from one open to the next (a fresh id per handle) gives an unchanged root a new identity, so the library is refused with `RootChanged` and "Use this folder" is offered. This fails closed: the user adopts it again after each refusal.
+  - m2 (the file id read once every N chunks instead of on every chunk): not done. A chunk read after another file took the path must never be handed out (HV-SCRIPT-12 step 4, `open_stream_reports_a_change_on_disk`), and a check every 16 chunks would hand out up to 15 of them. The extra open per 64 KiB chunk is kept; for a 150 MB script that is about 2,400 opens with zero access rights.
+
+## m4b-t17 — fix round 1 (review I1, I2, m1–m4, m6; rulings R-T17-1, R-T17-2)
+
+- **Gutter (R-T17-2).** A shown ▶ takes the key's slot and carries its label (ADR 0007 `### m4b-t17 fix round 1`). The key shows otherwise. No ▶, arrow stop or focus is lost to a mark.
+- **Save inside the debounce (I2).** Two named tests guard it:
+  - a save of text the tab has not scanned yet scans that text first, and asks;
+  - a second secret on an answered line asks again.
+- **One scan in flight (m2).**
+  - An edit while a scan runs starts none. When that scan lands for an older version, its answer is dropped and the newer text is scanned after the debounce.
+  - The text is copied out of the rope inside the blocking job.
+  - The recovery copy reuses the tab's scan of the same version.
+  - The save's own copy of the text stays on the UI thread (T14's). It is bounded by the size tiers: a T2 preview (above 20 MB) is never saved.
+- **`Debug` (m1).** A scan's `Debug` shows its version and counts only, never a fingerprint.
+- **Allow marker (m4).** `hacivat_scripts::secrets::ALLOW_MARKER` is the scanner's own spelling; the app's hints use it.
+- **Tests (m6).**
+  - A cancel asserts that no write started, by a count (`save::writes_started`).
+  - The debounce and the one-in-flight rule are asserted on the tab's scan state.
+  - The console test has a positive control.
+- **Accepted (R-T17-1).** The Unscanned dialog has no rows, no allow hint and no "remembered" line.
+- **Residual (m7, T14's pattern).** With no workspace window, a save's question has nowhere to open. Nothing is written, and a Save all chain or a quit round stops without a word.
+
+## m4b-t18 — Run as script
+
+`scripts::run_as_script` (HV-SCRIPT-12, R-M4b-20; NOTES surface 9). The runner and its exec changes are ADR 0006 `m4b-t18`.
+
+- **Where it is offered.** A console whose editor is a T2 preview shows **Run as script** in the toolbar's Run slot instead of Run (NOTES ruling 8). There is no ⌘↵, because the preview editor is read-only and `editor.run` is disabled there. Two kinds of preview stream:
+  - **A script tab's preview.** The file is read from disk. The app's `FileSource` adapts T10's `ScriptStream` and `PassRecord`: pass 2 reopens with pass 1's record, and only a pass read to its end is reopened. The tab's environment is read at each open from a watch channel that the app keeps current (R-T5-6). `chunk_error` and `read_error` are exhaustive `match`es with a test (T12 m6; T1a review). A path the library refuses, or one this connection no longer shows, maps to `Io(PermissionDenied)`, which tells the user "the file couldn't be read".
+  - **A pasted preview (carries-w1 T11/T18).** "Paste as preview" (Task 11's 20–100 MB question, now on: `confirm_large_paste` for every console and script tab) opens a **new console tab on the source console's connection**. The tab shows the document's first 2.5 MB as a T2 preview, and the source console's text stays as it was.
+    - *Ruling (T18): the whole pasted text lives in memory only.* It is held per console and read by `PastedSource`; both passes read the same `Arc`. It never reaches an autosave (the tab opens through `queue_text`, with autosave off), a recovery copy, history (the history row is "Pasted text") or any file, and it goes when the tab closes.
+    - *Why:* a paste can hold anything, credentials included (L14). A file would need a place, a lifetime and a cleanup.
+    - *Cost:* up to 100 MB of RAM per pasted preview while its tab is open, and it does not survive a restart. Fix round 1 (m5): the tab comes back as an ordinary console with the same number, and its restore reads that number's console file (`<n>.sql`), which may hold an older console's text, never the pasted text.
+    - A console with no connection refuses the paste with a toast.
+- **The run.** The run is `ScriptRunner::run_checked` on the core runtime, built from what the orchestrator's named hook (`script_run_parts`, beside `start_run_capped`) gathers. The hook first makes Run's own checks: no read-only reconnect pending, nothing else running, a script tab that runs somewhere, a live session (else the connect starts and nothing runs, R-M3-45), and the SQL context read (`modes_known` comes from it). Then the run uses:
+  - the tab's own session, which is fixed at open (R-M4b-4);
+  - the console's suppress set, history sink (origin `File`) and log;
+  - the catalog refresh inbox;
+  - the live environment tag, through a watch channel. `observe_global::<ConnectionsModel>` keeps it current (T12 fr1 I2). A test retags mid-run and the answered statement is not sent.
+  
+  At the end, the "don't ask again" keys join the console's, the SQL context is read again, and the explorer's refresh follows as after a Run (`script_run_ended`).
+- **The database check (R-M4b-27, R-T14-2, R-T14-3).** Between the passes the runner asks the UI thread to run Task 14's per-Run check (`tabs::run_gate_streamed`). It is the same gate as Run's: the probe on the tab's own session, the MySQL switch back once, and the refusal notice naming both databases. The only difference is that the gate's preview refusal is skipped (`streamed`). A pass answers the context generation that the check read (`tabs::take_checked_generation`). A refusal drops the gate's re-run closure, and with it the reply, which answers `None` (fail closed). A pasted preview's console has no bound database, so it has no check, as a console's Run has none.
+- **Confirmations.** They are M3b's dialogs, through `AppConfirmPort::for_script_run`. Its dialogs offer Execute all (off production) and Skip all in **open-ended words**, because the later statements are not read yet: "Execute all also runs, without asking, every later statement in the file that would ask on this connection (dev); a statement that needs its name typed still asks." Here `ConfirmContext::open_ended` replaces the count. A user's No (or Cancel) stops the run, and the units confirmed before it stay applied (R-T12-2). The strip says so: "Stopped at statement N: you didn't confirm it. The statements before it ran and stay applied; nothing after it was sent."
+- **The strip (surface 9).** It is a 26 px raised row under the notices. While the run goes, it shows:
+  - the amber run marker;
+  - "Checking the whole file before it runs" in pass 1, or "Running as script" in pass 2;
+  - the statements sent, the line, the bytes read of the file's size, and a clock repainted once a second;
+  - **Stop**, a Default button and a Tab stop.
+
+  Stop is the M3 cancel path: it stops between units and cancels the unit in flight. `exec.cancel` routes to it. Escape never stops a run.
+  
+  At the end the strip shows how the run ended. That is either the mock's sentence (done, a failed statement, Stop, a No) or the runner's own refusal or stop sentence, followed by **Close**. The runner writes its log lines and summary to Output. While a run goes, the toolbar's Run as script is disabled, with the tooltip "Running as script: wait for it, or stop it", and the session's per-statement run clock is not shown in the toolbar. The strip sits in a focus home whose primary is the editor (R-M4b-43), so a Stop or Close pressed from the keyboard hands the focus to the code (tested). A strip that is dropped (its tab closed) cancels its run, because a dropped sender never cancels.
+- **Trust signals.** The strip is drawn under the toolbar. It never covers the capsule, the environment mark, the production hairline or the status bar's "Read-only preview" segment (Task 14's, reused). A test checks each of them during a run.
+- **Residuals.**
+  - ~~A confirm-in-transaction prompt raised by a streamed unit has no `follow` entry.~~ Fixed in fix round 1 (I2), below.
+  - The elapsed clock follows the executor clock, like the toolbar's.
+
+### m4b-t18 fix round 1 (review I1–I3, m1–m8; rulings R-T18-1, R-T18-2)
+
+- **I1: plain Run never runs on a preview, or beside a stream.**
+  - Every plain Run path refuses on an editor that is a T2 preview, with "A read-only preview doesn't run." (`orchestrator::refuse_plain_run`). The paths are:
+    - the gutter ▶ (`run_would_be_enabled` is false, and its `ExecuteRequested` reaches `on_execute`);
+    - `on_execute` (the keys);
+    - the single submit point `start_run_capped` (the chooser's confirm, Re-run, T14's Retry).
+  - Plain Run also refuses on a console whose session a streamed run holds ("A script is running on this connection's session…"). This covers the stream's own console and any console sharing that session (`run_as_script::blocks_run`; `run_busy` includes it).
+  - A stream refuses to start while a console sharing its session runs or prepares a run. Two runs therefore never interleave on one session (review rv_b, now a test).
+- **I2: a streamed unit's confirm-in-transaction prompt.**
+  - The runner hands the port each unit's run through the new defaulted `ConfirmPort::follow_run`: its ticket's `choices` and `status`, the unit's masked text (the history redaction), and the session.
+  - `AppConfirmPort` registers the run in its book, as M3's submit does: the prompt shows the statement and takes its lost form from the run's status.
+  - It also listens for the session's loss on the core runtime with M3's `LossLink` rule, so the prompt turns to its "connection lost" form (Close only) exactly as M3's single run's does.
+  - Tests: the statement is shown through a real streamed run; the lost form is shown through the port. Both are mutation-killed.
+- **I3, R-T18-1: a paste from a script tab keeps that tab's binding.**
+  - The pasted preview records the source script tab's doc. Its run passes T14's per-Run check through that doc's binding, on the pasted console's session (`tabs::run_gate_streamed_for`), with the MySQL switch back once and the refusal notice.
+  - From a MySQL/MariaDB tab (`SessionPlan::Own`, R-T14-3), the pasted console takes a session of its own (slot 0) and refuses on the profile's default session.
+  - A paste from a plain console keeps the console's own binding, as M3 does.
+  - Tests: a tab bound to `orders_archive` either runs there after one `USE`, or refuses; it never runs on `orders`.
+  - A source tab that has closed fails the check closed.
+- **m1:** the check is made only on the session the run was started on: the console must still hold it, and `take_checked_generation` compares that session's id.
+- **m2:** when the profile is deleted mid-run, the run stops instead of publishing "no environment".
+- **m3:** T14's Retry on a preview retries Run as script.
+- **m4, R-T18-2:** when Stop cancels the statement in flight, the strip says "Stopped during statement N; statements after it were not sent." It uses the runner's new `ScriptRunSummary::cancelled_in_flight`. The PO is informed.
+- **m5:** the relaunch sentence above is corrected.
+- **m6:** a pasted text held for a tab is dropped when the tab's host is built without adopting it, and whenever a console closes or another paste opens (`prune_pending`: every tab no workspace shows any more).
+- **m7:** shots:
+  - the running strip is now on a connected production console (capsule, swatch, hairline);
+  - the confirmation is drawn over a running strip.
+- **m8:** app tests cover:
+  - a change between the passes (rv_a);
+  - a MySQL switch back with a pasted streamed run;
+  - a paste from a script tab.

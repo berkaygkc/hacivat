@@ -1302,6 +1302,22 @@ pub trait ConfirmPort: Send + Sync + std::fmt::Debug + 'static {
     fn confirm(&self, q: ConfirmQuestion) -> oneshot::Receiver<ConfirmAnswer>;
     /// A confirm-in-transaction question (`RunEvent::NeedsCommit`). Any close is `RollBack`.
     fn commit_decision(&self, q: CommitQuestion) -> oneshot::Receiver<CommitAnswer>;
+
+    // ## m4b-t18-run-as-script fix round 1 (named exception; review I2)
+    /// A run the asker sent on `session` (a streamed run's unit, Task 18): its ticket's
+    /// `choices` and `status` and each unit's masked text (the history redaction), by ordinal,
+    /// so a confirm-in-transaction prompt of that run shows its statement and turns to its
+    /// "connection lost" form as M3's single run does. The default follows nothing.
+    fn follow_run(
+        &self,
+        run: RunId,
+        choices: tokio::sync::watch::Receiver<Option<(u64, hacivat_session::session::RunEvent)>>,
+        status: tokio::sync::watch::Receiver<crate::status::RunStatus>,
+        sql: Arc<[Arc<str>]>,
+        session: hacivat_session::session::SessionHandle,
+    ) {
+        let _ = (run, choices, status, sql, session);
+    }
 }
 
 /// One confirmation ("statement `index` of `total`").

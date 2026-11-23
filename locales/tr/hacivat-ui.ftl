@@ -5169,3 +5169,51 @@ hv-scripts-set-failed =
 #   $n (Number) - a count, e.g. 3.
 # Review: PO
 hv-scripts-remove-dirty = Bu kitaplıktan açık { $n } betik sekmesinde kaydedilmemiş değişiklik var. Kitaplığı kaldırmak kurtarma kopyalarını siler; önce kaydedin.
+
+## m4b-t17-secrets-ui
+
+# Surface 8 (Secret warning): the gutter mark and the dialog of a script whose secret scan couldn't run (fail closed).
+# Review: PO
+hv-scripts-secret-unscanned = Gizli bilgi denetimi yapılamadı
+# Surface 8 (Secret warning): the unscanned mark's tooltip line.
+# Review: PO
+hv-scripts-secret-unscanned-hint = Kaydederken önce sorulur.
+# Surface 8 (Secret warning): the dialog's title when the scan couldn't run.
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-secret-unscanned-title = { $file } gizli bilgi için denetlenemedi
+# Surface 8 (Secret warning): the dialog's text when the scan couldn't run.
+# Review: PO
+hv-scripts-secret-unscanned-body = { -brand-hacivat } bu metinde parola ya da belirteç arayamadı; bu yüzden kitaplığa kaydetmeden önce sorar.
+# Surface 12 (Recovery): the tab's recovered text looked like it held a password or a token when it was copied (never which, never the value; R-T5-4).
+# Review: PO
+hv-scripts-recover-secret = Bu metnin bazı satırları parolaya ya da belirtece benziyor. Kaydederken önce sorulur.
+
+## m4b-t18-run-as-script
+# Review: PO
+hv-scripts-run-checking = Dosyanın tamamı çalıştırılmadan önce denetleniyor
+# Variables:
+#   $n (Number) - the statement's position in the file, e.g. 1205.
+# Review: PO
+hv-scripts-run-declined = { $n }. ifadede durduruldu: onaylamadınız. Önceki ifadeler çalıştı ve uygulanmış olarak kalıyor; ondan sonrası gönderilmedi.
+# Review: PO
+hv-scripts-run-close = Kapat
+# Variables:
+#   $env (String) - the connection's environment word (an hv-conn-env-* message), e.g. "staging".
+# Review: PO
+hv-scripts-confirm-open-ended = Tümünü çalıştır, dosyada bu bağlantıda ({ $env }) onay isteyecek sonraki her ifadeyi sormadan çalıştırır; adının yazılması gereken bir ifade yine sorar. Tümünü atla, onay isteyecek sonraki her ifadeyi atlar.
+# Variables:
+#   $env (String) - the connection's environment word (an hv-conn-env-* message), e.g. "production".
+# Review: PO
+hv-scripts-confirm-open-ended-skip = Tümünü atla, dosyada bu bağlantıda ({ $env }) onay isteyecek sonraki her ifadeyi atlar.
+# Review: PO
+hv-scripts-pasted-name = Yapıştırılan metin
+# Review: PO
+hv-scripts-paste-preview-unbound = Önizleme olarak yapıştırma bu konsolun bağlantısında açılır ve konsolun bağlantısı yok.
+# Review: PO
+hv-scripts-run-session-busy = Bu bağlantının oturumunda bir betik çalışıyor. Bitmesini bekleyin ya da durdurun, sonra yeniden çalıştırın.
+# Variables:
+#   $n (Number) - the statement's position in the file, e.g. 1205.
+# Review: PO
+hv-scripts-run-cancelled-during = { $n }. ifade sırasında durduruldu; ondan sonraki ifadeler gönderilmedi.

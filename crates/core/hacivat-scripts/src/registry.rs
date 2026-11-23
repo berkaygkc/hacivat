@@ -14,7 +14,7 @@
 //! path = "<absolute, as the user chose it>"
 //! added_at = "<RFC 3339 UTC>"
 //! canonical = "<the resolved root>"   # m4b-t10 fix round 2; set by the service
-//! inode = "<the root folder's inode>" # m4b-t10 fix round 2; Unix only
+//! inode = "<the root folder's inode>" # m4b-t10 fix round 2; Unix (Windows: file id, cifix-5)
 //!
 //! [[mapping]]
 //! profile = "<profile uuid>"
@@ -197,8 +197,9 @@ pub struct RegisteredLibrary {
     /// launch whose resolution differs refuses the root (a folder above it replaced by a link).
     /// `None` in rows written before, and by [`LibraryRegistry::add`].
     pub canonical: Option<PathBuf>,
-    /// The folder's inode then (Unix); compared across sessions with the canonical path. The
-    /// device number is not kept: it can change across a reboot or a remount.
+    /// The folder's inode then (Unix; on Windows its file id, m4b-cifix-5); compared across
+    /// sessions with the canonical path. The device number is not kept: it can change across a
+    /// reboot or a remount.
     pub inode: Option<u64>,
     // ## m4b-t10-service
     // ## m4b-t16-attach (named exception; R-T9-1): how its changes are found, as the user chose

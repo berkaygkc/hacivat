@@ -286,6 +286,9 @@ pub enum Notice {
     Recovered {
         at: std::time::SystemTime,
         unknown: bool,
+        /// ## m4b-t17-secrets-ui (named item, R-T5-4): the copy's metadata says its text looked
+        /// like it held a secret when it was written (never which, never the value).
+        secret: bool,
     },
     /// A Markdown note: it does not run.
     Markdown,
@@ -378,6 +381,8 @@ pub struct ScriptDoc {
     pending_reload: Option<DiskStamp>,
     /// "Save anyway" answers for this tab, by finding fingerprint (R-M4b-17).
     pub(crate) secret_ok: HashSet<u64>,
+    // ## m4b-t17-secrets-ui (named item): the secret scan of the text and its gutter marks.
+    pub(crate) secrets: crate::scripts::secret_marks::Marks,
     /// "Don't save" was answered (close or quit): not asked again.
     pub(crate) discarded: bool,
     /// The one-line status message ("Saved …", "Reloaded …"), for 3 s.
@@ -466,6 +471,8 @@ impl ScriptDoc {
             recovered: None,
             pending_reload: None,
             secret_ok: HashSet::new(),
+            // ## m4b-t17-secrets-ui (named item)
+            secrets: Default::default(),
             discarded: false,
             status: None,
             status_task: None,
@@ -551,6 +558,12 @@ impl ScriptDoc {
     /// The editor's tier for the file (a T2 preview is read-only, never saved or run).
     pub fn tier(&self) -> SizeTier {
         self.tier
+    }
+
+    // ## m4b-t17-secrets-ui (named item)
+    /// The tab's secret scan (the latest answer and whether one waits or runs).
+    pub fn secrets(&self) -> &crate::scripts::secret_marks::Marks {
+        &self.secrets
     }
 
     /// "Keep mine" on the "Changed on disk" bar: the bar goes, the next save asks before it
@@ -808,6 +821,8 @@ impl ScriptDoc {
                 Notice::Recovered {
                     at: entry.saved_at,
                     unknown: entry.liveness_unknown,
+                    // ## m4b-t17-secrets-ui (named line, R-T5-4)
+                    secret: entry.copy.secret_suspected,
                 },
                 cx,
             );
@@ -818,6 +833,8 @@ impl ScriptDoc {
         if self.is_dirty(cx) {
             self.schedule_recovery(Duration::ZERO, cx);
         }
+        // ## m4b-t17-secrets-ui (named line): the text's first secret scan, off the UI thread.
+        crate::scripts::secret_marks::schedule(self, Duration::ZERO, cx);
         cx.emit(ScriptDocEvent::Changed);
         cx.notify();
     }
@@ -826,6 +843,8 @@ impl ScriptDoc {
 
     /// The editor's text changed.
     pub(crate) fn on_edit(&mut self, cx: &mut Context<Self>) {
+        // ## m4b-t17-secrets-ui (named line): the secret scan follows the text, debounced.
+        crate::scripts::secret_marks::schedule(self, crate::scripts::secret_marks::DEBOUNCE, cx);
         if self.is_dirty(cx) {
             self.discarded = false;
             self.schedule_recovery(RECOVERY_IDLE, cx);
@@ -858,9 +877,16 @@ impl ScriptDoc {
             return;
         };
         let snap = editor.read(cx).snapshot();
-        let copy = CopyMeta {
+        // ## m4b-t17-secrets-ui fix round 1 (m2; named line): the tab's scan of this very text,
+        // when there is one, is not run again.
+        let known = self
+            .secrets
+            .at(snap.version)
+            .map(|s| !s.findings.is_empty());
+        let mut copy = CopyMeta {
             meta: self.meta,
             base: self.stamp,
+            // ## m4b-t17-secrets-ui (named line, R-T5-4): set below, off the UI thread.
             secret_suspected: false,
             damaged: false,
             // ## m4b-t14-tabs fix round 3 (m-fr2-1): the SQLite file the tab is bound to.
@@ -877,6 +903,9 @@ impl ScriptDoc {
         let task = on_core(cx, async move {
             tokio::task::spawn_blocking(move || {
                 let text = snap.buffer.to_string();
+                // ## m4b-t17-secrets-ui (named line, R-T5-4): the restore notice says so.
+                copy.secret_suspected =
+                    known.unwrap_or_else(|| crate::scripts::secret_marks::suspected(&text));
                 let Some(instance) = rt.instance.get_or_init(|| {
                     recovery::Instance::start(&rt.paths)
                         .inspect_err(|e| tracing::warn!(?e, "scripts: no recovery instance"))
@@ -960,6 +989,8 @@ impl ScriptDoc {
                     Notice::Recovered {
                         at: entry.saved_at,
                         unknown: entry.liveness_unknown,
+                        // ## m4b-t17-secrets-ui (named line, R-T5-4)
+                        secret: entry.copy.secret_suspected,
                     },
                     cx,
                 );
@@ -1219,6 +1250,8 @@ impl ScriptDoc {
         let Some(stamp) = self.pending_reload.take() else {
             return;
         };
+        // ## m4b-t17-secrets-ui (named line): the reloaded text is scanned again.
+        crate::scripts::secret_marks::schedule(self, Duration::ZERO, cx);
         match version {
             Some(v) => {
                 self.clean_at(v, Some(stamp), cx);
@@ -1634,8 +1667,35 @@ pub(crate) fn run_gate(console: ConsoleId, rerun: Box<dyn FnOnce(&mut App)>, cx:
     let Some(doc) = doc_of_console(console, cx) else {
         return !is_script_console(console, cx);
     };
-    doc.update(cx, |d, cx| d.gate(console, rerun, cx))
+    doc.update(cx, |d, cx| d.gate(console, rerun, false, cx))
 }
+
+// ## m4b-t18-run-as-script (named exception; R-M4b-27, R-T14-2; fix round 1, I3, R-T18-1)
+/// [`run_gate`] for Run as script (`scripts::run_as_script`, between its two passes), through
+/// script tab `doc`'s binding on console `console`: the tab's own console, or a preview pasted
+/// into that tab (its own console, the tab's database). The same check on that console's
+/// session, except that a T2 preview is what it streams. A pass inserts the check's context
+/// generation, which [`take_checked_generation`] hands to the runner.
+pub(crate) fn run_gate_streamed_for(
+    doc: &Entity<ScriptDoc>,
+    console: ConsoleId,
+    rerun: Box<dyn FnOnce(&mut App)>,
+    cx: &mut App,
+) -> bool {
+    doc.update(cx, |d, cx| d.gate(console, rerun, true, cx))
+}
+
+/// The context generation console `console`'s last passed check read on `session` (taken:
+/// one check, one run); `None` when no check passed there, or its generation is unknown.
+pub(crate) fn take_checked_generation(
+    console: ConsoleId,
+    session: hacivat_session::session::SessionId,
+    cx: &mut App,
+) -> Option<u64> {
+    let (on, generation) = cx.default_global::<RunChecks>().0.remove(&console)?;
+    (on == session).then_some(generation).flatten()
+}
+// ## m4b-t18-run-as-script
 
 /// Whether `console` is a script tab's (registered with its source), whatever its doc.
 fn is_script_console(console: ConsoleId, cx: &App) -> bool {
@@ -1647,6 +1707,8 @@ impl ScriptDoc {
         &mut self,
         console: ConsoleId,
         rerun: Box<dyn FnOnce(&mut App)>,
+        // ## m4b-t18-run-as-script (named exception): Run as script streams a T2 preview.
+        streamed: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.load != Load::Ready || self.plan.is_err() {
@@ -1661,7 +1723,7 @@ impl ScriptDoc {
             toast(msg(cx, "hv-scripts-run-md", Vec::new()), cx);
             return false;
         }
-        if self.tier == SizeTier::Preview {
+        if self.tier == SizeTier::Preview && !streamed {
             toast(msg(cx, "hv-scripts-preview-no-run", Vec::new()), cx);
             return false;
         }

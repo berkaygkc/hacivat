@@ -121,7 +121,10 @@ const CANCEL_GRACE: Duration = Duration::from_secs(30);
 
 /// A script read from disk in UTF-8 chunks, each cut at a character boundary: one pass over
 /// the file. The runner reads a pass to its end, then asks for the next one.
-pub trait ScriptChunks: Send {
+///
+/// ## m4b-t18-run-as-script (named exception): `Sync` too, so a run's future is `Send` and the
+/// app can run it on the core runtime (the run holds its request across every await).
+pub trait ScriptChunks: Send + Sync {
     /// The next chunk, `None` at the end. Blocking: the runner calls it on the blocking pool.
     fn next_chunk(&mut self) -> Option<Result<String, ChunkError>>;
 
@@ -180,6 +183,17 @@ pub enum RefuseReason {
     ModesDiffer,
     /// Stop was pressed before anything ran.
     Cancelled,
+    // ## m4b-t18-run-as-script (named exception; the T12 re-review's n1 and n3, R-T14-2)
+    /// More than 65,536 statements on one line with no line break (the item cap, R-T8-3): its
+    /// own words, never "64 MiB" (n1).
+    NoBoundaryItems,
+    /// The session's lexing modes are unknown and the file reads differently under some of
+    /// them (n3; `ModesDiffer` is the tab's known modes against the session's).
+    ModesUnknown,
+    /// The app's database check before pass 2 ([`ScriptRunner::run_checked`]) refused: the
+    /// session is not on the tab's database, or that could not be checked (R-M4b-27).
+    DatabaseCheck,
+    // ## m4b-t18-run-as-script
 }
 
 impl RefuseReason {
@@ -201,6 +215,10 @@ impl RefuseReason {
             RefuseReason::Read(ChunkError::Io(_)) => "exec-script-read-failed",
             RefuseReason::ModesDiffer => "exec-script-modes-differ",
             RefuseReason::Cancelled => "exec-script-cancelled-before",
+            // ## m4b-t18-run-as-script (named exception)
+            RefuseReason::NoBoundaryItems => "exec-script-no-boundary-items",
+            RefuseReason::ModesUnknown => "exec-script-modes-unknown",
+            RefuseReason::DatabaseCheck => "exec-script-database-check",
         }
     }
 
@@ -249,6 +267,10 @@ pub enum StopReason {
     NotSent,
     /// Pass 2 met what pass 1 did not (never on an unchanged file; fail closed).
     Split(RefuseReason),
+    // ## m4b-t18-run-as-script (named exception; the T12 re-review's n5)
+    /// The run lost track of the connection's events (its event stream lagged or closed): it
+    /// cannot tell whether the connection was reset, so it stops (fail closed).
+    LostTrack,
 }
 
 impl StopReason {
@@ -270,6 +292,8 @@ impl StopReason {
             StopReason::Reconnected => "exec-script-reconnected",
             StopReason::NotSent => "exec-script-not-sent",
             StopReason::Split(_) => "exec-script-split-changed",
+            // ## m4b-t18-run-as-script (named exception)
+            StopReason::LostTrack => "exec-script-lost-track",
         }
     }
 }
@@ -317,6 +341,10 @@ pub struct ScriptRunSummary {
     /// The most bytes the runner held at once (the splitters' text, the line count's text and
     /// the chunk being cut).
     pub peak_held: usize,
+    // ## m4b-t18-run-as-script fix round 1 (named exception; review m4, R-T18-2)
+    /// Stop reached the last unit after it was sent: it was cancelled in flight (or ended just
+    /// before the cancel reached it), so the stop is "during" that statement.
+    pub cancelled_in_flight: bool,
 }
 
 /// How a script run ended.
@@ -436,13 +464,65 @@ impl ScriptRunner {
         req: ScriptRunRequest,
         progress: watch::Sender<ScriptProgress>,
     ) -> ScriptRunOutcome {
+        self.run_checked(req, progress, None).await
+    }
+
+    // ## m4b-t18-run-as-script (named exception; R-M4b-27, R-T14-2)
+    /// [`ScriptRunner::run`] with the app's database check: after a clean pass 1 and before
+    /// anything is sent, `check` asks whether the session is on the tab's database and answers
+    /// the session's context generation it read (`None`: refused, nothing is sent,
+    /// `RefuseReason::DatabaseCheck`). The first unit is sent only under that generation (else
+    /// `StopReason::ContextChanged`, nothing sent); a loss or reset after the check stops the
+    /// run as any other. Stop while the check waits refuses the run.
+    pub async fn run_checked(
+        &self,
+        req: ScriptRunRequest,
+        progress: watch::Sender<ScriptProgress>,
+        check: Option<DatabaseCheck>,
+    ) -> ScriptRunOutcome {
         let mut run = Run::new(self, req, progress);
+        run.check = check;
         let out = run.go().await;
         run.log_outcome(&out);
         run.publish(|p| p.phase = ScriptPhase::Done);
         out
     }
 }
+
+// ## m4b-t18-run-as-script (named exception)
+/// The app's check that the tab's session is on the tab's database, run between the passes
+/// ([`ScriptRunner::run_checked`]): `Some(generation)` lets the run go on under that context
+/// generation, `None` refuses it.
+pub type DatabaseCheck = Box<dyn FnOnce() -> BoxFuture<'static, Option<u64>> + Send + Sync>;
+
+/// Why a run must stop for its connection (`Run::connection_lost`): the session's `state`
+/// now, and the events since pass 2 began (`None` before it). A lagged or closed stream is a
+/// lost track (fail closed), never "reset" (the T12 re-review's n5).
+fn lost_reason(
+    state: &SessionState,
+    events: Option<&mut broadcast::Receiver<SessionEvent>>,
+) -> Option<StopReason> {
+    if matches!(
+        state,
+        SessionState::Disconnected | SessionState::Connecting | SessionState::Broken(_)
+    ) {
+        return Some(StopReason::Reconnected);
+    }
+    let events = events?;
+    loop {
+        match events.try_recv() {
+            Ok(SessionEvent::Lost(_) | SessionEvent::Reconnected) => {
+                return Some(StopReason::Reconnected);
+            }
+            Ok(_) => {}
+            Err(broadcast::error::TryRecvError::Empty) => return None,
+            Err(
+                broadcast::error::TryRecvError::Lagged(_) | broadcast::error::TryRecvError::Closed,
+            ) => return Some(StopReason::LostTrack),
+        }
+    }
+}
+// ## m4b-t18-run-as-script
 
 /// [`ScriptRunner::run`] as a free function.
 pub async fn run_file(
@@ -657,6 +737,8 @@ enum Step {
     /// MySQL/MariaDB).
     Held {
         line: u64,
+        // ## m4b-t18-run-as-script (named exception, n1): only the item cap was passed.
+        items: bool,
     },
 }
 
@@ -838,13 +920,18 @@ impl Reader {
                 let items = split.feed(&chunk);
                 let held = split.held_len();
                 let over = self.guard && over_caps(split);
+                // ## m4b-t18-run-as-script (named exception, n1)
+                let items_only = held <= STREAM_HELD_MAX;
                 let refuses = any_refuses(&items);
                 let located = self.locate(items);
                 self.feed_variants(Some(&chunk));
                 self.peak = self.peak.max(self.held_now() + chunk.len());
                 if over {
                     let line = self.lines.at(self.fed - held as u64);
-                    return Step::Held { line };
+                    return Step::Held {
+                        line,
+                        items: items_only,
+                    };
                 }
                 // Later items start in the held text: what lies before it is never asked for.
                 self.lines.at(self.fed - held as u64);
@@ -1089,6 +1176,11 @@ struct Run<'a> {
     running: bool,
     started: Instant,
     started_at: SystemTime,
+    // ## m4b-t18-run-as-script (named exception; R-M4b-27, R-T14-2)
+    /// The app's database check, run after a clean pass 1 ([`ScriptRunner::run_checked`]).
+    check: Option<DatabaseCheck>,
+    /// The context generation that check read: the first unit's must be it.
+    checked_generation: Option<u64>,
 }
 
 impl<'a> Run<'a> {
@@ -1113,6 +1205,9 @@ impl<'a> Run<'a> {
             running: false,
             started: Instant::now(),
             started_at: SystemTime::now(),
+            // ## m4b-t18-run-as-script (named exception)
+            check: None,
+            checked_generation: None,
         }
     }
 
@@ -1240,12 +1335,18 @@ impl<'a> Run<'a> {
             reader = r;
             let (items, end, refuses, alike) = match step {
                 Step::Failed(e) => return refuse(RefuseReason::Read(e), None),
-                Step::Held { line } => {
+                Step::Held { line, items } => {
                     let at = ScriptPosition {
                         unit: units + 1,
                         line,
                     };
-                    return refuse(RefuseReason::NoBoundary, Some(at));
+                    // ## m4b-t18-run-as-script (named exception, n1)
+                    let reason = if items {
+                        RefuseReason::NoBoundaryItems
+                    } else {
+                        RefuseReason::NoBoundary
+                    };
+                    return refuse(reason, Some(at));
                 }
                 Step::Items {
                     items,
@@ -1293,7 +1394,8 @@ impl<'a> Run<'a> {
             });
             if end {
                 if !alike {
-                    return refuse(RefuseReason::ModesDiffer, None);
+                    // ## m4b-t18-run-as-script (named exception, n3): the modes are unknown.
+                    return refuse(RefuseReason::ModesUnknown, None);
                 }
                 break;
             }
@@ -1307,6 +1409,17 @@ impl<'a> Run<'a> {
         }
         // A loss or a reset from here on stops the run.
         self.events = Some(self.req.session.events());
+        // ## m4b-t18-run-as-script (named exception; R-M4b-27, R-T14-2): the app's check that
+        // the session is on the tab's database, after the events are followed (a reset after
+        // the check stops the run) and before the file is opened again; it answers the context
+        // generation it read, and the first unit is sent only under it.
+        if let Some(check) = self.check.take() {
+            match self.or_cancel(check()).await {
+                None => return refuse(RefuseReason::Cancelled, None),
+                Some(None) => return refuse(RefuseReason::DatabaseCheck, None),
+                Some(Some(generation)) => self.checked_generation = Some(generation),
+            }
+        }
         let inner = std::mem::replace(&mut reader.chunks.inner, Box::new(Spent));
         let second = match inner.reopen_verified().await {
             Ok(s) => s,
@@ -1338,12 +1451,18 @@ impl<'a> Run<'a> {
                     break 'run self.stop(StopReason::FileChanged, None);
                 }
                 Step::Failed(e) => break 'run self.stop(StopReason::Read(e), None),
-                Step::Held { line } => {
+                Step::Held { line, items } => {
                     let at = ScriptPosition {
                         unit: ordinal + 1,
                         line,
                     };
-                    break 'run self.stop(StopReason::Split(RefuseReason::NoBoundary), Some(at));
+                    // ## m4b-t18-run-as-script (named exception, n1)
+                    let reason = if items {
+                        RefuseReason::NoBoundaryItems
+                    } else {
+                        RefuseReason::NoBoundary
+                    };
+                    break 'run self.stop(StopReason::Split(reason), Some(at));
                 }
                 Step::Items { items, end, .. } => (items, end),
             };
@@ -1477,30 +1596,15 @@ impl<'a> Run<'a> {
         }
     }
 
-    /// Whether the connection was lost or reset since pass 2 began, or is not connected now
-    /// (a missed event counts as one: fail closed).
-    fn connection_lost(&mut self) -> bool {
+    /// Why the run must stop for its connection: it was lost or reset since pass 2 began, or
+    /// is not connected now (`Reconnected`), or a missed event hides whether it was
+    /// (`LostTrack`: fail closed). `None`: it is the connection the run began on.
+    ///
+    /// ## m4b-t18-run-as-script (named exception, the T12 re-review's n5): the reason, not a
+    /// flag, so a lagged stream says it lost track instead of "the connection was reset".
+    fn connection_lost(&mut self) -> Option<StopReason> {
         let state = self.req.session.state().borrow().state.clone();
-        if matches!(
-            state,
-            SessionState::Disconnected | SessionState::Connecting | SessionState::Broken(_)
-        ) {
-            return true;
-        }
-        let Some(events) = self.events.as_mut() else {
-            return false;
-        };
-        loop {
-            match events.try_recv() {
-                Ok(SessionEvent::Lost(_) | SessionEvent::Reconnected) => return true,
-                Ok(_) => {}
-                Err(broadcast::error::TryRecvError::Empty) => return false,
-                Err(
-                    broadcast::error::TryRecvError::Lagged(_)
-                    | broadcast::error::TryRecvError::Closed,
-                ) => return true,
-            }
-        }
+        lost_reason(&state, self.events.as_mut())
     }
 
     /// Waits for `fut`, or for Stop (`None`).
@@ -1528,8 +1632,16 @@ impl<'a> Run<'a> {
         let Some((sctx, generation)) = self.or_cancel(session.run_context()).await else {
             return UnitDone::Stop(StopReason::Cancelled);
         };
-        if self.connection_lost() {
-            return UnitDone::Stop(StopReason::Reconnected);
+        if let Some(lost) = self.connection_lost() {
+            return UnitDone::Stop(lost);
+        }
+        // ## m4b-t18-run-as-script (named exception; R-T14-2): the first unit is sent only
+        // under the context generation the app's database check read; anything that moved the
+        // context in between (a reconnect, a replay, a queued USE) stops the run, nothing sent.
+        if let Some(checked) = self.checked_generation.take()
+            && generation != Some(checked)
+        {
+            return UnitDone::Stop(StopReason::ContextChanged);
         }
         let (modes, known) = modes_of(self.req.engine, &sctx);
         if self.modes_fixed && known && modes.modes != self.dialect.modes {
@@ -1607,8 +1719,8 @@ impl<'a> Run<'a> {
             return UnitDone::Stop(StopReason::Cancelled);
         }
         // Right before the send, as M3's Run: the connection it was gated on, still.
-        if self.connection_lost() {
-            return UnitDone::Stop(StopReason::Reconnected);
+        if let Some(lost) = self.connection_lost() {
+            return UnitDone::Stop(lost);
         }
         let now = self.conn();
         if now.env != conn.env || now.read_only != conn.read_only {
@@ -1620,6 +1732,8 @@ impl<'a> Run<'a> {
             reports: reports.iter().map(|r| Some(r.items.clone())).collect(),
         });
         let unit = prepared[0].unit.clone();
+        // ## m4b-t18-run-as-script fix round 1 (named exception; review I2)
+        let masked: Arc<[Arc<str>]> = Arc::from(vec![prepared[0].masked.clone()]);
         // The service's lines go to the unit's own log, then to the console's numbered by the
         // unit's place in the file.
         let unit_log = SessionLog::new();
@@ -1638,9 +1752,20 @@ impl<'a> Run<'a> {
             context_generation: generation,
         };
         let mut ticket = self.runner.exec.run_with_refresh(&session, req, refresh);
+        // ## m4b-t18-run-as-script fix round 1 (named exception; review I2): the port follows
+        // this unit's run (its confirm-in-transaction prompt shows the statement and its loss).
+        self.req.confirm.follow_run(
+            ticket.run,
+            ticket.choices.clone(),
+            ticket.status.clone(),
+            masked,
+            session.clone(),
+        );
         let summary = match self.or_cancel(&mut ticket.done).await {
             Some(done) => done,
             None => {
+                // ## m4b-t18-run-as-script fix round 1 (named exception; review m4)
+                self.summary.cancelled_in_flight = true;
                 drop(session.cancel(ticket.seq));
                 match tokio::time::timeout(CANCEL_GRACE, &mut ticket.done).await {
                     // A unit that ended before the cancel reached it ran: it is counted.
@@ -2071,5 +2196,57 @@ mod tests {
         assert!(offers_suppress(&q));
         let q = question(&item, &prepared, at, 9, true, Arc::from("c")).expect("asks");
         assert!(!offers_suppress(&q));
+    }
+}
+
+// ## m4b-t18-run-as-script (named exception; the T12 re-review's n5)
+#[cfg(test)]
+mod t18_tests {
+    use super::*;
+
+    #[test]
+    fn a_lagged_or_closed_event_stream_is_a_lost_track_never_a_reset() {
+        let (tx, mut rx) = broadcast::channel(2);
+        for req in 0..3 {
+            let _ = tx.send(SessionEvent::SlowCancel { req });
+        }
+        assert_eq!(
+            lost_reason(&SessionState::Idle, Some(&mut rx)),
+            Some(StopReason::LostTrack)
+        );
+        // After the lag the stream reads again: ordinary events are no loss.
+        assert_eq!(lost_reason(&SessionState::Idle, Some(&mut rx)), None);
+        let _ = tx.send(SessionEvent::Reconnected);
+        assert_eq!(
+            lost_reason(&SessionState::Idle, Some(&mut rx)),
+            Some(StopReason::Reconnected)
+        );
+        drop(tx);
+        assert_eq!(
+            lost_reason(&SessionState::Idle, Some(&mut rx)),
+            Some(StopReason::LostTrack)
+        );
+    }
+
+    #[test]
+    fn a_session_that_is_not_connected_was_reset() {
+        for state in [SessionState::Disconnected, SessionState::Connecting] {
+            assert_eq!(lost_reason(&state, None), Some(StopReason::Reconnected));
+        }
+        assert_eq!(lost_reason(&SessionState::Idle, None), None);
+    }
+}
+
+// ## m4b-t18-run-as-script (named exception): the app runs a script on the core runtime.
+#[cfg(test)]
+mod t18_send {
+    use super::*;
+
+    fn is_send<T: Send>(_: &T) {}
+
+    #[allow(dead_code)]
+    fn a_run_is_send(runner: &ScriptRunner, req: ScriptRunRequest) {
+        let (tx, _) = watch::channel(ScriptProgress::default());
+        is_send(&runner.run_checked(req, tx, None));
     }
 }

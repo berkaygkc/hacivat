@@ -150,7 +150,11 @@ fn rank(kind: SecretKind) -> u8 {
 const SOURCES: &[u32] = &[9, 10, 11, 12, 13, 14, 15, 16, 21, 22];
 
 /// The comment marker that silences its line (R-M4b-17).
-const ALLOW: &str = "hacivat:allow-secret";
+const ALLOW: &str = ALLOW_MARKER;
+
+// ## m4b-t17-secrets-ui fix round 1 (m4; named item): the one spelling, for the app's hints.
+/// The comment marker that silences its line (never translated); the scanner reads this one.
+pub const ALLOW_MARKER: &str = "hacivat:allow-secret";
 
 /// One row of `data/secret_patterns.toml`.
 #[derive(Deserialize)]

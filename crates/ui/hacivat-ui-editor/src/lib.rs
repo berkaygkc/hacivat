@@ -25,6 +25,8 @@ pub mod gutter;
 mod ime;
 pub mod large_file;
 mod layout_cache;
+// ## m4b-t17-secrets-ui (named item): the host's line marks.
+mod line_marks;
 pub mod marks;
 mod mouse;
 mod paint;
@@ -68,3 +70,5 @@ pub use reload::{PreviewSpec, ReloadRefused};
 pub use clipboard::{PasteAnswer, PastedDocument};
 pub use reload::{DiskEdit, disk_edit};
 pub use view::UiWork;
+// ## m4b-t17-secrets-ui
+pub use line_marks::LineMark;

@@ -63,7 +63,10 @@ fn running_request(console: ConsoleId, cx: &App) -> Option<u64> {
 }
 
 fn can_cancel(cx: &App) -> bool {
-    focused_console(cx).is_some_and(|c| running_request(c, cx).is_some())
+    // ## m4b-t18-run-as-script (named exception): or a Run as script under way.
+    focused_console(cx).is_some_and(|c| {
+        running_request(c, cx).is_some() || crate::scripts::run_as_script::running(c, cx)
+    })
 }
 
 /// Cancels what console `console` runs; nothing when it runs nothing.
@@ -88,6 +91,11 @@ pub fn cancel(console: ConsoleId, cx: &mut App) -> bool {
 
 fn run_cancel(window: &mut Window, cx: &mut App) {
     if let Some(console) = focused_console(cx) {
+        // ## m4b-t18-run-as-script (named exception): Stop of a streamed run is its strip's
+        // Stop (between units, and the unit in flight is cancelled), never a cancel of one unit.
+        if crate::scripts::run_as_script::stop(console, cx) {
+            return;
+        }
         // ## m3b-t23-escalation (named exception): a second press while the request is being
         // cancelled opens the escalation dialog (HV-EXEC-09 step 5); it never escalates itself.
         if running_request(console, cx).is_some_and(|req| escalation::cancelling(console, req, cx))

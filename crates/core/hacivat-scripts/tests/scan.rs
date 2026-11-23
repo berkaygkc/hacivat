@@ -901,14 +901,30 @@ fn a_missing_or_stale_root_lists_nothing() {
     let d = tempfile::tempdir().unwrap();
     fs::create_dir(d.path().join("a")).unwrap();
     fs::write(d.path().join("a/x.sql"), "x").unwrap();
+    // m4b-cifix-5: the stale canonical path names another real folder. A spelling such as
+    // `<canonical>/../a` is no stale path on Windows: joining onto a verbatim (`\\?\`) path
+    // drops the `..`, so it was the canonical path itself there (CI 45091594060).
+    fs::create_dir(d.path().join("b")).unwrap();
     let root = real_root(&d.path().join("a"));
     let stale = LibraryRoot {
-        canonical: root.canonical.join("..").join("a"),
+        canonical: fs::canonicalize(d.path().join("b")).unwrap(),
         ..root.clone()
     };
     let r = scan(&stale, &Limits::default(), &RealFs);
     assert_eq!(r.root, Some(RootProblem::Changed));
     assert!(r.entries.is_empty());
+    // Where a joined `..` stays in the text, a spelling that is not the canonical one is
+    // refused too.
+    #[cfg(unix)]
+    {
+        let spelled = LibraryRoot {
+            canonical: root.canonical.join("..").join("a"),
+            ..root.clone()
+        };
+        let r = scan(&spelled, &Limits::default(), &RealFs);
+        assert_eq!(r.root, Some(RootProblem::Changed));
+        assert!(r.entries.is_empty());
+    }
     fs::remove_file(d.path().join("a/x.sql")).unwrap();
     fs::remove_dir(d.path().join("a")).unwrap();
     let r = scan(&root, &Limits::default(), &RealFs);

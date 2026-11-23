@@ -225,6 +225,8 @@ pub struct EditorView {
     // gutter's buttons (`gutter.rs`).
     pub(crate) autoscroll: Option<crate::mouse::Autoscroll>,
     pub(crate) gutter_ui: crate::gutter::GutterUi,
+    // ## m4b-t17-secrets-ui (named item): the host's line marks (`line_marks.rs`).
+    pub(crate) line_marks: crate::line_marks::LineMarks,
     /// The editor has the focus (the blink runs only then).
     has_focus: bool,
     /// The longest line seen, in bytes (the tier's long-line rule). Edits only grow it (a
@@ -376,6 +378,8 @@ impl EditorView {
             drag: None,
             autoscroll: None,
             gutter_ui: crate::gutter::GutterUi::default(),
+            // ## m4b-t17-secrets-ui (named item)
+            line_marks: crate::line_marks::LineMarks::default(),
             has_focus: false,
             longest_line: longest_line(text),
             // ## m4b-t11-editor
@@ -780,6 +784,38 @@ impl EditorView {
         &self.marks
     }
 
+    // ## m4b-t17-secrets-ui (named items, ADR 0007 `## m4b-t17`)
+    /// Replaces the host's line marks with `marks`, byte ranges of the text at `version`
+    /// (rebased to the current text; `line_marks.rs`).
+    pub fn set_line_marks(
+        &mut self,
+        version: u64,
+        marks: Vec<crate::line_marks::LineMark>,
+        cx: &mut Context<Self>,
+    ) {
+        let snap = self.model.snapshot();
+        crate::line_marks::set(
+            &mut self.line_marks,
+            version,
+            marks,
+            self.model.changelog(),
+            &snap,
+        );
+        cx.notify();
+    }
+
+    /// The lines (0-based, ascending) the host's line marks are on now.
+    pub fn line_mark_lines(&self) -> Vec<u32> {
+        crate::line_marks::lines(&self.line_marks, self.model.buffer())
+    }
+
+    // ## m4b-t17-secrets-ui fix round 1 (named item)
+    /// The rows (0-based) whose line-mark glyph the last painted frame drew (a shown ▶ or an
+    /// execution mark's glyph holds the others' slots).
+    pub fn line_mark_rows(&self) -> &[u32] {
+        &self.line_marks.painted
+    }
+
     /// The last painted frame (Task 27's `bounds_for_range`, `character_index_for_point`).
     pub fn last_layout(&self) -> Option<&FrameLayout> {
         self.layout.as_ref()
@@ -1047,6 +1083,8 @@ impl EditorView {
             self.scroll.reveal = true;
         }
         marks::on_commit(&mut self.marks, &committed, self.model.changelog(), &snap);
+        // ## m4b-t17-secrets-ui (named line): the host's line marks follow the text.
+        crate::line_marks::on_commit(&mut self.line_marks, &committed);
         // ## m3b-t01b-seams: folds follow the text; find matches go stale (Tasks 32, 33).
         // ## m3c-t32-fold (named exception, fix round 1 M2): only a text change maps them.
         fold_gutter::on_commit(self, &committed, text_changed);
