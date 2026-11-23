@@ -29,7 +29,9 @@ use hacivat_app::scripts::open::{install_service, open_script};
 use hacivat_app::scripts::tabs::{self, Load, ScriptDoc};
 use hacivat_app::scripts::{DatabaseName, LibraryId, RelPath};
 use hacivat_driver::ExecSummary;
-use hacivat_driver::fake::{FakeDriver, FakeExec, FakeQuery, FakeResultSet, FakeRows, FakeTypedCall};
+use hacivat_driver::fake::{
+    FakeDriver, FakeExec, FakeQuery, FakeResultSet, FakeRows, FakeTypedCall,
+};
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
 use hacivat_scripts::service::{LibraryService, ServiceOptions};
 use hacivat_scripts::testing::FakeEventSource;
@@ -318,7 +320,53 @@ impl Rig {
     fn sent(&self) -> (Vec<String>, Vec<String>) {
         (queries(&self.fakes[0]), queries(&self.fakes[1]))
     }
+
+    // ## fix round 1 (review I2)
+    /// Waits until `tab` has no Run preparing or in flight, by the exec service's own signal
+    /// (`run_busy` is true from a Run's preparation until the UI has seen its summary, after
+    /// the session sent it on the core runtime). On its own this is not a barrier for a press
+    /// still queued (a press reaches the console with the next frame), so a "nothing ran" check
+    /// also goes through [`Rig::barrier`].
+    fn quiesce(&self, tab: TabId) {
+        let console = self
+            .vcx
+            .cx
+            .read(|cx| Consoles::by_tab(cx, tab))
+            .expect("the tab's console");
+        self.vcx.run_until_parked();
+        wait_until(self.vcx, "the tab's runs have ended", |vcx| {
+            redraw_full(vcx);
+            vcx.cx
+                .read(|cx| !hacivat_app::exec_ui::orchestrator::run_busy(console, cx))
+        });
+        self.vcx.run_until_parked();
+    }
+
+    /// The barrier of a "nothing ran" check (review I2): Run on `barrier`, another tab of the
+    /// same connection whose text no other press sends, and wait until that text is in the
+    /// connection's log (the session runs in the order the runs were sent, and a press made
+    /// before this one reaches the console before it). Then wait until `tab` is idle too. A
+    /// Run that leaked from `tab` is in the log before this returns.
+    fn barrier(&self, barrier: TabId, tab: TabId, text: &str) {
+        let fake = &self.fakes[1];
+        let seen = |f: &FakeDriver| queries(f).iter().filter(|q| *q == text).count();
+        let before = seen(fake);
+        self.run(barrier);
+        wait_until(self.vcx, "the barrier's statement ran", |_| {
+            seen(fake) > before
+        });
+        self.quiesce(barrier);
+        self.quiesce(tab);
+    }
+
+    /// Everything the two connections ran, without the barrier statements.
+    fn leaked(&self, barrier_text: &str) -> (Vec<String>, Vec<String>) {
+        let (p, s) = self.sent();
+        (p, s.into_iter().filter(|q| q != barrier_text).collect())
+    }
 }
+
+const BARRIER: &str = "SELECT 'barrier'";
 
 fn doc(vcx: &VisualTestContext, tab: TabId) -> Option<Entity<ScriptDoc>> {
     vcx.cx.read(|cx| tabs::doc_of_tab(tab, cx))
@@ -370,14 +418,27 @@ fn retag(vcx: &VisualTestContext, id: ProfileId, env: Option<EnvTag>) {
 
 /// Run pressed while the chooser is open (its chord, and the command itself) runs nothing on
 /// any connection: the chooser holds the keys, the tab under it is not the target, and the
-/// chooser's own answer is never a run. Once the chooser is gone, Run runs on the tab's own
-/// connection only (the control).
+/// chooser's own answer is never a run. Once the chooser is gone, the same chord on another tab
+/// of the same connection runs that tab's own, distinct text (the control: the presses were
+/// live keys, and a late leak of `a.sql` could not hide behind it).
+///
+/// ## fix round 1 (review I2): every "nothing ran" check waits for the exec service's own end
+/// of runs first ([`Rig::quiesce`]).
 #[gpui::test]
 fn run_pressed_while_the_chooser_is_open_runs_nothing(cx: &mut TestAppContext) {
-    let mut r = rig(cx, &[("a.sql", "SELECT 1"), ("b.sql", "SELECT 2")]);
+    let mut r = rig(
+        cx,
+        &[
+            ("a.sql", "SELECT 1"),
+            ("b.sql", "SELECT 2"),
+            ("control.sql", "SELECT 'control'"),
+        ],
+    );
     r.connected("orders-prod");
     r.connected("orders-staging");
     let staging = r.staging;
+    let control = r.open("control.sql", staging);
+    r.wait_session(control);
     let tab = r.open("a.sql", staging);
     r.wait_session(tab);
     let before = tab_count(r.vcx);
@@ -393,21 +454,25 @@ fn run_pressed_while_the_chooser_is_open_runs_nothing(cx: &mut TestAppContext) {
     };
     press_key(r.vcx, chord);
     let _ = run(r.vcx, "editor.run");
-    r.vcx.run_until_parked();
-    assert_eq!(r.sent(), (vec![], vec![]), "nothing ran");
     // Escape closes the chooser and opens nothing.
     press_key(r.vcx, "escape");
     assert!(chooser(r.vcx).is_none());
     assert_eq!(tab_count(r.vcx), before);
-    assert_eq!(r.sent(), (vec![], vec![]), "still nothing ran");
-    // The control: the same chord with the tab focused reaches staging only (so the presses
-    // above were live keys the chooser held, not keys that do nothing here).
-    r.focus(tab);
+    // The control and barrier: the same chord on the other tab of the same connection runs
+    // that tab's own, distinct text. A Run the presses above leaked (`a.sql`'s `SELECT 1`, or
+    // `b.sql`'s `SELECT 2`, on either connection) is in the logs before it.
+    r.focus(control);
     press_key(r.vcx, chord);
-    wait_until(r.vcx, "staging ran it", |_| {
-        queries(&r.fakes[1]) == ["SELECT 1"]
+    wait_until(r.vcx, "the control ran", |_| {
+        queries(&r.fakes[1]).contains(&"SELECT 'control'".to_string())
     });
-    assert!(queries(&r.fakes[0]).is_empty(), "production saw nothing");
+    r.quiesce(control);
+    r.quiesce(tab);
+    assert_eq!(
+        r.sent(),
+        (vec![], vec!["SELECT 'control'".to_string()]),
+        "exactly the control, on staging: nothing ran under the chooser"
+    );
 }
 
 /// A profile retagged staging → production while its script tab is open: the capsule shows
@@ -443,7 +508,10 @@ fn a_retag_while_the_tab_is_open_shows_the_new_environment_and_runs_where_bound(
     wait_until(r.vcx, "its own connection ran it", |_| {
         queries(&r.fakes[1]) == ["SELECT 1"]
     });
-    assert!(queries(&r.fakes[0]).is_empty(), "the other connection saw nothing");
+    assert!(
+        queries(&r.fakes[0]).is_empty(),
+        "the other connection saw nothing"
+    );
 }
 
 /// A file moved into `@production/` while it is open under staging: a Run press on the tab
@@ -453,11 +521,17 @@ fn a_retag_while_the_tab_is_open_shows_the_new_environment_and_runs_where_bound(
 fn a_file_moved_into_production_while_open_under_staging_runs_nothing(cx: &mut TestAppContext) {
     let mut r = rig(
         cx,
-        &[("a.sql", "SELECT 1"), ("@production/keep.sql", "SELECT 0")],
+        &[
+            ("a.sql", "SELECT 1"),
+            ("@production/keep.sql", "SELECT 0"),
+            ("barrier.sql", BARRIER),
+        ],
     );
     r.connected("orders-prod");
     r.connected("orders-staging");
     let staging = r.staging;
+    let barrier = r.open("barrier.sql", staging);
+    r.wait_session(barrier);
     let tab = r.open("a.sql", staging);
     r.wait_session(tab);
     std::fs::rename(r.root.join("a.sql"), r.root.join("@production/a.sql")).unwrap();
@@ -477,7 +551,15 @@ fn a_file_moved_into_production_while_open_under_staging_runs_nothing(cx: &mut T
         })
     });
     // Run on the tab, by the command and by the chord: nothing reaches either connection.
+    // (Fix round 1, review I2: each press is followed by a barrier run on another staging
+    // tab, so a leaked Run is in the log before the check.)
     r.run(tab);
+    r.barrier(barrier, tab, BARRIER);
+    assert_eq!(
+        r.leaked(BARRIER),
+        (vec![], vec![]),
+        "the command ran nothing"
+    );
     r.focus(tab);
     let chord = if cfg!(target_os = "macos") {
         "cmd-enter"
@@ -485,8 +567,8 @@ fn a_file_moved_into_production_while_open_under_staging_runs_nothing(cx: &mut T
         "ctrl-enter"
     };
     press_key(r.vcx, chord);
-    r.vcx.run_until_parked();
-    assert_eq!(r.sent(), (vec![], vec![]), "nothing ran");
+    r.barrier(barrier, tab, BARRIER);
+    assert_eq!(r.leaked(BARRIER), (vec![], vec![]), "nothing ran");
     // Go to script offers it only under production, never preselected.
     let before = tab_count(r.vcx);
     goto_query(r.vcx, "a", "@production/a.sql · orders");
@@ -500,7 +582,8 @@ fn a_file_moved_into_production_while_open_under_staging_runs_nothing(cx: &mut T
     assert_eq!(rows.1, None, "production is never preselected");
     press_key(r.vcx, "enter");
     assert_eq!(tab_count(r.vcx), before, "Enter opened nothing");
-    assert_eq!(r.sent(), (vec![], vec![]), "still nothing ran");
+    r.barrier(barrier, tab, BARRIER);
+    assert_eq!(r.leaked(BARRIER), (vec![], vec![]), "still nothing ran");
     let _ = r.prod;
 }
 
@@ -515,7 +598,10 @@ fn a_stranded_rename_temp_is_named_in_the_diagnostics(cx: &mut TestAppContext) {
     let stranded = format!("reports/{temp}");
     let r = rig(
         cx,
-        &[("reports/a.sql", "SELECT 1"), (stranded.as_str(), "SELECT 2")],
+        &[
+            ("reports/a.sql", "SELECT 1"),
+            (stranded.as_str(), "SELECT 2"),
+        ],
     );
     let lib = r.lib;
     let (_, lines) = r.vcx.cx.read(|cx| {
