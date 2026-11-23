@@ -107,6 +107,15 @@ pub(super) enum M4b {
     /// Surface 4: "Remove orders-scripts from Hacivat?" (Remove Default, Cancel focused).
     LibraryRemove,
     // ## m4b-t16-attach
+    // ## m4b-t17-secrets-ui: surface 8.
+    /// Surface 8: a script with three secret-like lines (password, connection URL, token) and an
+    /// allow-marked one: the gutter's key glyphs, the connection URL line's tooltip open
+    /// (a comment line: no gutter ▶ covers its key, fix round 1).
+    SecretGutter,
+    /// Surface 8: ⌘S on it in a git library: "3 lines in create_reader.sql look like secrets",
+    /// the lines and kinds, the commit sentence and the hints; Cancel focused.
+    SecretDialog,
+    // ## m4b-t17-secrets-ui
 }
 
 /// Every M4b state, in shot order.
@@ -115,7 +124,8 @@ pub(super) enum M4b {
 // ## m4b-t14-tabs (named exception): Task 14's states after Task 11's.
 // ## m4b-t15-goto (named exception): Task 15's five after them.
 // ## m4b-t16-attach (named exception): Task 16's five after Task 14's.
-pub(super) const M4B_STATES: [M4b; 28] = [
+// ## m4b-t17-secrets-ui (named exception): Task 17's two after Task 16's.
+pub(super) const M4B_STATES: [M4b; 30] = [
     M4b::T2Preview,
     M4b::PasteConfirm,
     M4b::ScriptsProd,
@@ -146,6 +156,9 @@ pub(super) const M4B_STATES: [M4b; 28] = [
     M4b::MapShare,
     M4b::LibrarySettings,
     M4b::LibraryRemove,
+    // ## m4b-t17-secrets-ui
+    M4b::SecretGutter,
+    M4b::SecretDialog,
 ];
 
 /// The preview's file: 148 MB (the mock's).
@@ -193,6 +206,9 @@ impl M4b {
             M4b::MapShare => "m4b-scripts-map-share",
             M4b::LibrarySettings => "m4b-scripts-settings",
             M4b::LibraryRemove => "m4b-scripts-settings-remove",
+            // ## m4b-t17-secrets-ui
+            M4b::SecretGutter => "m4b-script-secret-gutter",
+            M4b::SecretDialog => "m4b-script-secret-save",
         }
     }
 
@@ -229,6 +245,9 @@ impl M4b {
             M4b::MapShare => ("#scripts-map-subtitle", None),
             M4b::LibrarySettings => ("#button-label-scripts-set-attach", None),
             M4b::LibraryRemove => ("hacivat-ui/src/dialog.rs:", None),
+            // ## m4b-t17-secrets-ui
+            M4b::SecretGutter => (t17::TIP, None),
+            M4b::SecretDialog => ("hacivat-ui/src/dialog.rs:", None),
         }
     }
 
@@ -264,11 +283,19 @@ impl M4b {
             M4b::AttachFound => &["#scripts-attach-found-head"],
             M4b::MapShare => &["#scripts-attach-file-line-0"],
             M4b::LibrarySettings | M4b::LibraryRemove => &[],
+            // ## m4b-t17-secrets-ui
+            M4b::SecretGutter => &[],
+            M4b::SecretDialog => &["#scripts-secret-line-0", "#scripts-secret-git"],
         }
     }
 
     /// Brings the state's fixtures on screen in a freshly started shell.
     pub(super) fn open(self, window: &mut Window, cx: &mut App) {
+        // ## m4b-t17-secrets-ui
+        if self.is_t17() {
+            save(cx, pg(DEV, EnvTag::Dev));
+            return;
+        }
         // ## m4b-t16-attach
         if self.is_t16() {
             return t16::open(self, window, cx);
@@ -314,6 +341,12 @@ impl M4b {
                 | M4b::LibrarySettings
                 | M4b::LibraryRemove
         )
+    }
+
+    // ## m4b-t17-secrets-ui
+    /// A Task 17 state (surface 8).
+    fn is_t17(self) -> bool {
+        matches!(self, M4b::SecretGutter | M4b::SecretDialog)
     }
 
     // ## m4b-t14-tabs
@@ -382,11 +415,17 @@ impl M4b {
             | M4b::MapShare
             | M4b::LibrarySettings
             | M4b::LibraryRemove => None,
+            // ## m4b-t17-secrets-ui
+            M4b::SecretGutter | M4b::SecretDialog => None,
         }
     }
 
     /// The steps after [`M4b::open`].
     pub(super) fn steps(self) -> Vec<Step> {
+        // ## m4b-t17-secrets-ui
+        if self.is_t17() {
+            return t17::steps(self);
+        }
         // ## m4b-t16-attach
         if self.is_t16() {
             return t16::steps(self);
@@ -513,6 +552,8 @@ impl M4b {
             | M4b::MapShare
             | M4b::LibrarySettings
             | M4b::LibraryRemove => Vec::new(),
+            // ## m4b-t17-secrets-ui: reached through `t17::steps` above.
+            M4b::SecretGutter | M4b::SecretDialog => Vec::new(),
         }
     }
 }
@@ -728,6 +769,8 @@ fn script_steps(state: M4b) -> Vec<Step> {
         | M4b::MapShare
         | M4b::LibrarySettings
         | M4b::LibraryRemove => {}
+        // ## m4b-t17-secrets-ui: Task 17's states (`t17::steps`).
+        M4b::SecretGutter | M4b::SecretDialog => {}
     }
     steps
 }
@@ -1276,6 +1319,8 @@ mod scripts {
             | M4b::MapShare
             | M4b::LibrarySettings
             | M4b::LibraryRemove => {}
+            // ## m4b-t17-secrets-ui: Task 17's states (`t17::steps`).
+            M4b::SecretGutter | M4b::SecretDialog => {}
         }
         out
     }
@@ -1630,3 +1675,152 @@ mod t16 {
     }
 }
 // ## m4b-t16-attach
+
+// ## m4b-t17-secrets-ui ---------------------------------------------------------------------------
+/// Task 17's states (surface 8): a script with secret-like lines in a git library, under
+/// orders-dev.
+mod t17 {
+    use super::*;
+    use hacivat_app::scripts::secret_dialog;
+
+    /// The tooltip's labels are drawn here.
+    pub(super) const TIP: &str = "hacivat-ui-editor/src/line_marks.rs:";
+
+    /// The script the states open (the mock's sample).
+    const FILE: &str = "create_reader.sql";
+
+    /// The mock's sample: a password (line 3), a connection URL with a password (5), a token
+    /// (8, built from parts: R-C0-4), and an allow-marked line (9).
+    fn text() -> String {
+        let token = format!("gh{}{}", "p_", "0123456789abcdefghijABCDEFGHIJ012345");
+        [
+            "-- Rapor kullanıcısı",
+            "",
+            "CREATE ROLE app_reader LOGIN PASSWORD 'hv_test_pw';",
+            "GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_reader;",
+            "-- dış sistem: postgresql://app_reader:hv_test_pw@pg-replica.example/orders",
+            "ALTER ROLE app_reader SET search_path = public;",
+            "",
+            &format!("-- webhook: {token}"),
+            "CREATE ROLE dev_tmp LOGIN PASSWORD 'dev'; -- hacivat:allow-secret",
+            "",
+        ]
+        .join("\n")
+    }
+
+    /// The library folder (`shot_library`'s), made a repository with the script in it before
+    /// the library is attached, so the service reads it once.
+    fn prepare(cx: &App) -> Option<()> {
+        let paths = cx.try_global::<hacivat_app::AppState>()?.paths.clone();
+        let root = paths.config.parent()?.join("library");
+        std::fs::create_dir_all(&root).ok()?;
+        std::fs::write(root.join(FILE), text()).ok()?;
+        if !root.join(".git").exists() {
+            // A fixture repository this harness made (product code never runs the CLI).
+            let ok = std::process::Command::new("git")
+                .args(["-c", "core.hooksPath=/dev/null", "init", "-q", "-b", "main"])
+                .current_dir(&root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .ok()?
+                .status
+                .success();
+            ok.then_some(())?;
+        }
+        Some(())
+    }
+
+    pub(super) fn steps(state: M4b) -> Vec<Step> {
+        let mut out = vec![
+            step(
+                |_, cx| {
+                    let _ = prepare(cx);
+                },
+                |_, cx| cx.try_global::<hacivat_app::AppState>().is_some(),
+            ),
+            open_step(FILE, Some(DEV), Some("orders")),
+            // The library's repository status is read (the commit sentence depends on it).
+            step(
+                |_, _| {},
+                |_, cx| {
+                    let Some(lib) = cx.try_global::<ShotLibrary>().map(|l| l.0) else {
+                        return false;
+                    };
+                    hacivat_app::scripts::open::service(cx).is_some_and(|s| {
+                        s.snapshot()
+                            .view(Some(EnvTag::Dev))
+                            .library(lib)
+                            .is_some_and(|l| l.git() != hacivat_scripts::GitSummary::Pending)
+                    })
+                },
+            ),
+            // The scan of the text landed: three marked lines.
+            step(
+                |window, cx| {
+                    if let Some(editor) = editor_in(window, cx) {
+                        let focus = editor.read(cx).focus_handle(cx);
+                        window.focus(&focus, cx);
+                    }
+                },
+                |window, cx| {
+                    editor_in(window, cx)
+                        .is_some_and(|e| e.read(cx).line_mark_lines() == vec![2, 4, 7])
+                },
+            ),
+        ];
+        match state {
+            M4b::SecretGutter => out.push(hover_mark(4)),
+            M4b::SecretDialog => out.push(step(
+                |window, cx| {
+                    hacivat_ui::actions::ActionRegistry::run("file.save", window, cx);
+                },
+                |window, cx| {
+                    secret_dialog::open_warning(cx).is_some()
+                        && window
+                            .root::<Workspace>()
+                            .flatten()
+                            .is_some_and(|ws| ws.read(cx).layer_ids().contains(&"dialog"))
+                },
+            )),
+            _ => {}
+        }
+        out
+    }
+
+    /// Moves the pointer over the mark slot of `line`'s row (x = 8..20 of the 58 px gutter)
+    /// and waits for the mark's tooltip.
+    fn hover_mark(line: u32) -> Step {
+        use gpui::InputEvent as _;
+        step(
+            move |window, cx| {
+                let Some(editor) = editor_in(window, cx) else {
+                    return;
+                };
+                let Some((x, y)) = editor.read(cx).last_layout().map(|l| {
+                    let rows = l.rows();
+                    let lh = f32::from(rows.line_height);
+                    let y =
+                        f32::from(rows.first_y) + (line - rows.first_line) as f32 * lh + lh / 2.0;
+                    (f32::from(rows.bounds.left()) - 58.0 + 14.0, y)
+                }) else {
+                    return;
+                };
+                window.dispatch_event(
+                    gpui::MouseMoveEvent {
+                        position: gpui::point(gpui::px(x), gpui::px(y)),
+                        pressed_button: None,
+                        modifiers: gpui::Modifiers::none(),
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            },
+            |_, cx| {
+                cx.try_global::<hacivat_ui::text::TextRegistry>()
+                    .is_some_and(|r| r.frame.iter().any(|t| t.path.contains(TIP)))
+            },
+        )
+    }
+}
+// ## m4b-t17-secrets-ui

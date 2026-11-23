@@ -1550,6 +1550,50 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
   - m9: Cancel and Show here stay together on the right when the footer wraps.
   - m10: the launch-time and remove-then-break residuals of R-T10-7 go to T20; a persisted last good binding would close them.
 
+
+## m4b-t17 — secret warning UI
+
+- **Scan.** `secret_marks::scan_text` is `scan_secrets(text, &secret_spans(text))`, the spans
+  mapped one to one (R-M4b-28). A script tab scans 300 ms after the last edit (and at once when
+  its file is read or reloaded) on the core runtime's blocking pool, never on the UI thread. A
+  newer edit replaces the waiting or running scan; an answer for an older version than the
+  editor's is dropped (latest wins by document version). A save uses the tab's scan when it is
+  for exactly the text being saved, else scans that text off the UI thread before it goes on.
+- **Fail closed.** A scan that cannot answer (no core runtime, or it panicked) is one
+  `Unscanned` finding over the whole text, as the scanner answers when its table fails to load.
+  The gutter puts "Couldn't be checked for secrets" on line 1, and every save asks ("…
+  couldn't be checked for secrets"). "Save anyway" is never remembered for it.
+- **Gutter.** One `key-round` line mark per finding (ADR 0007 `## m4b-t17`), whose tooltip and
+  accessible name name the kind ("Looks like a password", "… an access token", "… a private
+  key", "… a connection URL with a password") and how to silence the line. `TestKey` and JWT read
+  as an access token.
+- **Dialog** (`secret_dialog`). Every save of a library script goes through `save::save`, so
+  ⌘S, Save all, the unsaved prompt's Save (close, quit, restart), the recovery notice's Save and
+  "Deleted on disk"'s Save all ask here first. A 480 alertdialog: title, the tab's environment ·
+  connection · database, the body, a field well of **Line n · kind** rows (one per line and
+  kind, 8 shown, then "… and N more lines"), the commit sentence, the allow hint and the
+  "remembered" line. **Cancel** is Primary and focused; Escape, the close button and a window
+  close answer Cancel and the tab stays unsaved; Enter presses the focused button. The focus
+  returns where it was (the code). Nothing in it holds a value.
+- **Commit sentence.** Shown unless the library's git summary is `NotARepo`: a repository,
+  an untrusted or unavailable one, and a status not read yet all show it (errs toward the
+  warning).
+- **Remembered answers.** "Save anyway" remembers, in the tab's memory until quit (or the tab
+  closes), `xxh3(kind ‖ the line's text before the literal ‖ after it ‖ the literal)` per finding.
+  This joins the plan's rule (the line's text without the literal, and the kind) and `alg/28`'s
+  (`kind ‖ value`): a changed value or a changed line asks again; a line moved up or down does
+  not. Two identical lines are one answer.
+- **Recovery (R-T5-4).** The recovery copy's `secret_suspected` is set from a scan of the
+  copied text, run in the same blocking task that writes the copy (a panic counts as yes). The
+  restore notice adds "Some lines of this text look like a password or a token. Saving asks
+  first." when the copy's metadata says so; it never says which or shows a value.
+- **Consoles** never scan, mark or ask (Q7).
+- **Not in M4b.** There is no "Save as… into a library" and no "Move console to library…"; a
+  later one must call `secret_dialog::confirm` (through `save::save`) the same way.
+- **Copy.** The mock's hint copy follows the T6 fr2 FTL wording (a space after the dashes;
+  `design/m4b-scripts` NOTES and index.html synced). New strings: `hv-scripts-secret-unscanned`,
+  `-unscanned-hint`, `-unscanned-title`, `-unscanned-body`, `hv-scripts-recover-secret`.
+
 ## m4b-cifix-4 — a SQLite tab's file identity includes its birth time (Linux)
 
 - **Finding (CI 45077623376, Linux only).**
@@ -1606,3 +1650,23 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
   - m1: a file id of 0, which WebDAV and some NAS or FUSE shares report for every file, is no identity (`windows_id::identity_from`): such a root is compared by its path, as where no id can be read, and two zeros never count as the same folder. Test: `fileio::tests::a_zero_file_id_is_no_identity`.
   - Residual: a share whose ids are unstable from one open to the next (a fresh id per handle) gives an unchanged root a new identity, so the library is refused with `RootChanged` and "Use this folder" is offered. This fails closed: the user adopts it again after each refusal.
   - m2 (the file id read once every N chunks instead of on every chunk): not done. A chunk read after another file took the path must never be handed out (HV-SCRIPT-12 step 4, `open_stream_reports_a_change_on_disk`), and a check every 16 chunks would hand out up to 15 of them. The extra open per 64 KiB chunk is kept; for a 150 MB script that is about 2,400 opens with zero access rights.
+
+## m4b-t17 — fix round 1 (review I1, I2, m1–m4, m6; rulings R-T17-1, R-T17-2)
+
+- **Gutter (R-T17-2).** A shown ▶ takes the key's slot and carries its label (ADR 0007 `### m4b-t17 fix round 1`). The key shows otherwise. No ▶, arrow stop or focus is lost to a mark.
+- **Save inside the debounce (I2).** Two named tests guard it:
+  - a save of text the tab has not scanned yet scans that text first, and asks;
+  - a second secret on an answered line asks again.
+- **One scan in flight (m2).**
+  - An edit while a scan runs starts none. When that scan lands for an older version, its answer is dropped and the newer text is scanned after the debounce.
+  - The text is copied out of the rope inside the blocking job.
+  - The recovery copy reuses the tab's scan of the same version.
+  - The save's own copy of the text stays on the UI thread (T14's). It is bounded by the size tiers: a T2 preview (above 20 MB) is never saved.
+- **`Debug` (m1).** A scan's `Debug` shows its version and counts only, never a fingerprint.
+- **Allow marker (m4).** `hacivat_scripts::secrets::ALLOW_MARKER` is the scanner's own spelling; the app's hints use it.
+- **Tests (m6).**
+  - A cancel asserts that no write started, by a count (`save::writes_started`).
+  - The debounce and the one-in-flight rule are asserted on the tab's scan state.
+  - The console test has a positive control.
+- **Accepted (R-T17-1).** The Unscanned dialog has no rows, no allow hint and no "remembered" line.
+- **Residual (m7, T14's pattern).** With no workspace window, a save's question has nowhere to open. Nothing is written, and a Save all chain or a quit round stops without a word.

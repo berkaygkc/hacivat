@@ -1477,3 +1477,39 @@ read-only preview and the 20–100 MB paste confirmation. `hacivat-text` gains
   - `dispatch_prebuilt` checks the prebuilt text's content hash in debug builds. Its doc says
     the caller builds it from this exact version.
   - `ui_work` is documented as a proxy, not a time.
+
+## m4b-t17 — host line marks (the secret glyphs)
+
+- **What.** `EditorView::set_line_marks(version, Vec<LineMark>)` gives the editor glyphs for
+  lines of the text (`line_marks.rs`, named items). A `LineMark` is a byte range at a version,
+  an icon, a label (the glyph's accessible name and the tooltip's first line) and the tooltip's
+  other lines. The app's script tabs use it for secret-like literals (HV-SCRIPT-10, design
+  `m4b-scripts` surface 8); the editor knows nothing of secrets and holds no value, only ranges
+  and the host's texts.
+- **Why not a `DecorationSource`.** The plan named one, but a decoration source answers text
+  ranges for the visible bytes (marks, line classes, widgets) and the element paints none of
+  them in the gutter. A glyph with a tooltip in the gutter needed an element there anyway, so the
+  host gives it to the editor directly; the scan itself stays the host's, off the UI thread.
+- **Anchors.** `set` rebases each range from its version through the change log (one too old or
+  deleted is dropped; the host sends fresh marks after its next scan). Each committed edit maps
+  the ranges as container ranges (`on_commit`, next to the execution marks'), so a glyph follows
+  its line while the host's debounced scan catches up.
+- **Slot.** The glyph sits in the mark slot (x = 8, 12 px) of the row its range starts on (a
+  hidden line: its fold's header row), `key-round` in `text_2`. An execution mark's glyph keeps
+  its slot: the line mark is not drawn on that row. A row with a line mark shows no gutter ▶
+  (`gutter::prepaint_buttons`), so the glyph's tooltip stays reachable under the pointer; Run
+  (⌘↵) is unchanged. Residual: after a Run, a succeeded or failed glyph hides the key on its row
+  (the save warning still lists the line).
+- **Tooltip.** Its own small view (280 px): the icon and each label once, then the other lines as
+  wrapping `text_2` paragraphs (the Raised Ink Rule). It does not use the shared `Tip`, whose
+  single label cannot wrap (T13 fr1 n8).
+
+### m4b-t17 fix round 1 (review I1, ruling R-T17-2; m3)
+
+- **The ▶ is never lost to a line mark.** This supersedes "a row with a line mark shows no gutter ▶" above.
+  - As M3c does for a finished execution mark, a shown ▶ takes the mark slot. "Shown" means hover, a focused column, or the column in "Tab moves focus" mode while it shows. The key shows otherwise.
+  - The ▶ carries the row's labels: its tooltip lists them under "Run this statement", and its accessible name becomes "Run the statement at line N · <label>".
+  - ↑/↓ along the column visit marked rows.
+  - A focused ▶ stays focused and drawn when a scan marks its row.
+- `EditorView::line_mark_rows()` returns the rows the last frame drew a key on, beside `gutter_play_rows()`.
+- The key's accessible description is the rest of its tooltip (the host's hint), so the hint is not mouse-only.
