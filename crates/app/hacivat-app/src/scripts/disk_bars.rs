@@ -330,7 +330,14 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                             })
                             .ok()
                             .flatten();
-                        if let Some(editor) = editor {
+                        // ## m4b-t18-run-as-script fix round 1 (named exception; m3): a
+                        // preview retries Run as script, never plain Run.
+                        let console = a.upgrade().and_then(|d| d.read(cx).console());
+                        if let Some(console) =
+                            console.filter(|c| crate::scripts::run_as_script::offered(*c, cx))
+                        {
+                            crate::scripts::run_as_script::start(console, cx);
+                        } else if let Some(editor) = editor {
                             editor.update(cx, |e, cx| {
                                 e.run_command("editor.run", window, cx);
                             });

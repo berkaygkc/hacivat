@@ -5300,3 +5300,31 @@ hv-scripts-secret-unscanned-title = { $file } couldn't be checked for secrets
 hv-scripts-secret-unscanned-body = { -brand-hacivat } couldn't check this text for passwords or tokens, so it asks before saving it into the library.
 # Surface 12 (Recovery): the tab's recovered text looked like it held a password or a token when it was copied (never which, never the value; R-T5-4).
 hv-scripts-recover-secret = Some lines of this text look like a password or a token. Saving asks first.
+
+## m4b-t18-run-as-script
+# Surface 9 (Large files): the strip while pass 1 reads the whole file and runs nothing (R-M4b-47).
+hv-scripts-run-checking = Checking the whole file before it runs
+# Surface 9 (Large files): the user answered No (or Cancel) to a statement's confirmation (R-T12-2).
+# Variables:
+#   $n (Number) - the statement's position in the file, e.g. 1205.
+hv-scripts-run-declined = Stopped at statement { $n }: you didn't confirm it. The statements before it ran and stay applied; nothing after it was sent.
+# Surface 9 (Large files): the strip's button once the run ended.
+hv-scripts-run-close = Close
+# Surface 9 (Large files): the confirmation of a statement in Run as script (T12 m4): the run has not read the later statements yet, so Execute all and Skip all name no count.
+# Variables:
+#   $env (String) - the connection's environment word (an hv-conn-env-* message), e.g. "staging".
+hv-scripts-confirm-open-ended = Execute all also runs, without asking, every later statement in the file that would ask on this connection ({ $env }); a statement that needs its name typed still asks. Skip all skips every later statement that would ask.
+# Surface 9 (Large files): as hv-scripts-confirm-open-ended where Execute all is not offered (production).
+# Variables:
+#   $env (String) - the connection's environment word (an hv-conn-env-* message), e.g. "production".
+hv-scripts-confirm-open-ended-skip = Skip all skips every later statement in the file that would ask on this connection ({ $env }).
+# Surface 9 (Large files): the name a pasted preview's run goes by (the strip, the history row).
+hv-scripts-pasted-name = Pasted text
+# Surface 9 (Large files): "Paste as preview" in a console with no connection (the preview opens on the console's connection).
+hv-scripts-paste-preview-unbound = Paste as preview opens on this console's connection, and it has none.
+# m4b-t18-run-as-script fix round 1 (I1): Run (or Run as script) refused while a script runs on the same session; two runs never interleave.
+hv-scripts-run-session-busy = A script is running on this connection's session. Wait for it, or stop it, then run again.
+# m4b-t18-run-as-script fix round 1 (m4, R-T18-2, PO informed): Stop cancelled the statement that was running.
+# Variables:
+#   $n (Number) - the statement's position in the file, e.g. 1205.
+hv-scripts-run-cancelled-during = Stopped during statement { $n }; statements after it were not sent.
