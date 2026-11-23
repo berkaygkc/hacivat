@@ -664,6 +664,14 @@ impl ConsoleHost {
             }
         } else if let Some(profile) = profile {
             this.set_binding(profile, cx);
+            // ## m4b-t18-run-as-script fix round 1 (named exception; I3, R-T14-3): a preview
+            // pasted into a MySQL script tab takes a session of its own (slot 0), as the tab.
+            if crate::scripts::run_as_script::pending_wants_own_session(tab, cx) {
+                this.binding = Some((profile, 0));
+                if let Some(e) = cx.default_global::<Hosts>().by_tab.get_mut(&tab) {
+                    e.binding = this.binding;
+                }
+            }
             match take_fresh(cx, profile) {
                 Some(None) => this.open_editor(String::new(), Some(None), true, window, cx),
                 Some(Some(text)) => {
@@ -676,6 +684,8 @@ impl ConsoleHost {
                 }
                 None => this.restore(window, cx),
             }
+            // ## m4b-t18-run-as-script fix round 1 (m6): a pasted text not adopted goes.
+            crate::scripts::run_as_script::forget_pending(tab, cx);
         }
         this
     }

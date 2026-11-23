@@ -1644,18 +1644,18 @@ pub(crate) fn run_gate(console: ConsoleId, rerun: Box<dyn FnOnce(&mut App)>, cx:
     doc.update(cx, |d, cx| d.gate(console, rerun, false, cx))
 }
 
-// ## m4b-t18-run-as-script (named exception; R-M4b-27, R-T14-2)
-/// [`run_gate`] for Run as script (`scripts::run_as_script`, between its two passes): the same
-/// check on the tab's own session, except that a T2 preview is what it streams. A pass inserts
-/// the check's context generation, which [`take_checked_generation`] hands to the runner.
-pub(crate) fn run_gate_streamed(
+// ## m4b-t18-run-as-script (named exception; R-M4b-27, R-T14-2; fix round 1, I3, R-T18-1)
+/// [`run_gate`] for Run as script (`scripts::run_as_script`, between its two passes), through
+/// script tab `doc`'s binding on console `console`: the tab's own console, or a preview pasted
+/// into that tab (its own console, the tab's database). The same check on that console's
+/// session, except that a T2 preview is what it streams. A pass inserts the check's context
+/// generation, which [`take_checked_generation`] hands to the runner.
+pub(crate) fn run_gate_streamed_for(
+    doc: &Entity<ScriptDoc>,
     console: ConsoleId,
     rerun: Box<dyn FnOnce(&mut App)>,
     cx: &mut App,
 ) -> bool {
-    let Some(doc) = doc_of_console(console, cx) else {
-        return !is_script_console(console, cx);
-    };
     doc.update(cx, |d, cx| d.gate(console, rerun, true, cx))
 }
 

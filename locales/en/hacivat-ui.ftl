@@ -5306,3 +5306,9 @@ hv-scripts-confirm-open-ended-skip = Skip all skips every later statement in the
 hv-scripts-pasted-name = Pasted text
 # Surface 9 (Large files): "Paste as preview" in a console with no connection (the preview opens on the console's connection).
 hv-scripts-paste-preview-unbound = Paste as preview opens on this console's connection, and it has none.
+# m4b-t18-run-as-script fix round 1 (I1): Run (or Run as script) refused while a script runs on the same session; two runs never interleave.
+hv-scripts-run-session-busy = A script is running on this connection's session. Wait for it, or stop it, then run again.
+# m4b-t18-run-as-script fix round 1 (m4, R-T18-2, PO informed): Stop cancelled the statement that was running.
+# Variables:
+#   $n (Number) - the statement's position in the file, e.g. 1205.
+hv-scripts-run-cancelled-during = Stopped during statement { $n }; statements after it were not sent.

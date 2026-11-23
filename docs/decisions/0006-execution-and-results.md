@@ -1538,3 +1538,9 @@ Task 18 wires Task 12's runner to the app (HV-SCRIPT-12; `scripts::run_as_script
 - **Open-ended Execute all / Skip all (T12 m4)** are the app's (`AppConfirmPort::for_script_run`,
   ADR 0009). The runner's semantics are unchanged: Execute all never answers a typed name and
   covers nothing on production; Skip all skips every later unit that would ask.
+
+### m4b-t18 fix round 1 (review I2, m4)
+
+- **`ConfirmPort::follow_run(run, choices, status, sql, session)`** is a defaulted method that follows nothing by default. The runner calls it for every unit it sends, with the unit's masked text, so the app's prompt of that unit's confirm-in-transaction question shows the statement and its loss (ADR 0009). Other ports and M3's run service are unchanged.
+- **`ScriptRunSummary::cancelled_in_flight`** is set when Stop reached a unit after it was sent (R-T18-2). The app then says "Stopped during statement N".
+

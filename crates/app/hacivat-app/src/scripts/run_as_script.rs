@@ -62,7 +62,7 @@ use hacivat_ui::text::{Label, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Context, Entity, Focusable as _, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Task, WeakEntity, Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
 use hacivat_ui_editor::{EditorView, PastedDocument, PreviewSpec};
@@ -228,19 +228,29 @@ pub fn read_error(e: ReadError) -> ChunkError {
 enum Streamed {
     /// A script tab's T2 preview (its doc).
     File(Entity<ScriptDoc>),
-    /// A pasted preview's whole text.
-    Pasted(Arc<str>),
+    /// A pasted preview's whole text, and the script tab it was pasted from.
+    Pasted(PastedText),
 }
 
-/// The pasted previews' whole texts, by console (memory only; module docs).
+// ## m4b-t18-run-as-script fix round 1 (I3, R-T18-1)
+/// A pasted preview's whole text (memory only; module docs) and, when it was pasted into a
+/// script tab, that tab's doc: the preview runs only where the tab is bound (its database),
+/// through Task 14's per-Run check on the pasted console's own session.
+#[derive(Clone)]
+struct PastedText {
+    text: Arc<str>,
+    from: Option<Entity<ScriptDoc>>,
+}
+
+/// The pasted previews' texts, by console.
 #[derive(Default)]
-struct Pasted(HashMap<ConsoleId, Arc<str>>);
+struct Pasted(HashMap<ConsoleId, PastedText>);
 
 impl Global for Pasted {}
 
 /// The pasted previews waiting for their console tab to be built, by tab.
 #[derive(Default)]
-struct PendingPreviews(HashMap<hacivat_ui::panes::TabId, Arc<str>>);
+struct PendingPreviews(HashMap<hacivat_ui::panes::TabId, PastedText>);
 
 impl Global for PendingPreviews {}
 
@@ -266,6 +276,27 @@ fn streamed(console: ConsoleId, cx: &App) -> Option<Streamed> {
         .get(&console)
         .cloned()
         .map(Streamed::Pasted)
+}
+
+// ## m4b-t18-run-as-script fix round 1 (I1)
+/// Whether plain Run must not start on console `console`: a streamed run is under way on it, or
+/// on the session it shares (two runs never interleave on one session).
+pub fn blocks_run(console: ConsoleId, cx: &App) -> bool {
+    if running(console, cx) {
+        return true;
+    }
+    let Some(session) = Consoles::get(cx, console)
+        .and_then(|s| s.session.as_ref())
+        .map(|s| s.id())
+    else {
+        return false;
+    };
+    cx.try_global::<Runs>().is_some_and(|runs| {
+        runs.0.values().any(|v| {
+            let v = v.read(cx);
+            v.ended.is_none() && v.session == session
+        })
+    })
 }
 
 /// Whether console `console` offers Run as script (its editor is a T2 preview of a script file
@@ -301,6 +332,7 @@ pub fn enabled(console: ConsoleId, cx: &App) -> bool {
         }
         Some(Streamed::Pasted(_)) => {
             Consoles::get(cx, console).is_some_and(|s| s.profile.is_some())
+                && !blocks_run(console, cx)
         }
     }
 }
@@ -358,6 +390,58 @@ pub(crate) fn console_closed(console: ConsoleId, cx: &mut App) {
     if cx.has_global::<Pasted>() {
         cx.default_global::<Pasted>().0.remove(&console);
     }
+    // ## m4b-t18-run-as-script fix round 1 (m6): and pasted texts held for tabs that are gone.
+    prune_pending(cx);
+}
+
+// ## m4b-t18-run-as-script fix round 1 (m6)
+/// Drops the pasted texts held for tabs no workspace shows any more (closed before they were
+/// built).
+fn prune_pending(cx: &mut App) {
+    if !cx.has_global::<PendingPreviews>() {
+        return;
+    }
+    let open: Vec<hacivat_ui::panes::TabId> = cx
+        .global::<PendingPreviews>()
+        .0
+        .keys()
+        .copied()
+        .filter(|tab| tab_is_open(*tab, cx))
+        .collect();
+    cx.default_global::<PendingPreviews>()
+        .0
+        .retain(|tab, _| open.contains(tab));
+}
+
+/// Whether a workspace window shows tab `tab`.
+fn tab_is_open(tab: hacivat_ui::panes::TabId, cx: &App) -> bool {
+    cx.windows().iter().any(|w| {
+        w.downcast::<crate::shell::Workspace>()
+            .and_then(|w| w.read(cx).ok())
+            .is_some_and(|ws| ws.tab_kind(tab).is_some())
+    })
+}
+
+/// The host of tab `tab` was built: a pasted text still held for it is either adopted
+/// (`adopt_pending`) or dropped here (m6).
+pub(crate) fn forget_pending(tab: hacivat_ui::panes::TabId, cx: &mut App) {
+    if cx.has_global::<PendingPreviews>() {
+        cx.default_global::<PendingPreviews>().0.remove(&tab);
+    }
+}
+
+/// Whether the pasted preview waiting for tab `tab` came from a script tab whose connection
+/// gives each tab a session of its own (MySQL/MariaDB, R-T14-3): the console takes one too.
+pub(crate) fn pending_wants_own_session(tab: hacivat_ui::panes::TabId, cx: &App) -> bool {
+    cx.try_global::<PendingPreviews>()
+        .and_then(|p| p.0.get(&tab))
+        .and_then(|p| p.from.as_ref())
+        .is_some_and(|d| {
+            matches!(
+                d.read(cx).plan,
+                Ok(crate::scripts::open::SessionPlan::Own { .. })
+            )
+        })
 }
 
 fn notify_host(console: ConsoleId, cx: &mut App) {
@@ -399,6 +483,22 @@ fn launch(console: ConsoleId, what: Streamed, parts: Parts, cx: &mut App) {
     let (progress_tx, progress) = watch::channel(ScriptProgress::default());
     // The database check runs on the UI thread (Task 14's gate); the runner asks for it.
     let (ask, asks) = mpsc::unbounded_channel::<oneshot::Sender<Option<u64>>>();
+    let check_via = |ask: mpsc::UnboundedSender<oneshot::Sender<Option<u64>>>| -> DatabaseCheck {
+        Box::new(move || {
+            Box::pin(async move {
+                let (reply, answer) = oneshot::channel();
+                ask.send(reply).ok()?;
+                answer.await.ok().flatten()
+            })
+        })
+    };
+    // ## m4b-t18-run-as-script fix round 1 (I3, m1): the doc whose binding is checked, and
+    // the run's own session the check must be made on.
+    let via = match &what {
+        Streamed::File(doc) => Some(doc.downgrade()),
+        Streamed::Pasted(p) => p.from.as_ref().map(Entity::downgrade),
+    };
+    let session_id = parts.session.id();
     let (file, total, source, check): (SharedString, u64, Opening, Option<DatabaseCheck>) =
         match &what {
             Streamed::File(doc) => {
@@ -417,20 +517,13 @@ fn launch(console: ConsoleId, what: Streamed, parts: Parts, cx: &mut App) {
                     rel: spec.rel,
                     encoding: d.meta.encoding,
                 };
-                let check: DatabaseCheck = Box::new(move || {
-                    Box::pin(async move {
-                        let (reply, answer) = oneshot::channel();
-                        ask.send(reply).ok()?;
-                        answer.await.ok().flatten()
-                    })
-                });
-                (file, total, opening, Some(check))
+                (file, total, opening, Some(check_via(ask)))
             }
-            Streamed::Pasted(text) => (
+            Streamed::Pasted(p) => (
                 msg(cx, "hv-scripts-pasted-name", Vec::new()),
-                text.len() as u64,
-                Opening::Text(text.clone()),
-                None,
+                p.text.len() as u64,
+                Opening::Text(p.text.clone()),
+                p.from.is_some().then(|| check_via(ask)),
             ),
         };
     let file_name: Arc<str> = Arc::from(file.as_ref());
@@ -498,10 +591,11 @@ fn launch(console: ConsoleId, what: Streamed, parts: Parts, cx: &mut App) {
             cancel,
             env,
             home: HomeSlot::new(),
+            session: session_id,
             _tasks: Vec::new(),
             _subscriptions: Vec::new(),
         };
-        view.follow(progress, asks, run, cx);
+        view.follow(progress, asks, via, run, cx);
         view
     });
     cx.default_global::<Runs>().0.insert(console, view);
@@ -580,18 +674,45 @@ impl Request {
 /// `None` (fail closed).
 fn check_database(
     console: ConsoleId,
+    // ## m4b-t18-run-as-script fix round 1 (m1): the run's own session; (I3) the doc whose
+    // binding is checked (a pasted preview's source script tab).
+    session: hacivat_session::session::SessionId,
+    via: Option<WeakEntity<ScriptDoc>>,
     reply: Rc<RefCell<Option<oneshot::Sender<Option<u64>>>>>,
     cx: &mut App,
 ) {
-    let again = reply.clone();
-    let rerun = Box::new(move |cx: &mut App| check_database(console, again, cx));
-    if !tabs::run_gate_streamed(console, rerun, cx) {
+    // The console still holds the session the run was started on, else no check passes.
+    let state = Consoles::get(cx, console);
+    if state
+        .and_then(|s| s.session.as_ref())
+        .is_none_or(|s| s.id() != session)
+    {
         return;
     }
-    let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone()) else {
+    let Some(doc) = via.as_ref().and_then(WeakEntity::upgrade) else {
         return;
     };
-    let generation = tabs::take_checked_generation(console, session.id(), cx);
+    // A pasted preview of a script tab whose connection gives each tab a session of its own
+    // (R-T14-3) runs only on a session of its own, never the profile's default one.
+    let own = matches!(
+        doc.read(cx).plan,
+        Ok(crate::scripts::open::SessionPlan::Own { .. })
+    );
+    let is_file = tabs::doc_of_console(console, cx).is_some();
+    if own
+        && !is_file
+        && state.is_some_and(|s| s.client == hacivat_session::session::ClientId::DEFAULT)
+    {
+        return;
+    }
+    let again = reply.clone();
+    let via_again = via.clone();
+    let rerun =
+        Box::new(move |cx: &mut App| check_database(console, session, via_again, again, cx));
+    if !tabs::run_gate_streamed_for(&doc, console, rerun, cx) {
+        return;
+    }
+    let generation = tabs::take_checked_generation(console, session, cx);
     if let Some(reply) = reply.borrow_mut().take() {
         let _ = reply.send(generation);
     }
@@ -606,8 +727,8 @@ enum Ended {
     Done { n: u64 },
     /// A statement failed (the server's text is in Output).
     Failed { at: u64 },
-    /// Stop.
-    Cancelled { n: u64 },
+    /// Stop. `during`: the statement Stop cancelled in flight (R-T18-2).
+    Cancelled { n: u64, during: Option<u64> },
     /// The user's No at statement `at`: the `n` before it ran and stay applied (R-T12-2).
     Declined { at: u64 },
     /// The runner's own sentence (`hacivat-core.ftl`) with its line and count.
@@ -629,7 +750,13 @@ impl Ended {
                 at: s.failed_at.map_or(s.units_run + 1, |p| p.unit),
             },
             ScriptRunOutcome::Stopped(stop, s) => match &stop.reason {
-                ScriptStopReason::Cancelled => Ended::Cancelled { n: s.units_run },
+                ScriptStopReason::Cancelled => Ended::Cancelled {
+                    n: s.units_run,
+                    during: s
+                        .cancelled_in_flight
+                        .then(|| stop.at.map(|p| p.unit))
+                        .flatten(),
+                },
                 ScriptStopReason::ConfirmCancelled => Ended::Declined {
                     at: stop.at.map_or(s.units_run + 1, |p| p.unit),
                 },
@@ -662,7 +789,16 @@ impl Ended {
                 vec![("n", count(*n)), ("file", ArgValue::Text(file.to_string()))],
             ),
             Ended::Failed { at } => msg(cx, "hv-scripts-run-stopped", vec![("n", count(*at))]),
-            Ended::Cancelled { n } => msg(cx, "hv-scripts-run-cancelled", vec![("n", count(*n))]),
+            Ended::Cancelled {
+                during: Some(at), ..
+            } => msg(
+                cx,
+                "hv-scripts-run-cancelled-during",
+                vec![("n", count(*at))],
+            ),
+            Ended::Cancelled { n, during: None } => {
+                msg(cx, "hv-scripts-run-cancelled", vec![("n", count(*n))])
+            }
             Ended::Declined { at } => msg(cx, "hv-scripts-run-declined", vec![("n", count(*at))]),
             Ended::Said { id, line, n } => {
                 let mut args = Vec::new();
@@ -694,6 +830,8 @@ pub struct ScriptRunView {
     /// The profile's live environment tag (the runner reads it before every gate and send).
     env: watch::Sender<Option<EnvTag>>,
     home: HomeSlot,
+    // ## m4b-t18-run-as-script fix round 1 (I1, m1): the session the run was started on.
+    session: hacivat_session::session::SessionId,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<hacivat_ui_core::gpui_surface::Subscription>,
 }
@@ -710,10 +848,12 @@ impl ScriptRunView {
         &mut self,
         mut progress: watch::Receiver<ScriptProgress>,
         mut asks: mpsc::UnboundedReceiver<oneshot::Sender<Option<u64>>>,
+        via: Option<WeakEntity<ScriptDoc>>,
         run: impl std::future::Future<Output = Option<ScriptRunOutcome>> + 'static,
         cx: &mut Context<Self>,
     ) {
         let console = self.console;
+        let session = self.session;
         // The figures, coalesced to the latest.
         self._tasks.push(cx.spawn(async move |this, cx| {
             while progress.changed().await.is_ok() {
@@ -734,7 +874,8 @@ impl ScriptRunView {
         self._tasks.push(cx.spawn(async move |_, cx| {
             while let Some(reply) = asks.recv().await {
                 let reply = Rc::new(RefCell::new(Some(reply)));
-                cx.update(|cx| check_database(console, reply, cx));
+                let via = via.clone();
+                cx.update(|cx| check_database(console, session, via, reply, cx));
             }
         }));
         // The end.
@@ -767,8 +908,14 @@ impl ScriptRunView {
         self._subscriptions
             .push(
                 cx.observe_global::<crate::connections::ConnectionsModel>(move |v, cx| {
-                    let tag = crate::exec_ui::orchestrator::profile_of(cx, console)
-                        .and_then(|p| p.environment);
+                    // ## m4b-t18-run-as-script fix round 1 (m2): a profile deleted mid-run
+                    // stops the run (never "no environment" for the units after it).
+                    let Some(profile) = crate::exec_ui::orchestrator::profile_of(cx, console)
+                    else {
+                        v.cancel.send_replace(true);
+                        return;
+                    };
+                    let tag = profile.environment;
                     v.env.send_if_modified(|now| {
                         let changed = *now != tag;
                         *now = tag;
@@ -1101,9 +1248,17 @@ pub(crate) fn open_pasted(
         &full,
         hacivat_ui_editor::TierLimits::default().preview_bytes,
     );
+    // ## m4b-t18-run-as-script fix round 1 (I3, R-T18-1): pasted into a script tab, the
+    // preview keeps that tab's binding (its database, checked before every run).
+    let from = tabs::doc_of_console(console, cx);
+    prune_pending(cx);
     crate::console::view::queue_text(profile, full[..cut].to_string(), cx);
-    if let Some(tab) = ws.update(cx, |ws, cx| ws.open_console_tab(Some(profile), window, cx)) {
-        cx.default_global::<PendingPreviews>().0.insert(tab, full);
+    // Registered before the tab is built, so its host takes the session the binding needs.
+    let tab = ws.update(cx, |ws, cx| ws.open_console_tab(Some(profile), window, cx));
+    if let Some(tab) = tab {
+        cx.default_global::<PendingPreviews>()
+            .0
+            .insert(tab, PastedText { text: full, from });
     }
 }
 
@@ -1115,17 +1270,18 @@ pub(crate) fn adopt_pending(
     editor: &Entity<EditorView>,
     cx: &mut App,
 ) {
-    let Some(full) = cx
+    let Some(pasted) = cx
         .has_global::<PendingPreviews>()
         .then(|| cx.default_global::<PendingPreviews>().0.remove(&tab))
         .flatten()
     else {
         return;
     };
-    adopt(console, editor, full, cx);
+    adopt(console, editor, pasted, cx);
 }
 
-fn adopt(console: ConsoleId, editor: &Entity<EditorView>, full: Arc<str>, cx: &mut App) {
+fn adopt(console: ConsoleId, editor: &Entity<EditorView>, pasted: PastedText, cx: &mut App) {
+    let full = pasted.text.clone();
     let cut = hacivat_ui_editor::large_file::preview_cut(
         &full,
         editor.read(cx).config().tiers.preview_bytes,
@@ -1144,7 +1300,7 @@ fn adopt(console: ConsoleId, editor: &Entity<EditorView>, full: Arc<str>, cx: &m
             cx,
         );
     });
-    cx.default_global::<Pasted>().0.insert(console, full);
+    cx.default_global::<Pasted>().0.insert(console, pasted);
 }
 
 /// Shots and tests (features `shots`, `test-support`).
@@ -1156,7 +1312,11 @@ pub mod fixtures {
     /// without a 20 MB clipboard.
     pub fn pasted_preview(console: ConsoleId, text: &str, cx: &mut App) {
         if let Some(editor) = editor_of(console, cx) {
-            adopt(console, &editor, Arc::from(text), cx);
+            let pasted = PastedText {
+                text: Arc::from(text),
+                from: None,
+            };
+            adopt(console, &editor, pasted, cx);
             notify_host(console, cx);
         }
     }
@@ -1180,6 +1340,7 @@ pub mod fixtures {
             },
             "cancelled" => Ended::Cancelled {
                 n: progress.units_run,
+                during: None,
             },
             "declined" => Ended::Declined {
                 at: progress.units_run + 1,
@@ -1203,6 +1364,7 @@ pub mod fixtures {
             cancel: watch::channel(false).0,
             env: watch::channel(None).0,
             home: HomeSlot::new(),
+            session: hacivat_session::session::SessionId(u64::MAX),
             _tasks: Vec::new(),
             _subscriptions: Vec::new(),
         });

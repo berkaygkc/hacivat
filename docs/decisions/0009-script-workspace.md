@@ -1559,7 +1559,7 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
   - **A pasted preview (carries-w1 T11/T18).** "Paste as preview" (Task 11's 20–100 MB question, now on: `confirm_large_paste` for every console and script tab) opens a **new console tab on the source console's connection**. The tab shows the document's first 2.5 MB as a T2 preview, and the source console's text stays as it was.
     - *Ruling (T18): the whole pasted text lives in memory only.* It is held per console and read by `PastedSource`; both passes read the same `Arc`. It never reaches an autosave (the tab opens through `queue_text`, with autosave off), a recovery copy, history (the history row is "Pasted text") or any file, and it goes when the tab closes.
     - *Why:* a paste can hold anything, credentials included (L14). A file would need a place, a lifetime and a cleanup.
-    - *Cost:* up to 100 MB of RAM per pasted preview while its tab is open, and it does not survive a restart (the tab comes back empty).
+    - *Cost:* up to 100 MB of RAM per pasted preview while its tab is open, and it does not survive a restart. Fix round 1 (m5): the tab comes back as an ordinary console with the same number, and its restore reads that number's console file (`<n>.sql`), which may hold an older console's text, never the pasted text.
     - A console with no connection refuses the paste with a toast.
 - **The run.** The run is `ScriptRunner::run_checked` on the core runtime, built from what the orchestrator's named hook (`script_run_parts`, beside `start_run_capped`) gathers. The hook first makes Run's own checks: no read-only reconnect pending, nothing else running, a script tab that runs somewhere, a live session (else the connect starts and nothing runs, R-M3-45), and the SQL context read (`modes_known` comes from it). Then the run uses:
   - the tab's own session, which is fixed at open (R-M4b-4);
@@ -1581,5 +1581,40 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
   At the end the strip shows how the run ended. That is either the mock's sentence (done, a failed statement, Stop, a No) or the runner's own refusal or stop sentence, followed by **Close**. The runner writes its log lines and summary to Output. While a run goes, the toolbar's Run as script is disabled, with the tooltip "Running as script: wait for it, or stop it", and the session's per-statement run clock is not shown in the toolbar. The strip sits in a focus home whose primary is the editor (R-M4b-43), so a Stop or Close pressed from the keyboard hands the focus to the code (tested). A strip that is dropped (its tab closed) cancels its run, because a dropped sender never cancels.
 - **Trust signals.** The strip is drawn under the toolbar. It never covers the capsule, the environment mark, the production hairline or the status bar's "Read-only preview" segment (Task 14's, reused). A test checks each of them during a run.
 - **Residuals.**
-  - A confirm-in-transaction prompt raised by a streamed unit has no `follow` entry in the port's book, because the runner's per-unit tickets are not handed out. That prompt therefore shows no statement text and no loss state.
+  - ~~A confirm-in-transaction prompt raised by a streamed unit has no `follow` entry.~~ Fixed in fix round 1 (I2), below.
   - The elapsed clock follows the executor clock, like the toolbar's.
+
+### m4b-t18 fix round 1 (review I1–I3, m1–m8; rulings R-T18-1, R-T18-2)
+
+- **I1: plain Run never runs on a preview, or beside a stream.**
+  - Every plain Run path refuses on an editor that is a T2 preview, with "A read-only preview doesn't run." (`orchestrator::refuse_plain_run`). The paths are:
+    - the gutter ▶ (`run_would_be_enabled` is false, and its `ExecuteRequested` reaches `on_execute`);
+    - `on_execute` (the keys);
+    - the single submit point `start_run_capped` (the chooser's confirm, Re-run, T14's Retry).
+  - Plain Run also refuses on a console whose session a streamed run holds ("A script is running on this connection's session…"). This covers the stream's own console and any console sharing that session (`run_as_script::blocks_run`; `run_busy` includes it).
+  - A stream refuses to start while a console sharing its session runs or prepares a run. Two runs therefore never interleave on one session (review rv_b, now a test).
+- **I2: a streamed unit's confirm-in-transaction prompt.**
+  - The runner hands the port each unit's run through the new defaulted `ConfirmPort::follow_run`: its ticket's `choices` and `status`, the unit's masked text (the history redaction), and the session.
+  - `AppConfirmPort` registers the run in its book, as M3's submit does: the prompt shows the statement and takes its lost form from the run's status.
+  - It also listens for the session's loss on the core runtime with M3's `LossLink` rule, so the prompt turns to its "connection lost" form (Close only) exactly as M3's single run's does.
+  - Tests: the statement is shown through a real streamed run; the lost form is shown through the port. Both are mutation-killed.
+- **I3, R-T18-1: a paste from a script tab keeps that tab's binding.**
+  - The pasted preview records the source script tab's doc. Its run passes T14's per-Run check through that doc's binding, on the pasted console's session (`tabs::run_gate_streamed_for`), with the MySQL switch back once and the refusal notice.
+  - From a MySQL/MariaDB tab (`SessionPlan::Own`, R-T14-3), the pasted console takes a session of its own (slot 0) and refuses on the profile's default session.
+  - A paste from a plain console keeps the console's own binding, as M3 does.
+  - Tests: a tab bound to `orders_archive` either runs there after one `USE`, or refuses; it never runs on `orders`.
+  - A source tab that has closed fails the check closed.
+- **m1:** the check is made only on the session the run was started on: the console must still hold it, and `take_checked_generation` compares that session's id.
+- **m2:** when the profile is deleted mid-run, the run stops instead of publishing "no environment".
+- **m3:** T14's Retry on a preview retries Run as script.
+- **m4, R-T18-2:** when Stop cancels the statement in flight, the strip says "Stopped during statement N; statements after it were not sent." It uses the runner's new `ScriptRunSummary::cancelled_in_flight`. The PO is informed.
+- **m5:** the relaunch sentence above is corrected.
+- **m6:** a pasted text held for a tab is dropped when the tab's host is built without adopting it, and whenever a console closes or another paste opens (`prune_pending`: every tab no workspace shows any more).
+- **m7:** shots:
+  - the running strip is now on a connected production console (capsule, swatch, hairline);
+  - the confirmation is drawn over a running strip.
+- **m8:** app tests cover:
+  - a change between the passes (rv_a);
+  - a MySQL switch back with a pasted streamed run;
+  - a paste from a script tab.
+

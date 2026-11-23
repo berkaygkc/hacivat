@@ -341,6 +341,10 @@ pub struct ScriptRunSummary {
     /// The most bytes the runner held at once (the splitters' text, the line count's text and
     /// the chunk being cut).
     pub peak_held: usize,
+    // ## m4b-t18-run-as-script fix round 1 (named exception; review m4, R-T18-2)
+    /// Stop reached the last unit after it was sent: it was cancelled in flight (or ended just
+    /// before the cancel reached it), so the stop is "during" that statement.
+    pub cancelled_in_flight: bool,
 }
 
 /// How a script run ended.
@@ -1728,6 +1732,8 @@ impl<'a> Run<'a> {
             reports: reports.iter().map(|r| Some(r.items.clone())).collect(),
         });
         let unit = prepared[0].unit.clone();
+        // ## m4b-t18-run-as-script fix round 1 (named exception; review I2)
+        let masked: Arc<[Arc<str>]> = Arc::from(vec![prepared[0].masked.clone()]);
         // The service's lines go to the unit's own log, then to the console's numbered by the
         // unit's place in the file.
         let unit_log = SessionLog::new();
@@ -1746,9 +1752,20 @@ impl<'a> Run<'a> {
             context_generation: generation,
         };
         let mut ticket = self.runner.exec.run_with_refresh(&session, req, refresh);
+        // ## m4b-t18-run-as-script fix round 1 (named exception; review I2): the port follows
+        // this unit's run (its confirm-in-transaction prompt shows the statement and its loss).
+        self.req.confirm.follow_run(
+            ticket.run,
+            ticket.choices.clone(),
+            ticket.status.clone(),
+            masked,
+            session.clone(),
+        );
         let summary = match self.or_cancel(&mut ticket.done).await {
             Some(done) => done,
             None => {
+                // ## m4b-t18-run-as-script fix round 1 (named exception; review m4)
+                self.summary.cancelled_in_flight = true;
                 drop(session.cancel(ticket.seq));
                 match tokio::time::timeout(CANCEL_GRACE, &mut ticket.done).await {
                     // A unit that ended before the cancel reached it ran: it is counted.

@@ -5190,3 +5190,9 @@ hv-scripts-confirm-open-ended-skip = Tümünü atla, dosyada bu bağlantıda ({ 
 hv-scripts-pasted-name = Yapıştırılan metin
 # Review: PO
 hv-scripts-paste-preview-unbound = Önizleme olarak yapıştırma bu konsolun bağlantısında açılır ve konsolun bağlantısı yok.
+# Review: PO
+hv-scripts-run-session-busy = Bu bağlantının oturumunda bir betik çalışıyor. Bitmesini bekleyin ya da durdurun, sonra yeniden çalıştırın.
+# Variables:
+#   $n (Number) - the statement's position in the file, e.g. 1205.
+# Review: PO
+hv-scripts-run-cancelled-during = { $n }. ifade sırasında durduruldu; ondan sonraki ifadeler gönderilmedi.

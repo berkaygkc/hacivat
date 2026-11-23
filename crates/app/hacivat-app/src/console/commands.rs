@@ -293,6 +293,15 @@ pub fn run_would_be_enabled(console: ConsoleId, cx: &App) -> bool {
     if connected && crate::exec_ui::sql_context(console, cx) == SqlContext::Pending {
         return false;
     }
+    // ## m4b-t18-run-as-script fix round 1 (named exception; I1): never on a T2 preview (its
+    // gutter ▶ included): only Run as script streams it.
+    if state
+        .editor
+        .as_ref()
+        .is_some_and(|e| e.read(cx).preview().is_some())
+    {
+        return false;
+    }
     // ## m3c-int (M1): Run's whole gate: nor while a run is being prepared (classification, the
     // parameter prompt, the confirmations, the "as one" chooser) or a read-only reconnect is
     // pending.

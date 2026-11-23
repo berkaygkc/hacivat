@@ -552,7 +552,10 @@ fn stop_ends_the_run_and_reports_progress(cx: &mut TestAppContext) {
     assert!(r.running(tab));
     click(r.vcx, "button-script-run-stop");
     let end = r.ended(tab);
-    assert_eq!(end, "Stopped after 1 statement. Nothing after it was sent.");
+    assert_eq!(
+        end,
+        "Stopped during statement 2; statements after it were not sent."
+    );
     assert!(
         !queries(&r.fakes[0]).iter().any(|q| q == "SELECT 3"),
         "nothing after the stop was sent"
@@ -585,7 +588,10 @@ fn escape_never_cancels_the_run(cx: &mut TestAppContext) {
     r.focus_editor(tab);
     assert!(run(r.vcx, "exec.cancel"), "exec.cancel ran");
     let end = r.ended(tab);
-    assert_eq!(end, "Stopped after 1 statement. Nothing after it was sent.");
+    assert_eq!(
+        end,
+        "Stopped during statement 2; statements after it were not sent."
+    );
     assert!(!queries(&r.fakes[0]).iter().any(|q| q == "SELECT 3"));
 }
 
@@ -720,7 +726,10 @@ fn stop_by_keyboard_presses_the_button_and_keeps_the_focus(cx: &mut TestAppConte
     assert_focus_on(r.vcx, "Stop", &stop);
     press_key(r.vcx, "enter");
     let end = r.ended(tab);
-    assert_eq!(end, "Stopped after 1 statement. Nothing after it was sent.");
+    assert_eq!(
+        end,
+        "Stopped during statement 2; statements after it were not sent."
+    );
     redraw_full(r.vcx);
     assert!(
         r.vcx.debug_bounds("button-script-run-stop").is_none(),
@@ -901,4 +910,457 @@ fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+// ## m4b-t18-run-as-script fix round 1 -----------------------------------------------------------
+
+/// A MySQL fake whose schema probes answer `dbs` in order (the last one again after that).
+fn mysql_fake_seq(dbs: &[&'static str]) -> FakeDriver {
+    let mut exec: Vec<FakeExec> = (0..48)
+        .map(|_| answer("SELECT @@SESSION.sql_mode", &[Some("")]))
+        .collect();
+    let last = *dbs.last().expect("a database");
+    for db in dbs.iter().chain(std::iter::repeat_n(&last, 32)) {
+        exec.push(answer("SELECT DATABASE()", &[Some(db), Some("deploy@%")]));
+    }
+    FakeDriver::new(DbmsKind::MySql)
+        .tracks_transactions()
+        .exec(exec)
+}
+
+/// [`pg_fake`] whose schema probes take 1.5 s each (a slow server).
+fn pg_fake_slow_probe(db: &'static str) -> FakeDriver {
+    let exec = (0..64)
+        .flat_map(|_| {
+            let mut probe = answer(
+                "SELECT current_database()",
+                &[
+                    Some(db),
+                    Some("public"),
+                    Some("public"),
+                    Some("deploy"),
+                    Some("public"),
+                ],
+            );
+            probe.delay = Duration::from_millis(1500);
+            [
+                answer("SHOW standard_conforming_strings", &[Some("on")]),
+                answer("SELECT pg_catalog.txid_current_if_assigned()", &[None]),
+                probe,
+            ]
+        })
+        .collect();
+    FakeDriver::new(DbmsKind::Postgres)
+        .tracks_transactions()
+        .exec(exec)
+        .queries(scs_queries().into_iter().chain([slow(), slow()]).collect())
+}
+
+impl Rig {
+    /// Opens `rel` under `profile` and database `db`, once the tab shows the file.
+    fn open_on(&mut self, rel: &str, profile: ProfileId, db: &str) -> TabId {
+        let (lib, rel_path) = (self.lib, RelPath::parse(rel).unwrap());
+        let database = DatabaseName::new(db);
+        self.vcx.cx.update(|cx| {
+            open_script(cx, lib, rel_path, Some(profile), Some(database));
+        });
+        let want = rel.to_string();
+        wait_until(self.vcx, "the script tab shows its file", |vcx| {
+            redraw_full(vcx);
+            let ws = workspace(vcx);
+            let tab = vcx.cx.read(|cx| ws.read(cx).active_tab());
+            tab.and_then(|t| vcx.cx.read(|cx| tabs::doc_of_tab(t, cx)))
+                .is_some_and(|d| {
+                    vcx.cx.read(|cx| {
+                        let d = d.read(cx);
+                        *d.load() == Load::Ready
+                            && d.spec(cx).is_some_and(|s| s.rel.as_str() == want)
+                    })
+                })
+        });
+        self.active()
+    }
+
+    /// Pastes `text` into tab `tab` past its (shrunk) 20 MB limit and answers "Paste as
+    /// preview"; the preview's tab, once its console has a session.
+    fn paste_as_preview(&mut self, tab: TabId, text: &str) -> TabId {
+        let editor = self.editor(tab);
+        self.vcx.cx.update(|cx| {
+            editor.update(cx, |e, cx| {
+                let mut cfg = *e.config();
+                cfg.tiers.reduced_max_bytes = 16;
+                cfg.tiers.paste_max_bytes = 4096;
+                e.set_config(cfg, cx);
+            })
+        });
+        self.vcx
+            .write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
+        self.focus_editor(tab);
+        assert!(run(self.vcx, "editor.paste"), "editor.paste ran");
+        wait_until(self.vcx, "the question", |vcx| {
+            layer_ids(vcx).contains(&"dialog")
+        });
+        press_key(self.vcx, "shift-tab");
+        press_key(self.vcx, "enter");
+        wait_until(self.vcx, "the preview tab", |vcx| {
+            redraw_full(vcx);
+            let active = self.active();
+            active != tab
+                && vcx.cx.read(|cx| {
+                    Consoles::by_tab(cx, active).is_some_and(|c| run_as_script::offered(c, cx))
+                })
+        });
+        let preview = self.active();
+        self.wait_session(preview);
+        preview
+    }
+
+    fn session_of(&self, tab: TabId) -> hacivat_session::session::SessionHandle {
+        let console = self.console(tab);
+        self.vcx
+            .cx
+            .read(|cx| Consoles::get(cx, console).and_then(|s| s.session.clone()))
+            .expect("a session")
+    }
+}
+
+/// Sends what the gutter ▶ sends for the statement at byte 0 of tab `tab`'s editor.
+fn gutter_run(r: &Rig, tab: TabId) {
+    let editor = r.editor(tab);
+    r.vcx.cx.update(|cx| {
+        editor.update(cx, |e, cx| {
+            let request = hacivat_ui_editor::ExecRequest {
+                doc: e.doc(),
+                action: hacivat_ui_editor::ExecAction::Execute1,
+                at: hacivat_ui_editor::ExecAt::Carets(std::iter::once(0).collect()),
+                snapshot: e.snapshot(),
+            };
+            cx.emit(hacivat_ui_editor::EditorEvent::ExecuteRequested(request));
+        })
+    });
+    r.vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn plain_run_never_runs_on_a_preview_or_beside_a_stream(cx: &mut TestAppContext) {
+    // Review rv_b (I1): on a pasted preview the gutter's gate is closed and what a ▶ sends runs
+    // nothing, idle and while the stream runs; the stream's session never takes a second run.
+    let (mut r, tab) = dev_console(cx);
+    r.pasted(tab, "SELECT 1;\nSELECT 99;\nSELECT 3;\n");
+    let console = r.console(tab);
+    let gate = |r: &Rig| {
+        r.vcx
+            .cx
+            .read(|cx| hacivat_app::console::commands::run_would_be_enabled(console, cx))
+    };
+    assert!(!gate(&r), "no ▶ on a preview");
+    gutter_run(&r, tab);
+    assert!(
+        queries(&r.fakes[0]).is_empty(),
+        "the idle preview ran nothing"
+    );
+    assert!(
+        toast_texts(r.vcx)
+            .iter()
+            .any(|t| t == "A read-only preview doesn't run. Run as script sends the whole file."),
+        "{:?}",
+        toast_texts(r.vcx)
+    );
+    r.run_as_script();
+    wait_until(r.vcx, "the slow statement runs", |_| {
+        queries(&r.fakes[0]).iter().any(|q| q == "SELECT 99")
+    });
+    assert!(!gate(&r), "no ▶ while the stream runs");
+    assert!(
+        r.vcx
+            .cx
+            .read(|cx| hacivat_app::exec_ui::orchestrator::run_busy(console, cx)),
+        "Run is busy while the stream runs"
+    );
+    gutter_run(&r, tab);
+    assert!(
+        layer_ids(r.vcx).iter().all(|l| *l != "chooser"),
+        "no chooser: {:?}",
+        layer_ids(r.vcx)
+    );
+    assert_eq!(
+        queries(&r.fakes[0]),
+        ["SELECT 1", "SELECT 99"],
+        "no second run interleaved"
+    );
+    r.vcx.cx.update(|cx| run_as_script::stop(console, cx));
+    let _ = r.ended(tab);
+    assert!(!queries(&r.fakes[0]).iter().any(|q| q == "SELECT 3"));
+}
+
+/// [`pg_fake`] that also answers Run's context reads with a search path (so `=` resolves and
+/// a bounded UPDATE is a plain write).
+fn pg_fake_ctx(db: &'static str) -> FakeDriver {
+    let mut exec: Vec<FakeExec> = (0..64)
+        .flat_map(|_| {
+            [
+                answer("SHOW standard_conforming_strings", &[Some("on")]),
+                answer("SELECT pg_catalog.txid_current_if_assigned()", &[None]),
+                answer(
+                    "SELECT current_database()",
+                    &[
+                        Some(db),
+                        Some("public"),
+                        Some("public"),
+                        Some("deploy"),
+                        Some("public"),
+                    ],
+                ),
+            ]
+        })
+        .collect();
+    exec.extend((0..32).map(|_| {
+        answer(
+            "SELECT pg_catalog.current_setting('standard_conforming_strings')",
+            &[Some("on"), Some("\"$user\", public")],
+        )
+    }));
+    FakeDriver::new(DbmsKind::Postgres)
+        .tracks_transactions()
+        .exec(exec)
+        .queries(scs_queries().into_iter().chain([slow(), slow()]).collect())
+}
+
+#[gpui::test]
+fn a_streamed_commit_prompt_shows_its_statement(cx: &mut TestAppContext) {
+    // Review I2: on production in Auto mode (a connection retagged to production keeps its
+    // mode, R-M3-78) a plain write runs in a transaction and asks before it is kept; the
+    // prompt of a streamed statement shows that statement (its masked text).
+    let mut r = rig(
+        cx,
+        vec![(DbmsKind::Postgres, PROD, pg_fake_ctx("orders"))],
+        &[],
+    );
+    let id = add_profile(r.vcx, pg_profile("orders", EnvTag::Dev, PROD, "orders"));
+    connected(&r, "orders");
+    let tab = r.console_on(id);
+    let mut p = r
+        .vcx
+        .cx
+        .read(|cx| {
+            cx.global::<hacivat_app::connections::ConnectionsModel>()
+                .get(id)
+        })
+        .expect("the profile")
+        .as_ref()
+        .clone();
+    p.environment = Some(EnvTag::Production);
+    save_draft(r.vcx, hacivat_session::profile::ProfileDraft::edit(p));
+    r.pasted(tab, "SELECT 1;\nUPDATE t SET a=1 WHERE id=3;\nSELECT 2;\n");
+    r.run_as_script();
+    // The prompt shows the statement it asks about (its SQL inset, `commit-sql`).
+    let prompt_shows = |vcx: &VisualTestContext| {
+        redraw_full(vcx);
+        layer_ids(vcx).contains(&hacivat_app::exec_ui::commit_prompt::COMMIT_LAYER_ID)
+            && full_frame(vcx)
+                .iter()
+                .any(|t| &*t.text == "UPDATE t SET a=1 WHERE id=3")
+    };
+    wait_until(
+        r.vcx,
+        "the confirm-in-transaction prompt with its statement",
+        |vcx| prompt_shows(vcx),
+    );
+    // Escape answers Roll back: the statement is undone and the run stops there.
+    press_key(r.vcx, "escape");
+    let end = r.ended(tab);
+    assert!(end.starts_with("Stopped at statement 2"), "{end}");
+    assert!(!queries(&r.fakes[0]).iter().any(|q| q == "SELECT 2"));
+}
+
+#[gpui::test]
+fn a_streamed_units_commit_prompt_turns_lost_with_its_connection(cx: &mut TestAppContext) {
+    // Review I2: the script port follows a streamed unit's run (`ConfirmPort::follow_run`, what
+    // the runner calls for every unit): its confirm-in-transaction prompt shows the statement,
+    // and when the session reports the connection lost it turns to the "connection lost" form
+    // (Close only), as M3's single run's prompt does.
+    use hacivat_session::session::{RunEvent, RunId, UnitId};
+    let (r, tab) = dev_console(cx);
+    let console = r.console(tab);
+    let session = r.session_of(tab);
+    let port = r
+        .vcx
+        .cx
+        .update(|cx| hacivat_app::exec_ui::AppConfirmPort::for_script_run(console, cx));
+    let run = RunId(4242);
+    let unit = UnitId { run, ordinal: 0 };
+    let (choices_tx, choices) = tokio::sync::watch::channel(None);
+    let (_status_tx, status) = tokio::sync::watch::channel(hacivat_exec::RunStatus::default());
+    let rt = r.vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .runtime()
+    });
+    {
+        let (port, session) = (port.clone(), session.clone());
+        let followed = rt.spawn(async move {
+            hacivat_exec::ConfirmPort::follow_run(
+                port.as_ref(),
+                run,
+                choices,
+                status,
+                Arc::from(vec![Arc::<str>::from("UPDATE t SET a=1 WHERE id=3")]),
+                session,
+            );
+        });
+        futures::executor::block_on(followed).expect("followed");
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(300);
+    choices_tx.send_replace(Some((
+        1,
+        RunEvent::NeedsCommit {
+            unit,
+            question: 7,
+            affected: Some(1),
+            deadline,
+            savepoint: false,
+        },
+    )));
+    let answer = hacivat_exec::ConfirmPort::commit_decision(
+        port.as_ref(),
+        hacivat_exec::CommitQuestion {
+            run,
+            unit,
+            question: 7,
+            affected: Some(1),
+            deadline,
+            savepoint: false,
+            production: true,
+            connection: Arc::from("orders-dev"),
+        },
+    );
+    wait_until(r.vcx, "the prompt with its statement", |vcx| {
+        redraw_full(vcx);
+        layer_ids(vcx).contains(&hacivat_app::exec_ui::commit_prompt::COMMIT_LAYER_ID)
+            && full_frame(vcx)
+                .iter()
+                .any(|t| &*t.text == "UPDATE t SET a=1 WHERE id=3")
+    });
+    // The connection drops inside a transaction (the session then never reconnects silently
+    // and says it lost the connection); it finds it at its next request.
+    let _ = futures::executor::block_on(
+        session
+            .submit(hacivat_session::session::Request::Exec {
+                sql: "BEGIN".into(),
+                opts: hacivat_driver::ExecOpts::values(16),
+                origin: hacivat_session::session::ExecOrigin::User,
+            })
+            .reply,
+    );
+    r.fakes[0].kill_connections();
+    std::mem::drop(session.submit(hacivat_session::session::Request::Ping));
+    wait_until(r.vcx, "the lost form", |vcx| {
+        redraw_full(vcx);
+        text_of(vcx, "commit-dropped-body").is_some()
+    });
+    let labels = button_labels(r.vcx);
+    assert!(!labels.iter().any(|l| l == "Commit"), "{labels:?}");
+    drop(answer);
+}
+
+#[gpui::test]
+fn a_change_between_the_passes_runs_nothing(cx: &mut TestAppContext) {
+    // Review rv_a (m8): the file is rewritten (same length) while the between-pass database
+    // check waits on a slow server: pass 2 refuses, nothing is sent.
+    let big = big_script("SELECT 1;\nSELECT 2;\n");
+    let mut r = rig(
+        cx,
+        vec![(DbmsKind::Postgres, PROD, pg_fake_slow_probe("orders"))],
+        &[("big.sql", big.as_str())],
+    );
+    let prod = add_profile(
+        r.vcx,
+        pg_profile("orders-prod", EnvTag::Production, PROD, "orders"),
+    );
+    connected(&r, "orders-prod");
+    let tab = r.open("big.sql", prod);
+    r.wait_session(tab);
+    let probes = |r: &Rig| {
+        r.fakes[0]
+            .executed()
+            .iter()
+            .filter(|s| s.starts_with("SELECT current_database()"))
+            .count()
+    };
+    let before = probes(&r);
+    r.run_as_script();
+    wait_until(r.vcx, "the check's probe reaches the server", |_| {
+        probes(&r) > before
+    });
+    std::fs::write(
+        r.root.join("big.sql"),
+        big.replacen("SELECT 1;", "SELECT 7;", 1),
+    )
+    .unwrap();
+    let end = r.ended(tab);
+    assert!(end.starts_with("Nothing in the file was run"), "{end}");
+    assert_eq!(sent(&r.fakes[0]), Vec::<String>::new(), "nothing was sent");
+}
+
+/// A MySQL rig with one script `a.sql` open under `orders_archive` (the profile opens
+/// `orders`), its open switch landed; the schema probes answer `dbs`.
+fn mysql_archive_tab(cx: &mut TestAppContext, dbs: &[&'static str]) -> (Rig, TabId) {
+    let mut r = rig(
+        cx,
+        vec![(DbmsKind::MySql, MYSQL, mysql_fake_seq(dbs))],
+        &[("a.sql", "SELECT 1")],
+    );
+    let mut p = test_profile("orders-my", Some(EnvTag::Dev), MYSQL);
+    p.engine = DbmsKind::MySql;
+    p.database = Some("orders".to_string());
+    let id = add_profile(r.vcx, p);
+    connected(&r, "orders-my");
+    let tab = r.open_on("a.sql", id, "orders_archive");
+    wait_until(r.vcx, "the open switch", |vcx| {
+        let doc = r.doc(tab);
+        vcx.cx
+            .read(|cx| doc.read(cx).switch_state() == tabs::Switch::Done)
+    });
+    r.wait_session(tab);
+    (r, tab)
+}
+
+#[gpui::test]
+fn a_paste_from_a_mysql_script_tab_runs_on_its_database_after_one_switch_back(
+    cx: &mut TestAppContext,
+) {
+    // R-T18-1 (I3) and m8. Probes: the tab's open switch (archive); the pasted preview's check
+    // on its own fresh session (orders); after the one switch back (archive). It runs there,
+    // never on `orders`.
+    let (mut r, tab) = mysql_archive_tab(cx, &["orders_archive", "orders", "orders_archive"]);
+    let preview = r.paste_as_preview(tab, "SELECT 5;\nSELECT 6;\n-- pasted\n");
+    // A session of its own, as the tab's (R-T14-3): never the profile's default one.
+    assert_ne!(r.session_of(preview).id(), r.session_of(tab).id());
+    let fake = r.fakes[0].clone();
+    let before = fake.executed().len();
+    r.run_as_script();
+    let end = r.ended(preview);
+    // The pasted document: the paste at the caret (the start) and the tab's own text.
+    assert_eq!(end, "Ran 3 statements from Pasted text");
+    let after: Vec<String> = fake.executed()[before..]
+        .iter()
+        .filter(|s| s.starts_with("USE"))
+        .cloned()
+        .collect();
+    assert_eq!(after, ["USE `orders_archive`"], "one switch back");
+    assert_eq!(queries(&fake), ["SELECT 5", "SELECT 6", "SELECT 1"]);
+}
+
+#[gpui::test]
+fn a_paste_from_a_mysql_script_tab_never_runs_on_the_profiles_database(cx: &mut TestAppContext) {
+    // R-T18-1 (I3): the pasted preview's session is still on `orders` after the switch back:
+    // refused, nothing sent.
+    let (mut r, tab) = mysql_archive_tab(cx, &["orders_archive", "orders", "orders"]);
+    let preview = r.paste_as_preview(tab, "SELECT 5;\nSELECT 6;\n-- pasted\n");
+    r.run_as_script();
+    let end = r.ended(preview);
+    assert_eq!(
+        end,
+        "Nothing in the file was run: the connection isn't on this tab's database, or Hacivat couldn't check which database it's on."
+    );
+    assert!(queries(&r.fakes[0]).is_empty(), "nothing ran on orders");
 }

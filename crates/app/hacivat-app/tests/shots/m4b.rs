@@ -298,7 +298,9 @@ impl M4b {
             M4b::LibrarySettings | M4b::LibraryRemove => &[],
             // ## m4b-t18-run-as-script
             M4b::RunAsScriptReady => &["#editor-t2-title"],
-            M4b::RunAsScriptRunning => &["#script-run-sent", "#script-run-line", "#script-run-read"],
+            M4b::RunAsScriptRunning => {
+                &["#script-run-sent", "#script-run-line", "#script-run-read"]
+            }
             M4b::RunAsScriptFailed | M4b::RunAsScriptCancelled | M4b::RunAsScriptConfirm => &[],
         }
     }
@@ -319,7 +321,8 @@ impl M4b {
         save(cx, pg(DEV, EnvTag::Dev));
         // ## m4b-t14-tabs: the connections a script is open under.
         // ## m4b-t15-goto (named line): and the ones Go to script offers.
-        if self.is_script() || self.is_goto() {
+        // ## m4b-t18-run-as-script fix round 1 (named line): and Task 18's connected one.
+        if self.is_script() || self.is_goto() || self.connects() {
             let mut prod = pg(PROD, EnvTag::Production);
             if self.connects() {
                 // An IP literal: nothing resolves (the M3a fakes dial themselves).
@@ -355,7 +358,9 @@ impl M4b {
     // ## m4b-t14-tabs
     /// A state that connects for real (over the M3a fakes), so its capsule shows.
     pub(super) fn connects(self) -> bool {
-        self == M4b::ScriptConnectedProd
+        // ## m4b-t18-run-as-script fix round 1 (named exception; review m7): the running
+        // strip on a connected production console.
+        self == M4b::ScriptConnectedProd || self == M4b::RunAsScriptRunning
     }
 
     /// A script tab state (Task 14).
@@ -959,10 +964,35 @@ fn run_as_script_steps(state: M4b) -> Option<Vec<Step>> {
         M4b::RunAsScriptCancelled => Some(Some("cancelled")),
         _ => return None,
     };
-    let mut steps = vec![
+    // ## m4b-t18-run-as-script fix round 1 (review m7): the running state is a connected
+    // production console (its capsule, swatch and hairline with the strip).
+    let on = if state == M4b::RunAsScriptRunning {
+        PROD
+    } else {
+        DEV
+    };
+    let mut steps = Vec::new();
+    if state == M4b::RunAsScriptRunning {
+        steps.push(step(
+            |_, cx| {
+                if let Some(id) = profile_named(cx, PROD) {
+                    ConnectionsModel::connect(cx, id, None);
+                }
+            },
+            |_, cx| {
+                profile_named(cx, PROD).is_some_and(|id| {
+                    matches!(
+                        cx.global::<ConnectionsModel>().live(id),
+                        hacivat_session::LiveState::Connected(_)
+                    )
+                })
+            },
+        ));
+    }
+    steps.extend([
         step(
-            |window, cx| {
-                let Some(id) = profile_named(cx, DEV) else {
+            move |window, cx| {
+                let Some(id) = profile_named(cx, on) else {
                     return;
                 };
                 console_fixtures::open(id, &dump()[..shown()], window, cx);
@@ -1001,7 +1031,13 @@ fn run_as_script_steps(state: M4b) -> Option<Vec<Step>> {
                     })
             },
         ),
-    ];
+    ]);
+    // ## m4b-t18-run-as-script fix round 1 (review m7): the confirmation over a running strip.
+    let ended = if state == M4b::RunAsScriptConfirm {
+        Some(None)
+    } else {
+        ended
+    };
     if let Some(ended) = ended {
         steps.push(step(
             move |window, cx| {

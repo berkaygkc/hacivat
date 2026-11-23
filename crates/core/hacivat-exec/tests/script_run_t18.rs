@@ -271,3 +271,65 @@ fn the_new_reasons_have_their_words_in_both_locales() {
     assert!(en.contains("lost track of the connection's state"));
     assert!(en.contains("statements on line"));
 }
+
+// ---- fix round 1 (review I2) --------------------------------------------------------------
+
+/// A port that runs every statement it is asked about and records the runs it follows.
+#[derive(Debug, Default)]
+struct Following {
+    followed: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+impl hacivat_exec::ConfirmPort for Following {
+    fn confirm(
+        &self,
+        _: hacivat_exec::ConfirmQuestion,
+    ) -> tokio::sync::oneshot::Receiver<hacivat_exec::ConfirmAnswer> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(hacivat_exec::ConfirmAnswer::Execute);
+        rx
+    }
+
+    fn commit_decision(
+        &self,
+        _: hacivat_exec::CommitQuestion,
+    ) -> tokio::sync::oneshot::Receiver<hacivat_exec::CommitAnswer> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(hacivat_exec::CommitAnswer::RollBack);
+        rx
+    }
+
+    fn follow_run(
+        &self,
+        _: hacivat_session::session::RunId,
+        _: watch::Receiver<Option<(u64, hacivat_session::session::RunEvent)>>,
+        _: watch::Receiver<hacivat_exec::RunStatus>,
+        sql: Arc<[Arc<str>]>,
+        _: hacivat_session::session::SessionHandle,
+    ) {
+        self.followed
+            .lock()
+            .unwrap()
+            .push(sql.iter().map(|s| s.to_string()).collect());
+    }
+}
+
+#[tokio::test]
+async fn every_streamed_unit_is_followed_with_its_masked_text() {
+    // I2: the port follows each unit's run with the unit's masked text (the history
+    // redaction), so its confirm-in-transaction prompt can show the statement and its loss.
+    let r = rig(fake_pg(), false).await;
+    let port = Arc::new(Following::default());
+    let mut req = r.request(
+        script("SELECT 1;\nSELECT 2;\n").boxed(),
+        None,
+        Answers::new(&[]),
+    );
+    req.confirm = port.clone();
+    let (out, _) = r.run(req).await;
+    assert!(matches!(out, ScriptRunOutcome::Finished(_)), "{out:?}");
+    assert_eq!(
+        *port.followed.lock().unwrap(),
+        [vec!["SELECT 1".to_string()], vec!["SELECT 2".to_string()]]
+    );
+}

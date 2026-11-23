@@ -1826,6 +1826,26 @@ impl ConfirmPort for AppConfirmPort {
         }
     }
 
+    // ## m4b-t18-run-as-script fix round 1 (named exception; review I2)
+    /// A streamed unit's run: followed in the port's book as M3's submit follows its run
+    /// (the prompt's statement and its lost form from the run's status), and the session's
+    /// loss reaches the port as M3's question listener reports it ([`LossLink`]).
+    fn follow_run(
+        &self,
+        run: RunId,
+        choices: watch::Receiver<Option<(u64, RunEvent)>>,
+        status: watch::Receiver<RunStatus>,
+        sql: Arc<[Arc<str>]>,
+        session: hacivat_session::session::SessionHandle,
+    ) {
+        self.follow(run, choices.clone(), status, sql);
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let port = self.clone();
+        rt.spawn(follow_loss(port, run, choices, session));
+    }
+
     fn commit_decision(&self, q: CommitQuestion) -> oneshot::Receiver<CommitAnswer> {
         let Some(requests) = &self.requests else {
             return answered(CommitAnswer::RollBack);
@@ -1844,6 +1864,70 @@ impl ConfirmPort for AppConfirmPort {
         match sent {
             Ok(()) => rx,
             Err(_) => answered(CommitAnswer::RollBack),
+        }
+    }
+}
+
+// ## m4b-t18-run-as-script fix round 1 (named exception; review I2)
+/// Run `run`'s loss, reported to `port` once the run had a confirm-in-transaction question,
+/// whichever of the two comes first (M3's `follow_questions` rule, on the core runtime): with
+/// the statements before the confirmed one in the savepoint form; for `LOSS_GRACE` after the
+/// run ended when it had a question.
+async fn follow_loss(
+    port: AppConfirmPort,
+    run: RunId,
+    mut choices: watch::Receiver<Option<(u64, RunEvent)>>,
+    session: hacivat_session::session::SessionHandle,
+) {
+    use crate::exec_ui::orchestrator::{LOSS_GRACE, LossLink};
+    let mut events = session.events();
+    let mut link = LossLink::default();
+    let mut had_question = false;
+    let mut open = true;
+    loop {
+        if open {
+            tokio::select! {
+                ev = events.recv() => match ev {
+                    Ok(hacivat_session::session::SessionEvent::Lost(_)) => {
+                        if let Some(before) = link.lost() {
+                            port.connection_lost(run, before);
+                            return;
+                        }
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                },
+                changed = choices.changed() => {
+                    if changed.is_err() {
+                        open = false;
+                        if !had_question {
+                            return;
+                        }
+                        continue;
+                    }
+                    let now = choices.borrow_and_update().clone();
+                    if let Some((_, RunEvent::NeedsCommit { savepoint, .. })) = now {
+                        had_question = true;
+                        let statements = session.state().borrow().tx.statements;
+                        if let Some(before) = link.question(savepoint, statements) {
+                            port.connection_lost(run, before);
+                            return;
+                        }
+                    }
+                }
+            }
+        } else {
+            // The run ended after a question: a late loss report still reaches its prompt.
+            match tokio::time::timeout(LOSS_GRACE, events.recv()).await {
+                Ok(Ok(hacivat_session::session::SessionEvent::Lost(_))) => {
+                    if let Some(before) = link.lost() {
+                        port.connection_lost(run, before);
+                    }
+                    return;
+                }
+                Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => return,
+            }
         }
     }
 }
