@@ -18,15 +18,44 @@ ARTIFACTS="${HV_ARTIFACTS:-/artifacts}"
 PASSPHRASE=hv_test_pw
 P=mysql-x509
 FILES="$P-ca.pem $P-server.pem $P-server-key.pem $P-client.pem $P-client-key.pem $P-client-key-enc.pem"
+# ## m4b-t19-docker (named exception): the healthcheck waits for this marker, written only
+# after the checks at the end, so mysql84-x509 never starts on a set that is not ready.
+READY="$ARTIFACTS/.$P-ready"
+rm -f "$READY"
+# ## m4b-t19-docker
+
+# ## m4b-t19-docker (named exception; CI 44990057141, 45091594060; T19 review m1): `fresh`
+# says on stdout which check turned a kept set down, so the container's log tells a cache-state
+# problem from a first start.
+stale() {
+    echo "mysql-x509-certs: not keeping the existing set: $1"
+    return 1
+}
 
 fresh() {
     for f in $FILES; do
-        [ -s "$ARTIFACTS/$f" ] || return 1
+        [ -s "$ARTIFACTS/$f" ] || stale "$f is missing or empty" || return 1
     done
     for leaf in server client; do
-        openssl x509 -checkend 86400 -noout -in "$ARTIFACTS/$P-$leaf.pem" >/dev/null || return 1
+        openssl x509 -checkend 86400 -noout -in "$ARTIFACTS/$P-$leaf.pem" >/dev/null \
+            || stale "the $leaf certificate expires within a day or does not parse" || return 1
+    done
+    # A kept set must also be whole and of one generation: the CA parses, both leaves verify
+    # against it, and each private key is its certificate's.
+    openssl verify -CAfile "$ARTIFACTS/$P-ca.pem" \
+        "$ARTIFACTS/$P-server.pem" "$ARTIFACTS/$P-client.pem" >/dev/null 2>&1 \
+        || stale "the leaves do not verify against the CA (or the CA does not parse)" || return 1
+    local cert key
+    for leaf in server client; do
+        cert="$(openssl x509 -noout -pubkey -in "$ARTIFACTS/$P-$leaf.pem" 2>/dev/null)" \
+            || stale "the $leaf certificate's key does not read" || return 1
+        key="$(openssl pkey -pubout -in "$ARTIFACTS/$P-$leaf-key.pem" 2>/dev/null)" \
+            || stale "the $leaf private key does not read" || return 1
+        { [ -n "$cert" ] && [ "$cert" = "$key" ]; } \
+            || stale "the $leaf private key is not its certificate's" || return 1
     done
 }
+# ## m4b-t19-docker
 
 # One leaf signed by the CA in $W: `leaf <name> <subject> <extensions…>`.
 leaf() {
@@ -72,6 +101,34 @@ if ! fresh; then
     # `exec` runs no EXIT trap: the CA key goes now.
     rm -rf "$W"
     trap - EXIT
+    echo "mysql-x509-certs: generated a new set"
+else
+    echo "mysql-x509-certs: kept the existing set"
 fi
+
+# ## m4b-t19-docker (named exception; CI 44990057141, 45091594060; T19 review m1): both
+# failures came on runs that restored the job's cache, and in both the certs container took as
+# long as a fresh generation, so the set was most likely new and the CA unreadable to mysqld,
+# not invalid: "SSL_CTX_set_default_verify_paths failed" is MySQL's text for a failed
+# `SSL_CTX_load_verify_locations`, the first file it opens. A folder restored from the cache may
+# carry a mode `mysql` cannot traverse; the healthcheck runs as root and still passes; mysqld
+# then serves no TLS and its caching_sha2 sign-in never turns healthy. So: every file 0644, the
+# folder 0755, and the server's own view checked (the image's `gosu`, as its entrypoint uses).
+# A set mysqld cannot read stops here, named in this container's log.
+chmod 755 "$ARTIFACTS"
+for f in $FILES; do
+    chmod 644 "$ARTIFACTS/$f"
+done
+openssl verify -CAfile "$ARTIFACTS/$P-ca.pem" "$ARTIFACTS/$P-server.pem" >/dev/null
+if command -v gosu >/dev/null 2>&1; then
+    for f in $FILES; do
+        gosu mysql test -r "$ARTIFACTS/$f" || {
+            echo "mysql-x509-certs: $f is not readable by the mysql user" >&2
+            exit 1
+        }
+    done
+fi
+touch "$READY"
+# ## m4b-t19-docker
 
 exec "$@"
