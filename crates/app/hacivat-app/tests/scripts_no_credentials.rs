@@ -32,7 +32,9 @@ use hacivat_app::scripts::tabs::{self, Load, ScriptDoc};
 use hacivat_app::scripts::{DatabaseName, LibraryId, RelPath};
 use hacivat_app::shell::TabKind;
 use hacivat_driver::ExecSummary;
-use hacivat_driver::fake::{FakeDriver, FakeExec, FakeQuery, FakeResultSet, FakeRows, FakeTypedCall};
+use hacivat_driver::fake::{
+    FakeDriver, FakeExec, FakeQuery, FakeResultSet, FakeRows, FakeTypedCall,
+};
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
 use hacivat_scripts::manifest::ManifestV1;
 use hacivat_scripts::service::{FolderTrash, LibraryService, ServiceOptions};
@@ -172,12 +174,21 @@ fn opts(trash: &Path) -> ServiceOptions {
 }
 
 /// `git` on the fixture repository `dir` (a repository this test made), with fixed identities
-/// and dates.
+/// and dates and no automatic maintenance (T19 review I2: `git commit` starts a detached
+/// `maintenance run --auto` holding `objects/maintenance.lock`), so its files never change
+/// after the command returns.
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .current_dir(dir)
-        .args(["-c", "user.name=hvm4b", "-c", "user.email=hvm4b@example.invalid"])
+        .args([
+            "-c",
+            "user.name=hvm4b",
+            "-c",
+            "user.email=hvm4b@example.invalid",
+        ])
         .args(["-c", "init.defaultBranch=main", "-c", "core.autocrlf=false"])
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
         .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
@@ -218,7 +229,13 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 /// Every spelling of each profile's identifiers and every secret of the session.
 fn needles(profiles: &[ProfileId], names: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = [
-        PASSWORD, PASSPHRASE, USER, PROD, STAGING, "password =", "host =",
+        PASSWORD,
+        PASSPHRASE,
+        USER,
+        PROD,
+        STAGING,
+        "password =",
+        "host =",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -231,6 +248,7 @@ fn needles(profiles: &[ProfileId], names: &[&str]) -> Vec<String> {
             u.to_string(),
             u.simple().to_string(),
             u.to_string().to_ascii_uppercase(),
+            u.simple().to_string().to_ascii_uppercase(),
             format!("{id:?}"),
         ]);
         for slot in [SecretSlot::DbPassword, SecretSlot::TlsKeyPassphrase] {
@@ -363,7 +381,11 @@ fn no_credentials_are_ever_written_into_a_library_folder(cx: &mut TestAppContext
     let (vcx, fakes) = shell_with_routes(cx, "en", routes());
     in_window(vcx, |window, _| window.activate_window());
     let app_paths = paths(vcx);
-    let app_root = app_paths.config.parent().expect("the app root").to_path_buf();
+    let app_root = app_paths
+        .config
+        .parent()
+        .expect("the app root")
+        .to_path_buf();
     let base = temp_root();
     let (root, trash) = (base.join("orders-scripts"), base.join("trash"));
     std::fs::create_dir_all(&root).expect("the library folder");
@@ -421,14 +443,16 @@ fn no_credentials_are_ever_written_into_a_library_folder(cx: &mut TestAppContext
     wait_until(vcx, "the library is listed", |_| {
         listed("report.sql", Some(EnvTag::Production))
     });
-    // 2. Map another database of prod's, sharing the alias.
-    block(service.map(
+    // 2. The mapping dialog's path: map another database of prod's, sharing the alias, written
+    // only over the manifest bytes the dialog read and showed (`manifest::preview`).
+    let shown = hacivat_scripts::manifest::preview(&root).bytes;
+    block(service.map_sharing(
         LocalMapping {
             profile: prod,
             database: DatabaseName::new("orders_archive"),
             library: lib,
         },
-        true,
+        shown,
     ))
     .expect("the mapping");
 
@@ -439,7 +463,10 @@ fn no_credentials_are_ever_written_into_a_library_folder(cx: &mut TestAppContext
     let on_staging = open(vcx, lib, "report.sql", staging);
     for (tab, fake) in [(on_prod, &fakes[0]), (on_staging, &fakes[1])] {
         wait_until(vcx, "the tab's session", |vcx| {
-            let console = vcx.cx.read(|cx| Consoles::by_tab(cx, tab)).expect("console");
+            let console = vcx
+                .cx
+                .read(|cx| Consoles::by_tab(cx, tab))
+                .expect("console");
             vcx.cx.read(|cx| {
                 Consoles::get(cx, console).is_some_and(|s| s.session.is_some())
                     && hacivat_app::exec_ui::sql_context(console, cx)
@@ -456,14 +483,21 @@ fn no_credentials_are_ever_written_into_a_library_folder(cx: &mut TestAppContext
         .advance_clock(tabs::RECOVERY_IDLE + Duration::from_millis(10));
     wait_until(vcx, "the recovery copy", |vcx| copies(vcx, lib).len() == 1);
     let copy = copies(vcx, lib).remove(0);
-    assert!(copy.starts_with(&app_root), "the copy is under the app's folders");
+    assert!(
+        copy.starts_with(&app_root),
+        "the copy is under the app's folders"
+    );
     assert!(!copy.starts_with(&root), "never inside the library");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode(&copy), 0o600, "the copy's mode");
-        assert_eq!(mode(copy.parent().expect("its folder")), 0o700, "its folder's mode");
+        assert_eq!(
+            mode(copy.parent().expect("its folder")),
+            0o700,
+            "its folder's mode"
+        );
     }
     focus(vcx, on_prod);
     assert!(run(vcx, "file.save"), "file.save ran");
@@ -475,7 +509,9 @@ fn no_credentials_are_ever_written_into_a_library_folder(cx: &mut TestAppContext
     let rel = |s: &str| RelPath::parse(s).expect("a path");
     block(service.create(lib, &rel("drafts"), EntryKind::Folder, env)).expect("new folder");
     block(service.create(lib, &rel("drafts/new.sql"), EntryKind::Sql, env)).expect("new script");
-    wait_until(vcx, "drafts/new.sql listed", |_| listed("drafts/new.sql", env));
+    wait_until(vcx, "drafts/new.sql listed", |_| {
+        listed("drafts/new.sql", env)
+    });
     block(service.create(lib, &rel("monthly.sql"), EntryKind::Sql, env)).expect("new script");
     wait_until(vcx, "monthly.sql listed", |_| listed("monthly.sql", env));
     block(service.rename(lib, &rel("monthly.sql"), &rel("weekly.sql"), env)).expect("rename");
@@ -504,18 +540,19 @@ fn no_credentials_are_ever_written_into_a_library_folder(cx: &mut TestAppContext
             .count()
     });
     assert_eq!(restored, 2, "both script tabs restored");
-    if let Some(service) = vcx2.cx.read(hacivat_app::scripts::open::service) {
-        // Let the restored tabs load before the quit.
-        let _ = &service;
-        wait_until(vcx2, "the restored library", |_| {
-            service
-                .snapshot()
-                .view(env)
-                .library(lib)
-                .is_some_and(|l| l.entry(&rel("report.sql")).is_some())
-        });
-        service.shutdown();
-    }
+    // The relaunch installs its own library service (the restored tabs need it).
+    let service = vcx2
+        .cx
+        .read(hacivat_app::scripts::open::service)
+        .expect("the relaunch's library service");
+    wait_until(vcx2, "the restored library", |_| {
+        service
+            .snapshot()
+            .view(env)
+            .library(lib)
+            .is_some_and(|l| l.entry(&rel("report.sql")).is_some())
+    });
+    service.shutdown();
     close_all_windows(vcx2);
 
     // The audit.
@@ -524,14 +561,26 @@ fn no_credentials_are_ever_written_into_a_library_folder(cx: &mut TestAppContext
         .iter()
         .filter_map(|(n, b)| n.strip_prefix(".git/").map(|n| (n.to_string(), b.clone())))
         .collect();
-    assert_eq!(git_after, git_before, ".git/ changed: Hacivat wrote into the repository");
+    assert_eq!(
+        git_after, git_before,
+        ".git/ changed: Hacivat wrote into the repository"
+    );
     let mine: BTreeMap<&String, &Option<Vec<u8>>> = all
         .iter()
         .filter(|(n, _)| n.as_str() != ".git" && !n.starts_with(".git/"))
         .collect();
     let needles = needles(&[prod, staging], &["orders-prod", "orders-staging"]);
+    let trashed = walk(&trash);
     let mut found = Vec::new();
-    for (name, bytes) in &mine {
+    let audited = mine
+        .iter()
+        .map(|(n, b)| (format!("library/{n}"), b.as_deref()))
+        .chain(
+            trashed
+                .iter()
+                .map(|(n, b)| (format!("trash/{n}"), b.as_deref())),
+        );
+    for (name, bytes) in audited {
         for n in &needles {
             if name.contains(n.as_str()) {
                 found.push(format!("{name}: its name holds a credential or identifier"));
@@ -552,32 +601,39 @@ fn no_credentials_are_ever_written_into_a_library_folder(cx: &mut TestAppContext
     ]
     .into_iter()
     .collect();
-    assert_eq!(names, want, "the only paths are the user's scripts and the manifest");
+    assert_eq!(
+        names, want,
+        "the only paths are the user's scripts and the manifest"
+    );
     assert_eq!(
         mine[&"report.sql".to_string()].as_deref(),
         Some(&b"SELECT 1;\nSELECT 2"[..]),
         "the saved text"
     );
-    let manifest = String::from_utf8(
-        mine[&".hacivat/workspace.toml".to_string()]
-            .clone()
-            .expect("a file"),
-    )
-    .expect("UTF-8");
-    let keys: BTreeSet<&str> = manifest
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim()))
-        .collect();
-    assert_eq!(keys, BTreeSet::from(["aliases", "database", "format"]), "{manifest}");
-    assert!(manifest.contains("\"orders_archive\""), "the shared alias: {manifest}");
-    // The app's own state never names the library's contents, and lives outside it.
-    for f in [
-        app_paths.libraries_toml(),
-        app_paths.workspace_json(),
-        app_paths.connections_toml(),
-    ] {
-        assert!(!f.starts_with(&root), "{} is inside the library", f.display());
+    assert_eq!(
+        trashed.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["new.sql"],
+        "the trash holds only the trashed script"
+    );
+    // The manifest, parsed by the product's own reader (this crate has no TOML parser): a key
+    // other than `format`, `database` and `aliases` would be an `UnknownKey` diagnostic.
+    let bytes = mine[&".hacivat/workspace.toml".to_string()]
+        .clone()
+        .expect("a file");
+    let read = hacivat_scripts::manifest::read_bytes(&bytes, "orders-scripts");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(read.diags.is_empty(), "{:?}: {text}", read.diags);
+    assert_eq!(
+        read.db.as_ref().map(|d| d.as_str()),
+        Some("orders"),
+        "{text}"
+    );
+    let aliases: Vec<&str> = read.aliases.iter().map(|a| a.as_str()).collect();
+    assert_eq!(aliases, ["orders_archive"], "the shared alias only: {text}");
+    for key in ["format", "database", "aliases"] {
+        assert!(
+            text.lines().any(|l| l.trim_start().starts_with(key)),
+            "{key} missing: {text}"
+        );
     }
 }

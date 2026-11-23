@@ -24,29 +24,38 @@ READY="$ARTIFACTS/.$P-ready"
 rm -f "$READY"
 # ## m4b-t19-docker
 
+# ## m4b-t19-docker (named exception; CI 44990057141, 45091594060; T19 review m1): `fresh`
+# says on stdout which check turned a kept set down, so the container's log tells a cache-state
+# problem from a first start.
+stale() {
+    echo "mysql-x509-certs: not keeping the existing set: $1"
+    return 1
+}
+
 fresh() {
     for f in $FILES; do
-        [ -s "$ARTIFACTS/$f" ] || return 1
+        [ -s "$ARTIFACTS/$f" ] || stale "$f is missing or empty" || return 1
     done
     for leaf in server client; do
-        openssl x509 -checkend 86400 -noout -in "$ARTIFACTS/$P-$leaf.pem" >/dev/null || return 1
+        openssl x509 -checkend 86400 -noout -in "$ARTIFACTS/$P-$leaf.pem" >/dev/null \
+            || stale "the $leaf certificate expires within a day or does not parse" || return 1
     done
-    # ## m4b-t19-docker (named exception; CI 44990057141, 45091594060): a kept set must also
-    # be whole and of one generation. Both failures came on a run that restored the job's cache,
-    # where mysqld could not load the kept CA ("SSL_CTX_set_default_verify_paths failed" is
-    # MySQL's text for a failed `SSL_CTX_load_verify_locations`), served no TLS, and the
-    # healthcheck's caching_sha2 sign-in then never passed. So: the CA must parse, both leaves
-    # must verify against it, and each private key must be its certificate's.
+    # A kept set must also be whole and of one generation: the CA parses, both leaves verify
+    # against it, and each private key is its certificate's.
     openssl verify -CAfile "$ARTIFACTS/$P-ca.pem" \
-        "$ARTIFACTS/$P-server.pem" "$ARTIFACTS/$P-client.pem" >/dev/null 2>&1 || return 1
+        "$ARTIFACTS/$P-server.pem" "$ARTIFACTS/$P-client.pem" >/dev/null 2>&1 \
+        || stale "the leaves do not verify against the CA (or the CA does not parse)" || return 1
     local cert key
     for leaf in server client; do
-        cert="$(openssl x509 -noout -pubkey -in "$ARTIFACTS/$P-$leaf.pem" 2>/dev/null)" || return 1
-        key="$(openssl pkey -pubout -in "$ARTIFACTS/$P-$leaf-key.pem" 2>/dev/null)" || return 1
-        [ -n "$cert" ] && [ "$cert" = "$key" ] || return 1
+        cert="$(openssl x509 -noout -pubkey -in "$ARTIFACTS/$P-$leaf.pem" 2>/dev/null)" \
+            || stale "the $leaf certificate's key does not read" || return 1
+        key="$(openssl pkey -pubout -in "$ARTIFACTS/$P-$leaf-key.pem" 2>/dev/null)" \
+            || stale "the $leaf private key does not read" || return 1
+        { [ -n "$cert" ] && [ "$cert" = "$key" ]; } \
+            || stale "the $leaf private key is not its certificate's" || return 1
     done
-    # ## m4b-t19-docker
 }
+# ## m4b-t19-docker
 
 # One leaf signed by the CA in $W: `leaf <name> <subject> <extensions…>`.
 leaf() {
@@ -97,11 +106,15 @@ else
     echo "mysql-x509-certs: kept the existing set"
 fi
 
-# ## m4b-t19-docker (named exception): a kept set restored from a cache may carry other modes,
-# and mysqld reads these files as `mysql`, never root. Every file 0644 and the folder
-# traversable, then the server's own view checked (the image's `gosu`, as its entrypoint
-# uses): a set mysqld cannot read stops here, named in this container's log, instead of a
-# server that starts without TLS and never turns healthy.
+# ## m4b-t19-docker (named exception; CI 44990057141, 45091594060; T19 review m1): both
+# failures came on runs that restored the job's cache, and in both the certs container took as
+# long as a fresh generation, so the set was most likely new and the CA unreadable to mysqld,
+# not invalid: "SSL_CTX_set_default_verify_paths failed" is MySQL's text for a failed
+# `SSL_CTX_load_verify_locations`, the first file it opens. A folder restored from the cache may
+# carry a mode `mysql` cannot traverse; the healthcheck runs as root and still passes; mysqld
+# then serves no TLS and its caching_sha2 sign-in never turns healthy. So: every file 0644, the
+# folder 0755, and the server's own view checked (the image's `gosu`, as its entrypoint uses).
+# A set mysqld cannot read stops here, named in this container's log.
 chmod 755 "$ARTIFACTS"
 for f in $FILES; do
     chmod 644 "$ARTIFACTS/$f"

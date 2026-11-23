@@ -22,6 +22,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -29,15 +30,33 @@ use std::time::{Duration, Instant};
 use common::matrix::{Console, Line, Opts, Side, docker_enabled, line_of, must_exist, unique};
 use common::t12::{Answers, FileScript, dialect_of, rig, script};
 use hacivat_driver::fake::FakeDriver;
+use hacivat_driver::{ExecOpts, Protocol};
 use hacivat_exec::{
     ClassifyPool, ExecService, ScriptChunks, ScriptGate, ScriptPhase, ScriptProgress,
     ScriptRefuseReason, ScriptRunOutcome, ScriptRunRequest, ScriptRunner, SuppressSet, run_file,
 };
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_results::MemoryBudget;
-use hacivat_session::session::{Request, TxCommand, TxMode};
+use hacivat_session::session::{ExecOrigin, Request, TxCommand, TxMode};
 use hacivat_testkit::require_target;
 use tokio::sync::watch;
+
+/// Prints one `HV-FACT …` line straight to the process's stdout, on one line: libtest captures
+/// only the `print!` family, so the line reaches the CI log of a passing test too (R-W3-14,
+/// the `hacivat-meta` tests' macro). Facts never hold a secret.
+macro_rules! fact {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let line = format!($($arg)*).replace('\n', " ");
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    }};
+}
+
+/// The Docker tests of this file run one at a time (review m5): the dump's resident-set
+/// figures are this process's, so no other test's work may share them.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---------------------------------------------------------------------------------------------
 // Support
@@ -97,15 +116,20 @@ impl Drop for Table {
             rt.block_on(async {
                 let mut a = Side::open(&line, None).await;
                 for sql in drops {
-                    let _ = a.try_batch(&sql).await;
+                    if let Err(code) = a.try_batch(&sql).await {
+                        fact!(
+                            "HV-FACT t19 fixture_drop_failed target={} sql={sql} error={code}",
+                            line.id
+                        );
+                    }
                 }
                 a.close().await;
             });
         })
         .join();
         if joined.is_err() {
-            eprintln!(
-                "t19: dropping {} failed; the next run's names differ",
+            fact!(
+                "HV-FACT t19 fixture_drop_failed table={} reason=drop-thread-panicked",
                 self.name
             );
         }
@@ -130,6 +154,93 @@ async fn console(line: &Line, env: EnvTag) -> Console {
             .expect("the actor replies");
     assert!(r.is_ok(), "{}: SetMode(Auto): {r:?}", line.id);
     c
+}
+
+/// The MySQL/MariaDB session counters of the statement kinds a refused file holds (review m6):
+/// what the server ran on the console's own connection, whatever left no row behind.
+/// `Questions` counts every statement (the runner's context reads and this probe too).
+const COUNTERS: [&str; 6] = [
+    "Questions",
+    "Com_insert",
+    "Com_delete",
+    "Com_create_procedure",
+    "Com_set_option",
+    "Com_set_role",
+];
+
+/// The server's statement counters of `c`'s own connection: MySQL/MariaDB session status (the
+/// counters the server has of [`COUNTERS`]); PostgreSQL has none per connection without
+/// `pg_stat_statements`, so [`last_query`] stands in there.
+async fn counters(c: &Console) -> BTreeMap<String, i64> {
+    if !c.line.is_mysql_family() {
+        return BTreeMap::new();
+    }
+    let list = COUNTERS
+        .iter()
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let answer =
+        c.s.submit(Request::Exec {
+            sql: format!("SHOW SESSION STATUS WHERE Variable_name IN ({list})"),
+            opts: ExecOpts {
+                max_rows: 100,
+                protocol: Protocol::Simple,
+            },
+            origin: ExecOrigin::Internal { idempotent: true },
+        })
+        .reply
+        .await
+        .expect("the actor replies")
+        .unwrap_or_else(|e| panic!("{}: session status: {:?}", c.line.id, e.kind));
+    answer
+        .rows
+        .into_iter()
+        .filter_map(|r| {
+            let name = r.first().cloned().flatten()?;
+            let value = r.get(1).cloned().flatten()?.parse().ok()?;
+            Some((name, value))
+        })
+        .collect()
+}
+
+/// How each counter moved from `before` to `after`, as `name=delta` (a counter the server
+/// lacks is left out).
+fn deltas(before: &BTreeMap<String, i64>, after: &BTreeMap<String, i64>) -> BTreeMap<String, i64> {
+    after
+        .iter()
+        .filter_map(|(k, v)| before.get(k).map(|b| (k.clone(), v - b)))
+        .collect()
+}
+
+fn shown(d: &BTreeMap<String, i64>) -> String {
+    if d.is_empty() {
+        return "-".into();
+    }
+    d.iter()
+        .map(|(k, v)| format!("{k}:{v}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// PostgreSQL: the console's backend pid, read **before** the run (reading it later would make
+/// `SELECT pg_backend_pid()` the backend's last statement).
+async fn backend_pid(c: &Console) -> Option<String> {
+    if c.line.is_pg() {
+        Some(c.backend_id().await)
+    } else {
+        None
+    }
+}
+
+/// PostgreSQL: the last statement backend `pid` ran, read by the side channel from
+/// `pg_stat_activity` (a statement of the file would be the last one if any was sent).
+async fn last_query(pid: Option<&str>, side: &mut Side) -> Option<String> {
+    let pid = pid?;
+    side.value(&format!(
+        "SELECT query FROM pg_stat_activity WHERE pid = {pid}"
+    ))
+    .await
 }
 
 /// A runner as the app builds one: the run service and a classifier pool that keeps nothing.
@@ -254,6 +365,11 @@ impl Sampler {
             peak,
             thread: Some(thread),
         }
+    }
+
+    /// The peak so far.
+    fn peak_now(&self) -> u64 {
+        self.peak.load(Ordering::SeqCst).max(rss_kib())
     }
 
     fn finish(mut self) -> u64 {
@@ -398,6 +514,7 @@ async fn mysql_dump_of_150_mb_runs_in_constant_memory_on_a_real_server() {
     if !docker_enabled() {
         return;
     }
+    let _serial = SERIAL.lock().await;
     let Some(target) = require_target("mysql84") else {
         return;
     };
@@ -433,12 +550,13 @@ async fn mysql_dump_of_150_mb_runs_in_constant_memory_on_a_real_server() {
     let sampler = Sampler::start();
     let (tx, mut rx) = watch::channel(ScriptProgress::default());
     let started = Instant::now();
+    // The pass-1 figure is the peak up to the phase change (review m5), not one sample.
     let pass1 = async {
         let _ = rx.wait_for(|p| p.phase != ScriptPhase::Checking).await;
-        rss_kib()
+        sampler.peak_now()
     };
     let runner = runner();
-    let (out, after_pass1) = tokio::join!(run_file(&runner, req, tx), pass1);
+    let (out, pass1_peak) = tokio::join!(run_file(&runner, req, tx), pass1);
     let secs = started.elapsed().as_secs();
     let peak = sampler.finish();
     let rows = side
@@ -449,10 +567,10 @@ async fn mysql_dump_of_150_mb_runs_in_constant_memory_on_a_real_server() {
         other => panic!("mysql84: the dump did not finish: {other:?}"),
     };
     let growth_mib = peak.saturating_sub(before) / 1024;
-    let pass1_mib = after_pass1.saturating_sub(before) / 1024;
-    println!(
+    let pass1_mib = pass1_peak.saturating_sub(before) / 1024;
+    fact!(
         "HV-FACT t19 e8 target=mysql84 bytes={bytes} units={} units_run={} rows={rows} \
-         rss_before_mib={} rss_peak_mib={} rss_growth_mib={growth_mib} pass1_growth_mib={pass1_mib} \
+         rss_before_mib={} rss_peak_mib={} rss_growth_mib={growth_mib} pass1_peak_growth_mib={pass1_mib} \
          peak_held={} secs={secs}",
         units,
         summary.units_run,
@@ -484,6 +602,7 @@ async fn stray_end_file_executes_nothing_on_a_real_server() {
     if !docker_enabled() {
         return;
     }
+    let _serial = SERIAL.lock().await;
     let lines = server_lines(&[DbmsKind::MySql, DbmsKind::MariaDb]);
     assert!(
         !lines.is_empty(),
@@ -514,7 +633,9 @@ async fn stray_end_file_executes_nothing_on_a_real_server() {
             EnvTag::Dev,
             Answers::new(&[]),
         );
+        let counted = counters(&c).await;
         let out = run_file(&runner(), req, tx).await;
+        let moved = deltas(&counted, &counters(&c).await);
         let (reason, _) = refusal(id, &out);
         let rows = side.count(&format!("SELECT COUNT(*) FROM {t}")).await;
         let routines = side
@@ -523,9 +644,21 @@ async fn stray_end_file_executes_nothing_on_a_real_server() {
                  WHERE routine_schema = DATABASE() AND routine_name = '{p}'"
             ))
             .await;
-        println!(
-            "HV-FACT t19 e8 stray_end target={id} refused={reason:?} units_run={} rows={rows} routines={routines}",
-            rx.borrow().units_run
+        fact!(
+            "HV-FACT t19 e8 stray_end target={id} refused={reason:?} units_run={} rows={rows} routines={routines} statements={}",
+            rx.borrow().units_run,
+            shown(&moved)
+        );
+        for kind in ["Com_insert", "Com_delete", "Com_create_procedure"] {
+            assert_eq!(
+                moved.get(kind).copied().unwrap_or(0),
+                0,
+                "{id}: the server ran a statement of the file ({kind})"
+            );
+        }
+        assert!(
+            moved.contains_key("Com_insert"),
+            "{id}: no session counters"
         );
         assert!(
             matches!(reason, ScriptRefuseReason::Uncertain(_)),
@@ -544,6 +677,7 @@ async fn a_denied_statement_late_in_a_file_executes_nothing_on_a_real_server() {
     if !docker_enabled() {
         return;
     }
+    let _serial = SERIAL.lock().await;
     let lines = server_lines(&[DbmsKind::Postgres, DbmsKind::MySql, DbmsKind::MariaDb]);
     assert!(
         lines.iter().any(Line::is_pg) && lines.iter().any(Line::is_mysql_family),
@@ -567,14 +701,46 @@ async fn a_denied_statement_late_in_a_file_executes_nothing_on_a_real_server() {
             EnvTag::Production,
             port.clone(),
         );
+        let pid = backend_pid(&c).await;
+        let counted = counters(&c).await;
         let out = run_file(&runner(), req, tx).await;
+        let moved = deltas(&counted, &counters(&c).await);
+        let last = last_query(pid.as_deref(), &mut side).await;
         let (reason, unit) = refusal(id, &out);
         let rows = side.count(&format!("SELECT COUNT(*) FROM {t}")).await;
-        println!(
-            "HV-FACT t19 e8 late_denial target={id} refused={reason:?} at_unit={unit:?} units_run={} rows={rows} asked={}",
+        fact!(
+            "HV-FACT t19 e8 late_denial target={id} refused={reason:?} at_unit={unit:?} units_run={} rows={rows} asked={} statements={} pg_last_query_is_the_files={}",
             rx.borrow().units_run,
-            port.asked_units().len()
+            port.asked_units().len(),
+            shown(&moved),
+            last.as_deref()
+                .is_some_and(|q| q.contains(&t) || q.contains("SET ROLE"))
         );
+        for kind in ["Com_insert", "Com_set_role"] {
+            assert_eq!(
+                moved.get(kind).copied().unwrap_or(0),
+                0,
+                "{id}: the server ran a statement of the file ({kind})"
+            );
+        }
+        if line.is_mysql_family() {
+            assert!(
+                moved.contains_key("Com_insert"),
+                "{id}: no session counters"
+            );
+        }
+        if let Some(q) = &last {
+            assert!(
+                !q.contains(&t) && !q.contains("SET ROLE"),
+                "{id}: the console's backend last ran a statement of the file"
+            );
+        }
+        if line.is_pg() {
+            assert!(
+                last.is_some(),
+                "{id}: pg_stat_activity shows no console backend"
+            );
+        }
         assert!(
             matches!(reason, ScriptRefuseReason::Denied(_)),
             "{id}: {reason:?}"

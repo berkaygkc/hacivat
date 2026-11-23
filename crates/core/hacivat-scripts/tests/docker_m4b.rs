@@ -1,75 +1,106 @@
 //! M4b Task 19: Docker conformance of context-from-location (gate E1) and the credential audit
-//! (gate E6), with the library service, the binding and real sessions of a `ConnectionManager`
-//! (M2b's configuration), the way a script tab finds and runs its file:
+//! (gate E6), with the library service, the binding, `hacivat_exec`'s `ScriptRunner` (the run
+//! path, its gate and its confirmations) and real sessions of a `ConnectionManager` (M2b's
+//! configuration), the way a script tab finds and runs its file:
 //!
 //! 1. the library is attached (its `.hacivat/workspace.toml` written by the service);
 //! 2. a database node `(profile, database)` binds it through `hacivat_scripts::resolve`;
-//! 3. the file is read through `LibraryService::read` under the profile's environment;
-//! 4. its text runs on a session of that profile, opened on that database, after the tab's
-//!    database check (R-M4b-27: MySQL switches its own session back once; the check is mirrored
-//!    here from `hacivat-app`'s `scripts::tabs`, which this crate cannot reach).
+//! 3. the file is streamed through `LibraryService::open_stream` under the profile's
+//!    environment (both passes, pass 2 checked against pass 1's record, R-T10-3);
+//! 4. the runner sends it unit by unit on the tab's session, gated under the environment the
+//!    profile carries (`ScriptGate.env`), its questions answered by a recording port.
 //!
 //! What only Docker proves: the run lands on the server and database of the connection the
-//! file was opened under, checked on the server by `current_database()`/`DATABASE()`, the
-//! server version and a marker row that only the right server holds.
+//! file was opened under, and what the gate let through depends on that connection's
+//! environment, both checked on the server through separate admin sessions (marker rows that
+//! only the right server holds, its `current_database()`/`DATABASE()` and server version).
 //!
 //! - **E1** `same_library_runs_on_each_connection`: the same library under orders-prod and
-//!   orders-staging on PostgreSQL (pg17 / pg16) and MySQL (mysql84 / mysql80), and on two SQLite
-//!   files (`sqlite_file_stem_binds`, no server). The pairs need the `full` set; a pair whose
-//!   staging server is not in the active set is skipped with a line on stderr, never silently
-//!   under `full`. Facts: `HV-FACT t19 e1 …`.
-//! - **MySQL's database level** (`mysql_schema_is_the_database_level`,
-//!   `mysql_switch_is_reapplied_after_a_reconnect`): a script tab's own session switched to the
-//!   library's database, also after the server killed it.
+//!   orders-staging on PostgreSQL (pg17 / pg16) and MySQL (mysql84 / mysql80); production asks
+//!   (a "no" keeps every row; a "yes", recorded, lets the file run), staging does not ask.
+//!   `sqlite_file_stem_binds` does the same on two SQLite files (no server). The pairs need the
+//!   `full` set; a pair whose staging server is not in the active set is skipped with a line on
+//!   stderr, never under `full`. `e1_gate_follows_the_profiles_environment_on_fakes` pins the
+//!   premise without Docker.
+//! - **MySQL's database level** (`mysql_schema_is_the_database_level`, and
+//!   `mysql_tab_session_reopened_after_a_kill_is_switched_back` /
+//!   `mysql_default_session_reconnect_replays_its_schema`): a script tab's own session switched
+//!   to the library's database (R-M4b-27; the switch is the one `hacivat-app`'s `scripts::tabs`
+//!   sends, which this crate cannot call), also when the server killed it and the app opened a
+//!   new one, and what the default session's reconnect replays.
 //! - **E6** `no_credentials_reach_the_library_on_real_servers` (Docker) and
-//!   `no_credentials_reach_the_library_with_a_fake` (no Docker, runs everywhere): a full scripted
-//!   session (attach, map with a shared alias, save, save as, rename, new folder, new script,
-//!   trash, a recovery copy, a git refresh, a two-pass read and a run on prod and staging, quit),
-//!   then every byte and every name under the library folder is searched for the connections'
-//!   host, port, user, password, names, profile ids (in each spelling) and keyring service
-//!   names. `.git/` is byte-identical before and after (Hacivat writes nothing there), and the
-//!   only paths in the library are the user's scripts and `.hacivat/workspace.toml`, whose keys
-//!   are exactly `format`, `database`, `aliases`.
+//!   `no_credentials_reach_the_library_with_a_fake` (no Docker): a full scripted session, then
+//!   every byte and every name under the library's parent folder and the trash is searched for
+//!   the connections' host, port, user, password, passphrases, names, profile ids (in every
+//!   spelling) and keyring service names. `.git/` is byte-identical before and after, the only
+//!   paths are the user's scripts and `.hacivat/workspace.toml` (keys exactly `format`,
+//!   `database`, `aliases`). `mapping_lifecycle_writes_no_profile_id_near_the_library` is the
+//!   T19 reviewer's hostile test of the mapping lifecycle (adopted).
 //!
-//! Run with `<main>/target/docker/run-docker-tests.sh --set pr|full -p hacivat-scripts --test
-//! docker_m4b`. Server fixtures are `hvm4b_t19_*` tables, unique to the process and dropped by a
-//! guard (also when a test fails). Every wait is on a condition with a ceiling.
+//! Facts go to stdout through `fact!` (libtest captures only the `print!` family). Run with
+//! `<main>/target/docker/run-docker-tests.sh --set pr|full -p hacivat-scripts --test
+//! docker_m4b`. Server fixtures are `hvm4b_t19_*` tables, unique to the process and dropped by
+//! a guard (also when a test fails). Every wait is on a condition with a ceiling.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hacivat_driver::{DriverRegistry, EngineCatalog, ExecOpts, ExecSummary};
+use hacivat_exec::gate::CommitQuestion;
+use hacivat_exec::{
+    ClassifyPool, CommitAnswer, ConfirmAnswer, ConfirmPort, ConfirmQuestion, ExecService,
+    ScriptGate, ScriptProgress, ScriptRunOutcome, ScriptRunRequest, ScriptRunner, SessionLog,
+    SuppressSet, run_file,
+};
 use hacivat_net::TlsMode;
 use hacivat_net::ssh::{KnownHosts, TunnelManager};
 use hacivat_net::{BoxedStream, StreamFactory};
 use hacivat_proto::{DbmsKind, Department, EnvTag, ProfileId};
+use hacivat_results::MemoryBudget;
 use hacivat_scripts::binding::logical_for_sqlite;
 use hacivat_scripts::recovery::{self, CopyMeta, RecoveryKey};
 use hacivat_scripts::service::{FolderTrash, LibraryService, ServiceOptions};
 use hacivat_scripts::testing::{FakeHandle, logical};
 use hacivat_scripts::{
-    DatabaseName, DbNode, EntryKind, GitSummary, LibraryId, LibraryState, LocalMapping, RelPath,
-    SaveText, ScriptChunks as _, TextEncoding, resolve,
+    DatabaseName, DbNode, EntryKind, GitSummary, LibraryId, LibraryState, LocalMapping, ReadError,
+    RelPath, SaveText, ScriptChunks as _, ScriptStream, TextEncoding, resolve,
 };
 use hacivat_secrets::{
-    AuthProviderId, CredentialFiles, MemoryBackend, Retention, SecretBackend, SecretKey,
-    SecretSlot, SecretStore, SecretString,
+    AuthProviderId, CredentialFiles, ExposeSecret as _, MemoryBackend, Retention, SecretBackend,
+    SecretKey, SecretSlot, SecretStore, SecretString,
 };
 use hacivat_session::pipeline::{ApprovedRoots, ConnectDeps, Interaction};
 use hacivat_session::profile::{Profile, ProfileEndpoint};
 use hacivat_session::session::{
-    ClientId, ExecOrigin, Request, SessionEvent, SessionHandle, SessionKind, SessionSpec, TxMode,
-    parse_schema_probe, schema_probe_sql,
+    ClientId, ExecOrigin, Request, SessionEvent, SessionHandle, SessionKind, SessionSpec,
+    SessionState, TxMode, parse_schema_probe, schema_probe_sql,
 };
 use hacivat_session::{ConnectionManager, LiveState, ManagerConfig, default_drivers};
 use hacivat_settings::LocalPaths;
 use hacivat_testkit::{DockerTarget, TlsDefault, require_target};
+use sql_dialect::ClientFlavor;
+use tokio::sync::{oneshot, watch};
 
 const CEILING: Duration = Duration::from_secs(30);
+
+/// Prints one `HV-FACT …` line straight to the process's stdout, on one line: libtest captures
+/// only the `print!` family, so the line reaches the CI log of a passing test too (R-W3-14,
+/// the `hacivat-meta` tests' macro). Facts never hold a secret.
+macro_rules! fact {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let line = format!($($arg)*).replace('\n', " ");
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    }};
+}
 
 // ---------------------------------------------------------------------------------------------
 // Support: names, waits, the library service
@@ -97,10 +128,14 @@ async fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+fn tempdir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("a temporary folder")
+}
+
 /// A library service over app folders in `app`, fed by a fake event source (the scenario's
 /// own calls refresh the listing), trashing into `trash` (outside the library).
 struct Lib {
-    svc: LibraryService,
+    svc: Arc<LibraryService>,
     paths: LocalPaths,
     _fake: FakeHandle,
 }
@@ -122,13 +157,23 @@ fn service(app: &Path, trash: &Path) -> Lib {
         },
     );
     Lib {
-        svc,
+        svc: Arc::new(svc),
         paths,
         _fake: fake,
     }
 }
 
 impl Lib {
+    /// Waits for library `id`'s scan and status.
+    async fn ready(&self, id: LibraryId) {
+        wait_until("the scan and status", || {
+            self.svc.snapshot().view(None).library(id).is_some_and(|l| {
+                l.git() != GitSummary::Pending && l.library().state == LibraryState::Watching
+            })
+        })
+        .await;
+    }
+
     /// Attaches `dir` bound to `db`, writing its `workspace.toml`, and waits for its first scan
     /// and status.
     async fn attach(&self, dir: &Path, db: &str) -> LibraryId {
@@ -137,12 +182,7 @@ impl Lib {
             .attach(dir.to_path_buf(), Some(logical(db)), true)
             .await
             .expect("the library attaches");
-        wait_until("the first scan and status", || {
-            self.svc.snapshot().view(None).library(id).is_some_and(|l| {
-                l.git() != GitSummary::Pending && l.library().state == LibraryState::Watching
-            })
-        })
-        .await;
+        self.ready(id).await;
         id
     }
 
@@ -162,62 +202,236 @@ impl Lib {
             .is_some_and(|l| l.entry(&rel(r)).is_some())
     }
 
-    /// `r`'s text, read as a script tab reads it under `env`.
-    async fn text(&self, id: LibraryId, r: &str, env: Option<EnvTag>) -> String {
-        self.svc
-            .read(id, &rel(r), env)
-            .await
-            .unwrap_or_else(|e| panic!("reading {r}: {e:?}"))
-            .text
-    }
-
-    /// `r` read twice the way "Run as script" reads it (pass 1, then pass 2 checked against
-    /// pass 1's record); the text, which both passes must agree on.
-    async fn two_passes(&self, id: LibraryId, r: &str, env: Option<EnvTag>) -> String {
-        let utf8 = TextEncoding::UTF_8;
-        let mut pass1 = self
+    /// The runner's source for `r` under `env`: pass 1 opened now.
+    async fn source(&self, id: LibraryId, r: &str, env: Option<EnvTag>) -> Box<LibSource> {
+        let stream = self
             .svc
-            .open_stream(id, &rel(r), env, utf8, None)
+            .open_stream(id, &rel(r), env, TextEncoding::UTF_8, None)
             .await
-            .expect("pass 1 opens");
-        let one = drain(&mut pass1);
-        let mut pass2 = self
-            .svc
-            .open_stream(id, &rel(r), env, utf8, Some(pass1.record()))
-            .await
-            .expect("pass 2 opens");
-        let two = drain(&mut pass2);
-        assert_eq!(one, two, "{r}: the passes read differently");
-        one
+            .unwrap_or_else(|e| panic!("{r}: pass 1 opens: {e:?}"));
+        Box::new(LibSource {
+            svc: self.svc.clone(),
+            id,
+            rel: rel(r),
+            env,
+            stream,
+        })
     }
 }
 
-fn drain(s: &mut hacivat_scripts::ScriptStream) -> String {
-    let mut out = String::new();
-    while let Some(chunk) = s.next_chunk() {
-        out.push_str(&chunk.expect("a chunk"));
+/// A library file as "Run as script" reads it (T12's adapter sketch over T10's
+/// `ScriptStream`/`PassRecord`): pass 2 reopens with pass 1's record, only after a complete
+/// pass 1, and stops at the first block that differs.
+struct LibSource {
+    svc: Arc<LibraryService>,
+    id: LibraryId,
+    rel: RelPath,
+    env: Option<EnvTag>,
+    stream: ScriptStream,
+}
+
+fn chunk_error(e: hacivat_scripts::ChunkError) -> hacivat_exec::ChunkError {
+    match e {
+        hacivat_scripts::ChunkError::Changed => hacivat_exec::ChunkError::Changed,
+        hacivat_scripts::ChunkError::Decode => hacivat_exec::ChunkError::Decode,
+        hacivat_scripts::ChunkError::Io(k) => hacivat_exec::ChunkError::Io(k),
     }
-    out
+}
+
+fn read_error(e: ReadError) -> hacivat_exec::ChunkError {
+    match e {
+        ReadError::Changed => hacivat_exec::ChunkError::Changed,
+        ReadError::Io(k) => hacivat_exec::ChunkError::Io(k),
+        ReadError::NeedsEncoding { .. }
+        | ReadError::Binary
+        | ReadError::UnknownEncoding
+        | ReadError::Lossy
+        | ReadError::Undecodable => hacivat_exec::ChunkError::Decode,
+        ReadError::NotImplemented | ReadError::PathRefused | ReadError::OutOfScope => {
+            hacivat_exec::ChunkError::Io(std::io::ErrorKind::PermissionDenied)
+        }
+    }
+}
+
+type Reopened = Pin<
+    Box<
+        dyn Future<Output = Result<Box<dyn hacivat_exec::ScriptChunks>, hacivat_exec::ChunkError>>
+            + Send,
+    >,
+>;
+
+impl hacivat_exec::ScriptChunks for LibSource {
+    fn next_chunk(&mut self) -> Option<Result<String, hacivat_exec::ChunkError>> {
+        self.stream.next_chunk().map(|r| r.map_err(chunk_error))
+    }
+
+    fn reopen_verified(self: Box<Self>) -> Reopened {
+        Box::pin(async move {
+            let record = self.stream.record();
+            if !record.is_complete() {
+                return Err(hacivat_exec::ChunkError::Changed);
+            }
+            let stream = self
+                .svc
+                .open_stream(
+                    self.id,
+                    &self.rel,
+                    self.env,
+                    TextEncoding::UTF_8,
+                    Some(record),
+                )
+                .await
+                .map_err(read_error)?;
+            Ok(Box::new(LibSource { stream, ..*self }) as Box<dyn hacivat_exec::ScriptChunks>)
+        })
+    }
 }
 
 /// A library folder named `orders-scripts` (the folder name is not the database: the binding
 /// comes from `workspace.toml`) holding `files`.
 fn library_dir(parent: &Path, files: &[(&str, &str)]) -> PathBuf {
     let dir = parent.join("orders-scripts");
+    std::fs::create_dir_all(&dir).expect("the library folder");
     for (name, text) in files {
         let p = dir.join(name);
         std::fs::create_dir_all(p.parent().expect("a parent")).expect("a folder");
         std::fs::write(&p, text).expect("a script");
     }
-    std::fs::create_dir_all(&dir).expect("the library folder");
     dir
+}
+
+// ---------------------------------------------------------------------------------------------
+// Support: the runner and its questions
+
+/// A port that answers every confirmation `answer` and every commit question `commit`,
+/// recording each question (the dialog the app would show).
+#[derive(Debug)]
+struct Port {
+    answer: ConfirmAnswer,
+    commit: CommitAnswer,
+    asked: Mutex<Vec<ConfirmQuestion>>,
+    commits: Mutex<Vec<CommitQuestion>>,
+}
+
+impl Port {
+    /// The user says yes to everything (one statement at a time: production never takes
+    /// Execute all).
+    fn yes() -> Arc<Port> {
+        Port::new(ConfirmAnswer::Execute, CommitAnswer::Commit)
+    }
+
+    /// The user says no (Cancel; a commit question rolls back).
+    fn no() -> Arc<Port> {
+        Port::new(ConfirmAnswer::Cancel, CommitAnswer::RollBack)
+    }
+
+    fn new(answer: ConfirmAnswer, commit: CommitAnswer) -> Arc<Port> {
+        Arc::new(Port {
+            answer,
+            commit,
+            asked: Mutex::default(),
+            commits: Mutex::default(),
+        })
+    }
+
+    /// How many questions the run asked (confirmations and commit questions).
+    fn questions(&self) -> usize {
+        self.asked.lock().unwrap().len() + self.commits.lock().unwrap().len()
+    }
+
+    /// Whether every confirmation said "production" (the gate's context, ConfirmQuestion).
+    fn all_production(&self) -> bool {
+        self.asked.lock().unwrap().iter().all(|q| q.production)
+    }
+}
+
+impl ConfirmPort for Port {
+    fn confirm(&self, q: ConfirmQuestion) -> oneshot::Receiver<ConfirmAnswer> {
+        self.asked.lock().unwrap().push(q);
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(self.answer);
+        rx
+    }
+
+    fn commit_decision(&self, q: CommitQuestion) -> oneshot::Receiver<CommitAnswer> {
+        self.commits.lock().unwrap().push(q);
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(self.commit);
+        rx
+    }
+}
+
+/// A runner as the app builds one: the run service and a classifier pool.
+fn runner() -> ScriptRunner {
+    ScriptRunner::new(
+        Arc::new(ExecService::new(MemoryBudget::new(1 << 30, 256 << 20))),
+        ClassifyPool::new(2),
+    )
+}
+
+fn flavor(engine: DbmsKind) -> ClientFlavor {
+    match engine {
+        DbmsKind::Postgres => ClientFlavor::Psql,
+        DbmsKind::MySql | DbmsKind::MariaDb => ClientFlavor::MySqlCli,
+        _ => ClientFlavor::None,
+    }
+}
+
+/// Runs `source` as script on `s`, the session of `profile`, gated under the environment the
+/// profile carries; the outcome and the last progress.
+async fn run_script(
+    s: &SessionHandle,
+    profile: &Profile,
+    source: Box<dyn hacivat_exec::ScriptChunks>,
+    port: Arc<Port>,
+) -> (ScriptRunOutcome, ScriptProgress) {
+    let (env, _) = watch::channel(profile.environment);
+    let (cancel, _) = watch::channel(false);
+    let req = ScriptRunRequest {
+        session: s.clone(),
+        source,
+        console: 19,
+        profile: profile.id,
+        engine: profile.engine,
+        dialect: hacivat_exec::sqlctx::dialect_ctx(profile.engine, None, None),
+        modes_known: false,
+        flavor: flavor(profile.engine),
+        gate: ScriptGate {
+            env: env.subscribe(),
+            confirm_unsafe_where: true,
+            allowlist: Arc::from(Vec::new()),
+            suppressed: SuppressSet::default(),
+            connection: Arc::from(profile.name.as_str()),
+        },
+        confirm: port,
+        log: SessionLog::new(),
+        cancel: cancel.subscribe(),
+        history: None,
+        refresh: None,
+    };
+    let (tx, rx) = watch::channel(ScriptProgress::default());
+    let out = run_file(&runner(), req, tx).await;
+    let last = rx.borrow().clone();
+    (out, last)
+}
+
+fn finished(out: &ScriptRunOutcome) -> bool {
+    matches!(out, ScriptRunOutcome::Finished(_))
 }
 
 // ---------------------------------------------------------------------------------------------
 // Support: connections
 
-fn deps(drivers: DriverRegistry, wrap: bool) -> ConnectDeps {
-    let backend: Arc<dyn SecretBackend> = Arc::new(MemoryBackend::new());
+/// Connect dependencies over `drivers`; `seeds` go into the keyring first (the secrets a
+/// session of the app holds). `wrap`: a fake answers in memory, no socket is opened.
+fn deps(drivers: DriverRegistry, wrap: bool, seeds: &[(SecretKey, &str)]) -> ConnectDeps {
+    let backend = MemoryBackend::new();
+    for (key, value) in seeds {
+        backend
+            .put(key, &SecretString::from(value.to_string()))
+            .expect("a seeded secret");
+    }
+    let backend: Arc<dyn SecretBackend> = Arc::new(backend);
     let known_hosts = KnownHosts::load(
         Vec::new(),
         PathBuf::from("/nonexistent/hacivat/known_hosts"),
@@ -231,7 +445,6 @@ fn deps(drivers: DriverRegistry, wrap: bool) -> ConnectDeps {
             pgpass: None,
             pg_service: None,
         },
-        // A fake answers in memory: no socket is opened for it.
         transport_wrap: wrap.then(|| {
             Arc::new(|_direct: StreamFactory| {
                 StreamFactory::new(|| {
@@ -250,15 +463,17 @@ fn deps(drivers: DriverRegistry, wrap: bool) -> ConnectDeps {
     }
 }
 
-/// A connected profile: its manager, the profile, its default session.
+/// A connected profile: its manager, the profile, its default session, its keyring.
 struct Conn {
     m: Arc<ConnectionManager>,
     profile: Arc<Profile>,
     s: SessionHandle,
+    secrets: Arc<SecretStore>,
 }
 
 /// Connects `profile` (with `password`) on a manager of its own over `deps`.
 async fn connect(deps: ConnectDeps, profile: Profile, password: Option<&str>) -> Conn {
+    let secrets = deps.secrets.clone();
     let m = ConnectionManager::new(
         tokio::runtime::Handle::current(),
         Arc::new(deps),
@@ -288,8 +503,18 @@ async fn connect(deps: ConnectDeps, profile: Profile, password: Option<&str>) ->
         .expect("connected")
         .default_session()
         .expect("a default session");
-    Conn { m, profile, s }
+    Conn {
+        m,
+        profile,
+        s,
+        secrets,
+    }
 }
+
+/// The profiles' transaction mode: autocommit, so what a run wrote is committed when its reply
+/// comes and the side channel sees it (production and staging default to manual transactions,
+/// `session::default_mode`, where the row would wait for the user's Commit).
+const AUTOCOMMIT: Option<TxMode> = Some(TxMode::Auto);
 
 /// The profile `name` of server target `t`, on `database`, tagged `env`.
 fn server_profile(t: &DockerTarget, name: &str, env: Option<EnvTag>, database: &str) -> Profile {
@@ -317,14 +542,19 @@ fn server_profile(t: &DockerTarget, name: &str, env: Option<EnvTag>, database: &
     p
 }
 
-/// Connects to `t` as `name`, on `database`.
-async fn on_server(t: &DockerTarget, name: &str, env: Option<EnvTag>, database: &str) -> Conn {
+/// Connects `profile` of server target `t`, its keyring seeded with `seeds`.
+async fn on_server_as(t: &DockerTarget, profile: Profile, seeds: &[(SecretKey, &str)]) -> Conn {
     connect(
-        deps(default_drivers(), false),
-        server_profile(t, name, env, database),
+        deps(default_drivers(), false, seeds),
+        profile,
         Some(&t.password),
     )
     .await
+}
+
+/// Connects to `t` as `name`, on `database`.
+async fn on_server(t: &DockerTarget, name: &str, env: Option<EnvTag>, database: &str) -> Conn {
+    on_server_as(t, server_profile(t, name, env, database), &[]).await
 }
 
 /// A SQLite profile `name` on `file`.
@@ -345,11 +575,6 @@ fn sqlite_profile(file: &Path, name: &str, env: Option<EnvTag>) -> Profile {
         ..Profile::default()
     }
 }
-
-/// The profiles' transaction mode: autocommit, so what a run wrote is committed when its reply
-/// comes and the side channel sees it (production and staging default to manual transactions,
-/// `session::default_mode`, where the row would wait for the user's Commit).
-const AUTOCOMMIT: Option<TxMode> = Some(TxMode::Auto);
 
 /// `sql` on `s` as the user's statement; the reply.
 async fn exec(s: &SessionHandle, sql: &str) -> Result<ExecSummary, String> {
@@ -395,31 +620,17 @@ async fn current_database(s: &SessionHandle, engine: DbmsKind) -> Option<String>
         .filter(|d| !d.is_empty())
 }
 
-/// The script tab's database check before a Run (R-M4b-27, mirrored from
-/// `hacivat-app::scripts::tabs::run_gate`): the session must be on `bound`; a MySQL tab's own
-/// session switches back once (`Request::SwitchSchema`) and must then read `bound`. Returns
-/// the database the session was on before the check.
-async fn database_check(s: &SessionHandle, engine: DbmsKind, bound: &str) -> Option<String> {
-    let before = current_database(s, engine).await;
-    if before.as_deref() == Some(bound) {
-        return before;
-    }
-    assert!(
-        matches!(engine, DbmsKind::MySql | DbmsKind::MariaDb),
-        "{engine:?}: the session is on {before:?}, not {bound}: Run refuses"
-    );
+/// The switch a MySQL script tab sends on its own session when the session is not on the
+/// tab's database (R-M4b-27; `hacivat-app::scripts::tabs::run_gate`, which this crate cannot
+/// call): one `SwitchSchema`, then the probe again.
+async fn switch_back(s: &SessionHandle, engine: DbmsKind, bound: &str) -> Option<String> {
     let switched = s
         .submit(Request::SwitchSchema(bound.to_string()))
         .reply
         .await
         .expect("the actor replies");
     assert!(switched.is_ok(), "switching to {bound}: {switched:?}");
-    assert_eq!(
-        current_database(s, engine).await.as_deref(),
-        Some(bound),
-        "after the one switch back"
-    );
-    before
+    current_database(s, engine).await
 }
 
 /// A script tab's own session on `c`'s profile (`SessionKind::Console(ClientId(n))`, n far
@@ -440,7 +651,8 @@ async fn own_session(c: &Conn, n: u64) -> SessionHandle {
 }
 
 /// Server fixtures dropped when the guard goes (also on a failed assertion): the drops run on
-/// a runtime of their own on another thread, so they work while unwinding.
+/// a runtime of their own on another thread, so they work while unwinding. A drop that fails
+/// is said in a fact (review m8).
 struct Fixtures {
     drops: Vec<(DockerTarget, String, String)>,
 }
@@ -486,14 +698,19 @@ impl Drop for Fixtures {
             rt.block_on(async {
                 for (t, db, sql) in drops {
                     let admin = on_server(&t, "hvm4b-t19-drop", None, &db).await;
-                    let _ = exec(&admin.s, &sql).await;
+                    if let Err(e) = exec(&admin.s, &sql).await {
+                        fact!(
+                            "HV-FACT t19 fixture_drop_failed target={} sql={sql} error={e}",
+                            t.id
+                        );
+                    }
                     admin.m.disconnect(admin.profile.id);
                 }
             });
         })
         .join();
         if joined.is_err() {
-            eprintln!("t19: a fixture drop failed; the next run's names differ");
+            fact!("HV-FACT t19 fixture_drop_failed reason=drop-thread-panicked");
         }
     }
 }
@@ -516,24 +733,51 @@ fn full_set() -> bool {
 // ---------------------------------------------------------------------------------------------
 // E1: the same library under orders-prod and orders-staging
 
-/// The SQL of the pair's scripts on `engine`: `a.sql` reads where it runs, `mark.sql` leaves a
-/// row naming where it ran.
-fn e1_scripts(engine: DbmsKind, marker: &str) -> (String, String) {
-    match engine {
+/// `mark.sql` on `engine`: a row naming where it ran (database, server version), then a write
+/// the gate confirms on production only (a bounded DELETE of the seed row).
+fn mark_sql(engine: DbmsKind, marker: &str) -> String {
+    let (db, ver) = match engine {
         DbmsKind::Postgres => (
-            "SELECT current_database(), current_setting('server_version_num')".to_string(),
-            format!(
-                "INSERT INTO {marker} (who, db, ver) VALUES \
-                 ('mark.sql', current_database(), current_setting('server_version_num'))"
-            ),
+            "current_database()",
+            "current_setting('server_version_num')",
         ),
-        _ => (
-            "SELECT DATABASE(), VERSION()".to_string(),
-            format!(
-                "INSERT INTO {marker} (who, db, ver) VALUES ('mark.sql', DATABASE(), VERSION())"
-            ),
-        ),
-    }
+        DbmsKind::Sqlite => ("'main'", "sqlite_version()"),
+        _ => ("DATABASE()", "VERSION()"),
+    };
+    format!(
+        "INSERT INTO {marker} (who, db, ver) VALUES ('mark.sql', {db}, {ver});\n\
+         DELETE FROM {marker} WHERE who = 'seed';\n"
+    )
+}
+
+/// What a marker table holds: (rows by `mark.sql`, seed rows left, the database and version a
+/// `mark.sql` row recorded).
+async fn marks(admin: &Conn, marker: &str) -> (i64, i64, Option<(String, String)>) {
+    let who = &admin.profile.name;
+    let ran = count(
+        &admin.s,
+        who,
+        &format!("SELECT COUNT(*) FROM {marker} WHERE who = 'mark.sql'"),
+    )
+    .await;
+    let seed = count(
+        &admin.s,
+        who,
+        &format!("SELECT COUNT(*) FROM {marker} WHERE who = 'seed'"),
+    )
+    .await;
+    let at = if ran > 0 {
+        let r = row(
+            &admin.s,
+            who,
+            &format!("SELECT db, ver FROM {marker} WHERE who = 'mark.sql'"),
+        )
+        .await;
+        Some((r[0].clone(), r[1].clone()))
+    } else {
+        None
+    };
+    (ran, seed, at)
 }
 
 /// Whether server version text `v` (PostgreSQL's `server_version_num`, MySQL's `VERSION()`) is
@@ -542,6 +786,146 @@ fn of_major(engine: DbmsKind, major: &str, v: &str) -> bool {
     match engine {
         DbmsKind::Postgres => v.len() == 6 && v.starts_with(major),
         _ => v.starts_with(&format!("{major}.")),
+    }
+}
+
+fn env_name(env: Option<EnvTag>) -> &'static str {
+    match env {
+        Some(EnvTag::Production) => "production",
+        Some(EnvTag::Staging) => "staging",
+        Some(_) => "other",
+        None => "none",
+    }
+}
+
+/// One side of a pair: the connection a tab of `mark.sql` was opened under, and the admin
+/// session of its server or file.
+struct Side {
+    c: Conn,
+    admin: Conn,
+    /// The session the tab runs on (PostgreSQL and SQLite: the profile's; MySQL: one of its
+    /// own, R-T14-3).
+    s: SessionHandle,
+    target: String,
+    major: Option<String>,
+}
+
+/// Every side's marker table now.
+async fn snapshot(sides: &[Side], marker: &str) -> Vec<(i64, i64, Option<(String, String)>)> {
+    let mut v = Vec::new();
+    for s in sides {
+        v.push(marks(&s.admin, marker).await);
+    }
+    v
+}
+
+/// E1 over `sides` (prod first, then staging), all showing library `id` of `lib`:
+/// - every node binds the library (by name, or by file stem for SQLite);
+/// - on production the gate asks: a "no" leaves every server's rows as they were; a recorded
+///   "yes" lets `mark.sql` run there, and only there;
+/// - on staging nothing is asked, and the run lands there only.
+async fn e1_runs(lib: &Lib, id: LibraryId, sides: &[Side], marker: &str, node_db: &str) {
+    for (k, side) in sides.iter().enumerate() {
+        let p = &side.c.profile;
+        let name = &p.name;
+        let logical_db = match &p.endpoint {
+            ProfileEndpoint::File { path, .. } => logical_for_sqlite(path).expect("a stem"),
+            _ => logical(node_db),
+        };
+        assert_eq!(
+            logical_db.as_str(),
+            "orders",
+            "{name}: the node's logical name"
+        );
+        let node = DbNode {
+            profile: p.id,
+            database: DatabaseName::new(node_db),
+            logical: logical_db,
+        };
+        assert_eq!(lib.bound(&node), [id], "{name}: the library binds");
+        // The `@production/` file is listed only under production (R-M4b-6).
+        let prod_only = lib.lists(id, p.environment, "@production/only_prod.sql");
+        assert_eq!(
+            prod_only,
+            p.environment == Some(EnvTag::Production),
+            "{name}"
+        );
+        let before = snapshot(sides, marker).await;
+        let production = p.environment == Some(EnvTag::Production);
+        let mut said_no = None;
+        if production {
+            // The user says no: nothing changes anywhere.
+            let port = Port::no();
+            let src = lib.source(id, "mark.sql", p.environment).await;
+            let (out, _) = run_script(&side.s, p, src, port.clone()).await;
+            assert!(
+                !finished(&out),
+                "{name}: a \"no\" on production let the file finish"
+            );
+            assert!(port.questions() > 0, "{name}: production did not ask");
+            assert!(
+                port.all_production(),
+                "{name}: a question without production"
+            );
+            assert_eq!(
+                snapshot(sides, marker).await,
+                before,
+                "{name}: a \"no\" changed rows"
+            );
+            said_no = Some(port.questions());
+        }
+        let port = Port::yes();
+        let src = lib.source(id, "mark.sql", p.environment).await;
+        let (out, progress) = run_script(&side.s, p, src, port.clone()).await;
+        assert!(finished(&out), "{name}: {out:?}");
+        let asked = port.questions();
+        if production {
+            assert!(
+                asked >= 2,
+                "{name}: production asked {asked} times for two writes"
+            );
+            assert!(
+                port.all_production(),
+                "{name}: a question without production"
+            );
+        } else {
+            assert_eq!(asked, 0, "{name}: off production nothing is asked");
+        }
+        let after = snapshot(sides, marker).await;
+        for (j, (b, a)) in before.iter().zip(&after).enumerate() {
+            if j == k {
+                assert_eq!(
+                    (a.0, a.1),
+                    (b.0 + 1, 0),
+                    "{name}: its own server ran mark.sql"
+                );
+            } else {
+                assert_eq!(a, b, "{name}: another server changed");
+            }
+        }
+        let (db, ver) = after[k].2.clone().expect("a mark.sql row");
+        assert_eq!(
+            db,
+            if node_db == "main" { "main" } else { "orders" },
+            "{name}"
+        );
+        if let Some(major) = &side.major {
+            assert!(
+                of_major(p.engine, major, &ver),
+                "{name}: {ver} is not {major}"
+            );
+        }
+        fact!(
+            "HV-FACT t19 e1 profile={name} target={} database={db} server_version_num={ver} \
+             env={} asked={asked} no_asked={} units_run={} marker_prod={} marker_staging={} \
+             production_file_listed={prod_only}",
+            side.target,
+            env_name(p.environment),
+            said_no.map_or("-".to_string(), |n| n.to_string()),
+            progress.units_run,
+            after[0].0,
+            after.get(1).map_or(0, |m| m.0),
+        );
     }
 }
 
@@ -557,13 +941,11 @@ async fn e1_pair(engine: DbmsKind, prod_id: &str, staging_id: &str) {
         return;
     };
     let marker = unique("e1_mark");
-    let (a_sql, mark_sql) = e1_scripts(engine, &marker);
     let (app, parent, trash) = (tempdir(), tempdir(), tempdir());
     let dir = library_dir(
         parent.path(),
         &[
-            ("a.sql", &a_sql),
-            ("mark.sql", &mark_sql),
+            ("mark.sql", &mark_sql(engine, &marker)),
             ("@production/only_prod.sql", "SELECT 1"),
         ],
     );
@@ -571,8 +953,14 @@ async fn e1_pair(engine: DbmsKind, prod_id: &str, staging_id: &str) {
     let id = lib.attach(&dir, "orders").await;
 
     let mut fixtures = Fixtures::new();
-    let mut admins = Vec::new();
-    for t in [&prod, &staging] {
+    let mut sides = Vec::new();
+    for (k, (t, name, env)) in [
+        (&prod, "orders-prod", EnvTag::Production),
+        (&staging, "orders-staging", EnvTag::Staging),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let admin = on_server(t, "hvm4b-t19-admin", None, "orders").await;
         fixtures
             .table(
@@ -583,83 +971,39 @@ async fn e1_pair(engine: DbmsKind, prod_id: &str, staging_id: &str) {
                 "who VARCHAR(32), db VARCHAR(64), ver VARCHAR(64)",
             )
             .await;
-        admins.push(admin);
-    }
-    let marks = format!("SELECT COUNT(*) FROM {marker} WHERE who = 'mark.sql' AND db = 'orders'");
-
-    let sides = [
-        (&prod, "orders-prod", EnvTag::Production, "production"),
-        (&staging, "orders-staging", EnvTag::Staging, "staging"),
-    ];
-    for (k, (t, name, env, env_name)) in sides.iter().enumerate() {
-        let c = on_server(t, name, Some(*env), "orders").await;
-        let node = DbNode {
-            profile: c.profile.id,
-            database: DatabaseName::new("orders"),
-            logical: logical("orders"),
-        };
-        assert_eq!(lib.bound(&node), [id], "{name}: the library binds");
-        // The `@production/` file is listed and read only under production (R-M4b-6).
-        let prod_only = lib.lists(id, Some(*env), "@production/only_prod.sql");
-        assert_eq!(
-            prod_only,
-            *env == EnvTag::Production,
-            "{name}: @production/ listing"
-        );
-        assert_eq!(
-            lib.svc
-                .read(id, &rel("@production/only_prod.sql"), Some(*env))
-                .await
-                .is_ok(),
-            *env == EnvTag::Production,
-            "{name}: @production/ read"
-        );
-        // A script tab on MySQL has a session of its own; PostgreSQL's tab runs on the
-        // profile's session (R-T14-3).
+        exec(
+            &admin.s,
+            &format!("INSERT INTO {marker} (who) VALUES ('seed')"),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}: the seed row: {e}", t.id));
+        let c = on_server(t, name, Some(env), "orders").await;
         let s = if engine == DbmsKind::Postgres {
             c.s.clone()
         } else {
-            own_session(&c, k as u64).await
+            let s = own_session(&c, k as u64).await;
+            // A new own session starts on the profile's database, the tab's here.
+            assert_eq!(
+                current_database(&s, engine).await.as_deref(),
+                Some("orders")
+            );
+            s
         };
-        database_check(&s, engine, "orders").await;
-        let text = lib.text(id, "a.sql", Some(*env)).await;
-        let got = row(&s, name, &text).await;
-        let (db, ver) = (got[0].clone(), got[1].clone());
-        assert_eq!(db, "orders", "{name}");
-        assert!(
-            of_major(engine, &t.major, &ver),
-            "{name}: {ver} is not {}",
-            t.major
-        );
-        let text = lib.text(id, "mark.sql", Some(*env)).await;
-        exec(&s, &text)
-            .await
-            .unwrap_or_else(|e| panic!("{name}: mark.sql: {e}"));
-        let on: Vec<i64> = {
-            let mut v = Vec::new();
-            for a in &admins {
-                v.push(count(&a.s, name, &marks).await);
-            }
-            v
-        };
-        // Prod's run leaves a row on prod only; staging's, one more on staging only.
-        let want = if k == 0 { vec![1, 0] } else { vec![1, 1] };
-        assert_eq!(on, want, "{name}: marker rows on (prod, staging)");
-        println!(
-            "HV-FACT t19 e1 profile={name} target={} database={db} server_version={ver} env={env_name} \
-             marker_prod={} marker_staging={} production_file_listed={prod_only}",
-            t.id, on[0], on[1]
-        );
-        c.m.disconnect(c.profile.id);
+        sides.push(Side {
+            c,
+            admin,
+            s,
+            target: t.id.clone(),
+            major: Some(t.major.clone()),
+        });
     }
-    for a in &admins {
-        a.m.disconnect(a.profile.id);
+    e1_runs(&lib, id, &sides, &marker, "orders").await;
+    for side in &sides {
+        side.c.m.disconnect(side.c.profile.id);
+        side.admin.m.disconnect(side.admin.profile.id);
     }
+    lib.svc.shutdown();
     drop(fixtures);
-}
-
-fn tempdir() -> tempfile::TempDir {
-    tempfile::tempdir().expect("a temporary folder")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -671,80 +1015,115 @@ async fn same_library_runs_on_each_connection() {
 
 /// SQLite (no server: runs in every set, also without Docker): a database's logical name is its
 /// file's stem (R-M4b-32), so `prod/orders.db` and `staging/orders.db` both bind library
-/// `orders`, and each run lands in its own file.
+/// `orders`, each run lands in its own file, and production asks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "docker"]
 async fn sqlite_file_stem_binds() {
     let files = tempdir();
     let marker = "hvm4b_t19_e1_mark";
-    let mark_sql = format!(
-        "INSERT INTO {marker} (who, file) SELECT 'mark.sql', file FROM pragma_database_list \
-         WHERE name = 'main'"
-    );
     let (app, parent, trash) = (tempdir(), tempdir(), tempdir());
-    let dir = library_dir(parent.path(), &[("mark.sql", &mark_sql)]);
+    let dir = library_dir(
+        parent.path(),
+        &[
+            ("mark.sql", &mark_sql(DbmsKind::Sqlite, marker)),
+            ("@production/only_prod.sql", "SELECT 1"),
+        ],
+    );
     let lib = service(app.path(), trash.path());
     let id = lib.attach(&dir, "orders").await;
-
-    let sides = [
+    let mut sides = Vec::new();
+    for (folder, name, env) in [
         ("prod", "orders-prod", EnvTag::Production),
         ("staging", "orders-staging", EnvTag::Staging),
-    ];
-    let mut paths = Vec::new();
-    let mut admins = Vec::new();
-    for (folder, _, _) in &sides {
+    ] {
         let p = files.path().join(folder).join("orders.db");
         std::fs::create_dir_all(p.parent().expect("a parent")).expect("a folder");
         let admin = connect(
-            deps(default_drivers(), false),
+            deps(default_drivers(), false, &[]),
             sqlite_profile(&p, "hvm4b-t19-admin", None),
             None,
         )
         .await;
         exec(
             &admin.s,
-            &format!("CREATE TABLE {marker} (who TEXT, file TEXT)"),
+            &format!("CREATE TABLE {marker} (who TEXT, db TEXT, ver TEXT)"),
         )
         .await
         .expect("the marker table");
-        paths.push(p);
-        admins.push(admin);
-    }
-    let marks = format!("SELECT COUNT(*) FROM {marker} WHERE who = 'mark.sql'");
-    for (k, (_, name, env)) in sides.iter().enumerate() {
+        exec(
+            &admin.s,
+            &format!("INSERT INTO {marker} (who) VALUES ('seed')"),
+        )
+        .await
+        .expect("the seed row");
         let c = connect(
-            deps(default_drivers(), false),
-            sqlite_profile(&paths[k], name, Some(*env)),
+            deps(default_drivers(), false, &[]),
+            sqlite_profile(&p, name, Some(env)),
             None,
         )
         .await;
-        let stem = logical_for_sqlite(&paths[k]).expect("a stem");
-        assert_eq!(stem.as_str(), "orders");
-        let node = DbNode {
-            profile: c.profile.id,
-            database: DatabaseName::new("main"),
-            logical: stem,
-        };
-        assert_eq!(lib.bound(&node), [id], "{name}: the library binds");
-        let text = lib.text(id, "mark.sql", Some(*env)).await;
-        exec(&c.s, &text)
-            .await
-            .unwrap_or_else(|e| panic!("{name}: mark.sql: {e}"));
-        let mut on = Vec::new();
-        for a in &admins {
-            on.push(count(&a.s, name, &marks).await);
+        sides.push(Side {
+            s: c.s.clone(),
+            c,
+            admin,
+            target: "sqlite".into(),
+            major: None,
+        });
+    }
+    e1_runs(&lib, id, &sides, marker, "main").await;
+    for side in &sides {
+        side.c.m.disconnect(side.c.profile.id);
+        side.admin.m.disconnect(side.admin.profile.id);
+    }
+    lib.svc.shutdown();
+}
+
+/// The E1 premise without Docker: the same file run through the runner on fakes, under each
+/// profile's environment: production asks (every question says production), staging and an
+/// untagged profile do not. On PostgreSQL and MySQL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e1_gate_follows_the_profiles_environment_on_fakes() {
+    let (app, parent, trash) = (tempdir(), tempdir(), tempdir());
+    let dir = library_dir(
+        parent.path(),
+        &[("mark.sql", &mark_sql(DbmsKind::MySql, "hvm4b_t19_mark"))],
+    );
+    let lib = service(app.path(), trash.path());
+    let id = lib.attach(&dir, "orders").await;
+    for engine in [DbmsKind::Postgres, DbmsKind::MySql] {
+        for env in [Some(EnvTag::Production), Some(EnvTag::Staging), None] {
+            let fake = hacivat_driver::fake::FakeDriver::new(engine);
+            let fake = if engine == DbmsKind::Postgres {
+                fake.tracks_transactions()
+            } else {
+                fake
+            };
+            let profile = Profile {
+                environment: env,
+                tx_mode: AUTOCOMMIT,
+                ..fake_profile("orders", EnvTag::Dev, engine)
+            };
+            let mut drivers = DriverRegistry::new();
+            drivers.register(Arc::new(fake));
+            let c = connect(deps(drivers, true, &[]), profile, Some("hv_test_pw")).await;
+            let port = Port::yes();
+            let src = lib.source(id, "mark.sql", env).await;
+            let (out, _) = run_script(&c.s, &c.profile, src, port.clone()).await;
+            assert!(finished(&out), "{engine:?} {env:?}: {out:?}");
+            if env == Some(EnvTag::Production) {
+                assert!(
+                    port.questions() >= 2,
+                    "{engine:?}: production asked {}",
+                    port.questions()
+                );
+                assert!(port.all_production());
+            } else {
+                assert_eq!(port.questions(), 0, "{engine:?} {env:?}: asked");
+            }
+            c.m.disconnect(c.profile.id);
         }
-        let want = if k == 0 { vec![1, 0] } else { vec![1, 1] };
-        assert_eq!(on, want, "{name}: marker rows in (prod, staging)");
-        println!(
-            "HV-FACT t19 e1 profile={name} target=sqlite logical=orders env={env:?} marker_prod={} marker_staging={}",
-            on[0], on[1]
-        );
-        c.m.disconnect(c.profile.id);
     }
-    for a in &admins {
-        a.m.disconnect(a.profile.id);
-    }
+    lib.svc.shutdown();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -769,7 +1148,7 @@ async fn mysql_rig(t: &DockerTarget) -> MysqlRig {
         parent.path(),
         &[(
             "mark.sql",
-            &format!("INSERT INTO {marker} (who, db) VALUES ('mark.sql', DATABASE())"),
+            &format!("INSERT INTO {marker} (who, db) VALUES ('mark.sql', DATABASE());\n"),
         )],
     );
     let lib = service(app.path(), trash.path());
@@ -810,14 +1189,22 @@ impl MysqlRig {
         )
     }
 
+    /// `mark.sql` run as script on `s` (staging: nothing is asked).
     async fn run_mark(&self, s: &SessionHandle) {
-        let text = self
+        let port = Port::no();
+        let src = self
             .lib
-            .text(self.id, "mark.sql", Some(EnvTag::Staging))
+            .source(self.id, "mark.sql", Some(EnvTag::Staging))
             .await;
-        exec(s, &text)
-            .await
-            .unwrap_or_else(|e| panic!("mark.sql: {e}"));
+        let (out, _) = run_script(s, &self.c.profile, src, port.clone()).await;
+        assert!(finished(&out), "mark.sql: {out:?}");
+        assert_eq!(port.questions(), 0);
+    }
+
+    fn done(&self) {
+        self.c.m.disconnect(self.c.profile.id);
+        self.admin.m.disconnect(self.admin.profile.id);
+        self.lib.svc.shutdown();
     }
 }
 
@@ -840,10 +1227,10 @@ async fn mysql_schema_is_the_database_level() {
     );
     // The script tab's own session, never the default one.
     let script = own_session(&r.c, 1).await;
-    let was = database_check(&script, t.engine, "orders_archive").await;
+    let was = current_database(&script, t.engine).await;
+    let now = switch_back(&script, t.engine, "orders_archive").await;
     let default = current_database(&r.c.s, t.engine).await;
-    let now = current_database(&script, t.engine).await;
-    println!(
+    fact!(
         "HV-FACT t19 mysql_switch target={} default={} script_before={} script={}",
         t.id,
         default.as_deref().unwrap_or("?"),
@@ -855,40 +1242,130 @@ async fn mysql_schema_is_the_database_level() {
         Some("orders"),
         "a new session starts on the profile's database"
     );
+    assert_eq!(now.as_deref(), Some("orders_archive"));
     assert_eq!(
         default.as_deref(),
         Some("orders"),
         "the default session was not switched"
     );
-    assert_eq!(now.as_deref(), Some("orders_archive"));
     r.run_mark(&script).await;
     assert_eq!(
         r.marks().await,
         (0, 1),
         "the run landed in orders_archive only"
     );
-    r.c.m.disconnect(r.c.profile.id);
-    r.admin.m.disconnect(r.admin.profile.id);
+    r.done();
 }
 
+/// Waits until `s` has ended (the server killed its connection): an own session is not
+/// reconnected in place (`SessionPool::register`: only the default session's reconnects), so
+/// it goes `Broken` or `Disconnected`.
+async fn wait_ended(s: &SessionHandle) -> SessionState {
+    let mut state = s.state();
+    let deadline = tokio::time::Instant::now() + CEILING;
+    loop {
+        let now = state.borrow().state.clone();
+        if matches!(now, SessionState::Broken(_) | SessionState::Disconnected) {
+            return now;
+        }
+        // The next request is what finds the connection gone.
+        let _ = s.submit(Request::Ping).reply.await;
+        if matches!(
+            state.borrow().state,
+            SessionState::Broken(_) | SessionState::Disconnected
+        ) {
+            continue;
+        }
+        if tokio::time::timeout_at(deadline, state.changed())
+            .await
+            .is_err()
+        {
+            panic!("timed out waiting for the killed session to end: {now:?}");
+        }
+    }
+}
+
+/// C1 (review), the app's path: a script tab's own session is killed by the server; it ends
+/// (never reconnected in place); the app opens a new own session for the tab's slot
+/// (`console/view.rs`); that session starts on the profile's database (`orders`), the tab's
+/// check switches it, and the run lands in `orders_archive`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "docker"]
-async fn mysql_switch_is_reapplied_after_a_reconnect() {
+async fn mysql_tab_session_reopened_after_a_kill_is_switched_back() {
     let Some(t) = docker_target("mysql84") else {
         return;
     };
     let r = mysql_rig(&t).await;
     let script = own_session(&r.c, 2).await;
-    database_check(&script, t.engine, "orders_archive").await;
-    let mut events = script.events();
+    assert_eq!(
+        switch_back(&script, t.engine, "orders_archive")
+            .await
+            .as_deref(),
+        Some("orders_archive")
+    );
     let backend = row(&script, "script", "SELECT CONNECTION_ID()")
         .await
         .remove(0);
     exec(&r.c.s, &format!("KILL {backend}"))
         .await
         .unwrap_or_else(|e| panic!("KILL {backend}: {e}"));
-    // The next request finds the connection gone; the session recovers in place.
-    let _ = script.submit(Request::Ping).reply.await;
+    let ended = wait_ended(&script).await;
+    // The app's re-open for the same slot.
+    let reopened = own_session(&r.c, 2).await;
+    let new_backend = row(&reopened, "script", "SELECT CONNECTION_ID()")
+        .await
+        .remove(0);
+    let starts_on = current_database(&reopened, t.engine).await;
+    let after_check = switch_back(&reopened, t.engine, "orders_archive").await;
+    fact!(
+        "HV-FACT t19 mysql_reopen target={} killed_state={ended:?} starts_on={} after_check={} new_connection={}",
+        t.id,
+        starts_on.as_deref().unwrap_or("?"),
+        after_check.as_deref().unwrap_or("?"),
+        new_backend != backend
+    );
+    assert_ne!(new_backend, backend, "a new connection after the kill");
+    assert_eq!(
+        starts_on.as_deref(),
+        Some("orders"),
+        "the re-opened session starts on the profile's database, so the check is what moves it"
+    );
+    assert_eq!(after_check.as_deref(), Some("orders_archive"));
+    r.run_mark(&reopened).await;
+    assert_eq!(
+        r.marks().await,
+        (0, 1),
+        "the run landed in orders_archive only"
+    );
+    r.done();
+}
+
+/// C1's variant: the **default** session is killed. It reconnects in place (`Reconnected`)
+/// and its replay restores the last schema (`session/actor.rs`: "identity, read-only setup,
+/// last schema"), so a tab's check after it finds the database already right and switches
+/// nothing; the fact records which of the two put it there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn mysql_default_session_reconnect_replays_its_schema() {
+    let Some(t) = docker_target("mysql84") else {
+        return;
+    };
+    let r = mysql_rig(&t).await;
+    let default = r.c.s.clone();
+    assert_eq!(
+        switch_back(&default, t.engine, "orders_archive")
+            .await
+            .as_deref(),
+        Some("orders_archive")
+    );
+    let mut events = default.events();
+    let backend = row(&default, "default", "SELECT CONNECTION_ID()")
+        .await
+        .remove(0);
+    exec(&r.admin.s, &format!("KILL {backend}"))
+        .await
+        .unwrap_or_else(|e| panic!("KILL {backend}: {e}"));
+    let _ = default.submit(Request::Ping).reply.await;
     let deadline = tokio::time::Instant::now() + CEILING;
     loop {
         match tokio::time::timeout_at(deadline, events.recv()).await {
@@ -898,58 +1375,78 @@ async fn mysql_switch_is_reapplied_after_a_reconnect() {
             Err(_) => panic!("timed out waiting for Reconnected"),
         }
     }
-    let after = current_database(&script, t.engine).await;
-    let new_backend = row(&script, "script", "SELECT CONNECTION_ID()")
+    let new_backend = row(&default, "default", "SELECT CONNECTION_ID()")
         .await
         .remove(0);
-    assert_ne!(new_backend, backend, "a new connection after the kill");
-    // The check before the next statement puts the session back on the library's database.
-    database_check(&script, t.engine, "orders_archive").await;
-    let checked = current_database(&script, t.engine).await;
-    println!(
-        "HV-FACT t19 mysql_reconnect target={} after_reconnect={} after_check={}",
+    let after_replay = current_database(&default, t.engine).await;
+    // The tab's check: switches only when the probe reads another database.
+    let switched = after_replay.as_deref() != Some("orders_archive");
+    let after_check = if switched {
+        switch_back(&default, t.engine, "orders_archive").await
+    } else {
+        after_replay.clone()
+    };
+    fact!(
+        "HV-FACT t19 mysql_reconnect target={} after_replay={} check_switched={switched} after_check={} new_connection={}",
         t.id,
-        after.as_deref().unwrap_or("?"),
-        checked.as_deref().unwrap_or("?")
+        after_replay.as_deref().unwrap_or("?"),
+        after_check.as_deref().unwrap_or("?"),
+        new_backend != backend
     );
-    assert_eq!(checked.as_deref(), Some("orders_archive"));
-    r.run_mark(&script).await;
+    assert_ne!(new_backend, backend, "a new connection after the kill");
+    assert_eq!(
+        after_replay.as_deref(),
+        Some("orders_archive"),
+        "the replay restored the last schema"
+    );
+    assert!(!switched, "the check had nothing to switch");
+    r.run_mark(&default).await;
     assert_eq!(
         r.marks().await,
         (0, 1),
         "the run landed in orders_archive only"
     );
-    r.c.m.disconnect(r.c.profile.id);
-    r.admin.m.disconnect(r.admin.profile.id);
+    r.done();
 }
 
 // ---------------------------------------------------------------------------------------------
 // E6: no credentials ever reach a library folder
 
-/// What must never appear in a library: every spelling of each connection's identifiers and
-/// credentials.
+const PASSPHRASE: &str = "s3cret";
+
+/// Every spelling of a profile id (review m2: the uppercase simple form too).
+fn id_spellings(id: ProfileId) -> Vec<String> {
+    let u = id.0;
+    vec![
+        u.to_string(),
+        u.simple().to_string(),
+        u.to_string().to_ascii_uppercase(),
+        u.simple().to_string().to_ascii_uppercase(),
+        format!("{id:?}"),
+    ]
+}
+
+/// What must never appear near a library: every spelling of each connection's identifiers
+/// and credentials.
 fn needles(profiles: &[(&Profile, &str)]) -> Vec<String> {
-    let mut out: Vec<String> = vec!["password =".into(), "host =".into(), "s3cret".into()];
+    let mut out: Vec<String> = vec!["password =".into(), "host =".into(), PASSPHRASE.into()];
     for (p, password) in profiles {
-        let u = p.id.0;
-        out.extend([
-            password.to_string(),
-            p.name.clone(),
-            u.to_string(),
-            u.simple().to_string(),
-            u.to_string().to_ascii_uppercase(),
-            format!("{:?}", p.id),
-            SecretKey {
-                profile: p.id,
-                slot: SecretSlot::DbPassword,
-            }
-            .service(),
-            SecretKey {
-                profile: p.id,
-                slot: SecretSlot::SshPassphrase { hop: 0 },
-            }
-            .service(),
-        ]);
+        out.push(password.to_string());
+        out.push(p.name.clone());
+        out.extend(id_spellings(p.id));
+        for slot in [
+            SecretSlot::DbPassword,
+            SecretSlot::TlsKeyPassphrase,
+            SecretSlot::SshPassphrase { hop: 0 },
+        ] {
+            out.push(
+                SecretKey {
+                    profile: p.id,
+                    slot,
+                }
+                .service(),
+            );
+        }
         if let Some(user) = &p.user {
             out.push(user.clone());
         }
@@ -963,6 +1460,26 @@ fn needles(profiles: &[(&Profile, &str)]) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// The passphrases a profile's keyring holds (review m2): its TLS key and its first SSH hop.
+fn passphrase_seeds(id: ProfileId) -> Vec<(SecretKey, &'static str)> {
+    vec![
+        (
+            SecretKey {
+                profile: id,
+                slot: SecretSlot::TlsKeyPassphrase,
+            },
+            PASSPHRASE,
+        ),
+        (
+            SecretKey {
+                profile: id,
+                slot: SecretSlot::SshPassphrase { hop: 0 },
+            },
+            PASSPHRASE,
+        ),
+    ]
 }
 
 /// Every path under `root` (relative, `/`-separated) with its bytes (`None` for a folder).
@@ -991,8 +1508,36 @@ fn walk(root: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
     out
 }
 
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Every needle found in a name or the bytes of `tree`, labelled `where_`.
+fn findings(
+    tree: &BTreeMap<String, Option<Vec<u8>>>,
+    needles: &[String],
+    where_: &str,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    for (name, bytes) in tree {
+        for n in needles {
+            if name.contains(n.as_str()) {
+                found.push(format!(
+                    "{where_}/{name}: its name holds a credential or identifier"
+                ));
+            }
+            if bytes.as_deref().is_some_and(|b| contains(b, n.as_bytes())) {
+                found.push(format!("{where_}/{name}: holds a credential or identifier"));
+            }
+        }
+    }
+    found
+}
+
 /// `git` on the fixture repository `dir` (a repository this test made; R-T1a-1), with fixed
-/// identities and dates so its files never vary.
+/// identities and dates and no automatic maintenance (review I2: `git commit` starts a
+/// detached `maintenance run --auto` holding `objects/maintenance.lock`), so its files never
+/// change after the command returns.
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .current_dir(dir)
@@ -1003,6 +1548,8 @@ fn git(dir: &Path, args: &[&str]) {
             "user.email=hvm4b@example.invalid",
         ])
         .args(["-c", "init.defaultBranch=main", "-c", "core.autocrlf=false"])
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
         .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
@@ -1011,15 +1558,26 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?} failed");
 }
 
-/// One connection of the scenario: its session, profile and the password it was given.
+/// One connection of the scenario: its session and profile.
 struct Leg<'a> {
-    s: &'a SessionHandle,
-    profile: &'a Profile,
+    c: &'a Conn,
     env: EnvTag,
 }
 
-/// The full scripted session (plan Task 19), then the audit of the library folder.
-async fn credential_audit(legs: &[Leg<'_>], passwords: &[&str]) {
+/// The full scripted session (plan Task 19, review m3), then the audit of the library's
+/// parent folder and the trash.
+async fn credential_audit(legs: &[Leg<'_>], passwords: &[&str], select2: &str) {
+    // The keyring really holds every secret of the session (the needles are not vacuous).
+    for leg in legs {
+        for (key, value) in passphrase_seeds(leg.c.profile.id) {
+            let held = leg.c.secrets.get(&key, Retention::Forever).ok().flatten();
+            assert!(
+                held.is_some_and(|s| s.expose_secret() == value),
+                "{}: the keyring holds no passphrase",
+                leg.c.profile.name
+            );
+        }
+    }
     let (app, parent, trash) = (tempdir(), tempdir(), tempdir());
     let dir = library_dir(parent.path(), &[("README.md", "Orders scripts\n")]);
     // A repository the user made: Hacivat only ever reads it.
@@ -1031,19 +1589,57 @@ async fn credential_audit(legs: &[Leg<'_>], passwords: &[&str]) {
     let lib = service(app.path(), trash.path());
     // 1. Attach (writes workspace.toml).
     let id = lib.attach(&dir, "orders").await;
-    let prod = legs[0].profile;
-    // 2. Map another database of prod's, sharing the alias (workspace.toml gains it).
+    let prod = &legs[0].c.profile;
+    let staging = &legs[legs.len() - 1].c.profile;
+    // 2. The mapping dialog's path: share the alias, written only over the bytes it showed.
+    let before = hacivat_scripts::manifest::preview(&dir).bytes;
     lib.svc
-        .map(
+        .map_sharing(
             LocalMapping {
                 profile: prod.id,
                 database: DatabaseName::new("orders_archive"),
                 library: id,
             },
-            true,
+            before,
         )
         .await
-        .expect("the mapping");
+        .expect("the shared mapping");
+    // A local-only mapping of staging's, then unmapped; and one dropped with its profile.
+    lib.svc
+        .map(
+            LocalMapping {
+                profile: staging.id,
+                database: DatabaseName::new("orders_hist"),
+                library: id,
+            },
+            false,
+        )
+        .await
+        .expect("a local mapping");
+    assert!(
+        lib.svc
+            .unmap(staging.id, DatabaseName::new("orders_hist"))
+            .await
+            .expect("unmap")
+    );
+    lib.svc
+        .map(
+            LocalMapping {
+                profile: staging.id,
+                database: DatabaseName::new("orders_old"),
+                library: id,
+            },
+            false,
+        )
+        .await
+        .expect("a local mapping");
+    assert_eq!(
+        lib.svc
+            .drop_profile(staging.id)
+            .await
+            .expect("drop_profile"),
+        1
+    );
     let env = Some(legs[0].env);
     let save = |r: &str, text: &str, expect| {
         let r = rel(r);
@@ -1051,7 +1647,7 @@ async fn credential_audit(legs: &[Leg<'_>], passwords: &[&str]) {
             text: text.to_string(),
             meta: Default::default(),
         };
-        let svc = &lib.svc;
+        let svc = lib.svc.clone();
         async move { svc.save(id, &r, env, text, expect).await }
     };
     // 3. New script, saved.
@@ -1069,7 +1665,7 @@ async fn credential_audit(legs: &[Leg<'_>], passwords: &[&str]) {
         .read(id, &rel("monthly.sql"), env)
         .await
         .expect("read");
-    save("monthly.sql", "SELECT 2", Some(read.stamp))
+    save("monthly.sql", select2, Some(read.stamp))
         .await
         .expect("save over");
     // 6. Save as.
@@ -1114,42 +1710,24 @@ async fn credential_audit(legs: &[Leg<'_>], passwords: &[&str]) {
         )
         .await
         .expect("save under @production");
-    // 9. A recovery copy of an unsaved edit (it lives under the app's folders).
-    let instance = recovery::Instance::start(&lib.paths).expect("a recovery instance");
-    recovery::store(
-        &lib.paths,
-        &instance,
-        &RecoveryKey {
-            library: id,
-            rel: rel("monthly.sql"),
-            profile: Some(prod.id),
-            database: Some(DatabaseName::new("orders")),
-        },
-        "SELECT 5 -- unsaved",
-        &CopyMeta::default(),
-    )
-    .expect("a recovery copy");
-    // 10. Git refresh.
-    lib.svc.refresh(id).await;
-    // 11. Run monthly.sql (two passes, as Run as script reads it) on every connection.
-    for leg in legs {
-        let text = lib.two_passes(id, "monthly.sql", Some(leg.env)).await;
-        let got = row(leg.s, &leg.profile.name, &text).await;
-        assert_eq!(got, ["2"], "{}: the saved text ran", leg.profile.name);
+    // 9. A recovery copy left by an instance that crashed, then recovered by this one.
+    let key = RecoveryKey {
+        library: id,
+        rel: rel("monthly.sql"),
+        profile: Some(prod.id),
+        database: Some(DatabaseName::new("orders")),
+    };
+    {
+        let crashed = recovery::Instance::start(&lib.paths).expect("a recovery instance");
+        recovery::store(
+            &lib.paths,
+            &crashed,
+            &key,
+            "SELECT 5 -- unsaved",
+            &CopyMeta::default(),
+        )
+        .expect("a recovery copy");
     }
-    wait_until("the git status after the refresh", || {
-        lib.svc
-            .snapshot()
-            .view(env)
-            .library(id)
-            .is_some_and(|l| l.git() != GitSummary::Pending)
-    })
-    .await;
-    // 12. Quit.
-    lib.svc.shutdown();
-    drop(lib);
-
-    // The recovery copy is outside the library, private.
     let app_files = walk(app.path());
     let copies: Vec<&String> = app_files
         .iter()
@@ -1168,64 +1746,98 @@ async fn credential_audit(legs: &[Leg<'_>], passwords: &[&str]) {
     {
         use std::os::unix::fs::PermissionsExt as _;
         let file = app.path().join(copies[0]);
-        let mode = std::fs::metadata(&file)
-            .expect("the copy")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "the copy's mode");
-        let folder = file.parent().expect("its folder");
-        let mode = std::fs::metadata(folder)
-            .expect("its folder")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o700, "the copy folder's mode");
+        let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode(&file), 0o600, "the copy's mode");
+        assert_eq!(
+            mode(file.parent().expect("its folder")),
+            0o700,
+            "its folder's mode"
+        );
     }
+    let instance = recovery::Instance::start(&lib.paths).expect("this instance");
+    let recovered = recovery::take_all(&lib.paths, &instance, id);
+    assert_eq!(recovered.len(), 1, "the crashed instance's copy is offered");
+    assert_eq!(recovered[0].text, "SELECT 5 -- unsaved");
+    assert_eq!(recovered[0].key, key);
+    recovery::discard_entry(&lib.paths, &recovered[0]).expect("discarded once restored");
+    // 10. Git refresh.
+    lib.svc.refresh(id).await;
+    // 11. Detach, then attach again over the manifest already there (read, never rewritten),
+    // and share the alias again (already there: nothing added).
+    lib.svc.detach(id).await.expect("detach");
+    let id = lib
+        .svc
+        .attach(dir.clone(), Some(logical("orders")), true)
+        .await
+        .expect("re-attach");
+    lib.ready(id).await;
+    lib.svc
+        .map(
+            LocalMapping {
+                profile: prod.id,
+                database: DatabaseName::new("orders_archive"),
+                library: id,
+            },
+            true,
+        )
+        .await
+        .expect("the alias again");
+    // 12. Run monthly.sql as script on every connection, under its environment.
+    for leg in legs {
+        let port = Port::yes();
+        let src = lib.source(id, "monthly.sql", Some(leg.env)).await;
+        let (out, progress) = run_script(&leg.c.s, &leg.c.profile, src, port).await;
+        assert!(finished(&out), "{}: {out:?}", leg.c.profile.name);
+        assert_eq!(
+            progress.units_run, 1,
+            "{}: the saved text ran",
+            leg.c.profile.name
+        );
+    }
+    lib.ready(id).await;
+    // 13. Quit.
+    lib.svc.shutdown();
+    drop(lib);
 
-    // The audit.
+    // The audit: the parent holds only the library, the trash only what was trashed, and
+    // neither holds anything identifying.
     let profiles: Vec<(&Profile, &str)> = legs
         .iter()
         .zip(passwords)
-        .map(|(l, p)| (l.profile, *p))
+        .map(|(l, p)| (l.c.profile.as_ref(), *p))
         .collect();
     let needles = needles(&profiles);
-    let all = walk(&dir);
+    let all = walk(parent.path());
+    let git_after: BTreeMap<String, Option<Vec<u8>>> = all
+        .iter()
+        .filter_map(|(n, b)| {
+            n.strip_prefix("orders-scripts/.git/")
+                .map(|n| (n.to_string(), b.clone()))
+        })
+        .collect();
     assert_eq!(
-        all.iter()
-            .filter(|(n, _)| n.as_str() == ".git" || n.starts_with(".git/"))
-            .filter(|(n, _)| n.as_str() != ".git")
-            .map(|(n, b)| (n.strip_prefix(".git/").unwrap_or(n).to_string(), b.clone()))
-            .collect::<BTreeMap<_, _>>(),
-        git_before,
+        git_after, git_before,
         ".git/ changed: Hacivat wrote into the repository"
     );
-    let mine: BTreeMap<&String, &Option<Vec<u8>>> = all
-        .iter()
-        .filter(|(n, _)| n.as_str() != ".git" && !n.starts_with(".git/"))
+    let mine: BTreeMap<String, Option<Vec<u8>>> = all
+        .into_iter()
+        .filter(|(n, _)| n != "orders-scripts/.git" && !n.starts_with("orders-scripts/.git/"))
         .collect();
-    let mut found = Vec::new();
-    for (name, bytes) in &mine {
-        for n in &needles {
-            if name.contains(n.as_str()) {
-                found.push(format!("{name}: its name holds a credential or identifier"));
-            }
-            if bytes.as_deref().is_some_and(|b| contains(b, n.as_bytes())) {
-                found.push(format!("{name}: holds a credential or identifier"));
-            }
-        }
-    }
+    let trashed = walk(trash.path());
+    let mut found = findings(&mine, &needles, "parent");
+    found.extend(findings(&trashed, &needles, "trash"));
     assert!(found.is_empty(), "{found:?}");
-    let names: BTreeSet<&str> = mine.keys().map(|n| n.as_str()).collect();
+    let names: BTreeSet<&str> = mine.keys().map(String::as_str).collect();
     let want: BTreeSet<&str> = [
-        ".hacivat",
-        ".hacivat/workspace.toml",
-        "@production",
-        "@production/cleanup.sql",
-        "README.md",
-        "copy.sql",
-        "drafts",
-        "monthly.sql",
+        "orders-scripts",
+        "orders-scripts/.hacivat",
+        "orders-scripts/.hacivat/workspace.toml",
+        "orders-scripts/@production",
+        "orders-scripts/@production/cleanup.sql",
+        "orders-scripts/README.md",
+        "orders-scripts/copy.sql",
+        "orders-scripts/drafts",
+        "orders-scripts/monthly.sql",
     ]
     .into_iter()
     .collect();
@@ -1233,8 +1845,13 @@ async fn credential_audit(legs: &[Leg<'_>], passwords: &[&str]) {
         names, want,
         "the only paths are the user's scripts and the manifest"
     );
+    assert_eq!(
+        trashed.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["new.sql"],
+        "the trash holds only the trashed script"
+    );
     let manifest = String::from_utf8(
-        mine[&".hacivat/workspace.toml".to_string()]
+        mine["orders-scripts/.hacivat/workspace.toml"]
             .clone()
             .expect("a file"),
     )
@@ -1243,7 +1860,7 @@ async fn credential_audit(legs: &[Leg<'_>], passwords: &[&str]) {
     let keys: BTreeSet<&str> = table.keys().map(String::as_str).collect();
     assert_eq!(keys, BTreeSet::from(["aliases", "database", "format"]));
     assert_eq!(table["database"].as_str(), Some("orders"));
-    // The shared alias of step 2 is the database's name only.
+    // The shared alias only, once; the local-only databases never became aliases.
     let aliases: Vec<&str> = table["aliases"]
         .as_array()
         .expect("aliases")
@@ -1251,16 +1868,14 @@ async fn credential_audit(legs: &[Leg<'_>], passwords: &[&str]) {
         .filter_map(|a| a.as_str())
         .collect();
     assert_eq!(aliases, ["orders_archive"]);
-    println!(
-        "HV-FACT t19 e6 connections={} files={} needles={} found=0 git_unchanged=true manifest_keys=aliases,database,format",
+    fact!(
+        "HV-FACT t19 e6 connections={} paths={} trash={} needles={} found=0 git_unchanged=true \
+         manifest_keys=aliases,database,format recovered=1",
         legs.len(),
         names.len(),
+        trashed.len(),
         needles.len()
     );
-}
-
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1274,24 +1889,21 @@ async fn no_credentials_reach_the_library_on_real_servers() {
         let Some(t) = require_target(id) else {
             continue;
         };
-        let prod = on_server(&t, "orders-prod", Some(EnvTag::Production), "orders").await;
-        let staging = on_server(&t, "orders-staging", Some(EnvTag::Staging), "orders").await;
-        let legs = [
-            Leg {
-                s: &prod.s,
-                profile: &prod.profile,
-                env: EnvTag::Production,
-            },
-            Leg {
-                s: &staging.s,
-                profile: &staging.profile,
-                env: EnvTag::Staging,
-            },
-        ];
-        credential_audit(&legs, &[&t.password, &t.password]).await;
-        println!("HV-FACT t19 e6 target={id} audited=true");
-        prod.m.disconnect(prod.profile.id);
-        staging.m.disconnect(staging.profile.id);
+        let mut conns = Vec::new();
+        for (name, env) in [
+            ("orders-prod", EnvTag::Production),
+            ("orders-staging", EnvTag::Staging),
+        ] {
+            let p = server_profile(&t, name, Some(env), "orders");
+            let seeds = passphrase_seeds(p.id);
+            conns.push((on_server_as(&t, p, &seeds).await, env));
+        }
+        let legs: Vec<Leg<'_>> = conns.iter().map(|(c, env)| Leg { c, env: *env }).collect();
+        credential_audit(&legs, &[&t.password, &t.password], "SELECT 2").await;
+        fact!("HV-FACT t19 e6 target={id} audited=true");
+        for (c, _) in &conns {
+            c.m.disconnect(c.profile.id);
+        }
         ran += 1;
     }
     assert!(ran > 0, "the active set has neither pg17 nor mysql84");
@@ -1301,11 +1913,11 @@ async fn no_credentials_reach_the_library_on_real_servers() {
 /// else in the test's library. The plan's `db.example.internal` would stop the connect at its
 /// DNS step (the fake's in-memory transport replaces only the socket), so the host is an
 /// address of TEST-NET-1 (RFC 5737), which needs no lookup.
-fn fake_profile(name: &str, env: EnvTag) -> Profile {
+fn fake_profile(name: &str, env: EnvTag, engine: DbmsKind) -> Profile {
     let mut p = Profile {
         id: ProfileId::new(),
         name: name.to_string(),
-        engine: DbmsKind::Postgres,
+        engine,
         environment: Some(env),
         endpoint: ProfileEndpoint::Server {
             host: "192.0.2.77".into(),
@@ -1329,39 +1941,138 @@ async fn no_credentials_reach_the_library_with_a_fake() {
         ("orders-prod", EnvTag::Production),
         ("orders-staging", EnvTag::Staging),
     ] {
-        // The saved text's answer, as the server would give it.
-        let fake = Arc::new(
-            hacivat_driver::fake::FakeDriver::new(DbmsKind::Postgres).exec(vec![
-                hacivat_driver::fake::FakeExec {
-                    prefix: "SELECT 2",
-                    result: Ok(ExecSummary {
-                        rows: vec![vec![Some("2".into())]],
-                        row_count: 1,
-                        ..ExecSummary::default()
-                    }),
-                    delay: Duration::ZERO,
-                    tx_after: None,
-                    panics: false,
-                },
-            ]),
-        );
         let mut drivers = DriverRegistry::new();
-        drivers.register(fake);
-        let c = connect(
-            deps(drivers, true),
-            fake_profile(name, env),
-            Some("hv_test_pw"),
-        )
-        .await;
+        drivers.register(Arc::new(
+            hacivat_driver::fake::FakeDriver::new(DbmsKind::Postgres).tracks_transactions(),
+        ));
+        let p = fake_profile(name, env, DbmsKind::Postgres);
+        let seeds = passphrase_seeds(p.id);
+        let c = connect(deps(drivers, true, &seeds), p, Some("hv_test_pw")).await;
         conns.push((c, env));
     }
-    let legs: Vec<Leg<'_>> = conns
-        .iter()
-        .map(|(c, env)| Leg {
-            s: &c.s,
-            profile: &c.profile,
-            env: *env,
-        })
+    let legs: Vec<Leg<'_>> = conns.iter().map(|(c, env)| Leg { c, env: *env }).collect();
+    credential_audit(&legs, &["hv_test_pw", "hv_test_pw"], "SELECT 2").await;
+}
+
+/// The T19 reviewer's hostile test (adopted, review m3): the mapping lifecycle the first audit
+/// skipped (the mapping dialog's `map_sharing`, a local-only map, unmap, `drop_profile`,
+/// detach and a re-attach over the existing manifest), audited over the library's **parent**
+/// (siblings, leftovers), with a positive control proving the needles find a real profile id
+/// where Hacivat may keep one (`libraries.toml`, app config).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mapping_lifecycle_writes_no_profile_id_near_the_library() {
+    let (app, parent, trash) = (tempdir(), tempdir(), tempdir());
+    let dir = library_dir(parent.path(), &[("a.sql", "SELECT 1")]);
+    let lib = service(app.path(), trash.path());
+    let id = lib.attach(&dir, "orders").await;
+    let (p1, p2) = (ProfileId::new(), ProfileId::new());
+    let before = hacivat_scripts::manifest::preview(&dir).bytes;
+    lib.svc
+        .map_sharing(
+            LocalMapping {
+                profile: p1,
+                database: DatabaseName::new("orders_archive"),
+                library: id,
+            },
+            before,
+        )
+        .await
+        .expect("map_sharing");
+    lib.svc
+        .map(
+            LocalMapping {
+                profile: p2,
+                database: DatabaseName::new("orders_hist"),
+                library: id,
+            },
+            false,
+        )
+        .await
+        .expect("local map");
+    // Positive control: the needles DO find the ids where Hacivat may keep them.
+    let reg = std::fs::read(lib.paths.libraries_toml()).expect("libraries.toml");
+    for p in [p1, p2] {
+        assert!(
+            id_spellings(p).iter().any(|n| contains(&reg, n.as_bytes())),
+            "positive control: an id is not found in libraries.toml (a needle spelled wrong?)"
+        );
+    }
+    lib.svc
+        .save(
+            id,
+            &rel("b.sql"),
+            None,
+            SaveText {
+                text: "SELECT 2".into(),
+                meta: Default::default(),
+            },
+            None,
+        )
+        .await
+        .expect("save");
+    assert!(
+        lib.svc
+            .unmap(p1, DatabaseName::new("orders_archive"))
+            .await
+            .expect("unmap")
+    );
+    lib.svc.drop_profile(p2).await.expect("drop_profile");
+    lib.svc.detach(id).await.expect("detach");
+    let id2 = lib.attach(&dir, "orders").await;
+    lib.svc
+        .map(
+            LocalMapping {
+                profile: p1,
+                database: DatabaseName::new("orders_archive"),
+                library: id2,
+            },
+            true,
+        )
+        .await
+        .expect("map again with share (the alias is already there)");
+    lib.svc.shutdown();
+    let all = walk(parent.path());
+    let names: Vec<&str> = all.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        [
+            "orders-scripts",
+            "orders-scripts/.hacivat",
+            "orders-scripts/.hacivat/workspace.toml",
+            "orders-scripts/a.sql",
+            "orders-scripts/b.sql",
+        ],
+        "paths under the library's parent"
+    );
+    let needles: Vec<String> = id_spellings(p1)
+        .into_iter()
+        .chain(id_spellings(p2))
         .collect();
-    credential_audit(&legs, &["hv_test_pw", "hv_test_pw"]).await;
+    let found = findings(&all, &needles, "parent");
+    assert!(found.is_empty(), "{found:?}");
+    let manifest = String::from_utf8(
+        all["orders-scripts/.hacivat/workspace.toml"]
+            .clone()
+            .expect("a file"),
+    )
+    .expect("UTF-8");
+    let table: toml::Table = toml::from_str(&manifest).expect("the manifest parses");
+    let keys: BTreeSet<&str> = table.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        BTreeSet::from(["aliases", "database", "format"]),
+        "{manifest}"
+    );
+    let aliases: Vec<&str> = table["aliases"]
+        .as_array()
+        .expect("aliases")
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
+    assert_eq!(aliases, ["orders_archive"], "{manifest}");
+    assert!(walk(trash.path()).is_empty(), "the trash got nothing");
+    fact!(
+        "HV-FACT t19 e6 mapping_lifecycle paths={} found=0",
+        all.len()
+    );
 }

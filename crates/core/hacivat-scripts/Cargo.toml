@@ -67,6 +67,13 @@ hacivat-secrets.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tempfile.workspace = true
 proptest.workspace = true
+# ## m4b-t19-docker (named exception to Task 1a's manifest ownership, ruling R-T19-1): Task 19's
+# `docker_m4b` runs library files through `hacivat_exec`'s `ScriptRunner`, whose run service
+# takes a `MemoryBudget` and whose request takes a `ClientFlavor`. Dev-dependencies only: they
+# never reach a product build or `fuzz/scripts`.
+hacivat-results.workspace = true
+sql-dialect.workspace = true
+# ## m4b-t19-docker
 
 [lints]
 workspace = true
