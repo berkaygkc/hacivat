@@ -872,6 +872,67 @@ fn the_guard_alone_refuses_a_working_double_slash_spelling() {
         );
         std::fs::remove_file(&p).unwrap();
     }
+
+    // Pre-merge fix (re-review m-fr5-1): a nested gitfile naming a **local** link whose target
+    // is `//<real git dir>`. The spelling passes; the link walk refuses it, and that refusal
+    // refuses the library (it was taken for "missing" and skipped, while gix followed the link:
+    // `Ready` with `sub`). Through a link to `<real git dir>`, it reads and shows `sub`.
+    std::os::unix::fs::symlink(format!("/{}", inner.display()), top.join("to-net")).unwrap();
+    std::os::unix::fs::symlink(&inner, top.join("to-local")).unwrap();
+    write(
+        &sub.join(".git"),
+        format!("gitdir: {}\n", top.join("to-net").display()).as_bytes(),
+    );
+    refused_locally(&lib, "nested gitfile through a link to //");
+    write(
+        &sub.join(".git"),
+        format!("gitdir: {}\n", top.join("to-local").display()).as_bytes(),
+    );
+    let st = status(&lib, &GitLimits::default());
+    assert!(
+        format!("{st:?}").contains(r#"GitPath("sub"): Unknown(Submodule)"#),
+        "control nested gitfile through a local link: {st:?}"
+    );
+}
+
+/// Pre-merge fix (re-review m-fr5-2): 2,000 nested gitfiles, each behind a 30-hop link chain,
+/// cost 60,000 `read_link`s if every one is walked. The pre-walk shares one link budget
+/// (4,096 hops) and reads the worker's flag per entry: the status answers `Redirected` quickly,
+/// on both passes, never `Timeout` or `Paused`.
+#[cfg(unix)]
+#[test]
+fn many_nested_gitfiles_behind_link_chains_spend_one_budget() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let inner = repo(&top, "inner").join(".git");
+    let lib = repo(&top, "lib");
+    let chain = top.join("chain");
+    std::fs::create_dir_all(&chain).unwrap();
+    let mut next = inner.clone();
+    for i in (0..30).rev() {
+        let link = chain.join(format!("c{i}"));
+        std::os::unix::fs::symlink(&next, &link).unwrap();
+        next = link;
+    }
+    let text = format!("gitdir: {}\n", chain.join("c0").display());
+    for i in 0..2_000 {
+        write(&lib.join(format!("n{i}/.git")), text.as_bytes());
+    }
+    for pass in ["first", "refresh"] {
+        let started = std::time::Instant::now();
+        let st = status(&lib, &GitLimits::default());
+        let took = started.elapsed();
+        fact(&format!(
+            "t20 link_budget pass={pass} ms={} state={}",
+            took.as_millis(),
+            format!("{st:?}").replace(' ', "")
+        ));
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Redirected)),
+            "{pass}: {st:?}"
+        );
+        assert!(took < std::time::Duration::from_secs(3), "{pass}: {took:?}");
+    }
 }
 
 /// Re-review I1-fr1 (b), defence in depth: a worker abandoned at its deadline (a stall here,

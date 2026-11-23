@@ -1805,6 +1805,14 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
     - **m-fr4-3: rooted with no drive.** `PathPrefix::Rooted` (`\x`, `/x`) is local on Unix only. On Windows it resolves against the process's current drive, which may be a share. The classifier table is updated.
     - **m-fr4-1: never-path config keys.** `user.*` and `core.comment*` are skipped, along with the `remote`, `submodule` and `url` sections.
       - **Known false-positive class (accepted, fail closed):** any other value that only *starts* like a network or device path refuses the whole library, even when gix never reads it as a path. Examples are an `alias.*` starting `//`, or a custom key holding a share path. The badges are cosmetic, and a key-by-key allow-list would miss a path key added in a later gix.
+  - **Pre-merge fix (re-review fr5).**
+    - **m-fr5-1.** `trust::resolve` now returns `Result<Option<PathBuf>, GitState>`:
+      - `Ok(None)`: the path names nothing.
+      - `Err(_)`: the path is refused, because its spelling or a link target leaves the local drives (or the link budget ran out), or the interrupt flag is set.
+      - Every caller answers a refusal as the status. `check_nested` used to take a refusal for "missing" and skip it, while gix followed the link. A nested gitfile naming a local link to `//real` now answers `Redirected`, not `Ready` with `sub`.
+    - **m-fr5-2.** `check_library_tree` takes the worker's interrupt flag and reads it per entry and in `check_nested`.
+      - The layout checks and the library pre-walk each share one `LinkBudget` of 4,096 hops (`SCAN_HOPS_MAX`), on top of the 40-hop limit per path. Over budget answers `Redirected`.
+      - Test: 2,000 nested gitfiles behind 30-hop chains answer `Redirected` in about 0.1 s, on both passes. With the budget off, the same library took 1.3 s and read `Ready`.
   - **Residual (m-fr3-1): a live local writer.** R-T20-2 checks that a vetted alternate has no `info/alternates` before gix opens the store, and gix reads the folder again during the open. A local process that creates and removes that file in the gap can make gix follow one nested file, which can cost one `Timeout`. This is bounded:
     - by the 5 s budget;
     - by one worker per library;

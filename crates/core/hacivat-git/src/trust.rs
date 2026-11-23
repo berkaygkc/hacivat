@@ -131,9 +131,18 @@ pub(crate) fn local_spelling(text: &str) -> bool {
     crate::map::path_prefix(text).is_local() && crate::map::path_prefix(text.trim()).is_local()
 }
 
-fn resolve(base: &Path, text: &str) -> Option<PathBuf> {
+/// A repository path text resolved to an existing folder: `Ok(Some(_))`; `Ok(None)` when it
+/// names nothing (or not a folder); `Err(_)` when it is **refused** (## m4b-t20-adversarial
+/// pre-merge fix, m-fr5-1: a spelling off the local drives, a link target off them, or the
+/// link budget spent answers `Redirected`; a set interrupt flag answers `Timeout`). Every
+/// caller answers a refusal as the whole status, never as "missing".
+fn resolve(
+    base: &Path,
+    text: &str,
+    budget: &mut LinkBudget<'_>,
+) -> Result<Option<PathBuf>, GitState> {
     if !local_spelling(text) {
-        return None;
+        return redirected();
     }
     let p = Path::new(text);
     let p = if p.is_absolute() {
@@ -142,22 +151,42 @@ fn resolve(base: &Path, text: &str) -> Option<PathBuf> {
         base.join(p)
     };
     // ## m4b-t20-adversarial fix round 5 (named line, re-review m-fr4-2)
-    if !link_targets_stay_local(&p) {
-        return None;
-    }
-    std::fs::canonicalize(p).ok().filter(|c| c.is_dir())
+    link_targets_stay_local(&p, budget)?;
+    Ok(std::fs::canonicalize(p).ok().filter(|c| c.is_dir()))
 }
 
 // ## m4b-t20-adversarial fix round 5 (named exception, re-review m-fr4-2)
 /// The most symbolic links one resolution follows (Linux's `MAXSYMLINKS`; macOS stops at 32).
 const LINK_HOPS_MAX: usize = 40;
 
+// ## m4b-t20-adversarial pre-merge fix (named exception, re-review m-fr5-2)
+/// The most symbolic links one status's checks follow in all (the layout and the whole
+/// library pre-walk share it): 2,000 nested gitfiles behind 30-hop chains would otherwise cost
+/// 60,000 `read_link`s before the open, uninterruptibly. Over it answers `Redirected`.
+const SCAN_HOPS_MAX: usize = 4_096;
+
+/// What one status may still spend on links, and the worker's interrupt flag.
+pub(crate) struct LinkBudget<'a> {
+    left: usize,
+    interrupt: &'a AtomicBool,
+}
+
+impl<'a> LinkBudget<'a> {
+    pub(crate) fn new(interrupt: &'a AtomicBool) -> Self {
+        LinkBudget {
+            left: SCAN_HOPS_MAX,
+            interrupt,
+        }
+    }
+}
+
 /// Walks `path` component by component, as `canonicalize` will, with `symlink_metadata` and
-/// `read_link`, and answers whether every link target on the way is a [`local_spelling`]: a
-/// local folder may itself be a link to `\\host\share` (or, on Unix, to `//host`), which
+/// `read_link`: every link target on the way must be a [`local_spelling`], since a local
+/// folder may itself be a link to `\\host\share` (or, on Unix, to `//host`), which
 /// `canonicalize` would follow. A missing component ends the walk (`canonicalize` then fails
-/// and nothing is followed); more than [`LINK_HOPS_MAX`] links, or an unreadable link, refuse.
-fn link_targets_stay_local(path: &Path) -> bool {
+/// and nothing is followed); more than [`LINK_HOPS_MAX`] links in one path, the status's
+/// [`LinkBudget`] spent, or an unreadable link refuse (`Redirected`).
+fn link_targets_stay_local(path: &Path, budget: &mut LinkBudget<'_>) -> Result<(), GitState> {
     let segments =
         |p: &Path| -> Vec<PathBuf> { p.components().rev().map(|c| c.as_os_str().into()).collect() };
     let mut todo = segments(path);
@@ -181,22 +210,27 @@ fn link_targets_stay_local(path: &Path) -> bool {
             continue;
         }
         let Ok(md) = std::fs::symlink_metadata(&cur) else {
-            return true;
+            return Ok(());
         };
         if !md.file_type().is_symlink() {
             continue;
         }
+        interrupted(budget.interrupt)?;
         hops += 1;
+        if hops > LINK_HOPS_MAX || budget.left == 0 {
+            return redirected();
+        }
+        budget.left -= 1;
         let Ok(target) = std::fs::read_link(&cur) else {
-            return false;
+            return redirected();
         };
-        if hops > LINK_HOPS_MAX || !local_spelling(&target.to_string_lossy()) {
-            return false;
+        if !local_spelling(&target.to_string_lossy()) {
+            return redirected();
         }
         cur.pop();
         todo.extend(segments(&target));
     }
-    true
+    Ok(())
 }
 
 /// The checks before the open. `Err` is the state to answer. Every small file read here (a
@@ -219,6 +253,8 @@ pub(crate) fn check_layout_bounded(
     placeholder: Placeholder<'_>,
     interrupt: &AtomicBool,
 ) -> Result<Layout, GitState> {
+    // ## m4b-t20-adversarial pre-merge fix (named line, m-fr5-2): the layout's own link budget.
+    let mut budget = LinkBudget::new(interrupt);
     require_owned(&found.worktree, owned)?;
     require_owned(&found.dot_git, owned)?;
     let layout = match found.kind {
@@ -240,7 +276,7 @@ pub(crate) fn check_layout_bounded(
             if placeholder(&found.dot_git) {
                 return dataless();
             }
-            gitfile_layout(found, owned, placeholder)?
+            gitfile_layout(found, owned, placeholder, &mut budget)?
         }
     };
     require_owned(&layout.git_dir, owned)?;
@@ -249,7 +285,7 @@ pub(crate) fn check_layout_bounded(
         &layout.common_dir.join("objects"),
         owned,
         placeholder,
-        interrupt,
+        &mut budget,
     )?;
     Ok(layout)
 }
@@ -588,7 +624,11 @@ pub(crate) fn check_library_tree(
     worktree: &Path,
     library: &Path,
     placeholder: Placeholder<'_>,
+    interrupt: &AtomicBool,
 ) -> Result<TreeFacts, GitState> {
+    // ## m4b-t20-adversarial pre-merge fix (named lines, re-review m-fr5-2): the worker's flag,
+    // read per entry, and one link budget for the whole pre-walk.
+    let mut budget = LinkBudget::new(interrupt);
     let too_large = || Err(GitState::Unavailable(GitError::Failed(FailKind::TooLarge)));
     // The folders from the worktree down to the library's parent.
     if let Ok(below) = library.strip_prefix(worktree) {
@@ -622,13 +662,15 @@ pub(crate) fn check_library_tree(
         // A nested repository: checked, not entered (gix does not enter it either).
         let dot_git = dir.join(".git");
         if dir != worktree && std::fs::symlink_metadata(&dot_git).is_ok() {
-            check_nested(&dot_git, placeholder)?;
+            check_nested(&dot_git, placeholder, &mut budget)?;
             continue;
         }
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
         for e in rd.filter_map(Result::ok) {
+            // ## m4b-t20-adversarial pre-merge fix (named line, m-fr5-2): per entry.
+            interrupted(interrupt)?;
             seen += 1;
             if seen > PREWALK_ENTRIES_MAX {
                 return too_large();
@@ -661,7 +703,12 @@ pub(crate) fn check_library_tree(
 
 /// A nested repository's `.git` (I3, F3): a real directory whose `HEAD` is regular, capped and
 /// no placeholder, or a regular capped gitfile (no placeholder) whose target's `HEAD` is.
-fn check_nested(dot_git: &Path, placeholder: Placeholder<'_>) -> Result<(), GitState> {
+fn check_nested(
+    dot_git: &Path,
+    placeholder: Placeholder<'_>,
+    budget: &mut LinkBudget<'_>,
+) -> Result<(), GitState> {
+    interrupted(budget.interrupt)?;
     let Ok(md) = std::fs::symlink_metadata(dot_git) else {
         return Ok(());
     };
@@ -707,7 +754,9 @@ fn check_nested(dot_git: &Path, placeholder: Placeholder<'_>) -> Result<(), GitS
         return redirected();
     }
     let base = dot_git.parent().unwrap_or(dot_git);
-    if let Some(t) = resolve(base, target) {
+    // ## m4b-t20-adversarial pre-merge fix (named line, m-fr5-1): a refused target (a local
+    // link to `//real`, say) refuses the library; only a target that names nothing is skipped.
+    if let Some(t) = resolve(base, target, budget)? {
         nested_pointer(&t.join("commondir"), placeholder)?;
         head_ok(&t.join("HEAD"))?;
     }
@@ -754,6 +803,7 @@ fn gitfile_layout(
     found: &Found,
     owned: Owner<'_>,
     placeholder: Placeholder<'_>,
+    budget: &mut LinkBudget<'_>,
 ) -> Result<Layout, GitState> {
     let Some(text) = small_text(&found.dot_git) else {
         return redirected();
@@ -767,7 +817,7 @@ fn gitfile_layout(
     else {
         return redirected();
     };
-    let Some(t) = resolve(&found.worktree, target) else {
+    let Some(t) = resolve(&found.worktree, target, budget)? else {
         return redirected();
     };
     require_owned(&t, owned)?;
@@ -792,7 +842,7 @@ fn gitfile_layout(
         if exists(&back_pointer) && !small_text(&back_pointer).is_some_and(|b| local_spelling(&b)) {
             return redirected();
         }
-        let back = resolve(&t, text.trim());
+        let back = resolve(&t, text.trim(), budget)?;
         return match (common, back) {
             (Some(c), Some(b)) if c == b => Ok(Layout {
                 git_dir: t,
@@ -844,8 +894,9 @@ fn check_alternates(
     objects: &Path,
     owned: Owner<'_>,
     placeholder: Placeholder<'_>,
-    interrupt: &AtomicBool,
+    budget: &mut LinkBudget<'_>,
 ) -> Result<(), GitState> {
+    let interrupt = budget.interrupt;
     let file = objects.join("info").join("alternates");
     if placeholder(&file) {
         return dataless();
@@ -874,7 +925,7 @@ fn check_alternates(
     let mut seen: Vec<PathBuf> = Vec::new();
     for raw in entries {
         interrupted(interrupt)?;
-        let Some(alt) = resolve(objects, raw) else {
+        let Some(alt) = resolve(objects, raw, budget)? else {
             return redirected();
         };
         if seen.contains(&alt) {
@@ -1161,6 +1212,38 @@ mod tests {
         );
     }
 
+    /// `resolve` with a fresh budget and no interrupt.
+    fn resolve_t(base: &Path, text: &str) -> Result<Option<PathBuf>, GitState> {
+        resolve(base, text, &mut LinkBudget::new(&NEVER))
+    }
+
+    // ## m4b-t20-adversarial pre-merge fix (re-review m-fr5-1, m-fr5-2)
+    /// A path that names nothing is "missing" (`Ok(None)`), not refused; a spent budget or a
+    /// set interrupt flag refuses (`Redirected`, `Timeout`).
+    #[cfg(unix)]
+    #[test]
+    fn missing_refused_and_spent_are_told_apart() {
+        let (_t, top) = top();
+        std::fs::create_dir_all(top.join("real")).unwrap();
+        std::os::unix::fs::symlink(top.join("real"), top.join("link")).unwrap();
+        assert!(matches!(resolve_t(&top, "nothing-here"), Ok(None)));
+        let mut spent = LinkBudget::new(&NEVER);
+        spent.left = 0;
+        assert!(matches!(
+            resolve(&top, "link", &mut spent),
+            Err(GitState::Unavailable(GitError::Redirected))
+        ));
+        let set = AtomicBool::new(true);
+        assert!(matches!(
+            resolve(&top, "link", &mut LinkBudget::new(&set)),
+            Err(GitState::Unavailable(GitError::Timeout))
+        ));
+        assert_eq!(
+            resolve_t(&top, "link").ok().flatten(),
+            Some(top.join("real"))
+        );
+    }
+
     // ## m4b-t20-adversarial fix round 5 (re-review m-fr4-2)
     /// A local spelling that goes through a link to `//…` is refused before `canonicalize`
     /// follows it: at the start, in the middle, after a relative hop and after `..`. A loop of
@@ -1186,10 +1269,16 @@ mod tests {
             "real/../net/objects",
             "loop1",
         ] {
-            assert_eq!(resolve(&top, text), None, "{text}");
+            assert!(
+                matches!(
+                    resolve_t(&top, text),
+                    Err(GitState::Unavailable(GitError::Redirected))
+                ),
+                "{text}: refused, not missing"
+            );
         }
         assert_eq!(
-            resolve(&top, "ok2/objects"),
+            resolve_t(&top, "ok2/objects").ok().flatten(),
             Some(real.join("objects")),
             "a local chain resolves"
         );
@@ -1220,7 +1309,7 @@ mod tests {
         assert_eq!(local_spelling(r"\abs\objects"), !cfg!(windows));
         // `resolve` never reaches the filesystem with one.
         assert_eq!(
-            resolve(Path::new("/"), "//hv-t20-nohost.invalid/share"),
+            resolve_t(Path::new("/"), "//hv-t20-nohost.invalid/share").ok(),
             None
         );
     }

@@ -290,7 +290,7 @@ fn pipeline(
         return st;
     }
     let extra: BTreeSet<String> = extra_dataless.iter().cloned().collect();
-    let facts = match trust::check_library_tree(&found.worktree, &root, &placeholder) {
+    let facts = match trust::check_library_tree(&found.worktree, &root, &placeholder, interrupt) {
         Ok(f) => f,
         Err(st) => return st,
     };
