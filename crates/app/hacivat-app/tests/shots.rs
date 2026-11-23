@@ -1612,8 +1612,9 @@ fn take_lock(lock: &Path, name: &str) {
             .ok()
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age > STALE_LOCK);
+        let owner = lock_owner(lock);
         if stale || lock_owner_dead(lock) {
-            let _ = std::fs::remove_dir_all(lock);
+            take_over(lock, owner);
             continue;
         }
         assert!(
@@ -1630,16 +1631,43 @@ fn take_lock(lock: &Path, name: &str) {
     );
 }
 
+/// The owner the lock `lock` names (`None`: none yet, or unreadable).
+fn lock_owner(lock: &Path) -> Option<u32> {
+    std::fs::read_to_string(lock.join(LOCK_OWNER))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
 /// Whether the lock `lock` names an owner that is no longer running. `false` when it names
 /// none (yet), names this process, or the check cannot run.
 fn lock_owner_dead(lock: &Path) -> bool {
-    let Some(pid) = std::fs::read_to_string(lock.join(LOCK_OWNER))
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-    else {
+    let Some(pid) = lock_owner(lock) else {
         return false;
     };
     pid != std::process::id() && process_gone(pid)
+}
+
+// ## m4b-t22-pre fix round 1 (T22-pre review m3)
+/// Removes the lock `lock`, judged dead or stale with owner `owner`, atomically: it is renamed
+/// to a tomb of this taker's own, so of two takers only one moves it, and the other retries
+/// (`create_dir`). The tomb is then checked to be the lock that was judged (the same owner,
+/// and, with none named, still stale): a lock a faster taker made in between is put back.
+fn take_over(lock: &Path, owner: Option<u32>) {
+    static TOMBS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = TOMBS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tomb = lock.with_extension(format!("tomb-{}-{n}", std::process::id()));
+    if std::fs::rename(lock, &tomb).is_err() {
+        return;
+    }
+    let stale = std::fs::metadata(&tomb)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age > STALE_LOCK);
+    let judged = lock_owner(&tomb) == owner && (owner.is_some() || stale);
+    if judged || std::fs::rename(&tomb, lock).is_err() {
+        let _ = std::fs::remove_dir_all(&tomb);
+    }
 }
 
 /// Whether no process `pid` runs (`ps -p`, as `live_threads` reads; `false` when `ps` cannot
@@ -1723,6 +1751,33 @@ fn a_dead_runs_shot_lock_is_taken_over_at_once() {
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("the lock is taken once free");
     assert_eq!(owner.as_deref(), Some(me.as_str()));
+    // ## m4b-t22-pre fix round 1 (m3): two runs taking over one dead lock at once: one gets it,
+    // the other waits for it; never both at once.
+    for round in 0..20 {
+        let lock = held(&format!("race-{round}.lock"), Some(dead));
+        let inside = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let racers: Vec<_> = (0..2)
+            .map(|_| {
+                let (lock, inside, start) = (lock.clone(), inside.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    take_lock(&lock, "race");
+                    let alone = !inside.swap(true, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    inside.store(false, std::sync::atomic::Ordering::SeqCst);
+                    std::fs::remove_dir_all(&lock).expect("let go");
+                    alone
+                })
+            })
+            .collect();
+        for r in racers {
+            assert!(
+                r.join().expect("a racer ends"),
+                "round {round}: both took the lock"
+            );
+        }
+    }
     // No owner named, but older than STALE_LOCK: the stale rule takes it over.
     let lock = held("old.lock", None);
     let old = std::time::SystemTime::now() - STALE_LOCK - std::time::Duration::from_secs(60);
@@ -2116,22 +2171,27 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     failures
 }
 
-// ## m4b-t22-pre (T21 r1)
-/// (s) A script tab's first notice shows its title whole: visible, not clipped, and not cut or
-/// hidden at the fold of the scroll area the notices sit in while a Run-as-script strip shows
-/// (check (b) lets a fold through as scrolling). The titles record that at prepaint
-/// (`InlineNotice::title_id`); later notices may scroll.
+// ## m4b-t22-pre (T21 r1); fix round 1 (T22-pre review I3, ruling R-T22-1)
+/// (s) A script tab's most severe notice shows its title whole: visible, not clipped, and not
+/// cut or hidden at the fold of the scroll area the notices sit in while a Run-as-script strip
+/// shows (check (b) lets a fold through as scrolling). Each title records its severity in its
+/// id (`disk_bars::NOTICE_TITLE_IDS`: the connection deleted, the file deleted, the file
+/// changed, the rest) and completes its record at prepaint (`InlineNotice::title_id`); the
+/// most severe is the first such record of the lowest rank. Less severe notices may scroll.
 fn check_notice_title(name: &str, frame: &[RenderedText]) -> Option<String> {
-    let id = format!("#{}", hacivat_app::scripts::disk_bars::NOTICE_TITLE_ID);
-    let first = frame.iter().find(|r| r.path.ends_with(id.as_str()))?;
-    (!first.visible || first.clipped || first.folded).then(|| {
+    let ids = hacivat_app::scripts::disk_bars::NOTICE_TITLE_IDS;
+    let worst = ids.iter().find_map(|id| {
+        let id = format!("#{id}");
+        frame.iter().find(|r| r.path.ends_with(id.as_str()))
+    })?;
+    (!worst.visible || worst.clipped || worst.folded).then(|| {
         format!(
-            "{name}: (s) the first notice's title is not shown whole: {:?} (visible {}, \
+            "{name}: (s) the most severe notice's title is not shown whole: {:?} (visible {}, \
              clipped {}, folded {})",
-            strip(&first.text),
-            first.visible,
-            first.clipped,
-            first.folded
+            strip(&worst.text),
+            worst.visible,
+            worst.clipped,
+            worst.folded
         )
     })
 }
@@ -3257,24 +3317,37 @@ fn trust_signals_must_be_drawn() {
             && found.iter().any(|v| v.contains("cut short")),
         "{found:?}"
     );
-    // (s) The first notice's title: whole passes; folded, clipped or hidden fails; a later
-    // notice's title may fold.
-    let title = |folded: bool| RenderedText {
+    // (s) The most severe notice's title: whole passes; folded, clipped or hidden fails; a less
+    // severe notice's title may fold, wherever it is drawn.
+    let title = |rank: usize, folded: bool| RenderedText {
         folded,
-        ..at("script-notice-title", 90.0, true)
+        ..at(
+            hacivat_app::scripts::disk_bars::NOTICE_TITLE_IDS[rank],
+            90.0,
+            true,
+        )
     };
-    assert_eq!(check_notice_title("s", &[title(false), title(true)]), None);
-    assert!(
-        check_notice_title("s", &[title(true), title(false)]).is_some_and(|v| v.contains("(s)"))
+    assert_eq!(
+        check_notice_title("s", &[title(1, false), title(3, true)]),
+        None
     );
+    assert_eq!(
+        check_notice_title("s", &[title(3, true), title(1, false)]),
+        None
+    );
+    assert!(
+        check_notice_title("s", &[title(3, false), title(1, true)])
+            .is_some_and(|v| v.contains("(s)"))
+    );
+    assert!(check_notice_title("s", &[title(0, true), title(1, false)]).is_some());
     let clipped_title = RenderedText {
         clipped: true,
-        ..title(false)
+        ..title(2, false)
     };
     assert!(check_notice_title("s", &[clipped_title]).is_some());
     let hidden_title = RenderedText {
         visible: false,
-        ..title(false)
+        ..title(3, false)
     };
     assert!(check_notice_title("s", &[hidden_title]).is_some());
     assert_eq!(

@@ -48,6 +48,8 @@ pub struct InlineNotice {
     title_id: Option<&'static str>,
     on_title: Option<TitleBounds>,
     actions_first: bool,
+    // ## m4b-t22-pre fix round 1 (T22-pre review I2)
+    on_actions: Option<TitleBounds>,
 }
 
 impl InlineNotice {
@@ -62,6 +64,7 @@ impl InlineNotice {
             title_id: None,
             on_title: None,
             actions_first: false,
+            on_actions: None,
         }
     }
 
@@ -112,10 +115,19 @@ impl InlineNotice {
         self
     }
 
-    /// Puts the action row right under the title lines, before the secondary lines and
+    /// Draws the action row right under the title lines, above the secondary lines and
     /// parameters: in a notice cut short, its buttons show before its explanation.
+    /// ## m4b-t22-pre fix round 1 (T22-pre review m1): only the drawing moves; the explanation
+    /// still comes before the buttons in the element tree (reading order) and the Tab order.
     pub fn actions_first(mut self, first: bool) -> Self {
         self.actions_first = first;
+        self
+    }
+
+    // ## m4b-t22-pre fix round 1 (named item; T22-pre review I2)
+    /// Calls `f` at prepaint with the bounds of the action row (no row: never called).
+    pub fn on_actions_bounds(mut self, f: TitleBounds) -> Self {
+        self.on_actions = Some(f);
         self
     }
 }
@@ -160,8 +172,9 @@ impl IntoElement for InlineNotice {
                     body = body.child(line(text, c.text.to_hsla(), cx));
                 }
             }
-            let mut actions = (!self.actions.is_empty()).then(|| {
-                div()
+            let on_actions = self.on_actions.take();
+            let actions = (!self.actions.is_empty()).then(|| {
+                let row = div()
                     .flex()
                     .flex_row()
                     // ## m4b-t21-shots (named exception): a row of buttons wider than the
@@ -170,22 +183,26 @@ impl IntoElement for InlineNotice {
                     .flex_wrap()
                     .gap(px(t.spacing.sm))
                     .mt(px(t.spacing.md))
-                    .children(self.actions)
-            });
-            if self.actions_first
-                && let Some(row) = actions.take()
-            {
-                body = body.child(row);
-                if !self.secondary.is_empty() {
-                    let mut rest = div().flex().flex_col().mt(px(t.spacing.sm));
-                    for text in std::mem::take(&mut self.secondary) {
-                        rest = rest.child(line(text, c.text_2.to_hsla(), cx));
-                    }
-                    body = body.child(rest);
+                    .children(self.actions);
+                match on_actions {
+                    // ## m4b-t22-pre fix round 1: the row reports where it was laid out.
+                    Some(f) => row.relative().child(
+                        canvas(
+                            move |bounds, window, cx| f(bounds, window, cx),
+                            |_, (), _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    ),
+                    None => row,
                 }
-            }
+            });
+            // The explanation: the secondary lines, then the parameters.
+            let mut explanation: Vec<AnyElement> = Vec::new();
             for text in self.secondary {
-                body = body.child(line(text, c.text_2.to_hsla(), cx));
+                explanation.push(line(text, c.text_2.to_hsla(), cx));
             }
             if !self.params.is_empty() {
                 let mut list = div().flex().flex_col().mt(px(t.spacing.xs));
@@ -210,10 +227,28 @@ impl IntoElement for InlineNotice {
                             ))),
                     );
                 }
-                body = body.child(list);
+                explanation.push(list.into_any_element());
             }
-            if let Some(row) = actions {
-                body = body.child(row);
+            match actions {
+                // ## m4b-t22-pre fix round 1 (T22-pre review m1): drawn under the title, the
+                // explanation below it, in a reversed column: the explanation stays first in
+                // the element tree.
+                Some(row) if self.actions_first => {
+                    let mut stack = div().flex().flex_col_reverse();
+                    if !explanation.is_empty() {
+                        stack = stack.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .mt(px(t.spacing.sm))
+                                .children(explanation),
+                        );
+                    }
+                    body = body.child(stack.child(row));
+                }
+                row => {
+                    body = body.children(explanation).children(row);
+                }
             }
             let card = div()
                 .debug_selector(|| "inline-notice".to_string())

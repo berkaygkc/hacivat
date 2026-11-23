@@ -1654,6 +1654,19 @@ impl ConsoleHost {
             }
             _ => RunUx::Idle,
         };
+        // ## m4b-t22-pre fix round 1 (T22-pre review I1): a Run as script shows Stop for the
+        // whole run, its first pass and the gaps between units included (no unit in flight),
+        // in the toolbar's first row, which never leaves the tile. Its clock is the strip's.
+        let run = match run {
+            RunUx::Idle
+                if self
+                    .console()
+                    .is_some_and(|c| crate::scripts::run_as_script::running(c, cx)) =>
+            {
+                RunUx::Running(0)
+            }
+            other => other,
+        };
         let read_only = self
             .ux
             .filter(|ux| ux.read_only && !self.pending_ro)
@@ -1806,22 +1819,26 @@ impl Render for ConsoleHost {
             .flex_col()
             .size_full()
             .bg(theme.tokens.colors.panel.to_hsla())
+            // ## m4b-t22-pre fix round 1 (ruling R-T22-1): the tile's bottom, for the notices'
+            // floor, which gives way to the strip.
+            .relative()
+            .children(strip_shown.then(|| self.notice_area.tile_probe()))
             .child(bar)
             // ## m4b-t14-tabs (named exception): a script tab's notices, under its toolbar.
             // ## m4b-t21-shots fix round 2 (m-a): the notices give way first while a strip
             // shows (they scroll), so the code keeps its two lines inside the tile; the strip
             // and the banner's title never shrink.
-            // ## m4b-t22-pre (T21 r1): down to a floor that keeps the first notice's title
-            // whole, its buttons under the title, a focused button scrolled into view
-            // (`NoticeArea`).
-            .children(self.script.as_ref().and_then(|doc| {
-                if strip_shown {
-                    self.notice_area.render(doc, host, cx)
-                } else {
-                    crate::scripts::disk_bars::render(doc, cx)
-                        .map(|n| div().flex_none().child(n).into_any_element())
-                }
-            }))
+            // ## m4b-t22-pre (T21 r1); fix round 1 (ruling R-T22-1): the most severe notice's
+            // title and buttons keep a floor that gives way only to the strip; the others give
+            // way first (`NoticeArea`).
+            .children(match self.script.as_ref() {
+                Some(doc) if strip_shown => self.notice_area.render(doc, host, cx),
+                Some(doc) => crate::scripts::disk_bars::render(doc, cx)
+                    .map(|n| div().flex_none().child(n).into_any_element())
+                    .into_iter()
+                    .collect(),
+                None => Vec::new(),
+            })
             // ## m4b-t18-run-as-script (named exception; NOTES surface 9): the Run-as-script
             // strip, under the notices (never over a trust signal).
             // ## m4b-t21-shots (named exception, T18 concern): and under the T2 banner, as the
@@ -1832,7 +1849,14 @@ impl Render for ConsoleHost {
                     .clone()
                     .update(cx, |e, cx| e.banner_element(window, cx))
             }))
-            .children(strip.map(|s| div().flex_none().child(s)))
+            .children(strip.map(|s| {
+                div()
+                    .flex_none()
+                    // ## m4b-t22-pre fix round 1 (ruling R-T22-1)
+                    .relative()
+                    .child(s)
+                    .child(self.notice_area.strip_probe(host))
+            }))
             // ## m3c-t33-find (named exception): the find bar, a row under the toolbar
             // (design/m3b-safe surface 16, M3c-9).
             .children(

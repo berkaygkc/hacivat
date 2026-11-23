@@ -140,7 +140,12 @@ pub fn build_for(
     // ## m4b-t18-run-as-script (named exception; NOTES surface 9, ruling 8): on a T2 preview
     // the slot is Run as script, the toolbar's one Primary; plain Run is absent. While it runs
     // the strip shows the run, so the session's per-statement run state is not shown here.
-    let script = console.filter(|c| crate::scripts::run_as_script::offered(*c, cx));
+    // ## m4b-t22-pre fix round 1 (T22-pre review I1): while it runs, the slot is Stop (the
+    // run button below, `RunUx::Running`), which stops the whole run (`exec.cancel`).
+    let script_running = console.is_some_and(|c| crate::scripts::run_as_script::running(c, cx));
+    let script = console
+        .filter(|c| crate::scripts::run_as_script::offered(*c, cx))
+        .filter(|_| !script_running);
     if let Some(c) = script {
         bar = bar.item(
             ToolbarItem::pinned(
@@ -163,7 +168,7 @@ pub fn build_for(
     // ## m4b-t18-run-as-script
 
     // The run state.
-    if model.run != RunUx::Idle && script.is_none() {
+    if model.run != RunUx::Idle && script.is_none() && !script_running {
         let run = model.run;
         let label: TextFn = match run {
             RunUx::Cancelling => text_fn(ids::hv::CONSOLE_CANCELLING),

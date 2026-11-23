@@ -118,9 +118,12 @@ impl ProfileDataDoc {
         section.set_implicit(false);
         clear_positions(&mut section);
 
-        // ## m4b-t22-pre (T21 m12): how long the save waited for the lock, and wrote.
+        // ## m4b-t22-pre (T21 m12): how long the save waited for the lock, and wrote (debug
+        // builds only, fix round 1 m5).
+        #[cfg(debug_assertions)]
         let asked = std::time::Instant::now();
         let _writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(debug_assertions)]
         let locked = std::time::Instant::now();
         let (mut doc, layout) = read_doc(&self.path)?;
         if layout.mixed {
@@ -148,6 +151,7 @@ impl ProfileDataDoc {
             out.insert(0, BOM);
         }
         let written = fsio::atomic_write(&self.path, out.as_bytes()).map_err(ProfileDataError::Io);
+        #[cfg(debug_assertions)]
         timings::note(locked - asked, locked.elapsed());
         written?;
         self.doc = doc;
@@ -158,15 +162,23 @@ impl ProfileDataDoc {
 // ## m4b-t22-pre (named item, T21 m12)
 /// How long saves took in this process: for the diagnostics a test prints when a save it
 /// waited on timed out (the durable write syncs twice, under the process-wide lock). Nothing
-/// reads these to decide anything.
+/// reads these to decide anything. ## m4b-t22-pre fix round 1 (T22-pre review m5): kept in
+/// debug builds only (tests); a release build records nothing and reads zeros.
 pub mod timings {
+    #[cfg(debug_assertions)]
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(debug_assertions)]
     use std::time::Duration;
 
+    #[cfg(debug_assertions)]
     static SAVES: AtomicU64 = AtomicU64::new(0);
+    #[cfg(debug_assertions)]
     static LOCK_WAIT_MAX_US: AtomicU64 = AtomicU64::new(0);
+    #[cfg(debug_assertions)]
     static LOCKED_MAX_US: AtomicU64 = AtomicU64::new(0);
+    #[cfg(debug_assertions)]
     static LOCK_WAIT_LAST_US: AtomicU64 = AtomicU64::new(0);
+    #[cfg(debug_assertions)]
     static LOCKED_LAST_US: AtomicU64 = AtomicU64::new(0);
 
     /// The saves so far: how many, and the longest and the last wait for the lock and time
@@ -180,6 +192,7 @@ pub mod timings {
         pub locked_last_us: u64,
     }
 
+    #[cfg(debug_assertions)]
     pub(super) fn note(wait: Duration, locked: Duration) {
         let (wait, locked) = (micros(wait), micros(locked));
         SAVES.fetch_add(1, Ordering::Relaxed);
@@ -189,11 +202,19 @@ pub mod timings {
         LOCKED_LAST_US.store(locked, Ordering::Relaxed);
     }
 
+    #[cfg(debug_assertions)]
     fn micros(d: Duration) -> u64 {
         u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
     }
 
     /// The timings so far.
+    #[cfg(not(debug_assertions))]
+    pub fn get() -> SaveTimings {
+        SaveTimings::default()
+    }
+
+    /// The timings so far.
+    #[cfg(debug_assertions)]
     pub fn get() -> SaveTimings {
         SaveTimings {
             saves: SAVES.load(Ordering::Relaxed),
