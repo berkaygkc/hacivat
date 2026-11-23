@@ -88,8 +88,12 @@ pub(crate) fn is_plain_index_path(path: &[u8]) -> bool {
 /// so the rule is one pure function and is tested everywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathPrefix {
-    /// No prefix: a relative path, or one rooted on the current drive (`\x`, `/x`).
+    /// No prefix and no root: a relative path.
     None,
+    /// ## m4b-t20-adversarial fix round 5 (re-review m-fr4-3): rooted with no drive (`\x`, `/x`).
+    /// On Unix an absolute path; on Windows it resolves against the process's current drive,
+    /// which may be a share, so it is not local there.
+    Rooted,
     /// `C:\…` or `C:/…`, a drive path.
     Disk,
     /// `C:` or `C:x`, relative to that drive's current folder.
@@ -110,10 +114,11 @@ impl PathPrefix {
     /// Whether a path with this start may be handed to the filesystem: it stays on a local
     /// drive (a mapped or `subst` drive letter is the user's own setup, not the repository's).
     pub(crate) fn is_local(self) -> bool {
-        matches!(
-            self,
-            PathPrefix::None | PathPrefix::Disk | PathPrefix::VerbatimDisk
-        )
+        match self {
+            PathPrefix::None | PathPrefix::Disk | PathPrefix::VerbatimDisk => true,
+            PathPrefix::Rooted => !cfg!(windows),
+            _ => false,
+        }
     }
 
     pub(crate) fn has_prefix(self) -> bool {
@@ -156,6 +161,9 @@ pub(crate) fn path_prefix(text: &str) -> PathPrefix {
         } else {
             PathPrefix::DriveRelative
         };
+    }
+    if sep(0) {
+        return PathPrefix::Rooted;
     }
     PathPrefix::None
 }
@@ -688,8 +696,9 @@ mod tests {
             ("a/b", P::None),
             ("objects", P::None),
             ("../x", P::None),
-            ("/abs/x", P::None),
-            (r"\rooted\x", P::None),
+            ("/abs/x", P::Rooted),
+            (r"\rooted\x", P::Rooted),
+            ("/", P::Rooted),
             ("", P::None),
             (r"C:\x", P::Disk),
             ("c:/x", P::Disk),
@@ -724,21 +733,13 @@ mod tests {
             .filter(|(t, _)| path_prefix(t).is_local())
             .map(|(t, _)| *t)
             .collect();
-        assert_eq!(
-            local,
-            [
-                "a/b",
-                "objects",
-                "../x",
-                "/abs/x",
-                r"\rooted\x",
-                "",
-                r"C:\x",
-                "c:/x",
-                r"\\?\C:\x",
-                r"\\?\c:"
-            ]
-        );
+        // Fix round 5 (m-fr4-3): a rooted path with no drive is local on Unix only.
+        let mut want = vec!["a/b", "objects", "../x"];
+        if !cfg!(windows) {
+            want.extend(["/abs/x", r"\rooted\x", "/"]);
+        }
+        want.extend(["", r"C:\x", "c:/x", r"\\?\C:\x", r"\\?\c:"]);
+        assert_eq!(local, want);
     }
 
     // ## m4b-cifix-2-index-paths (review C2, R-CI2-2)

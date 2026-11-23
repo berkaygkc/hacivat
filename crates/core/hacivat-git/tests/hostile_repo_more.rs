@@ -720,6 +720,25 @@ fn no_repository_path_leaves_the_local_drives() {
             refused_locally(&r, &format!("{key} {start}"));
             write(&config, &kept);
         }
+
+        // Fix round 5 (re-review I-fr4-1): a nested repository in the library, which gix's
+        // untracked walk would probe; the whole library is refused, never a skip.
+        let sub = r.join("sub");
+        write(&sub.join(".git"), format!("gitdir: {start}\n").as_bytes());
+        refused_locally(&r, &format!("nested gitfile {start}"));
+        std::fs::remove_dir_all(&sub).unwrap();
+        for file in ["commondir", "gitdir"] {
+            let nest = r.join("nest");
+            write(&nest.join(".git/HEAD"), b"ref: refs/heads/main\n");
+            std::fs::create_dir_all(nest.join(".git/objects")).unwrap();
+            std::fs::create_dir_all(nest.join(".git/refs")).unwrap();
+            write(
+                &nest.join(".git").join(file),
+                format!("{start}\n").as_bytes(),
+            );
+            refused_locally(&r, &format!("nested {file} {start}"));
+            std::fs::remove_dir_all(&nest).unwrap();
+        }
     }
     // Restored, both read; a remote's URL on a share is an ordinary clone source and reads too.
     set(&config, "remote.origin.url", REMOTE_STARTS[0]);
@@ -805,6 +824,54 @@ fn the_guard_alone_refuses_a_working_double_slash_spelling() {
         status(&r, &GitLimits::default()),
         GitState::Ready(_)
     ));
+
+    // Fix round 5 (re-review I-fr4-1): nested repositories. The reviewer's proof: before the
+    // fix, a nested gitfile spelled `gitdir: //<real git dir>` was skipped by our check and
+    // followed by gix's untracked walk, so the badges showed the nested repository (`sub`).
+    // Now the whole library is refused; spelled `/…`, it reads and shows `sub`.
+    let inner = repo(&top, "inner").join(".git");
+    let lib = repo(&top, "lib");
+    let sub = lib.join("sub");
+    write(
+        &sub.join(".git"),
+        format!("gitdir: /{}\n", inner.display()).as_bytes(),
+    );
+    refused_locally(&lib, "twin nested gitfile");
+    write(
+        &sub.join(".git"),
+        format!("gitdir: {}\n", inner.display()).as_bytes(),
+    );
+    let st = status(&lib, &GitLimits::default());
+    fact(&format!(
+        "t20 remote_path case=control-nested-gitfile state={}",
+        format!("{st:?}").replace(' ', "")
+    ));
+    let GitState::Ready(s) = &st else {
+        panic!("control nested gitfile: {st:?}");
+    };
+    assert!(
+        format!("{:?}", s.by_path).contains(r#"GitPath("sub"): Unknown(Submodule)"#),
+        "the nested repository is seen through its gitfile: {st:?}"
+    );
+    std::fs::remove_dir_all(&sub).unwrap();
+    // A nested `.git` folder whose `commondir` (or `gitdir`) is spelled `//…`.
+    let nest = lib.join("nest");
+    git(&lib, &["init", "-q", "nest"]);
+    for (file, target) in [
+        ("commondir", nest.join(".git")),
+        ("gitdir", nest.join(".git")),
+    ] {
+        let p = nest.join(".git").join(file);
+        write(&p, format!("/{}\n", target.display()).as_bytes());
+        refused_locally(&lib, &format!("twin nested {file}"));
+        write(&p, format!("{}\n", target.display()).as_bytes());
+        let st = status(&lib, &GitLimits::default());
+        assert!(
+            matches!(st, GitState::Ready(_)),
+            "control nested {file}: {st:?}"
+        );
+        std::fs::remove_file(&p).unwrap();
+    }
 }
 
 /// Re-review I1-fr1 (b), defence in depth: a worker abandoned at its deadline (a stall here,

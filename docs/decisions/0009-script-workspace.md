@@ -1791,6 +1791,20 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
       - `hostile_repo_more.rs` `no_repository_path_leaves_the_local_drives`: alternates, gitfile, `commondir`, `gitdir` back-pointer, `core.worktree` and `core.excludesFile`, each crossed with six starts that name a nonexistent `.invalid` host. Each answers `Redirected`. On Windows each start must also be `is_absolute` and refused within 2 s. Restored, both repositories read, and a remote URL on a share reads too;
       - `the_guard_alone_refuses_a_working_double_slash_spelling` (Unix): `//<a real local folder>` is a working POSIX spelling, so only the guard refuses it. Each source gives `Redirected`, and `/…` gives `Ready`.
       - Both repository tests go RED with the guard answering `true`.
+  - **Fix round 5 (re-review fr4).**
+    - **I-fr4-1: nested repositories.** gix's untracked walk runs `gix_discover::is_git` on every nested folder that holds a `.git`.
+      - For a gitfile it reads `gitdir:`, then checks `<target>/HEAD` and the target's `commondir`.
+      - For a `.git` folder it reads `commondir` and `gitdir` and checks the paths they name.
+      - Our pre-walk skipped a guarded gitfile target, and never read a nested folder's `commondir`.
+      - Now `trust::check_nested` applies `local_spelling` to all three, before the gix status runs: the gitfile's `gitdir:` (the parsed target and the whole text), the target's `commondir`, and the folder's `commondir` and `gitdir` (`nested_pointer`). Any refusal answers `Unavailable(Redirected)` for the **whole library**, never a skip. A pointer that is not a small regular file (a FIFO gix would block on, say) is refused the same way, and a placeholder answers `Dataless`.
+      - The reviewer's proof is now an assertion. A nested `sub/.git` reading `gitdir: //<real git dir>` showed `sub: Unknown(Submodule)` in the badges (still RED with the check off). It now answers `Redirected`, and the `/…` control shows `sub`.
+    - **m-fr4-2: links.** `trust::resolve` walks the joined path component by component before `canonicalize`, using `symlink_metadata` and `read_link`. Every link target must be a `local_spelling`, so on Unix a `//` target is refused too.
+      - More than 40 links (`LINK_HOPS_MAX`), or an unreadable link, refuses.
+      - A missing component ends the walk, since `canonicalize` then fails and nothing is followed.
+      - Unit test: `a_link_to_a_network_spelling_is_never_followed` checks a link at the start, in the middle, after a relative hop, after `..`, and a loop. A local chain still resolves.
+    - **m-fr4-3: rooted with no drive.** `PathPrefix::Rooted` (`\x`, `/x`) is local on Unix only. On Windows it resolves against the process's current drive, which may be a share. The classifier table is updated.
+    - **m-fr4-1: never-path config keys.** `user.*` and `core.comment*` are skipped, along with the `remote`, `submodule` and `url` sections.
+      - **Known false-positive class (accepted, fail closed):** any other value that only *starts* like a network or device path refuses the whole library, even when gix never reads it as a path. Examples are an `alias.*` starting `//`, or a custom key holding a share path. The badges are cosmetic, and a key-by-key allow-list would miss a path key added in a later gix.
   - **Residual (m-fr3-1): a live local writer.** R-T20-2 checks that a vetted alternate has no `info/alternates` before gix opens the store, and gix reads the folder again during the open. A local process that creates and removes that file in the gap can make gix follow one nested file, which can cost one `Timeout`. This is bounded:
     - by the 5 s budget;
     - by one worker per library;

@@ -141,7 +141,62 @@ fn resolve(base: &Path, text: &str) -> Option<PathBuf> {
     } else {
         base.join(p)
     };
+    // ## m4b-t20-adversarial fix round 5 (named line, re-review m-fr4-2)
+    if !link_targets_stay_local(&p) {
+        return None;
+    }
     std::fs::canonicalize(p).ok().filter(|c| c.is_dir())
+}
+
+// ## m4b-t20-adversarial fix round 5 (named exception, re-review m-fr4-2)
+/// The most symbolic links one resolution follows (Linux's `MAXSYMLINKS`; macOS stops at 32).
+const LINK_HOPS_MAX: usize = 40;
+
+/// Walks `path` component by component, as `canonicalize` will, with `symlink_metadata` and
+/// `read_link`, and answers whether every link target on the way is a [`local_spelling`]: a
+/// local folder may itself be a link to `\\host\share` (or, on Unix, to `//host`), which
+/// `canonicalize` would follow. A missing component ends the walk (`canonicalize` then fails
+/// and nothing is followed); more than [`LINK_HOPS_MAX`] links, or an unreadable link, refuse.
+fn link_targets_stay_local(path: &Path) -> bool {
+    let segments =
+        |p: &Path| -> Vec<PathBuf> { p.components().rev().map(|c| c.as_os_str().into()).collect() };
+    let mut todo = segments(path);
+    let mut cur = PathBuf::new();
+    let mut hops = 0usize;
+    while let Some(seg) = todo.pop() {
+        if seg.as_os_str() == "." {
+            continue;
+        }
+        if seg.as_os_str() == ".." {
+            cur.pop();
+            continue;
+        }
+        cur.push(&seg);
+        // A prefix (`C:`, `\\?\C:`) or the root is no link to look at, and `lstat` of a bare
+        // verbatim prefix fails, which would end the walk early.
+        if matches!(
+            Path::new(&seg).components().next(),
+            Some(std::path::Component::Prefix(_) | std::path::Component::RootDir)
+        ) {
+            continue;
+        }
+        let Ok(md) = std::fs::symlink_metadata(&cur) else {
+            return true;
+        };
+        if !md.file_type().is_symlink() {
+            continue;
+        }
+        hops += 1;
+        let Ok(target) = std::fs::read_link(&cur) else {
+            return false;
+        };
+        if hops > LINK_HOPS_MAX || !local_spelling(&target.to_string_lossy()) {
+            return false;
+        }
+        cur.pop();
+        todo.extend(segments(&target));
+    }
+    true
 }
 
 /// The checks before the open. `Err` is the state to answer. Every small file read here (a
@@ -624,6 +679,12 @@ fn check_nested(dot_git: &Path, placeholder: Placeholder<'_>) -> Result<(), GitS
         regular_capped(head, REF_MAX).map(|_| ())
     };
     if ft.is_dir() {
+        // ## m4b-t20-adversarial fix round 5 (named lines, re-review I-fr4-1): gix's untracked
+        // walk runs `gix_discover::is_git` here, which reads this folder's `commondir` and
+        // `gitdir` and checks paths they name. Either one off the local drives refuses the
+        // whole library, never a skip.
+        nested_pointer(&dot_git.join("commondir"), placeholder)?;
+        nested_pointer(&dot_git.join("gitdir"), placeholder)?;
         return head_ok(&dot_git.join("HEAD"));
     }
     if !ft.is_file() {
@@ -638,11 +699,36 @@ fn check_nested(dot_git: &Path, placeholder: Placeholder<'_>) -> Result<(), GitS
         .and_then(|l| l.strip_prefix("gitdir:"))
         .map(str::trim)
         .unwrap_or("");
+    // ## m4b-t20-adversarial fix round 5 (named lines, I-fr4-1): the gitfile's target, also as
+    // the whole text (gix reads it whatever our parse makes of it), refuses the whole library;
+    // so does the target's `commondir`, which gix reads too.
+    let whole = text.strip_prefix("gitdir:").unwrap_or(&text);
+    if !local_spelling(target) || !local_spelling(whole) {
+        return redirected();
+    }
     let base = dot_git.parent().unwrap_or(dot_git);
     if let Some(t) = resolve(base, target) {
+        nested_pointer(&t.join("commondir"), placeholder)?;
         head_ok(&t.join("HEAD"))?;
     }
     Ok(())
+}
+
+// ## m4b-t20-adversarial fix round 5 (named exception, re-review I-fr4-1)
+/// A nested repository's pointer file (`commondir`, `gitdir`), as gix's discovery reads it:
+/// absent, or a small regular file whose text stays on the local drives. A placeholder answers
+/// `Dataless`; anything else (a FIFO gix would block on included) answers `Redirected`.
+fn nested_pointer(file: &Path, placeholder: Placeholder<'_>) -> Result<(), GitState> {
+    if placeholder(file) {
+        return dataless();
+    }
+    if !exists(file) {
+        return Ok(());
+    }
+    match small_text(file) {
+        Some(text) if local_spelling(&text) => Ok(()),
+        _ => redirected(),
+    }
 }
 
 /// m10: the owners checked before the open, checked again on what gix opened.
@@ -888,7 +974,10 @@ fn repository_configs(
 /// `core.attributesFile` or any other key gix may read as a path. Every value is checked, not a
 /// list of keys, so a key added in a later gix is covered too; only the `remote`, `submodule`
 /// and `url` sections are left out: their values are fetch locations (a clone from
-/// `\\server\git\repo.git` is ordinary), which a status never opens. A config that cannot be
+/// `\\server\git\repo.git` is ordinary), which a status never opens; and (fix round 5) the
+/// never-path keys `user.*` and `core.comment*`. Any other value that merely starts like a
+/// network path (a `//` alias, say) refuses the library: a known false-positive class, fail
+/// closed. A config that cannot be
 /// read answers `true` (fail closed; [`unsupported_format`] refuses it first anyway).
 pub(crate) fn config_names_a_remote_path(git_dir: &Path, common_dir: &Path) -> bool {
     use gix::bstr::ByteSlice as _;
@@ -900,9 +989,18 @@ pub(crate) fn config_names_a_remote_path(git_dir: &Path, common_dir: &Path) -> b
             let fetch_only = ["remote", "submodule", "url"]
                 .iter()
                 .any(|n| s.header().name().eq_ignore_ascii_case(n.as_bytes()));
+            // ## m4b-t20-adversarial fix round 5 (named lines, re-review m-fr4-1): keys that are
+            // never paths are skipped too, `user.*` and `core.comment*` (a name or a comment
+            // marker may start with `//`).
+            let never_paths = s.header().name().eq_ignore_ascii_case(b"user");
+            let comment = |name: &str| {
+                s.header().name().eq_ignore_ascii_case(b"core")
+                    && name.to_ascii_lowercase().starts_with("comment")
+            };
             let body = s.body();
             !fetch_only
-                && body.value_names().any(|name| {
+                && !never_paths
+                && body.value_names().filter(|n| !comment(n)).any(|name| {
                     body.values(&name)
                         .iter()
                         .any(|v| !local_spelling(&v.to_str_lossy()))
@@ -1063,6 +1161,42 @@ mod tests {
         );
     }
 
+    // ## m4b-t20-adversarial fix round 5 (re-review m-fr4-2)
+    /// A local spelling that goes through a link to `//…` is refused before `canonicalize`
+    /// follows it: at the start, in the middle, after a relative hop and after `..`. A loop of
+    /// links is refused too (past `LINK_HOPS_MAX`); a plain chain of local links resolves.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_network_spelling_is_never_followed() {
+        use std::os::unix::fs::symlink;
+        let (_t, top) = top();
+        let real = top.join("real");
+        std::fs::create_dir_all(real.join("objects")).unwrap();
+        let double = format!("/{}", real.display());
+        symlink(&double, top.join("net")).unwrap();
+        symlink("net", top.join("hop")).unwrap();
+        symlink(&real, top.join("ok1")).unwrap();
+        symlink("ok1", top.join("ok2")).unwrap();
+        symlink("loop2", top.join("loop1")).unwrap();
+        symlink("loop1", top.join("loop2")).unwrap();
+        for text in [
+            "net",
+            "net/objects",
+            "hop/objects",
+            "real/../net/objects",
+            "loop1",
+        ] {
+            assert_eq!(resolve(&top, text), None, "{text}");
+        }
+        assert_eq!(
+            resolve(&top, "ok2/objects"),
+            Some(real.join("objects")),
+            "a local chain resolves"
+        );
+        // Without the walk, `canonicalize` follows `//<real>` (a working POSIX spelling).
+        assert!(std::fs::canonicalize(top.join("net/objects")).is_ok());
+    }
+
     // ## m4b-t20-adversarial fix round 4 (re-review I-fr3-1)
     /// The guard reads raw and trimmed text: a leading space never hides a UNC start.
     #[test]
@@ -1078,9 +1212,12 @@ mod tests {
         ] {
             assert!(!local_spelling(text), "{text:?}");
         }
-        for text in ["../x", "/abs/objects", r"C:\x", r"\\?\C:\x", " objects\n"] {
+        for text in ["../x", r"C:\x", r"\\?\C:\x", " objects\n"] {
             assert!(local_spelling(text), "{text:?}");
         }
+        // Fix round 5 (m-fr4-3): rooted with no drive is the process's drive on Windows.
+        assert_eq!(local_spelling("/abs/objects"), !cfg!(windows));
+        assert_eq!(local_spelling(r"\abs\objects"), !cfg!(windows));
         // `resolve` never reaches the filesystem with one.
         assert_eq!(
             resolve(Path::new("/"), "//hv-t20-nohost.invalid/share"),
