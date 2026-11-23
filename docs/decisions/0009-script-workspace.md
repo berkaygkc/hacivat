@@ -1769,6 +1769,33 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
       - `only_single_level_absolute_alternates_are_read`: one absolute alternate gives `Ready`. A nested file (empty, one line, or 1,000 lines), a relative entry and CRLF each give `Redirected`.
     - The earlier rows were kept under the rule. The fan-out's `clone --shared` case removes the alternate's own file. The repeated-line test reads 16 copies of an absolute entry.
     - m-fr2-1: `an_overrun_backs_off_then_retries` uses a 3 s backoff, so a loaded runner still lands inside it.
+  - **Repository paths never leave the local drives (fix round 4, re-review I-fr3-1; Review Focus 3).**
+    - **The problem.** On Windows, a `\\host\share\…` or `\\?\UNC\…` path counts as absolute. It could arrive in an alternates entry, a gitfile's `gitdir:` or a `commondir`. `canonicalize` then opened it over SMB, which sends the user's NTLM credentials, on attach and with no user action.
+    - **One rule.** `map::path_prefix` classifies a path text by how it starts, read as Windows reads it. It is a pure function and reads the same on every OS. `PathPrefix::is_local` admits:
+      - no prefix (a relative path, or one rooted on the current drive);
+      - a drive path (`C:\`);
+      - the verbatim drive path a canonical library root itself uses (`\\?\C:\`).
+    - It refuses UNC (`\\host`, `//host`, mixed separators), verbatim UNC, the device and object namespaces (`\\.\`, `//./`, `\??\`, and `\\?\` followed by anything but a drive), and drive-relative `C:x`.
+    - R-CI2-2's index-path guard uses the same classifier: on Windows an index path has no prefix at all. There is no second copy of the rule.
+    - **The guard** (`trust::local_spelling`, which checks the raw and the trimmed text) runs before any filesystem call on every path text the repository hands us:
+      - inside `trust::resolve`: the gitfile's `gitdir:`, `commondir`, alternates entries and a nested `.git`'s target;
+      - a linked worktree's `gitdir` back-pointer, which gix's discovery may read;
+      - every value in the repository's own `config` and `config.worktree` (`trust::config_names_a_remote_path`, run before the open). That covers `core.worktree`, `core.excludesFile`, `core.attributesFile` and any key a later gix reads. The only sections left out are `remote`, `submodule` and `url`: their values are fetch locations a status never opens, and a clone from `\\server\git\repo.git` is ordinary.
+      - A refusal answers `Unavailable(Redirected)`.
+    - The guard runs on every OS. It fails closed, since no real repository on Unix names `//host`.
+    - A symbolic ref's name may no longer hold `:` (git's ref names never do), so no join follows a drive.
+    - **Residual:** a mapped or `subst` drive letter (`Z:\`) passes. The user set that drive up and chose its host; the repository cannot choose it.
+    - **Tests:**
+      - `map::tests::path_prefixes_are_classified_as_windows_reads_them`, the pure classifier, runs on every OS;
+      - `trust::tests::local_spelling_refuses_every_network_and_device_start`;
+      - `hostile_repo_more.rs` `no_repository_path_leaves_the_local_drives`: alternates, gitfile, `commondir`, `gitdir` back-pointer, `core.worktree` and `core.excludesFile`, each crossed with six starts that name a nonexistent `.invalid` host. Each answers `Redirected`. On Windows each start must also be `is_absolute` and refused within 2 s. Restored, both repositories read, and a remote URL on a share reads too;
+      - `the_guard_alone_refuses_a_working_double_slash_spelling` (Unix): `//<a real local folder>` is a working POSIX spelling, so only the guard refuses it. Each source gives `Redirected`, and `/…` gives `Ready`.
+      - Both repository tests go RED with the guard answering `true`.
+  - **Residual (m-fr3-1): a live local writer.** R-T20-2 checks that a vetted alternate has no `info/alternates` before gix opens the store, and gix reads the folder again during the open. A local process that creates and removes that file in the gap can make gix follow one nested file, which can cost one `Timeout`. This is bounded:
+    - by the 5 s budget;
+    - by one worker per library;
+    - by the overrun backoff (30 s, doubling).
+    - It needs a process already running as the user, which is outside the hostile-library model: hostile files, not a hostile live process. It is not fixed.
   - **N3 (cifix-2 re-review): a library inside a bigger repository.** `GitStatus::index_lock` carries the validated outer git dir's `index.lock` (none when the git dir is the library's own `.git` folder). The service hands it to the watcher (`Watcher::set_outer_lock`), and the reconciler `lstat`s it at most once a window while counted hints arrive, treating it held exactly like the local lock. Nothing outside the library is watched; the path is never derived from the index or the worktree. **Fix round 1 (review m3):** every status re-arms it, a status that is not `Ready` drops it (a path no status validates now is not looked at), and a watcher started after the status (a re-attach, an adoption, a watch-mode switch) gets the latest status's path when it starts. Test: `hostile_library.rs` `git_the_outer_index_lock_reaches_every_watcher_and_leaves_with_the_status`, end to end through the service. It goes red when a non-`Ready` status keeps the path. The restart leg cannot isolate the start hand-off, because the restart's rescan also refreshes the status. **Fix round 2 (re-review m3-fr1):**
     - Only a state that means the repository is no longer the validated one drops the lock: `NotARepo`, `Untrusted`, `Redirected`, `Unsupported`, `TrustPromoted` or `Failed`, or the library itself made unavailable (gone or replaced).
     - A passing `Timeout`, `Paused`, `TooLarge` or `Dataless` keeps it. Its layout was validated before, and dropping the lock would end a checkout's burst early in the very monorepos N3 is for.

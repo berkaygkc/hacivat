@@ -280,6 +280,11 @@ fn pipeline(
     if trust::unsupported_format(&layout.git_dir, &layout.common_dir) {
         return GitState::Unavailable(GitError::Unsupported);
     }
+    // ## m4b-t20-adversarial fix round 4 (named lines, I-fr3-1): no config value gix may open
+    // as a path leaves the local drives.
+    if trust::config_names_a_remote_path(&layout.git_dir, &layout.common_dir) {
+        return GitState::Unavailable(GitError::Redirected);
+    }
     // I3 (R-T7-2), after the format check: a reftable repository has a file at `refs/heads`.
     if let Err(st) = trust::check_repository_files(&layout, &placeholder) {
         return st;

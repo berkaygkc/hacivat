@@ -14,7 +14,9 @@
 //!   R-T20-2: anything but at most 16 trimmed absolute entries with no alternates of their
 //!   own), are
 //!   refused: `Unavailable(Redirected)`. Linked worktrees and `clone --shared` repositories
-//!   are read under the same isolated, reduced-trust open (n2).
+//!   are read under the same isolated, reduced-trust open (n2). Every path text the repository
+//!   supplies (gitfile, `commondir`, `gitdir`, alternates, config values) must stay on a local
+//!   drive, checked before any filesystem call on it (m4b-t20 fix round 4, [`local_spelling`]).
 //!
 //! After the open: `git_dir_trust() == Reduced`, and no repository-kind config section has full
 //! trust (gix can promote single sections when a `safe.directory` matches the config file),
@@ -117,7 +119,22 @@ fn exists(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok()
 }
 
+// ## m4b-t20-adversarial fix round 4 (named exception, re-review I-fr3-1; Review Focus 3)
+/// The guard on every path text the repository hands us (a gitfile's `gitdir:`, `commondir`,
+/// a linked worktree's `gitdir` back-pointer, an alternates entry, a nested `.git`'s target,
+/// a config value), applied **before any filesystem call** on it: only a spelling that stays
+/// on a local drive passes ([`map::PathPrefix::is_local`]). A UNC, verbatim UNC or device path
+/// would make Windows contact a host over SMB and send the user's NTLM credentials, on attach,
+/// with no user action. Read the same way on every OS (fail closed: no real repository on Unix
+/// names `//host` or `\\host`), raw and trimmed, since gix trims some texts and not others.
+pub(crate) fn local_spelling(text: &str) -> bool {
+    crate::map::path_prefix(text).is_local() && crate::map::path_prefix(text.trim()).is_local()
+}
+
 fn resolve(base: &Path, text: &str) -> Option<PathBuf> {
+    if !local_spelling(text) {
+        return None;
+    }
     let p = Path::new(text);
     let p = if p.is_absolute() {
         p.to_path_buf()
@@ -422,8 +439,11 @@ fn check_symref_chain(
     let Some(name) = text.strip_prefix("ref:").map(str::trim) else {
         return Ok(()); // a detached HEAD names an object id
     };
+    // ## m4b-t20-adversarial fix round 4 (named line, I-fr3-1): no `:` either (git's ref names
+    // never hold one), so no component is a drive that a join would follow.
     let valid = name.starts_with("refs/")
         && !name.contains('\\')
+        && !name.contains(':')
         && name
             .split('/')
             .all(|c| !c.is_empty() && c != "." && c != "..");
@@ -680,6 +700,12 @@ fn gitfile_layout(
         let Some(text) = small_text(&commondir) else {
             return redirected();
         };
+        // ## m4b-t20-adversarial fix round 4 (named lines, I-fr3-1): gix's discovery may read
+        // the `gitdir` back-pointer as the worktree's path; it names a local path or nothing.
+        let back_pointer = t.join("gitdir");
+        if exists(&back_pointer) && !small_text(&back_pointer).is_some_and(|b| local_spelling(&b)) {
+            return redirected();
+        }
         let back = resolve(&t, text.trim());
         return match (common, back) {
             (Some(c), Some(b)) if c == b => Ok(Layout {
@@ -823,6 +849,24 @@ pub(crate) fn check_resolved(
 /// for the git dir's `config.worktree` when present.
 pub(crate) fn unsupported_format(git_dir: &Path, common_dir: &Path) -> bool {
     use gix::bstr::ByteSlice as _;
+    let Some((file, _)) = repository_configs(git_dir, common_dir) else {
+        return true;
+    };
+    let other = |key: &str, ok: &str| {
+        file.string(key)
+            .is_some_and(|v| !v.trim().eq_ignore_ascii_case(ok.as_bytes()))
+    };
+    other("extensions.objectFormat", "sha1") || other("extensions.refStorage", "files")
+}
+
+/// The repository's own config files as written (no includes, whatever their trust): the
+/// common dir's `config` (required) and the git dir's `config.worktree` (when present). `None`
+/// when one cannot be read: missing (`config`), not a regular file, over [`TEXT_MAX`], or not
+/// parseable.
+fn repository_configs(
+    git_dir: &Path,
+    common_dir: &Path,
+) -> Option<(gix::config::File, Option<gix::config::File>)> {
     let parse = |path: PathBuf, required: bool| -> Result<Option<gix::config::File>, ()> {
         match regular_capped(&path, TEXT_MAX) {
             Ok(true) => {}
@@ -833,17 +877,38 @@ pub(crate) fn unsupported_format(git_dir: &Path, common_dir: &Path) -> bool {
             .map(Some)
             .map_err(|_| ())
     };
-    let Ok(Some(file)) = parse(common_dir.join("config"), true) else {
+    let file = parse(common_dir.join("config"), true).ok()??;
+    let worktree = parse(git_dir.join("config.worktree"), false).ok()?;
+    Some((file, worktree))
+}
+
+// ## m4b-t20-adversarial fix round 4 (named exception, re-review I-fr3-1)
+/// Whether any value of the repository's own config files is a path text that does not stay
+/// on a local drive ([`local_spelling`]): `core.worktree`, `core.excludesFile`,
+/// `core.attributesFile` or any other key gix may read as a path. Every value is checked, not a
+/// list of keys, so a key added in a later gix is covered too; only the `remote`, `submodule`
+/// and `url` sections are left out: their values are fetch locations (a clone from
+/// `\\server\git\repo.git` is ordinary), which a status never opens. A config that cannot be
+/// read answers `true` (fail closed; [`unsupported_format`] refuses it first anyway).
+pub(crate) fn config_names_a_remote_path(git_dir: &Path, common_dir: &Path) -> bool {
+    use gix::bstr::ByteSlice as _;
+    let Some((file, worktree)) = repository_configs(git_dir, common_dir) else {
         return true;
     };
-    if parse(git_dir.join("config.worktree"), false).is_err() {
-        return true;
-    }
-    let other = |key: &str, ok: &str| {
-        file.string(key)
-            .is_some_and(|v| !v.trim().eq_ignore_ascii_case(ok.as_bytes()))
-    };
-    other("extensions.objectFormat", "sha1") || other("extensions.refStorage", "files")
+    std::iter::once(&file).chain(worktree.as_ref()).any(|f| {
+        f.sections().any(|s| {
+            let fetch_only = ["remote", "submodule", "url"]
+                .iter()
+                .any(|n| s.header().name().eq_ignore_ascii_case(n.as_bytes()));
+            let body = s.body();
+            !fetch_only
+                && body.value_names().any(|name| {
+                    body.values(&name)
+                        .iter()
+                        .any(|v| !local_spelling(&v.to_str_lossy()))
+                })
+        })
+    })
 }
 // ## m4b-t07-git
 
@@ -995,6 +1060,31 @@ mod tests {
                 .unwrap_err()
                 .into_cmp(),
             GitState::Unavailable(GitError::Redirected).into_cmp()
+        );
+    }
+
+    // ## m4b-t20-adversarial fix round 4 (re-review I-fr3-1)
+    /// The guard reads raw and trimmed text: a leading space never hides a UNC start.
+    #[test]
+    fn local_spelling_refuses_every_network_and_device_start() {
+        for text in [
+            r"\\host\share",
+            r" \\host\share",
+            "\t//host/share\n",
+            r"\\?\UNC\host\share",
+            r"\\.\pipe\x",
+            r"\??\UNC\host\share",
+            "C:x",
+        ] {
+            assert!(!local_spelling(text), "{text:?}");
+        }
+        for text in ["../x", "/abs/objects", r"C:\x", r"\\?\C:\x", " objects\n"] {
+            assert!(local_spelling(text), "{text:?}");
+        }
+        // `resolve` never reaches the filesystem with one.
+        assert_eq!(
+            resolve(Path::new("/"), "//hv-t20-nohost.invalid/share"),
+            None
         );
     }
 

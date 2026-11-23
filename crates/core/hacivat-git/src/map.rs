@@ -65,7 +65,11 @@ pub(crate) fn is_plain_index_path(path: &[u8]) -> bool {
         protect_ntfs: cfg!(windows),
         protect_hfs: cfg!(target_os = "macos"),
     };
+    // ## m4b-t20-adversarial fix round 4 (named line, I-fr3-1): the one prefix rule, shared with
+    // the repository's own path texts (`trust`); on Windows an index path has no prefix at all.
+    let no_prefix = || !cfg!(windows) || path.to_str().is_ok_and(|s| !path_prefix(s).has_prefix());
     !path.is_empty()
+        && no_prefix()
         && path.split(|b| *b == b'/').all(|c| {
             !c.contains(&0)
                 && gix::validate::path::component(c.as_bstr(), None, host).is_ok()
@@ -77,6 +81,83 @@ pub(crate) fn is_plain_index_path(path: &[u8]) -> bool {
                     )
                 })
         })
+}
+
+// ## m4b-t20-adversarial fix round 4 (named exception, re-review I-fr3-1; Review Focus 3)
+/// How a path text starts, read the way Windows reads it. The reading is the same on every OS,
+/// so the rule is one pure function and is tested everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathPrefix {
+    /// No prefix: a relative path, or one rooted on the current drive (`\x`, `/x`).
+    None,
+    /// `C:\…` or `C:/…`, a drive path.
+    Disk,
+    /// `C:` or `C:x`, relative to that drive's current folder.
+    DriveRelative,
+    /// `\\?\C:\…`: the verbatim drive path that a canonical library root itself uses.
+    VerbatimDisk,
+    /// `\\host\share`, `//host/share`: Windows contacts the host over SMB and sends the user's
+    /// NTLM credentials.
+    Unc,
+    /// `\\?\UNC\host\share`, the same contact.
+    VerbatimUnc,
+    /// The device and object namespaces: `\\.\…`, `//./…`, `\??\…`, and `\\?\` followed by
+    /// anything but a drive or `UNC`.
+    Device,
+}
+
+impl PathPrefix {
+    /// Whether a path with this start may be handed to the filesystem: it stays on a local
+    /// drive (a mapped or `subst` drive letter is the user's own setup, not the repository's).
+    pub(crate) fn is_local(self) -> bool {
+        matches!(
+            self,
+            PathPrefix::None | PathPrefix::Disk | PathPrefix::VerbatimDisk
+        )
+    }
+
+    pub(crate) fn has_prefix(self) -> bool {
+        self != PathPrefix::None
+    }
+}
+
+/// The [`PathPrefix`] of `text` (`\` and `/` are both separators, except in the verbatim
+/// `\\?\` form, which Windows reads only with backslashes).
+pub(crate) fn path_prefix(text: &str) -> PathPrefix {
+    let b = text.as_bytes();
+    let sep = |i: usize| b.get(i).is_some_and(|c| matches!(c, b'\\' | b'/'));
+    let drive =
+        |i: usize| b.get(i).is_some_and(u8::is_ascii_alphabetic) && b.get(i + 1) == Some(&b':');
+    if b.starts_with(br"\??\") {
+        return PathPrefix::Device;
+    }
+    if sep(0) && sep(1) {
+        if b.starts_with(br"\\?\") {
+            let rest = &b[4..];
+            let unc = rest.len() >= 3
+                && rest[..3].eq_ignore_ascii_case(b"UNC")
+                && matches!(rest.get(3), None | Some(b'\\'));
+            if unc {
+                return PathPrefix::VerbatimUnc;
+            }
+            if drive(4) && matches!(b.get(6), None | Some(b'\\')) {
+                return PathPrefix::VerbatimDisk;
+            }
+            return PathPrefix::Device;
+        }
+        if matches!(b.get(2), Some(b'.' | b'?')) && (sep(3) || b.len() == 3) {
+            return PathPrefix::Device;
+        }
+        return PathPrefix::Unc;
+    }
+    if drive(0) {
+        return if sep(2) {
+            PathPrefix::Disk
+        } else {
+            PathPrefix::DriveRelative
+        };
+    }
+    PathPrefix::None
 }
 
 /// An index folder spelling that n2 may compare with the library folder: plain
@@ -596,6 +677,68 @@ mod tests {
         let p = t.path().join("a.sql");
         std::fs::write(&p, b"select 1;\n").unwrap();
         assert!(!is_dataless(&std::fs::symlink_metadata(&p).unwrap()));
+    }
+
+    // ## m4b-t20-adversarial fix round 4 (re-review I-fr3-1)
+    /// The prefix classifier, pure and the same on every OS.
+    #[test]
+    fn path_prefixes_are_classified_as_windows_reads_them() {
+        use PathPrefix as P;
+        let cases = [
+            ("a/b", P::None),
+            ("objects", P::None),
+            ("../x", P::None),
+            ("/abs/x", P::None),
+            (r"\rooted\x", P::None),
+            ("", P::None),
+            (r"C:\x", P::Disk),
+            ("c:/x", P::Disk),
+            ("C:", P::DriveRelative),
+            ("C:x", P::DriveRelative),
+            (r"\\?\C:\x", P::VerbatimDisk),
+            (r"\\?\c:", P::VerbatimDisk),
+            (r"\\host\share\x", P::Unc),
+            ("//host/share/x", P::Unc),
+            (r"\/host\share", P::Unc),
+            (r"/\host/share", P::Unc),
+            (r"\\", P::Unc),
+            (r"\\?\UNC\host\share\x", P::VerbatimUnc),
+            (r"\\?\unc\host\share", P::VerbatimUnc),
+            (r"\\?\UNC", P::VerbatimUnc),
+            (r"\\.\pipe\x", P::Device),
+            (r"\\.\UNC\host\share", P::Device),
+            ("//./c:/x", P::Device),
+            (r"\\.", P::Device),
+            (r"\??\UNC\host\share", P::Device),
+            (r"\??\C:\x", P::Device),
+            (r"\\?\GLOBALROOT\Device\Mup\host\share", P::Device),
+            (r"\\?\Volume{0}\x", P::Device),
+            ("//?/C:/x", P::Device),
+            (r"\\?\C:x", P::Device),
+        ];
+        for (text, want) in cases {
+            assert_eq!(path_prefix(text), want, "{text:?}");
+        }
+        let local: Vec<&str> = cases
+            .iter()
+            .filter(|(t, _)| path_prefix(t).is_local())
+            .map(|(t, _)| *t)
+            .collect();
+        assert_eq!(
+            local,
+            [
+                "a/b",
+                "objects",
+                "../x",
+                "/abs/x",
+                r"\rooted\x",
+                "",
+                r"C:\x",
+                "c:/x",
+                r"\\?\C:\x",
+                r"\\?\c:"
+            ]
+        );
     }
 
     // ## m4b-cifix-2-index-paths (review C2, R-CI2-2)

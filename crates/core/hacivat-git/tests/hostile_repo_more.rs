@@ -642,6 +642,171 @@ fn only_single_level_absolute_alternates_are_read() {
     refused_twice(&r, "crlf");
 }
 
+// ## m4b-t20-adversarial fix round 4 (re-review I-fr3-1; Review Focus 3: badges never touch
+// the network)
+
+/// The network and device starts, each naming a host that does not exist (`.invalid` never
+/// resolves): a status that touched one would wait on name resolution and SMB.
+const REMOTE_STARTS: [&str; 6] = [
+    r"\\hv-t20-nohost.invalid\share\objects",
+    "//hv-t20-nohost.invalid/share/objects",
+    r"\\?\UNC\hv-t20-nohost.invalid\share\objects",
+    r"\\.\UNC\hv-t20-nohost.invalid\share\objects",
+    r"\??\UNC\hv-t20-nohost.invalid\share\objects",
+    r"\\?\GLOBALROOT\Device\Mup\hv-t20-nohost.invalid\share\objects",
+];
+
+/// One status of `r`: `Redirected`, and (on Windows, where the start means a host) at once.
+fn refused_locally(r: &Path, what: &str) {
+    let started = std::time::Instant::now();
+    let st = status(r, &GitLimits::default());
+    let took = started.elapsed();
+    fact(&format!(
+        "t20 remote_path case={what} ms={} state={}",
+        took.as_millis(),
+        format!("{st:?}").replace(' ', "")
+    ));
+    assert!(
+        matches!(st, GitState::Unavailable(GitError::Redirected)),
+        "{what}: {st:?}"
+    );
+    #[cfg(windows)]
+    assert!(took < std::time::Duration::from_secs(2), "{what}: {took:?}");
+}
+
+/// Every repository-supplied path text × every network or device start: alternates entries,
+/// a gitfile's `gitdir:`, a linked worktree's `commondir` and `gitdir` back-pointer, and config
+/// values gix may open as paths (`core.worktree`, `core.excludesFile`). Each answers
+/// `Redirected` before anything opens it; with each restored the repository reads again. On
+/// Windows each start is an absolute path, so only the guard stands between it and SMB; the
+/// same rule runs (and is tested) on every OS.
+#[test]
+fn no_repository_path_leaves_the_local_drives() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let r = repo(&top, "repo");
+    git(&r, &["worktree", "add", "-q", "../wt"]);
+    let wt = top.join("wt");
+    let private = r.join(".git/worktrees/wt");
+    let gf = top.join("gf");
+    std::fs::create_dir_all(&gf).unwrap();
+    let alternates = r.join(".git/objects/info/alternates");
+    let config = r.join(".git/config");
+    for start in REMOTE_STARTS {
+        // Rust reads `\??\` as rooted, not prefixed; Win32 passes it through as an NT path.
+        #[cfg(windows)]
+        assert!(
+            Path::new(start).is_absolute() || start.starts_with(r"\??\"),
+            "{start}"
+        );
+        write(&alternates, format!("{start}\n").as_bytes());
+        refused_locally(&r, &format!("alternates {start}"));
+        std::fs::remove_file(&alternates).unwrap();
+
+        write(&gf.join(".git"), format!("gitdir: {start}\n").as_bytes());
+        refused_locally(&gf, &format!("gitfile {start}"));
+
+        for file in ["commondir", "gitdir"] {
+            let p = private.join(file);
+            let kept = std::fs::read(&p).unwrap();
+            write(&p, format!("{start}\n").as_bytes());
+            refused_locally(&wt, &format!("{file} {start}"));
+            write(&p, &kept);
+        }
+
+        for key in ["core.worktree", "core.excludesFile"] {
+            let kept = std::fs::read(&config).unwrap();
+            set(&config, key, start);
+            refused_locally(&r, &format!("{key} {start}"));
+            write(&config, &kept);
+        }
+    }
+    // Restored, both read; a remote's URL on a share is an ordinary clone source and reads too.
+    set(&config, "remote.origin.url", REMOTE_STARTS[0]);
+    for lib in [&r, &wt] {
+        let st = status(lib, &GitLimits::default());
+        assert!(
+            matches!(st, GitState::Ready(_)),
+            "{}: {st:?}",
+            lib.display()
+        );
+    }
+}
+
+/// The guard itself bites on Unix too, where the starts above would fail later anyway (no such
+/// host, or not absolute): `//<a real local folder>` is a working POSIX spelling of that folder,
+/// and the guard reads it as UNC. Each source, spelled `//…`, answers `Redirected`; spelled
+/// `/…`, the same target reads (`Ready`). RED with `local_spelling` answering `true`.
+#[cfg(unix)]
+#[test]
+fn the_guard_alone_refuses_a_working_double_slash_spelling() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let r = repo(&top, "repo");
+    git(&r, &["worktree", "add", "-q", "../wt"]);
+    let wt = top.join("wt");
+    let private = r.join(".git/worktrees/wt");
+    let shared = repo(&top, "shared").join(".git/objects");
+    // A gitfile leading to a git dir inside its own worktree (followed, n2).
+    let gf = repo(&top, "gf");
+    std::fs::rename(gf.join(".git"), gf.join("inner.git")).unwrap();
+    let config = r.join(".git/config");
+    let check = |lib: &Path, file: &Path, text: String, what: &str| {
+        let kept = std::fs::read(file).ok();
+        write(file, format!("/{text}\n").as_bytes());
+        refused_locally(lib, &format!("twin {what}"));
+        write(file, format!("{text}\n").as_bytes());
+        let st = status(lib, &GitLimits::default());
+        assert!(matches!(st, GitState::Ready(_)), "control {what}: {st:?}");
+        match kept {
+            Some(k) => write(file, &k),
+            None => std::fs::remove_file(file).unwrap(),
+        }
+    };
+    let alternates = r.join(".git/objects/info/alternates");
+    check(&r, &alternates, shared.display().to_string(), "alternates");
+    let gitdir = format!("gitdir: {}", gf.join("inner.git").display());
+    let kept = gitdir.clone();
+    // The gitfile's text starts with `gitdir: `, so the slash goes after it.
+    write(
+        &gf.join(".git"),
+        format!("gitdir: /{}\n", gf.join("inner.git").display()).as_bytes(),
+    );
+    refused_locally(&gf, "twin gitfile");
+    write(&gf.join(".git"), format!("{kept}\n").as_bytes());
+    let st = status(&gf, &GitLimits::default());
+    assert!(matches!(st, GitState::Ready(_)), "control gitfile: {st:?}");
+    check(
+        &wt,
+        &private.join("commondir"),
+        r.join(".git").display().to_string(),
+        "commondir",
+    );
+    check(
+        &wt,
+        &private.join("gitdir"),
+        wt.join(".git").display().to_string(),
+        "gitdir",
+    );
+    let kept = std::fs::read(&config).unwrap();
+    set(
+        &config,
+        "core.excludesFile",
+        &format!("/{}", top.join("ignore").display()),
+    );
+    refused_locally(&r, "twin core.excludesFile");
+    write(&config, &kept);
+    set(
+        &config,
+        "core.excludesFile",
+        &top.join("ignore").display().to_string(),
+    );
+    assert!(matches!(
+        status(&r, &GitLimits::default()),
+        GitState::Ready(_)
+    ));
+}
+
 /// Re-review I1-fr1 (b), defence in depth: a worker abandoned at its deadline (a stall here,
 /// as an uninterruptible read would) leaves the library `Paused` only while it runs. Once it
 /// ends, the library answers `Timeout` at once for its backoff, starting no worker, and then
