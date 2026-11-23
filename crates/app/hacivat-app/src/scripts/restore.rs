@@ -159,7 +159,7 @@ fn offer(found: Vec<RecoveryEntry>, cx: &mut App) {
                 id,
                 tabs::SqliteFile {
                     path: file.path,
-                    id: file.dev_ino,
+                    id: file.id,
                 },
                 cx,
             );

@@ -866,7 +866,7 @@ impl ScriptDoc {
             // ## m4b-t14-tabs fix round 3 (m-fr2-1): the SQLite file the tab is bound to.
             db_file: sqlite_file(self.id, cx).map(|f| hacivat_scripts::recovery::DbFile {
                 path: f.path,
-                dev_ino: f.id,
+                id: f.id,
             }),
         };
         let old = self
@@ -1420,11 +1420,13 @@ fn main_file(answer: &hacivat_driver::ExecSummary) -> Option<String> {
 
 /// Whether `now` is `stored` after a remount: the same path and inode, another device.
 fn remounted(stored: &SqliteFile, now: &SqliteFile) -> bool {
+    // ## m4b-cifix-4: a remount keeps the birth time too (it is on the disk); another file on
+    // another volume with the same inode does not.
     stored.path == now.path
         && stored
             .id
             .zip(now.id)
-            .is_some_and(|((d1, i1), (d2, i2))| i1 == i2 && d1 != d2)
+            .is_some_and(|(was, is)| was.ino == is.ino && was.born == is.born && was.dev != is.dev)
 }
 
 /// The context generation each script console's last passed check was read under; the
@@ -1455,27 +1457,27 @@ pub(crate) fn generation_holds(
 
 /// The SQLite file a SQLite script tab was opened on (C2, R-T14-1): its canonical path and,
 /// on Unix, its device and inode.
+///
+/// ## m4b-cifix-4: and on Linux its birth time (`FileIdentity`, R-CI2-1). ext4 hands a file
+/// deleted and written again at the same path the freed inode back, so `dev:ino` alone let a
+/// tab run on a replaced file (CI 45077623376).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteFile {
     pub path: String,
-    pub id: Option<(u64, u64)>,
+    pub id: Option<hacivat_scripts::fileio::FileIdentity>,
 }
 
 impl SqliteFile {
-    /// `"dev:ino"` (`workspace.json`).
+    /// `"dev:ino"`, then `:secs.nanos` of the birth time on Linux (`workspace.json`).
     pub fn id_text(&self) -> Option<String> {
-        self.id.map(|(d, i)| format!("{d}:{i}"))
+        self.id.map(|id| id.to_text())
     }
 
     /// The file from what `workspace.json` holds.
     pub fn parse(path: &str, id: Option<&str>) -> Self {
-        let id = id.and_then(|t| {
-            let (d, i) = t.split_once(':')?;
-            Some((d.parse().ok()?, i.parse().ok()?))
-        });
         SqliteFile {
             path: path.to_string(),
-            id,
+            id: id.and_then(hacivat_scripts::fileio::FileIdentity::parse),
         }
     }
 }
@@ -1510,19 +1512,10 @@ pub fn forget_sqlite_file_for_tests(id: ScriptTabId, cx: &mut App) {
 pub fn sqlite_identity(path: &std::path::Path) -> Option<SqliteFile> {
     let canonical = std::fs::canonicalize(path).ok()?;
     let meta = std::fs::metadata(&canonical).ok()?;
-    #[cfg(unix)]
-    let id = {
-        use std::os::unix::fs::MetadataExt;
-        Some((meta.dev(), meta.ino()))
-    };
-    #[cfg(not(unix))]
-    let id = {
-        let _ = &meta;
-        None
-    };
     Some(SqliteFile {
         path: canonical.to_string_lossy().into_owned(),
-        id,
+        // ## m4b-cifix-4: device, inode and (Linux) birth time; none off Unix.
+        id: hacivat_scripts::fileio::FileIdentity::of(&meta),
     })
 }
 
