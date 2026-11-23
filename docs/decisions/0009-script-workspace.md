@@ -1490,3 +1490,63 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
 - **I-fr1-1 (R-T15-2 for clicks).** A chooser row's click carries the identity of the row it was painted for, `goto::Seen::Row(connection, database, environment)`, and "Open without a connection" carries `Seen::Unbound`; neither carries an index. `GotoHost::activate(seen)` re-checks the rows and opens only that identity while it is still a candidate (unbound: while there is still none). It never uses the current active row, so a row gone since the last frame, a reordered list or a candidate that just appeared opens nothing and redraws. Test: `a_click_with_a_stale_row_identity_opens_nothing` drives the handler's entry point with stale identities, so the test window's redraw after every update cannot hide the race.
 - **m-fr1-1.** Enter acts on what the last frame drew as active (`painted`, recorded while drawing and after the user's own ↑/↓, never by a refresh), under the same rule.
 - **m-fr1-2, m-fr1-3.** The original bullets above now say "connection" (R-T15-1), and the `chooser.rs` module doc is wrapped at 100 columns.
+## m4b-t16 — attach dialog, manual mapping, Settings › Script libraries
+
+**What is written into a library, and how it is shown first (L14, R-M4b-8, Q5, Q6).**
+
+- **The attach dialog shows the bytes it writes.** The folder is read on the core runtime before anything is offered: `manifest::preview` (new) reads `.hacivat/workspace.toml` through the same no-link `Dir` handle as `manifest::read` (no link followed, never a FIFO, at most 64 KiB), and `envscope::root_env_folder` checks the root. With no manifest, the inset shows `ManifestV1::to_toml()` of the typed name and aliases, line by line, and Attach hands that same `ManifestV1` to the new `LibraryService::attach_writing`, which writes its `to_toml()` (`manifest::write_new`). `ManifestV1` has exactly `format`, `database` and `aliases`, so no profile id, connection name, host, port, user, keyring slot or password can reach the folder from the dialog.
+- **Never over a file that appeared meanwhile.** `attach_writing` refuses `Manifest(Exists)` and registers nothing when a manifest appeared between the dialog's read and the press (the older `attach(.., write_manifest: true)` silently read it instead). The dialog then reads the folder again and shows what it found.
+- **A found manifest is shown, never rewritten.** Its text (comments included) is shown read-only; Attach calls `attach(path, None, false)`. A manifest that is there but cannot be read is said so, and the folder binds by its own name until it can be read.
+- **The shared alias is written only over what was shown.** `manifest::with_alias` (new) is the pure edit that `add_alias` now runs (behaviour unchanged, through `toml_edit`, comments, line endings and the BOM kept). The mapping dialog shows its result over the bytes `manifest::preview` read, the added line on the selection tint. `LibraryService::map_sharing(m, before)` (new) writes it only while the file is still exactly `before` (`manifest::add_alias_if_unchanged`), else `Alias(Changed)` and nothing changes. The default mapping writes `libraries.toml` only, so the folder's bytes are identical before and after (Q5).
+- **Tested byte for byte:** `scripts_attach.rs` compares the written file with the lines the dialog drew, checks that its keys are exactly `format`, `database`, `aliases`, that no profile name, host, user, environment or profile id appears in it, and that the rest of the folder is unchanged. Mutations that write one more alias than shown, or share the alias on the one-click mapping, fail those tests.
+- **Untrusted text** (the path, the found file's lines, its binding, library and connection names) is shown through `escape_untrusted` (bidi and invisible characters as `<U+XXXX>`); a found file's lines are cut at 512 characters each, and each line is a truncating data label (its tooltip has the whole line).
+
+**Where the Scripts items appear (R-M4b-25, R-M4b-32, R-M4b-34).** `scripts::database_menu_items` answers "Attach script library…" and "Map to a script library…" only on a node where a Scripts node can show: the PostgreSQL database the profile's session is on (or, without a session, its configured database), every MySQL/MariaDB database, and the SQLite profile root. A PostgreSQL schema row, another PostgreSQL database and a SQLite attached database get no Scripts items (carries T1b m11). The placement rule is `projection::place_logical`, the same `match` as the Scripts node's. "Map…" is disabled with "No other library is attached" when every library already shows there. The attach's "Shows under" list uses the explorer's places plus each profile's configured database (R-M4b-31), as Go to script does.
+
+**Refused up front.** A folder inside an `@<env>` folder, a folder already attached, and the 32-library limit disable Attach with an ink line. The service's own refusals (a link, the home folder, an app folder, a filesystem root, a nested library, a read-only registry) come back as the same line. Nothing is written in any refused case.
+
+**R-T9-1: Watch: automatic / poll.** The registry row gains an optional `watch = "poll"` (`registry::WatchMode`). It is written only when not automatic, and any other value reads as automatic, so a hand edit never stops a library being watched. `LibraryService::set_watch` saves it and restarts an up library's watcher with `Backend::Poll(PollReason::UserChoice)` (Task 9's `Watcher::open` keeps a poll backend the caller sets). The snapshot carries `LibrarySnapshot::watch`. A chosen poll is not a library problem in the diagnostics popover. A library nothing watches (`Unwatched`) now is one, and the popover suggests "Watch: Every 2 seconds".
+
+**T10 m-h: "Use this folder…".** For a library in `Unavailable(RootChanged)`, Settings shows a confirmed action (Cancel is the default). `LibraryService::adopt_root` refuses any other state. It forgets the recorded canonical path and inode (`LibraryRegistry::clear_resolved`) and this session's resolution, then validates the root from scratch: every other check still applies, so a link root, an app folder or an overlap is refused again (tested with a link). The library keeps its id, its mappings and its tabs' bindings. A detach and re-attach would lose the mappings.
+
+**R-T10-7: an unreadable manifest keeps the last good binding.** When a manifest that bound the library (`database` or aliases read and understood) is later present but unreadable (`manifest::is_read_failure`: a link, not a file, changed while read, an I/O error, too large, not UTF-8, too deep, invalid TOML, missing or bad `format`, a bad `database`), the actor keeps the last `db`/aliases and shows the diagnostic instead of falling back to the folder name, which could bind another database. A newer `format` still binds by folder name (R-M4b-21), and a removed file binds by folder name as before. Residual: at launch there is no last good binding, so an unreadable manifest binds by folder name, as before.
+
+**Keys and focus (R-T33-1, R-M4b-43).**
+- Both dialogs are modal layers, which are focus homes (`shell::layers`). Tab is trapped in NOTES order, and every button is a Tab stop; the header × is not.
+- The fields are real window Tab stops through a new opt-in, `TextInput::set_tab_stop`. This is a named exception in `hacivat-ui`: GPUI reads the flag from the tracked handle. It is off by default, so no existing form changes.
+- Escape (a field's `Cancelled` too) cancels. Enter presses the focused button, and in a field it attaches.
+- The Settings section is a first-stop focus home, so a removed row's focused button hands the focus to "Attach a folder…".
+
+**Named exceptions.**
+- Core files: `registry.rs`, `manifest.rs`, `service.rs`, `service/actor.rs`, `service/work.rs`, `lib.rs`.
+- App files: `scripts/{mod, projection, diagnostics, file_ops}.rs` ("Script library settings…" enabled), `settings_ui/{mod, rows}.rs` (`Section::Scripts`, 9 sections).
+- Tests: `tests/m4b_routing.rs` (the stub count, the filled menus, the two new rows) and `tests/shots/m4b.rs` (five states).
+- UI: `hacivat-ui/src/input/mod.rs` and `hacivat-ui/src/checkbox.rs` (`Checkbox::wrap`; fix round 1, m8: the stacked layout's label is a `paragraph`, which takes only a static id, so it has no `checkbox-label-<id>`; no shot marker uses it).
+
+**Deviations from the mock.**
+- The inset is plain mono ink, not syntax-coloured.
+- The polling reason is a caption line under the state, not a tooltip: the settings rows have no tooltip primitive.
+- The added alias line in the mapping inset is the whole edited line (`toml_edit` rewrites the `aliases = [...]` line).
+
+### Fix round 1 (review I1–I6, m1–m10; ruling R-T16-1)
+
+- **I1 (R-T10-7 said truly).** When a broken manifest's last good binding is kept, the snapshot carries `LibraryDiag::ManifestKept(<database>)`. The popover shows one line in place of the read failure: ".hacivat/workspace.toml in <folder> can't be read, so the library keeps its last binding, <database>, until the file is fixed." The Settings row shows the same line, through `diagnostics::manifest_problem`; a test compares the two.
+- **I2 (no inherited binding).** An adopted folder is read from scratch: `manifest_good`, `db`, aliases and the manifest diagnostics are reset. A root refused as `RootChanged` also forgets `manifest_good`. Only the user's local mappings stay; they belong to the library, not to the folder. The review's probe is now `an_adopted_folder_never_inherits_the_old_binding`.
+- **I3 (transactional "Use this folder").**
+  - `adopt_root` records nothing up front. It marks the library, and the next validation runs with only the identity checks waived (`RefreshJob::waived`: no recorded or session identity). The new canonical path and inode are saved only when that validation passes (`commit_adoption`). A refusal leaves the old record and `RootChanged`, so a folder that later takes the path is never adopted without a new confirmation.
+  - `adopt_root` now answers once the validation is done: `Ok(true)` adopted, `Ok(false)` refused.
+  - It is accepted, and the button is offered, only for `RootRefused(Moved | IdentityChanged)`, never for a link, a non-folder, an overlap, the home or an app folder (`LibrarySnapshot::can_adopt`).
+  - Residual (m4): the confirmation is bound to the refusal reason and the path, not to a folder identity seen when the dialog opened (the snapshot exposes no identity). A swap between the question and the press is validated afresh and, if it is another real folder, adopted.
+- **I4.** A found manifest with a read failure, or a newer `format`, heads the dialog with "Found .hacivat/workspace.toml, but it can't be read (<reason>); the library will bind by its folder name, <folder>, until it is fixed." There is one reason per diagnostic kind (`hv-scripts-manifest-reason`).
+- **I5 (R-T16-1).** The mapping dialog's "Attach another folder…" opens the attach dialog with `Prefill::Folder`: the Database field shows the chosen folder's name, never the node's local name, and follows Change… while untouched. A new file can be attached, by Enter or click, only after a frame drew its fields and text. The plain database-menu attach keeps the node's name (the plan's "prefilled with the node's database name").
+- **I6.** Every Settings action (Remove, "Use this folder", Watch, a mapping's Remove) reports what it could not do on its row (`hv-scripts-set-failed`: read-only registry, the library changed meanwhile, the folder refused, a failed save). The error clears on the next attempt.
+- **Minor findings.**
+  - m1: the inset draws at most 200 lines, then "… and N more lines".
+  - m2: another library unticks the share box.
+  - m3: Enter on the box presses Show here.
+  - m5: Settings controls are keyed by `LibraryId`, and the mapping rows by their node.
+  - m6: the tests assert the initial and Cancel focus, and wait for the service before negative checks.
+  - m7: Remove's question says when open script tabs of the library have unsaved changes, whose recovery copies go with it.
+  - m9: Cancel and Show here stay together on the right when the footer wraps.
+  - m10: the launch-time and remove-then-break residuals of R-T10-7 go to T20; a persisted last good binding would close them.
+

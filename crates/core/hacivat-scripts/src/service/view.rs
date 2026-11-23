@@ -181,6 +181,8 @@ impl<'a> LibraryView<'a> {
                 | LibraryDiag::Suppressed(_)
                 | LibraryDiag::RootInEnvFolder(_)
                 | LibraryDiag::RootRefused(_)
+                // ## m4b-t16-attach fix round 1 (named line): a database name, no path.
+                | LibraryDiag::ManifestKept(_)
                 | LibraryDiag::NoLogicalName => true,
                 LibraryDiag::HiddenProblems(n) => {
                     hidden += n;

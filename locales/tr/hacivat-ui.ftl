@@ -4994,3 +4994,178 @@ hv-scripts-sqlite-remounted = Veritabanı dosyası artık başka bir birimde; { 
 # Surface 7 (Go to script). Palette title of the tree row's "Open under another connection…" (the chooser without the row's connection); no default chord.
 # Review: PO
 hv-cmd-scripts-open-under = Betiği başka bir bağlantıda aç…
+
+## m4b-t16-attach
+
+# The command behind the database menu's "Map to a script library…" (menu and palette).
+# Review: PO
+hv-cmd-scripts-map = Bir betik kitaplığına eşle…
+# The command behind "Script library settings…" (Settings › Script libraries).
+# Review: PO
+hv-cmd-scripts-library-settings = Betik kitaplığı ayarları…
+# Surface 3 (Attach dialog): why the folder can't be attached; nothing was written.
+# Variables:
+#   $reason (String) - selector: why; one of envfolder, link, home, app, root, nested, notfolder, readonly, changed (anything else: the default).
+#   $folder (String) - an environment folder's name, verbatim (data), e.g. "@production".
+# Review: PO
+hv-scripts-attach-refused =
+    { $reason ->
+        [envfolder] Bu klasör { $folder } ortam klasörünün içinde. Bunun yerine { $folder } klasörünü içeren klasörü bağlayın.
+        [link] Bu bir bağlantı. Bunun yerine işaret ettiği klasörü seçin.
+        [home] Ana klasörünüz kitaplık olamaz. İçindeki bir betik klasörünü seçin.
+        [app] Bu Hacivat'ın kendi klasörlerinden biri ya da birini içeriyor. Başka bir klasör seçin.
+        [root] Bütün bir sürücü kitaplık olamaz. Bir betik klasörü seçin.
+        [nested] Bu klasör bağlı bir kitaplığın içinde ya da bir kitaplığı içeriyor.
+        [notfolder] Bu bir klasör değil.
+        [readonly] Hacivat kitaplık listesini şu an değiştiremiyor. Nedeni Ayarlar › Betik kitaplıkları'nda.
+        [changed] Hacivat dosyayı yazarken klasör değişti. Hiçbir şey bağlanmadı; yeniden deneyin.
+       *[other] Hacivat bu klasörü bağlayamadı. Hiçbir şey yazılmadı.
+    }
+# Surface 3 (Attach dialog): an alias Hacivat can't write.
+# Variables:
+#   $reason (String) - selector: why; one of control, long, many (anything else: the default).
+# Review: PO
+hv-scripts-attach-aliases-err =
+    { $reason ->
+        [control] Takma ad denetim karakteri içeremez.
+        [long] Takma ad en çok 128 bayt olabilir.
+       *[many] Hacivat en çok 32 takma ad tutar.
+    }
+# Surface 3 (Attach dialog): while the chosen folder is read.
+# Review: PO
+hv-scripts-attach-reading = Klasör okunuyor…
+# Surface 3 (Attach dialog): the subtitle, the connection and database it was opened from.
+# Variables:
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-attach-from = { $conn } › { $database }
+# Surface 3 (Mapping): a library in the Library select.
+# Variables:
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-map-option = { $library }, { $database } veritabanına bağlı
+# Surface 3 (Mapping): why the share box can't be ticked.
+# Variables:
+#   $reason (String) - selector: why; one of none, unreadable (anything else: the default).
+# Review: PO
+hv-scripts-map-alias-off =
+    { $reason ->
+        [none] Bu klasörde ekleme yapılacak bir .hacivat/workspace.toml yok.
+        [unreadable] Hacivat bu klasörün .hacivat/workspace.toml dosyasını okuyamıyor, bu yüzden ekleme yapamaz.
+       *[name] Bu ad takma ad olamaz.
+    }
+# Surface 3 (Mapping): why nothing was saved.
+# Variables:
+#   $reason (String) - selector: why; one of changed, unavailable (anything else: the default).
+# Review: PO
+hv-scripts-map-failed =
+    { $reason ->
+        [changed] .hacivat/workspace.toml bu pencere onu okuduktan sonra değişti. Hiçbir şey kaydedilmedi; yeniden bakın.
+        [unavailable] Kitaplığın klasörüne şu an erişilemiyor. Hiçbir şey kaydedilmedi.
+       *[other] Hacivat eşlemeyi kaydedemedi. Hiçbir şey değişmedi.
+    }
+# Surface 4 (Settings › Script libraries): how a library's changes are found (R-T9-1).
+# Review: PO
+hv-scripts-set-watch = İzleme
+# Surface 4 (Settings › Script libraries): the watcher's own choice.
+# Review: PO
+hv-scripts-set-watch-auto = Otomatik
+# Surface 4 (Settings › Script libraries): checking the folder every 2 seconds.
+# Review: PO
+hv-scripts-set-watch-poll = 2 saniyede bir
+# Surface 4 (Settings › Script libraries): why a library is polled, when the user chose it.
+# Review: PO
+hv-scripts-set-watch-chosen = Bu klasörün 2 saniyede bir denetlenmesini siz seçtiniz.
+# Surface 4 (Settings › Script libraries): states beyond the mock's four.
+# Variables:
+#   $state (String) - selector: the state; one of moved, envfolder, unreadable, notresponding, unwatched (anything else: the default).
+# Review: PO
+hv-scripts-set-state =
+    { $state ->
+        [moved] Bu, bağlanan klasör değil: taşınmış ya da değiştirilmiş.
+        [envfolder] Bu klasör bir ortam klasörünün içinde, bu yüzden içindekiler gösterilmiyor.
+        [unreadable] Hacivat bu klasörü okuyamıyor.
+        [notresponding] Klasör yanıt vermiyor.
+        [unwatched] Bu klasördeki değişiklikleri bildiren yok; Yenile onları gösterir.
+       *[scanning] Klasör okunuyor…
+    }
+# Surface 4 (Settings › Script libraries): the confirmed fix for a moved or replaced folder.
+# Review: PO
+hv-scripts-set-adopt = Bu klasörü kullan…
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+# Review: PO
+hv-scripts-adopt-title = Bu klasör { $library } olarak kullanılsın mı?
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $path (String) - a folder path, verbatim (data), e.g. "~/work/orders-scripts".
+# Review: PO
+hv-scripts-adopt-body = Hacivat bu kitaplığı göstermeyi bıraktı, çünkü { $path } konumundaki klasör bağlanan klasör değil. Onu kendiniz taşıdıysanız ya da geri yüklediyseniz kullanın: kitaplık yerel eşlemelerini korur. Neden değiştiğini bilmiyorsanız önce klasöre bakın.
+# Surface 4 (Settings › Script libraries).
+# Review: PO
+hv-scripts-adopt-btn = Bu klasörü kullan
+# Surface 4 (Settings › Script libraries): the Remove and Use this folder questions' subtitle.
+# Variables:
+#   $path (String) - a folder path, verbatim (data), e.g. "~/work/orders-scripts".
+hv-scripts-remove-path = { $path }
+# Surface 11 (Diagnostics): nothing watches the library (R-T9-1: the poll suggestion).
+# Variables:
+#   $folder (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+# Review: PO
+hv-scripts-diag-unwatched = { $folder } içindeki değişiklikleri bildiren yok. Hacivat dışında yapılan düzenlemeler görünmüyorsa Ayarlar › Betik kitaplıkları'nda İzleme: 2 saniyede bir'i seçin.
+# m4b-t16-attach fix round 1 (I1, R-T10-7): the manifest can't be read and the library keeps the binding its last good read gave.
+# Variables:
+#   $folder (String) - a library's folder name, verbatim (data), e.g. "billing".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+# Review: PO
+hv-scripts-diag-toml-kept = { $folder } içindeki .hacivat/workspace.toml okunamıyor; kitaplık dosya düzeltilene dek son bağlamasını, { $database }, korur.
+# m4b-t16-attach fix round 1 (I4): why a found .hacivat/workspace.toml can't be read.
+# Variables:
+#   $reason (String) - selector: why; one of link, notfile, changed, unreadable, large, notutf8, deep, invalid, noformat, badformat, newer, database (anything else: the default).
+# Review: PO
+hv-scripts-manifest-reason =
+    { $reason ->
+        [link] bir bağlantı; Hacivat bağlantıları izlemez
+        [notfile] bir dosya değil
+        [changed] okunurken değişti
+        [unreadable] açılamıyor
+        [large] 64 KB'tan büyük
+        [notutf8] UTF-8 metin değil
+        [deep] çok derin iç içe
+        [invalid] geçerli TOML değil
+        [noformat] format satırı yok
+        [badformat] format değeri bir sayı değil
+        [newer] daha yeni bir Hacivat yazmış
+        [database] veritabanı adı geçerli değil
+       *[other] anlaşılamıyor
+    }
+# m4b-t16-attach fix round 1 (I4): the attach dialog over a found file it can't read.
+# Variables:
+#   $reason (String) - why, an hv-scripts-manifest-reason text, e.g. "it is not valid TOML".
+#   $folder (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+# Review: PO
+hv-scripts-attach-found-broken = .hacivat/workspace.toml bulundu ama okunamıyor ({ $reason }); kitaplık, dosya düzeltilene dek klasör adıyla, { $folder }, bağlanır.
+# m4b-t16-attach fix round 1 (m1): a long found file is shown up to a cap.
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-attach-more-lines = … ve { $n } satır daha
+# m4b-t16-attach fix round 1 (I6): an action in Settings › Script libraries did nothing.
+# Variables:
+#   $reason (String) - selector: why; one of readonly, state, refused (anything else: the default).
+# Review: PO
+hv-scripts-set-failed =
+    { $reason ->
+        [readonly] Hacivat kitaplık listesini şu an değiştiremiyor; hiçbir şey değişmedi.
+        [state] Kitaplık bu arada değişti; hiçbir şey yapılmadı.
+        [refused] Hacivat bu klasörü kitaplık olarak kullanamıyor; hiçbir şey değişmedi.
+       *[other] Hacivat bu değişikliği kaydedemedi; hiçbir şey değişmedi.
+    }
+# m4b-t16-attach fix round 1 (m7): Remove… while script tabs from the library have unsaved changes.
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+# Review: PO
+hv-scripts-remove-dirty = Bu kitaplıktan açık { $n } betik sekmesinde kaydedilmemiş değişiklik var. Kitaplığı kaldırmak kurtarma kopyalarını siler; önce kaydedin.

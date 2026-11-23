@@ -48,13 +48,35 @@ enum Problem {
     Diag(LibraryDiag),
     Polling(PollReason),
     Untrusted,
+    // ## m4b-t16-attach (named line; R-T9-1): nothing watches it; the popover suggests polling.
+    Unwatched,
 }
 
 fn problems(lib: &LibraryView<'_>) -> Vec<Problem> {
-    let mut out: Vec<Problem> = lib.diagnostics().into_iter().map(Problem::Diag).collect();
-    if let LibraryState::Polling(r) = lib.library().state {
-        out.push(Problem::Polling(r));
+    let diags = lib.diagnostics();
+    // ## m4b-t16-attach fix round 1 (I1, R-T10-7): while the last good binding is kept, the
+    // manifest's read failure is said once, by the kept line, never as "binds by its folder
+    // name" (which is not true then).
+    let kept = diags
+        .iter()
+        .any(|d| matches!(d, LibraryDiag::ManifestKept(_)));
+    let mut out: Vec<Problem> = diags
+        .into_iter()
+        .filter(|d| {
+            !(kept
+                && matches!(d, LibraryDiag::Manifest(m) if hacivat_scripts::manifest::is_read_failure(m)))
+        })
+        .map(Problem::Diag)
+        .collect();
+    // ## m4b-t16-attach (named exception; R-T9-1): a poll the user chose is not a problem, and
+    // a library nothing watches is one (the popover suggests "Every 2 seconds").
+    match lib.library().state {
+        LibraryState::Polling(PollReason::UserChoice) => {}
+        LibraryState::Polling(r) => out.push(Problem::Polling(r)),
+        LibraryState::Unwatched => out.push(Problem::Unwatched),
+        _ => {}
     }
+    // ## m4b-t16-attach
     if matches!(lib.git(), GitSummary::Untrusted(_)) {
         out.push(Problem::Untrusted);
     }
@@ -64,6 +86,13 @@ fn problems(lib: &LibraryView<'_>) -> Vec<Problem> {
 /// How many problems the library's row counts ("2 problems").
 pub(crate) fn count(lib: &LibraryView<'_>) -> usize {
     problems(lib).len()
+}
+
+// ## m4b-t16-attach (named exception)
+/// [`count`] for tests.
+#[cfg(feature = "test-support")]
+pub fn count_for_tests(lib: &LibraryView<'_>) -> usize {
+    count(lib)
 }
 
 fn manifest_line(d: &ManifestDiag, folder: &str, cx: &App) -> SharedString {
@@ -101,6 +130,39 @@ fn manifest_line(d: &ManifestDiag, folder: &str, cx: &App) -> SharedString {
         ),
     }
 }
+
+// ## m4b-t16-attach fix round 1 (I1)
+fn kept_line(db: &str, folder: &str, cx: &App) -> SharedString {
+    text(
+        cx,
+        "hv-scripts-diag-toml-kept",
+        vec![("folder", arg(folder)), ("database", arg(db))],
+    )
+}
+
+/// The manifest's problem as the popover says it (the kept binding first), for the Settings
+/// row, so the two surfaces never disagree.
+pub(crate) fn manifest_problem(lib: &LibraryView<'_>, cx: &App) -> Option<SharedString> {
+    let name = projection::library_name(lib);
+    let diags = lib.diagnostics();
+    if let Some(db) = diags.iter().find_map(|d| match d {
+        LibraryDiag::ManifestKept(db) => Some(db.clone()),
+        _ => None,
+    }) {
+        return Some(kept_line(&db, &name, cx));
+    }
+    diags.iter().find_map(|d| match d {
+        LibraryDiag::Manifest(m) => Some(manifest_line(m, &name, cx)),
+        _ => None,
+    })
+}
+
+/// The popover's title and lines (tests).
+#[cfg(feature = "test-support")]
+pub fn content_for_tests(lib: &LibraryView<'_>, cx: &App) -> (SharedString, Vec<SharedString>) {
+    content(lib, cx)
+}
+// ## m4b-t16-attach
 
 fn other(what: &str, n: usize, folder: &str, cx: &App) -> SharedString {
     text(
@@ -157,6 +219,8 @@ fn lines(p: &Problem, folder: &str, cx: &App) -> Vec<SharedString> {
             )]
         }
         Problem::Diag(LibraryDiag::Manifest(d)) => vec![manifest_line(d, folder, cx)],
+        // ## m4b-t16-attach fix round 1 (I1)
+        Problem::Diag(LibraryDiag::ManifestKept(db)) => vec![kept_line(db, folder, cx)],
         Problem::Diag(LibraryDiag::Suppressed(n)) => vec![other("suppressed", *n, folder, cx)],
         Problem::Diag(LibraryDiag::HiddenProblems(n)) => vec![other("hidden", *n, folder, cx)],
         Problem::Diag(LibraryDiag::NoLogicalName) => vec![other("noname", 0, folder, cx)],
@@ -166,6 +230,8 @@ fn lines(p: &Problem, folder: &str, cx: &App) -> Vec<SharedString> {
             let reason = match r {
                 PollReason::WatchBudget => "watches",
                 PollReason::NetworkFs | PollReason::BackendLost => "network",
+                // ## m4b-t16-attach (named line): never listed (see `problems`).
+                PollReason::UserChoice => return Vec::new(),
             };
             vec![text(
                 cx,
@@ -173,6 +239,12 @@ fn lines(p: &Problem, folder: &str, cx: &App) -> Vec<SharedString> {
                 vec![("reason", arg(reason))],
             )]
         }
+        // ## m4b-t16-attach (named lines)
+        Problem::Unwatched => vec![text(
+            cx,
+            "hv-scripts-diag-unwatched",
+            vec![("folder", arg(folder))],
+        )],
         Problem::Untrusted => vec![
             tr_id(cx, "hv-scripts-diag-untrusted"),
             tr_id(cx, "hv-scripts-diag-untrusted-help"),

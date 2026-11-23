@@ -5127,3 +5127,161 @@ hv-scripts-sqlite-remounted = The database file is on a different volume now; ru
 ## m4b-t15-goto
 # Surface 7 (Go to script). Palette title of the tree row's "Open under another connection…" (the chooser without the row's connection); no default chord.
 hv-cmd-scripts-open-under = Open script under another connection…
+
+## m4b-t16-attach
+
+# The command behind the database menu's "Map to a script library…" (menu and palette).
+hv-cmd-scripts-map = Map to a script library…
+# The command behind "Script library settings…" (Settings › Script libraries).
+hv-cmd-scripts-library-settings = Script library settings…
+# Surface 3 (Attach dialog): why the folder can't be attached; nothing was written.
+# Variables:
+#   $reason (String) - selector: why; one of envfolder, link, home, app, root, nested, notfolder, readonly, changed (anything else: the default).
+#   $folder (String) - an environment folder's name, verbatim (data), e.g. "@production".
+hv-scripts-attach-refused =
+    { $reason ->
+        [envfolder] This folder is inside the environment folder { $folder }. Attach the folder that holds { $folder } instead.
+        [link] This is a link. Choose the folder it points to instead.
+        [home] Your home folder can't be a library. Choose a folder of scripts inside it.
+        [app] This is one of Hacivat's own folders, or holds one. Choose another folder.
+        [root] A whole drive can't be a library. Choose a folder of scripts.
+        [nested] This folder is inside an attached library, or holds one.
+        [notfolder] This isn't a folder.
+        [readonly] Hacivat can't change its list of libraries now. Settings › Script libraries says why.
+        [changed] The folder changed while Hacivat wrote the file. Nothing was attached; try again.
+       *[other] Hacivat couldn't attach this folder. Nothing was written.
+    }
+# Surface 3 (Attach dialog): an alias Hacivat can't write.
+# Variables:
+#   $reason (String) - selector: why; one of control, long, many (anything else: the default).
+hv-scripts-attach-aliases-err =
+    { $reason ->
+        [control] An alias can't contain control characters.
+        [long] An alias can be at most 128 bytes.
+       *[many] Hacivat keeps up to 32 aliases.
+    }
+# Surface 3 (Attach dialog): while the chosen folder is read.
+hv-scripts-attach-reading = Reading the folder…
+# Surface 3 (Attach dialog): the subtitle, the connection and database it was opened from.
+# Variables:
+#   $conn (String) - a connection name, verbatim (data), e.g. "orders-prod".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-attach-from = { $conn } › { $database }
+# Surface 3 (Mapping): a library in the Library select.
+# Variables:
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-map-option = { $library } binds to { $database }
+# Surface 3 (Mapping): why the share box can't be ticked.
+# Variables:
+#   $reason (String) - selector: why; one of none, unreadable (anything else: the default).
+hv-scripts-map-alias-off =
+    { $reason ->
+        [none] This folder has no .hacivat/workspace.toml to add it to.
+        [unreadable] Hacivat can't read this folder's .hacivat/workspace.toml, so it can't add to it.
+       *[name] This name can't be an alias.
+    }
+# Surface 3 (Mapping): why nothing was saved.
+# Variables:
+#   $reason (String) - selector: why; one of changed, unavailable (anything else: the default).
+hv-scripts-map-failed =
+    { $reason ->
+        [changed] .hacivat/workspace.toml changed after this dialog read it. Nothing was saved; look at it again.
+        [unavailable] The library's folder isn't available now. Nothing was saved.
+       *[other] Hacivat couldn't save the mapping. Nothing was changed.
+    }
+# Surface 4 (Settings › Script libraries): how a library's changes are found (R-T9-1).
+hv-scripts-set-watch = Watch
+# Surface 4 (Settings › Script libraries): the watcher's own choice.
+hv-scripts-set-watch-auto = Automatic
+# Surface 4 (Settings › Script libraries): checking the folder every 2 seconds.
+hv-scripts-set-watch-poll = Every 2 seconds
+# Surface 4 (Settings › Script libraries): why a library is polled, when the user chose it.
+hv-scripts-set-watch-chosen = You chose to check this folder every 2 seconds.
+# Surface 4 (Settings › Script libraries): states beyond the mock's four.
+# Variables:
+#   $state (String) - selector: the state; one of moved, envfolder, unreadable, notresponding, unwatched (anything else: the default).
+hv-scripts-set-state =
+    { $state ->
+        [moved] This isn't the folder that was attached: it was moved or replaced.
+        [envfolder] This folder is inside an environment folder, so nothing in it is shown.
+        [unreadable] Hacivat can't read this folder.
+        [notresponding] The folder isn't answering.
+        [unwatched] Nothing reports changes in this folder; Refresh shows them.
+       *[scanning] Reading the folder…
+    }
+# Surface 4 (Settings › Script libraries): the confirmed fix for a moved or replaced folder.
+hv-scripts-set-adopt = Use this folder…
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $library (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+hv-scripts-adopt-title = Use this folder as { $library }?
+# Surface 4 (Settings › Script libraries).
+# Variables:
+#   $path (String) - a folder path, verbatim (data), e.g. "~/work/orders-scripts".
+hv-scripts-adopt-body = Hacivat stopped showing this library because the folder at { $path } is not the one that was attached. If you moved or restored it yourself, use it: the library keeps its local mappings. If you don't know why it changed, look at the folder first.
+# Surface 4 (Settings › Script libraries).
+hv-scripts-adopt-btn = Use this folder
+# Surface 4 (Settings › Script libraries): the Remove and Use this folder questions' subtitle.
+# Variables:
+#   $path (String) - a folder path, verbatim (data), e.g. "~/work/orders-scripts".
+hv-scripts-remove-path = { $path }
+# Surface 11 (Diagnostics): nothing watches the library (R-T9-1: the poll suggestion).
+# Variables:
+#   $folder (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+hv-scripts-diag-unwatched = Nothing reports changes in { $folder }. If edits made outside Hacivat don't show up, choose Watch: Every 2 seconds in Settings › Script libraries.
+# m4b-t16-attach fix round 1 (I1, R-T10-7): the manifest can't be read and the library keeps the binding its last good read gave.
+# Variables:
+#   $folder (String) - a library's folder name, verbatim (data), e.g. "billing".
+#   $database (String) - a database name, verbatim (data), e.g. "orders".
+hv-scripts-diag-toml-kept = .hacivat/workspace.toml in { $folder } can't be read, so the library keeps its last binding, { $database }, until the file is fixed.
+# m4b-t16-attach fix round 1 (I4): why a found .hacivat/workspace.toml can't be read.
+# Variables:
+#   $reason (String) - selector: why; one of link, notfile, changed, unreadable, large, notutf8, deep, invalid, noformat, badformat, newer, database (anything else: the default).
+hv-scripts-manifest-reason =
+    { $reason ->
+        [link] it is a link, which Hacivat never follows
+        [notfile] it is not a file
+        [changed] it changed while it was read
+        [unreadable] it can't be opened
+        [large] it is over 64 KB
+        [notutf8] it is not UTF-8 text
+        [deep] it is nested too deeply
+        [invalid] it is not valid TOML
+        [noformat] it has no format line
+        [badformat] its format is not a number
+        [newer] a newer Hacivat wrote it
+        [database] its database name is not valid
+       *[other] it can't be understood
+    }
+# m4b-t16-attach fix round 1 (I4): the attach dialog over a found file it can't read.
+# Variables:
+#   $reason (String) - why, an hv-scripts-manifest-reason text, e.g. "it is not valid TOML".
+#   $folder (String) - a library's folder name, verbatim (data), e.g. "orders-scripts".
+hv-scripts-attach-found-broken = Found .hacivat/workspace.toml, but it can't be read ({ $reason }); the library will bind by its folder name, { $folder }, until it is fixed.
+# m4b-t16-attach fix round 1 (m1): a long found file is shown up to a cap.
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-attach-more-lines =
+    { $n ->
+        [one] … and { $n } more line
+       *[other] … and { $n } more lines
+    }
+# m4b-t16-attach fix round 1 (I6): an action in Settings › Script libraries did nothing.
+# Variables:
+#   $reason (String) - selector: why; one of readonly, state, refused (anything else: the default).
+hv-scripts-set-failed =
+    { $reason ->
+        [readonly] Hacivat can't change its list of libraries now, so nothing was changed.
+        [state] The library changed meanwhile, so nothing was done.
+        [refused] Hacivat can't use this folder as the library; nothing was changed.
+       *[other] Hacivat couldn't save this change; nothing was changed.
+    }
+# m4b-t16-attach fix round 1 (m7): Remove… while script tabs from the library have unsaved changes.
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-scripts-remove-dirty =
+    { $n ->
+        [one] { $n } open script tab from it has unsaved changes. Removing the library discards its recovery copy, so save it first.
+       *[other] { $n } open script tabs from it have unsaved changes. Removing the library discards their recovery copies, so save them first.
+    }
