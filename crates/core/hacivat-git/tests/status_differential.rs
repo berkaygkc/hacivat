@@ -1226,6 +1226,8 @@ fn index_entry_ceiling_is_measured_at_the_boundary() {
     let limits = GitLimits {
         max_entries: usize::MAX,
         timeout: std::time::Duration::from_secs(600),
+        // ## m4b-t20-adversarial fix round 2 (named line): the new field, its default.
+        ..GitLimits::default()
     };
     let mut results = Vec::new();
     for n in [ceiling, ceiling + 1] {

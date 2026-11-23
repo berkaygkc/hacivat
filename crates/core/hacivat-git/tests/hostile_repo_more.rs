@@ -204,6 +204,9 @@ fn includes_outside_the_repository_run_nothing() {
     // LF-committed file clean. Read, `eol.sql` would lose its badge. (`eol.sql` is committed
     // before the includes are armed: the git CLI itself follows them and runs fsmonitor.)
     set(&outside, "core.autocrlf", "true");
+    // Fix round 2 (re-review m5-fr1): the reviewer's oracle. Read, `core.bare = true` would make
+    // the status `Redirected` (the control below); `Ready` proves the include was not read.
+    set(&outside, "core.bare", "true");
     let st = status(&r, &GitLimits::default());
     let GitState::Ready(s) = &st else {
         panic!("the status reads the repository: {st:?}");
@@ -226,10 +229,16 @@ fn includes_outside_the_repository_run_nothing() {
     assert_eq!(markers_left(&markers), Vec::<String>::new());
     // The whole map is pinned: nothing an included file could set changed a badge.
     assert_eq!(s.by_path.len(), 3, "{s:?}");
-    // Recorded (fix round 1): no control can show an include being read through a badge.
-    // This pipeline's status honours none of `core.autocrlf`, `core.excludesFile` or
-    // `status.showUntrackedFiles` even from the repository's own config (observed), so the
-    // keys an include could bring that matter are the program keys, which the markers cover.
+    // The control (fix round 2): the same `core.bare` in the repository's own config is read,
+    // and refuses the repository, so the `Ready` above means the include was not followed.
+    // (`core.autocrlf`, `core.excludesFile` and `status.showUntrackedFiles` are not honoured by
+    // this pipeline even from the repository's own config, observed in fix round 1.)
+    set(&cfg, "core.bare", "true");
+    let st = status(&r, &GitLimits::default());
+    assert!(
+        matches!(st, GitState::Unavailable(GitError::Redirected)),
+        "{st:?}"
+    );
 }
 
 /// A 1 GiB index: never decoded (`TooLarge(Index)`, refused by its size before gix reads it),
@@ -326,9 +335,12 @@ fn a_fan_out_of_alternates_is_refused_at_once() {
         "t20 alternates_fan_out state={}",
         format!("{st:?}").replace(' ', "")
     ));
-    // Each of the three folders is checked once: answered within the budget, never `Timeout`
-    // (and so never a stuck worker that leaves the library `Paused`).
-    assert!(matches!(st, GitState::Ready(_)), "{st:?}");
+    // Fix round 2 (re-review I1-fr1): 500 raw entries in one file are refused before anything
+    // (ours or gix's store open) resolves one: `Redirected` at once, never `Timeout`.
+    assert!(
+        matches!(st, GitState::Unavailable(GitError::Redirected)),
+        "{st:?}"
+    );
     // Many distinct alternates (each a real, owned object folder) are refused.
     let mut lines = String::new();
     for i in 0..20 {
@@ -400,17 +412,17 @@ fn many_expensive_alternates_lines_are_refused_before_any_is_resolved() {
             );
         }
     };
-    // 1,000 copies of one short line: our check resolves it once (gix's own open then refuses
-    // a 30-link alternate: `Failed(Open)`, observed); answered at once either way.
-    std::os::unix::fs::symlink(deep.join("l1"), objects.join("a0")).unwrap();
-    write(&alternates, "a0\n".repeat(1_000).as_bytes());
+    // 1,000 copies of one short line: since fix round 2 over the raw-entry cap, refused before
+    // anything resolves it (`Redirected`); answered at once.
+    std::os::unix::fs::symlink(deep.join("l1"), objects.join("link0")).unwrap();
+    write(&alternates, "link0\n".repeat(1_000).as_bytes());
     not_stuck("repeated");
     // 1,000 distinct short lines (each its own link into the chain): refused before one is
     // resolved.
     let mut lines = String::new();
     for i in 1..1_000 {
-        std::os::unix::fs::symlink(deep.join("l1"), objects.join(format!("a{i}"))).unwrap();
-        lines.push_str(&format!("a{i}\n"));
+        std::os::unix::fs::symlink(deep.join("l1"), objects.join(format!("link{i}"))).unwrap();
+        lines.push_str(&format!("link{i}\n"));
     }
     write(&alternates, lines.as_bytes());
     not_stuck("distinct");
@@ -418,6 +430,135 @@ fn many_expensive_alternates_lines_are_refused_before_any_is_resolved() {
         status(&r, &GitLimits::default()),
         GitState::Unavailable(GitError::Redirected)
     ));
+}
+
+// ## m4b-t20-adversarial fix round 2 (re-review I1-fr1, the reviewer's shape)
+/// One short line repeated to 64 KiB (with whitespace variants), each a 2-hop link chain through
+/// 400-deep folders: our own check resolved it once, but gix's store open re-read the raw file
+/// and resolved every entry, uninterruptibly (27–113 s measured), so the status answered
+/// `Timeout`, then `Paused`, on every refresh. Now the raw entries are capped before gix sees
+/// the file: `Redirected` at once, on both passes. A file within the caps (16 copies) is read
+/// as before.
+#[cfg(unix)]
+#[test]
+fn a_repeated_short_alternates_line_never_reaches_gix() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let r = repo(&top, "repo");
+    let other = repo(&top, "other");
+    let mut deep = top.join("deep");
+    for _ in 0..400 {
+        deep.push("d");
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    // objects/l0 → deep/l1 → other's objects: each hop an absolute path through `deep`.
+    std::os::unix::fs::symlink(other.join(".git/objects"), deep.join("l1")).unwrap();
+    let objects = r.join(".git/objects");
+    std::os::unix::fs::symlink(deep.join("l1"), objects.join("l0")).unwrap();
+    let alternates = objects.join("info/alternates");
+    let mut text = String::new();
+    let variants = ["l0\n", " l0\n", "l0 \n", "\tl0\n"];
+    let mut i = 0;
+    while text.len() + 8 < 64 * 1024 {
+        text.push_str(variants[i % variants.len()]);
+        i += 1;
+    }
+    write(&alternates, text.as_bytes());
+    for pass in ["first", "refresh"] {
+        let st = status(&r, &GitLimits::default());
+        fact(&format!(
+            "t20 alternates_repeated pass={pass} state={}",
+            format!("{st:?}").replace(' ', "")
+        ));
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Redirected)),
+            "{pass}: {st:?}"
+        );
+    }
+    // Within the caps: 16 copies of the line, read as before (never `Timeout` or `Paused`).
+    write(&alternates, "l0\n".repeat(16).as_bytes());
+    for pass in ["first", "refresh"] {
+        let st = status(&r, &GitLimits::default());
+        assert!(
+            !matches!(
+                st,
+                GitState::Unavailable(GitError::Timeout | GitError::Paused | GitError::Redirected)
+            ),
+            "{pass}: {st:?}"
+        );
+    }
+}
+
+/// Re-review I1-fr1 (b), defence in depth: a worker abandoned at its deadline (a stall here,
+/// as an uninterruptible read would) leaves the library `Paused` only while it runs. Once it
+/// ends, the library answers `Timeout` at once for its backoff, starting no worker, and then
+/// is retried and answers normally: never `Paused` for good, never a worker back to back.
+#[test]
+fn an_overrun_backs_off_then_retries() {
+    let top = tempfile::tempdir().unwrap();
+    let r = repo(&canonical(top.path()), "repo");
+    let limits = GitLimits {
+        timeout: std::time::Duration::from_millis(300),
+        retry_after: std::time::Duration::from_millis(400),
+        ..GitLimits::default()
+    };
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (ended_tx, ended) = std::sync::mpsc::channel::<()>();
+    let first = hacivat_git::testing::status_with_stall(
+        &r,
+        &limits,
+        hacivat_git::testing::Stall::AfterResolve,
+        move || {
+            let _ = released.recv_timeout(std::time::Duration::from_secs(10));
+            let _ = ended_tx.send(());
+        },
+    );
+    assert!(
+        matches!(first, GitState::Unavailable(GitError::Timeout)),
+        "{first:?}"
+    );
+    assert!(matches!(
+        status(&r, &limits),
+        GitState::Unavailable(GitError::Paused)
+    ));
+    release.send(()).unwrap();
+    ended
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    // Later calls get a roomy budget, so a slow runner never overruns again.
+    let roomy = GitLimits {
+        timeout: std::time::Duration::from_secs(5),
+        ..limits
+    };
+    // The stuck worker ended (its overrun recorded on the way out): condition wait for the
+    // first answer that is not `Paused`; it is the backoff's `Timeout`, given at once.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let next = loop {
+        let st = status(&r, &roomy);
+        if !matches!(st, GitState::Unavailable(GitError::Paused)) {
+            break st;
+        }
+        assert!(std::time::Instant::now() < deadline, "still Paused");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    assert!(
+        matches!(next, GitState::Unavailable(GitError::Timeout)),
+        "{next:?}"
+    );
+    // After the backoff the library is retried, and answers.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let st = status(&r, &roomy);
+        if matches!(st, GitState::Ready(_)) {
+            break;
+        }
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Timeout)),
+            "only the backoff's answer before the retry: {st:?}"
+        );
+        assert!(std::time::Instant::now() < deadline, "never retried");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// The index with one more extension before its trailing SHA-1, the checksum recomputed.

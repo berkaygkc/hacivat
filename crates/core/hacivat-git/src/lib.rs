@@ -216,6 +216,13 @@ pub struct GitLimits {
     pub timeout: Duration,
     /// The most entries one status lists before it stops (R-M4b-14: a library's 20,000 files).
     pub max_entries: usize,
+    // ## m4b-t20-adversarial fix round 2 (named exception, re-review I1-fr1 b)
+    /// After a worker overran its call's budget (it was abandoned with `Timeout` and ended
+    /// later), how long the library answers `Unavailable(Timeout)` at once, starting no worker,
+    /// before it tries again. It doubles on each overrun in a row, up to an hour, and resets
+    /// once a worker answers in time. So a repository whose status cannot finish never keeps a
+    /// worker busy back to back, and is still retried.
+    pub retry_after: Duration,
 }
 
 impl Default for GitLimits {
@@ -223,6 +230,8 @@ impl Default for GitLimits {
         GitLimits {
             timeout: Duration::from_secs(5),
             max_entries: 20_000,
+            // ## m4b-t20-adversarial fix round 2 (named line)
+            retry_after: Duration::from_secs(30),
         }
     }
 }

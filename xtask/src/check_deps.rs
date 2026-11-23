@@ -2291,6 +2291,16 @@ fn names_the_file_system(t: &[SrcTok]) -> bool {
     let splices = (0..t.len()).any(|i| {
         (tok_ident(t, i, "include") && tok_punct(t, i + 1, '!'))
             || (tok_punct(t, i, '#') && tok_punct(t, i + 1, '[') && tok_ident(t, i + 2, "path"))
+            // Fix round 2 (re-review nit): `#[cfg_attr(…, path = "…")]`.
+            || (tok_punct(t, i, '#')
+                && tok_punct(t, i + 1, '[')
+                && tok_ident(t, i + 2, "cfg_attr")
+                && {
+                    let end = (i + 3..t.len())
+                        .find(|k| tok_punct(t, *k, ']'))
+                        .unwrap_or(t.len());
+                    (i + 3..end).any(|k| tok_ident(t, k, "path") && tok_punct(t, k + 1, '='))
+                })
     });
     if splices {
         return true;
@@ -5880,7 +5890,7 @@ mod tests {
     /// renames, brace groups and leading `::`, and a glob from outside the crate.
     #[test]
     fn script_content_outside_fileio_is_flagged() {
-        let forms: [(&str, &str); 18] = [
+        let forms: [(&str, &str); 19] = [
             // Fix round 1 (review m2): the settings crate's path-based writer, and splicing.
             (
                 "fsio.rs",
@@ -5892,6 +5902,10 @@ mod tests {
             ),
             ("include.rs", "include!(\"../x.rs\");"),
             ("path_attr.rs", "#[path = \"../../x.rs\"]\nmod x;"),
+            (
+                "cfg_attr_path.rs",
+                "#[cfg_attr(unix, path = \"../../x.rs\")]\nmod x;",
+            ),
             ("std_fs.rs", "fn f() { std::fs::read(\"x\"); }"),
             ("rooted.rs", "fn f() { ::std::fs::read(\"x\"); }"),
             ("use_fs.rs", "use std::fs;\nfn f() { fs::write(p, b); }"),

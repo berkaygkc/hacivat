@@ -952,9 +952,18 @@ async fn git_the_outer_index_lock_reaches_every_watcher_and_leaves_with_the_stat
     let root = canonical(&lib);
     let mut rx = r.svc.subscribe(None);
     // One edit, its event awaited: the edit's hint made the watcher look at the outer lock.
+    // Fix round 2: the hint waits for a watcher to take it (a watcher restarting has none for a
+    // moment; 1 in 10 runs met that gap).
     let edit = |n: u32| {
         std::fs::write(root.join("a.sql"), format!("SELECT {n};")).unwrap();
-        r.hint(&root, vec![RawHint::Path(root.join("a.sql"))]);
+        let (fake, root) = (&r.fake, root.clone());
+        async move {
+            let path = root.join("a.sql");
+            wait_until("a watcher takes the hint", || {
+                fake.emit(&root, vec![RawHint::Path(path.clone())])
+            })
+            .await;
+        }
     };
     let changed = |e: &LibraryEvent| matches!(e, LibraryEvent::FileChanged { rel, .. } if rel.as_str() == "a.sql");
     async fn next(rx: &mut hacivat_scripts::Subscription, f: impl Fn(&LibraryEvent) -> bool) {
@@ -969,7 +978,7 @@ async fn git_the_outer_index_lock_reaches_every_watcher_and_leaves_with_the_stat
     }
     // A tab has the file open (its events are the open files').
     r.svc.read(id, &rel("a.sql"), None).await.unwrap();
-    edit(1);
+    edit(1).await;
     next(&mut rx, changed).await;
     wait_until("the status's lock was looked at", || fs.count() >= 1).await;
     // A watcher started again (watch mode switch) has the lock too. (The restart's rescan also
@@ -982,7 +991,7 @@ async fn git_the_outer_index_lock_reaches_every_watcher_and_leaves_with_the_stat
     r.svc.settled().await;
     let before = fs.count();
     r.svc.read(id, &rel("a.sql"), None).await.unwrap();
-    edit(2);
+    edit(2).await;
     next(&mut rx, changed).await;
     assert!(fs.count() > before, "the new watcher looks at the lock");
     // A status that is not `Ready` (an unreadable repository config) takes it back.
@@ -999,7 +1008,7 @@ async fn git_the_outer_index_lock_reaches_every_watcher_and_leaves_with_the_stat
     r.svc.settled().await;
     let after = fs.count();
     r.svc.read(id, &rel("a.sql"), None).await.unwrap();
-    edit(3);
+    edit(3).await;
     next(&mut rx, changed).await;
     r.svc.settled().await;
     assert_eq!(

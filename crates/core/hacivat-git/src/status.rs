@@ -112,34 +112,90 @@ pub(crate) fn status_with(library_root: &Path, limits: &GitLimits, hooks: Hooks)
     let limits = *limits;
     let given = library_root.to_path_buf();
     let spelling = given.clone();
-    run_timed(spelling, limits.timeout, move |interrupt| {
-        let Some(root) = resolve(&given, &mut hooks) else {
-            return failed(FailKind::LibraryUnreadable);
-        };
-        let _canonical = if root == given {
-            None
-        } else if running().insert(root.clone()) {
-            Some(Running(root.clone()))
-        } else {
-            return GitState::Unavailable(GitError::Paused);
-        };
-        hooks.stall_at(crate::testing::Stall::AfterResolve);
-        pipeline(&root, &limits, &hooks.dataless, interrupt)
-    })
+    // ## m4b-t20-adversarial fix round 2 (named line, I1-fr1 b): with the overrun backoff.
+    run_timed_backoff(
+        spelling,
+        limits.timeout,
+        limits.retry_after,
+        move |interrupt| {
+            let Some(root) = resolve(&given, &mut hooks) else {
+                return failed(FailKind::LibraryUnreadable);
+            };
+            let _canonical = if root == given {
+                None
+            } else if running().insert(root.clone()) {
+                Some(Running(root.clone()))
+            } else {
+                return GitState::Unavailable(GitError::Paused);
+            };
+            hooks.stall_at(crate::testing::Stall::AfterResolve);
+            pipeline(&root, &limits, &hooks.dataless, interrupt)
+        },
+    )
 }
 
-/// Runs `work` on a worker thread and waits at most `timeout` for its answer (m3).
+/// Runs `work` on a worker thread and waits at most `timeout` for its answer (m3). Since
+/// m4b-t20 fix round 2 the status uses [`run_timed_backoff`]; this form (no backoff) is the
+/// unit tests'.
+#[cfg(test)]
 pub(crate) fn run_timed<F>(key: PathBuf, timeout: Duration, work: F) -> GitState
 where
     F: FnOnce(&AtomicBool) -> GitState + Send + 'static,
 {
+    run_timed_backoff(key, timeout, Duration::ZERO, work)
+}
+
+// ## m4b-t20-adversarial fix round 2 (named exception, re-review I1-fr1 b)
+/// Libraries whose last worker overran its call's budget: no new worker before `until`.
+struct Overrun {
+    until: std::time::Instant,
+    backoff: Duration,
+}
+
+static OVERRAN: Mutex<std::collections::BTreeMap<PathBuf, Overrun>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+fn overran() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<PathBuf, Overrun>> {
+    OVERRAN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The longest wait after overruns in a row.
+const RETRY_MAX: Duration = Duration::from_secs(3_600);
+
+/// [`run_timed`], with a backoff after an overrun: a worker abandoned at the deadline that
+/// ends later records it, and until its backoff (`retry`, doubling on each overrun in a row,
+/// at most [`RETRY_MAX`]) has passed the library answers `Unavailable(Timeout)` at once and
+/// starts no worker. A worker that answers in time clears it. Together with the one-worker
+/// claim this keeps at most one worker per library, never back to back on a status that cannot
+/// finish, and the library is retried, never `Paused` for good.
+pub(crate) fn run_timed_backoff<F>(
+    key: PathBuf,
+    timeout: Duration,
+    retry: Duration,
+    work: F,
+) -> GitState
+where
+    F: FnOnce(&AtomicBool) -> GitState + Send + 'static,
+{
+    if overran()
+        .get(&key)
+        .is_some_and(|o| std::time::Instant::now() < o.until)
+    {
+        return GitState::Unavailable(GitError::Timeout);
+    }
     if !running().insert(key.clone()) {
         // m2: an earlier worker for this library is still blocked in a read.
         return GitState::Unavailable(GitError::Paused);
     }
     let interrupt = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&interrupt);
+    // The caller gave up (the interrupt flag is also set by a full walk, so not that one).
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let gave_up = Arc::clone(&abandoned);
     let (tx, rx) = mpsc::sync_channel(1);
+    let record_key = key.clone();
     let guard = Running(key);
     let spawned = std::thread::Builder::new()
         .name("hacivat-repo-status".into())
@@ -147,6 +203,24 @@ where
             let guard = guard;
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&flag)))
                 .unwrap_or_else(|_| failed(FailKind::Worker));
+            {
+                let mut o = overran();
+                if gave_up.load(Ordering::SeqCst) {
+                    let backoff = o
+                        .get(&record_key)
+                        .map_or(retry, |prev| (prev.backoff * 2).max(retry))
+                        .min(RETRY_MAX);
+                    o.insert(
+                        record_key,
+                        Overrun {
+                            until: std::time::Instant::now() + backoff,
+                            backoff,
+                        },
+                    );
+                } else {
+                    o.remove(&record_key);
+                }
+            }
             // Leave RUNNING before answering, so that a call right after this answer starts.
             drop(guard);
             let _ = tx.send(out);
@@ -158,12 +232,14 @@ where
     match rx.recv_timeout(timeout) {
         Ok(st) => st,
         Err(mpsc::RecvTimeoutError::Timeout) => {
+            abandoned.store(true, Ordering::SeqCst);
             interrupt.store(true, Ordering::SeqCst);
             GitState::Unavailable(GitError::Timeout)
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => failed(FailKind::Worker),
     }
 }
+// ## m4b-t20-adversarial
 
 /// Discover, check, open, check again, collect. `root` is canonical.
 fn pipeline(

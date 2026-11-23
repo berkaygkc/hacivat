@@ -67,6 +67,12 @@ const ALTERNATES_MAX: usize = 8;
 /// is the expensive step, so a file of many cheap lines is refused at once. Real clones have
 /// one or two.
 const ALTERNATE_LINES_MAX: usize = 4 * ALTERNATES_MAX;
+/// ## m4b-t20-adversarial fix round 2 (re-review I1-fr1): the most raw entries (duplicates
+/// included, as `gix-odb` parses them) one alternates file may hold, and the whole chain.
+/// gix resolves each one when it opens the object store, uninterruptibly; a real clone has one
+/// or two.
+const ALTERNATE_RAW_PER_FILE: usize = 16;
+const ALTERNATE_RAW_PER_CHAIN: usize = 32;
 /// ## m4b-t20-adversarial fix round 1 (review I1): the most entries an object folder's `pack`
 /// folder may hold for the placeholder check (three files per pack; `git gc` keeps one pack).
 /// Past it the status answers `TooLarge(LooseObjects)` ("run git gc"), which repacks them.
@@ -741,6 +747,7 @@ fn check_alternates(
         interrupt,
         seen: Vec::new(),
         lines: 0,
+        raw_entries: 0,
     };
     walk.visit(objects, 0)
 }
@@ -754,6 +761,8 @@ struct AltWalk<'a> {
     seen: Vec<PathBuf>,
     /// The distinct lines of the chain met so far.
     lines: usize,
+    /// ## m4b-t20-adversarial fix round 2: the raw entries of the chain met so far.
+    raw_entries: usize,
 }
 
 // (A named lifetime: `check-deps`' `BackendInPublicApi` reads `'_` as a `_` import.)
@@ -769,6 +778,20 @@ impl<'a> AltWalk<'a> {
         let Some(text) = small_text(&file) else {
             return redirected();
         };
+        // ## m4b-t20-adversarial fix round 2 (re-review I1-fr1): gix's own store open reads this
+        // same file and resolves every raw entry, duplicates included, and cannot be
+        // interrupted. So the raw entries are capped first, counted as `gix-odb`'s
+        // `alternate::parse` reads them (every non-empty line that does not start with `#`,
+        // untrimmed): more than `ALTERNATE_RAW_PER_FILE` in one file, or
+        // `ALTERNATE_RAW_PER_CHAIN` in the chain, answer `Redirected` before gix sees them.
+        let entries = text
+            .split('\n')
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .count();
+        self.raw_entries += entries;
+        if entries > ALTERNATE_RAW_PER_FILE || self.raw_entries > ALTERNATE_RAW_PER_CHAIN {
+            return redirected();
+        }
         // Bounded text work first: no line is resolved before every line was counted.
         let mut raw: Vec<&str> = Vec::new();
         for line in text.lines().map(str::trim) {
