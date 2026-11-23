@@ -4567,7 +4567,10 @@ hv-scripts-secret-gutter =
        *[password] Looks like a password
     }
 # Surface 8 (Secret warning).
-hv-scripts-secret-gutter-hint = Saving asks first. A comment on this line such as -- hacivat:allow-secret (with a space after the dashes) keeps it quiet.
+# m4b-t21-shots (named exception, T17 review m5): the marker is a placeable, so no locale mangles it.
+# Variables:
+#   $marker (String) - the literal hacivat:allow-secret (never translated).
+hv-scripts-secret-gutter-hint = Saving asks first. A comment on this line such as -- { $marker } (with a space after the dashes) keeps it quiet.
 # Surface 8 (Secret warning).
 # Variables:
 #   $n (Number) - a count, e.g. 3.
@@ -4778,7 +4781,8 @@ hv-scripts-recover-dismiss = Dismiss
 # Surface 12 (Recovery).
 # Variables:
 #   $date (DateTime) - when the recovery copy was written, e.g. 2026-11-21 14:05.
-hv-scripts-recover-tab = Recovered unsaved changes from { DATETIME($date, month: "short", day: "numeric", hour: "numeric", minute: "numeric") }.
+# m4b-t21-shots (named exception): DATETIME takes dateStyle and timeStyle only; the other options were ignored and the time was lost.
+hv-scripts-recover-tab = Recovered unsaved changes from { DATETIME($date, dateStyle: "medium", timeStyle: "short") }.
 # Surface 12 (Recovery).
 hv-scripts-recover-tab-body = Save keeps them. Discard goes back to the file on disk.
 # Surface 12 (Recovery).

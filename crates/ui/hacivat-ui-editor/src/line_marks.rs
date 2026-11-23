@@ -68,28 +68,37 @@ pub(crate) struct LineMarks {
     pub(crate) painted: Vec<u32>,
 }
 
-/// Fix round 1 (I1): the icon and the labels (once each, in text order) of the marks on `line`,
-/// for the ▶ that covers them; `None` when the line has none.
-pub(crate) fn on_line(
-    s: &LineMarks,
-    buf: &TextBuffer,
-    line: u32,
-    cx: &App,
-) -> Option<(IconName, Vec<SharedString>)> {
-    let mut icon = None;
+/// What a shown ▶ covers on its row: the marks' icon, their labels (once each, in text order)
+/// and (## m4b-t21-shots, T17 re-review n1) the first mark's other lines, as the key's own
+/// tooltip lists them.
+#[derive(Debug, Clone)]
+pub(crate) struct Covered {
+    pub icon: IconName,
+    pub labels: Vec<SharedString>,
+    pub detail: Vec<SharedString>,
+}
+
+/// Fix round 1 (I1): what the marks on `line` show, for the ▶ that covers them; `None` when the
+/// line has none.
+pub(crate) fn on_line(s: &LineMarks, buf: &TextBuffer, line: u32, cx: &App) -> Option<Covered> {
+    let mut first: Option<&LineMark> = None;
     let mut labels: Vec<SharedString> = Vec::new();
     for m in s
         .marks
         .iter()
         .filter(|m| line_of(buf, m.range.start) == line)
     {
-        icon.get_or_insert(m.icon);
+        first.get_or_insert(m);
         let l = (m.label)(cx);
         if !labels.contains(&l) {
             labels.push(l);
         }
     }
-    icon.map(|i| (i, labels))
+    first.map(|m| Covered {
+        icon: m.icon,
+        labels,
+        detail: m.detail.iter().map(|f| f(cx)).collect(),
+    })
 }
 
 /// Replaces the marks with `marks`, computed at `version`, rebased to `snap.version`.

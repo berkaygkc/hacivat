@@ -580,6 +580,22 @@ impl GotoHost {
 
     // ---- tests ------------------------------------------------------------------------------
 
+    // ## m4b-t21-shots (plan Task 21: the chooser announces the environment of each row)
+    /// The chooser rows' accessible names, in order (tests); empty in the results.
+    pub fn chooser_row_labels(&self, cx: &App) -> Vec<SharedString> {
+        match &self.mode {
+            Mode::Choose(ch) => ch.rows.iter().map(|c| row_label(c, cx)).collect(),
+            Mode::Results => Vec::new(),
+        }
+    }
+
+    // ## m4b-t21-shots (T15 fr2 n1, n3)
+    /// What Enter in the chooser acts on now: the identity the last frame drew active, `None`
+    /// before the chooser has drawn (tests).
+    pub fn enter_target(&self) -> Option<Seen> {
+        self.painted.clone()
+    }
+
     /// The results' rows as "folder/name · library" (tests).
     pub fn result_rows(&self) -> Vec<String> {
         self.hits
@@ -677,6 +693,18 @@ fn current_platform() -> KeymapPlatform {
 fn key_label(chord: &str) -> SharedString {
     let presses = parse_chord(chord).unwrap_or_default();
     display_chord(&presses, current_platform()).into()
+}
+
+// ## m4b-t21-shots
+/// A chooser row's accessible name: its environment word, the connection and the database
+/// (the mark is the only other cue of the environment).
+fn row_label(cand: &Candidate, cx: &App) -> SharedString {
+    SharedString::from(format!(
+        "{} {} {}",
+        crate::connections::capsule::env_word(cx, cand.env),
+        super::tabs::display_name(&cand.name),
+        super::tabs::display_name(cand.database.as_str())
+    ))
 }
 
 /// The environment of the folder `rel` sits in, when an `@<env>` folder scopes it.
@@ -922,11 +950,8 @@ impl Render for GotoHost {
                                 .debug_selector(move || format!("scripts-choose-row-{ix}"))
                                 // ## m4b-t15-goto fix round 1 (review minor 2): with the
                                 // environment word (the mark is the only other cue).
-                                .aria_label(SharedString::from(format!(
-                                    "{} {name} {}",
-                                    crate::connections::capsule::env_word(cx, cand.env),
-                                    super::tabs::display_name(cand.database.as_str())
-                                )))
+                                // ## m4b-t21-shots: one function, which the tests read.
+                                .aria_label(row_label(cand, cx))
                                 // ## m4b-t15-goto fix round 2 (I-fr1-1): the click carries the
                                 // identity of the row it was painted for, never an index.
                                 .on_click({
@@ -1125,9 +1150,13 @@ fn show(mode: Mode, window: &mut Window, cx: &mut App) {
         host.update(cx, |h, cx| {
             if let Mode::Choose(_) = mode {
                 h.mode = mode;
+                // ## m4b-t21-shots (T15 fr2 n3): what the replaced chooser drew is no longer on
+                // screen, so Enter acts on nothing until this one has drawn.
+                h.painted = None;
             } else if matches!(h.mode, Mode::Choose(_)) {
                 // A second ⇧⌘O over the chooser goes back to the results.
                 h.mode = Mode::Results;
+                h.painted = None;
                 h.run_query(cx);
             }
             cx.notify();

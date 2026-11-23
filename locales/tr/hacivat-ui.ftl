@@ -4333,8 +4333,10 @@ hv-scripts-secret-gutter =
        *[password] Parolaya benziyor
     }
 # Surface 8 (Secret warning).
+# Variables:
+#   $marker (String) - the literal hacivat:allow-secret (never translated).
 # Review: PO
-hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırdaki -- hacivat:allow-secret gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur.
+hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırdaki -- { $marker } gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur.
 # Surface 8 (Secret warning).
 # Variables:
 #   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
@@ -4572,7 +4574,7 @@ hv-scripts-recover-dismiss = Kapat
 # Variables:
 #   $date (DateTime) - when the recovery copy was written, e.g. 2026-11-21 14:05.
 # Review: PO
-hv-scripts-recover-tab = { DATETIME($date, month: "short", day: "numeric", hour: "numeric", minute: "numeric") } tarihli kaydedilmemiş değişiklikler kurtarıldı.
+hv-scripts-recover-tab = { DATETIME($date, dateStyle: "medium", timeStyle: "short") } tarihli kaydedilmemiş değişiklikler kurtarıldı.
 # Surface 12 (Recovery).
 # Review: PO
 hv-scripts-recover-tab-body = Kaydet onları korur. At, diskteki dosyaya geri döner.

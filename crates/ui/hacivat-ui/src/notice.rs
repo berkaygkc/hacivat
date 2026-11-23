@@ -144,6 +144,10 @@ impl IntoElement for InlineNotice {
                     div()
                         .flex()
                         .flex_row()
+                        // ## m4b-t21-shots (named exception): a row of buttons wider than the
+                        // notice wraps (the encoding notice's four "Open as …" at 960 in the
+                        // pseudo-locales); a row that fits lays out as before.
+                        .flex_wrap()
                         .gap(px(t.spacing.sm))
                         .mt(px(t.spacing.md))
                         .children(self.actions),

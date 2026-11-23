@@ -576,3 +576,14 @@ pub fn preview_segment(tab: hacivat_ui::panes::TabId, cx: &App) -> Option<Shared
     (doc.read(cx).tier == hacivat_scripts::fileio::SizeTier::Preview)
         .then(|| msg(cx, "hv-scripts-preview-segment", Vec::new()))
 }
+
+// ## m4b-t21-shots
+/// Shot fixtures (`tests/shots/m4b.rs`).
+pub mod fixtures {
+    use super::*;
+
+    /// The question "Reload" asks on `doc`'s "Changed on disk" bar.
+    pub fn confirm_reload(doc: &Entity<ScriptDoc>, window: &mut Window, cx: &mut App) {
+        super::confirm_reload(doc, window, cx);
+    }
+}

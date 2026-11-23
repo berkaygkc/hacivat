@@ -1536,3 +1536,103 @@ fn a_click_with_a_stale_row_identity_opens_nothing(cx: &mut TestAppContext) {
     });
     r.finish();
 }
+
+// ## m4b-t21-shots (T15 fr2 n1, n3): Enter acts on what the last frame drew; a chooser that
+// replaced another one has drawn nothing, so until it draws, Enter has no row. (GPUI draws a
+// dirty window before it dispatches a key, so a real Enter always comes after that frame.)
+#[gpui::test]
+fn enter_acts_on_the_row_its_own_chooser_drew(cx: &mut TestAppContext) {
+    let r = rig(
+        cx,
+        vec![
+            prof("orders-prod", Some(EnvTag::Production), "orders"),
+            prof("orders-staging", Some(EnvTag::Staging), "orders"),
+        ],
+    );
+    let (prod, staging) = (
+        profile_id(r.vcx, "orders-prod"),
+        profile_id(r.vcx, "orders-staging"),
+    );
+    let lib = r.library("orders", &["a.sql", "@production/b.sql"]);
+    let before = tab_count(r.vcx);
+    // The chooser of a.sql, drawn: staging is the row it shows active.
+    goto_query(r.vcx, "a", "a.sql · orders");
+    press_key(r.vcx, "enter");
+    let h = host(r.vcx);
+    assert_eq!(
+        r.vcx.cx.read(|cx| h.read(cx).enter_target()),
+        Some(Seen::Row(
+            staging,
+            DatabaseName::new("orders"),
+            Some(EnvTag::Staging)
+        ))
+    );
+    // The chooser of @production/b.sql replaces it: before it draws, Enter has no row (n3).
+    let replaced = in_window(r.vcx, |window, cx| {
+        goto::open_chooser(
+            lib,
+            RelPath::parse("@production/b.sql").unwrap(),
+            None,
+            window,
+            cx,
+        );
+        h.read(cx).enter_target()
+    });
+    assert_eq!(
+        replaced, None,
+        "the row a.sql's chooser drew is gone with it"
+    );
+    // Enter (n1): its frame shows no active row (production only), so nothing opens.
+    press_key(r.vcx, "enter");
+    assert_eq!(
+        r.vcx.cx.read(|cx| h.read(cx).enter_target()),
+        Some(Seen::Nothing)
+    );
+    assert_eq!(tab_count(r.vcx), before, "nothing opened");
+    // ↓ moves onto production, the frame draws it, and Enter opens it.
+    press_key(r.vcx, "down");
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "b.sql opens under prod", |vcx| {
+        active_spec(vcx).is_some_and(|(s, ready)| {
+            ready && s.rel.as_str() == "@production/b.sql" && s.profile == Some(prod)
+        })
+    });
+    r.finish();
+}
+
+// ## m4b-t21-shots (plan Task 21: the chooser announces the environment of each row)
+#[gpui::test]
+fn the_chooser_names_each_rows_environment(cx: &mut TestAppContext) {
+    let r = rig(
+        cx,
+        vec![
+            prof("orders-prod", Some(EnvTag::Production), "orders"),
+            prof("orders-staging", Some(EnvTag::Staging), "orders"),
+            prof("orders-dev", Some(EnvTag::Dev), "orders"),
+        ],
+    );
+    r.library("orders", &["a.sql"]);
+    goto_query(r.vcx, "a", "a.sql · orders");
+    press_key(r.vcx, "enter");
+    let h = host(r.vcx);
+    let rows = chooser(r.vcx).expect("the chooser");
+    let labels = r.vcx.cx.read(|cx| h.read(cx).chooser_row_labels(cx));
+    assert_eq!(labels.len(), rows.0.len(), "{labels:?}");
+    let labels: Vec<String> = labels.iter().map(|l| strip(l)).collect();
+    // Each row: the environment word, the connection, the database; production says so.
+    for (label, (name, db)) in labels.iter().zip(rows.0.iter()) {
+        assert!(label.contains(name) && label.ends_with(db), "{label:?}");
+    }
+    let prod = labels
+        .iter()
+        .find(|l| l.contains("orders-prod"))
+        .expect("the production row");
+    assert!(prod.starts_with("production "), "{prod:?}");
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.starts_with("staging ") && l.contains("orders-staging")),
+        "{labels:?}"
+    );
+    r.finish();
+}

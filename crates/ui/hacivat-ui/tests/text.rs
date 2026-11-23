@@ -486,3 +486,66 @@ fn a_paragraph_one_snapped_line_short_is_still_cut(cx: &mut TestAppContext) {
     let (clipped, _) = prose_clipped(cx, Some(natural - 1.0));
     assert!(clipped, "a clip 1 px short of its height cuts it");
 }
+
+// ## m4b-t21-shots (T13 fr1 re-review n8): the shared tooltip takes a line break, and a line
+// too wide for the window wraps inside it.
+
+/// A view showing one `Tip` (the tooltip view) as its content.
+struct TipHost(gpui::AnyView);
+
+impl Render for TipHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(self.0.clone())
+    }
+}
+
+/// Draws a `Tip` of `text` in a window `width` px wide; returns what the frame recorded.
+fn draw_tip(cx: &mut TestAppContext, text: &str, width: f32) -> Vec<RenderedText> {
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let text: gpui::SharedString = text.to_string().into();
+    let (_, vcx) = cx.add_window_view(|_, cx| TipHost(hacivat_ui::popover::Tip::view(text, cx)));
+    vcx.simulate_resize(size(px(width), px(400.0)));
+    vcx.run_until_parked();
+    vcx.read(|cx| cx.global::<TextRegistry>().frame.clone())
+}
+
+#[gpui::test]
+fn a_tooltip_with_a_line_break_draws_each_line(cx: &mut TestAppContext) {
+    // Before: GPUI's line shaper panicked on the `\n` on hover.
+    let frame = draw_tip(
+        cx,
+        "13 scripts listed here\nAlso under orders-staging",
+        960.0,
+    );
+    let texts: Vec<&str> = frame.iter().map(|r| r.text.as_ref()).collect();
+    assert_eq!(
+        texts,
+        ["13 scripts listed here", "Also under orders-staging"],
+        "{frame:?}"
+    );
+    assert!(frame.iter().all(|r| !r.clipped && r.visible), "{frame:?}");
+}
+
+#[gpui::test]
+fn a_tooltip_wider_than_its_window_wraps_and_one_that_fits_stays_one_line(cx: &mut TestAppContext) {
+    let long = "Points outside the library, so Hacivat never opens it. · Kept in the cloud, not \
+                downloaded. Opening it downloads it first. · ? Unknown: git status could not \
+                be read for this file";
+    // At 400 px it cannot be one line: it wraps in its box, nothing cut.
+    let frame = draw_tip(cx, long, 400.0);
+    assert_eq!(frame.len(), 1, "{frame:?}");
+    let r = &frame[0];
+    assert!(!r.clipped && r.visible, "{r:?}");
+    assert!(r.painted_px <= 400.0 - 16.0, "{r:?}");
+    assert!(r.path.contains("hacivat-ui/src/popover.rs"), "{r:?}");
+    // A short one is the one-line label it always was.
+    let frame = draw_tip(cx, "Run this statement", 960.0);
+    assert_eq!(frame.len(), 1, "{frame:?}");
+    assert!(!frame[0].clipped && !frame[0].truncated, "{:?}", frame[0]);
+}

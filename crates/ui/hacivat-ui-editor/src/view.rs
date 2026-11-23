@@ -194,6 +194,9 @@ pub struct EditorView {
     // ## m3c-narrow
     /// Whether the last render drew the banner's narrow form (`large_file::narrow`).
     pub(crate) banner_narrow: bool,
+    // ## m4b-t21-shots (named item, ADR 0007 `## m4b-t21`)
+    /// Whether the host draws the large-file banner itself now ([`EditorView::set_host_banner`]).
+    pub(crate) host_banner: Option<Rc<dyn Fn(&App) -> bool>>,
     // ## m3a-t01b-seams (fix round 1): module-owned state of the input handler (Task 27) and
     // the commands (Task 25), and the focus subscriptions.
     pub(crate) input: InputState,
@@ -361,6 +364,8 @@ impl EditorView {
             placeholder_at: None,
             // ## m3c-narrow
             banner_narrow: false,
+            // ## m4b-t21-shots
+            host_banner: None,
             input: InputState::default(),
             commands: CommandState::default(),
             find: FindState::default(),
@@ -784,6 +789,41 @@ impl EditorView {
         &self.marks
     }
 
+    // ## m4b-t21-shots (named items, ADR 0007 `## m4b-t21`)
+    /// Lets the host draw the large-file banner itself while `draws(cx)` answers `true` (the
+    /// app's Run-as-script strip goes under the T2 banner, `design/m4b-scripts` surface 9, and
+    /// outside the editor, so its buttons keep their Tab order before the code). While it
+    /// does, the editor's column holds no banner; the host draws [`EditorView::banner_element`]
+    /// and notifies the editor whenever the answer changes.
+    pub fn set_host_banner(
+        &mut self,
+        draws: Option<Rc<dyn Fn(&App) -> bool>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.host_banner = draws;
+        cx.notify();
+    }
+
+    /// Whether the editor's own column draws the banner now (no host draws it).
+    pub(crate) fn banner_in_column(&self, cx: &App) -> bool {
+        !self.host_banner.as_ref().is_some_and(|draws| draws(cx))
+    }
+
+    /// The large-file banner as this editor would draw it in its column (its narrow form when
+    /// the editor's last frame was narrow); `None` in T0.
+    pub fn banner_element(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<hacivat_ui_core::gpui_surface::AnyElement> {
+        let narrow = self
+            .layout
+            .as_ref()
+            .map(|l| l.bounds.size.width)
+            .filter(|w| large_file::shows_banner(&self.tier) && large_file::narrow(*w));
+        large_file::banner(&self.tier, narrow, window, cx)
+    }
+
     // ## m4b-t17-secrets-ui (named items, ADR 0007 `## m4b-t17`)
     /// Replaces the host's line marks with `marks`, byte ranges of the text at `version`
     /// (rebased to the current text; `line_marks.rs`).
@@ -1205,13 +1245,20 @@ impl Render for EditorView {
         // ## m3c-narrow: the banner's form follows the width the last frame gave the editor
         // (`prepaint_frame` asks for one more frame when it crossed the narrow line).
         // ## m3c-narrow (fix round 1, M5): only while a banner shows.
+        // ## m4b-t21-shots (named lines): none while the host draws it.
+        let in_column = self.banner_in_column(cx);
         let narrow = self
             .layout
             .as_ref()
             .map(|l| l.bounds.size.width)
-            .filter(|w| large_file::shows_banner(&self.tier) && large_file::narrow(*w));
+            .filter(|w| large_file::shows_banner(&self.tier) && large_file::narrow(*w))
+            .filter(|_| in_column);
         self.banner_narrow = narrow.is_some();
-        let banner = large_file::banner(&self.tier, narrow, window, cx);
+        let banner = if in_column {
+            large_file::banner(&self.tier, narrow, window, cx)
+        } else {
+            None
+        };
         let overlay = commands::overlay(self, window, cx);
         // ## m3c-t41
         let placeholder = self.placeholder_element(window, cx);

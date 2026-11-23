@@ -130,6 +130,25 @@ pub(super) enum M4b {
     /// words (T12 m4).
     RunAsScriptConfirm,
     // ## m4b-t18-run-as-script
+    // ## m4b-t21-shots: surfaces 10 and 12, the rest of 5 and 6, and the cross-surface state.
+    /// Surface 10: a file that is not UTF-8: "tr_rapor.sql isn't UTF-8 text." with its
+    /// encodings in place of the text.
+    ScriptEncoding,
+    /// Surface 12: on launch, the recovered tab's notice (Save, Discard…) and the sticky
+    /// "Recovered unsaved changes to 2 scripts" toast.
+    ScriptRecovered,
+    /// Surface 6: "Reload" asks first: "Discard your edits and reload orders_report.sql?"
+    /// (Discard and reload Danger, isolated; Cancel focused).
+    ScriptReloadAsk,
+    /// Surface 5, controller ruling (d): a 47-character connection, two tabs; the connection
+    /// part of a script tab's title never ellipsizes.
+    ScriptLongConnection,
+    /// The cross-surface state (plan Task 21): a script tab on production, connected, with the
+    /// T2 banner, the Run-as-script strip, the find bar and the "Changed on disk" bar open at
+    /// once; at 960 the capsule, the hairline and the environment cell stay whole (the M3c
+    /// narrow-toolbar rule).
+    CrossNarrowProd,
+    // ## m4b-t21-shots
 }
 
 /// Every M4b state, in shot order.
@@ -140,7 +159,8 @@ pub(super) enum M4b {
 // ## m4b-t16-attach (named exception): Task 16's five after Task 14's.
 // ## m4b-t17-secrets-ui (named exception): Task 17's two after Task 16's.
 // ## m4b-t18-run-as-script (named exception): Task 18's five after Task 17's.
-pub(super) const M4B_STATES: [M4b; 35] = [
+// ## m4b-t21-shots (named exception): Task 21's five after Task 18's.
+pub(super) const M4B_STATES: [M4b; 40] = [
     M4b::T2Preview,
     M4b::PasteConfirm,
     M4b::ScriptsProd,
@@ -180,6 +200,12 @@ pub(super) const M4B_STATES: [M4b; 35] = [
     M4b::RunAsScriptFailed,
     M4b::RunAsScriptCancelled,
     M4b::RunAsScriptConfirm,
+    // ## m4b-t21-shots
+    M4b::ScriptEncoding,
+    M4b::ScriptRecovered,
+    M4b::ScriptReloadAsk,
+    M4b::ScriptLongConnection,
+    M4b::CrossNarrowProd,
 ];
 
 /// The preview's file: 148 MB (the mock's).
@@ -236,6 +262,12 @@ impl M4b {
             M4b::RunAsScriptFailed => "m4b-run-as-script-failed",
             M4b::RunAsScriptCancelled => "m4b-run-as-script-cancelled",
             M4b::RunAsScriptConfirm => "m4b-run-as-script-confirm",
+            // ## m4b-t21-shots
+            M4b::ScriptEncoding => "m4b-script-encoding",
+            M4b::ScriptRecovered => "m4b-script-recovered",
+            M4b::ScriptReloadAsk => "m4b-script-reload-ask",
+            M4b::ScriptLongConnection => "m4b-script-long-connection",
+            M4b::CrossNarrowProd => "m4b-script-cross-prod",
         }
     }
 
@@ -280,6 +312,12 @@ impl M4b {
             M4b::RunAsScriptRunning => ("#script-run-state", None),
             M4b::RunAsScriptFailed | M4b::RunAsScriptCancelled => ("#script-run-end", None),
             M4b::RunAsScriptConfirm => ("#confirm-open-ended-scope", None),
+            // ## m4b-t21-shots
+            M4b::ScriptEncoding => ("hacivat-ui/src/notice.rs:", None),
+            M4b::ScriptRecovered => ("hacivat-ui/src/toast.rs:", None),
+            M4b::ScriptReloadAsk => ("hacivat-ui/src/dialog.rs:", None),
+            M4b::ScriptLongConnection => ("#tab-title", None),
+            M4b::CrossNarrowProd => ("#script-run-state", None),
         }
     }
 
@@ -324,11 +362,19 @@ impl M4b {
                 &["#script-run-sent", "#script-run-line", "#script-run-read"]
             }
             M4b::RunAsScriptFailed | M4b::RunAsScriptCancelled | M4b::RunAsScriptConfirm => &[],
+            // ## m4b-t21-shots
+            M4b::ScriptEncoding | M4b::ScriptReloadAsk | M4b::ScriptLongConnection => &[],
+            M4b::ScriptRecovered => &[],
+            M4b::CrossNarrowProd => &["#editor-t2-title", "#script-run-sent"],
         }
     }
 
     /// Brings the state's fixtures on screen in a freshly started shell.
     pub(super) fn open(self, window: &mut Window, cx: &mut App) {
+        // ## m4b-t21-shots
+        if self.is_t21() {
+            return t21::open(self, window, cx);
+        }
         // ## m4b-t17-secrets-ui
         if self.is_t17() {
             save(cx, pg(DEV, EnvTag::Dev));
@@ -393,7 +439,30 @@ impl M4b {
     pub(super) fn connects(self) -> bool {
         // ## m4b-t18-run-as-script fix round 1 (named exception; review m7): the running
         // strip on a connected production console.
-        self == M4b::ScriptConnectedProd || self == M4b::RunAsScriptRunning
+        self == M4b::ScriptConnectedProd
+            || self == M4b::RunAsScriptRunning
+            // ## m4b-t21-shots (named line)
+            || self == M4b::CrossNarrowProd
+    }
+
+    // ## m4b-t21-shots
+    /// A Task 21 state.
+    fn is_t21(self) -> bool {
+        matches!(
+            self,
+            M4b::ScriptEncoding
+                | M4b::ScriptRecovered
+                | M4b::ScriptReloadAsk
+                | M4b::ScriptLongConnection
+                | M4b::CrossNarrowProd
+        )
+    }
+
+    /// The trust signals a state must show whole (`trust_signals_must_be_drawn`): a connected
+    /// production script tab's environment cell.
+    pub(super) fn required(self) -> &'static [&'static [&'static str]] {
+        const ENV: &[&str] = &["#status-env-label"];
+        if self.connects() { &[ENV] } else { &[] }
     }
 
     /// A script tab state (Task 14).
@@ -441,6 +510,12 @@ impl M4b {
             | M4b::RunAsScriptFailed
             | M4b::RunAsScriptCancelled
             | M4b::RunAsScriptConfirm => None,
+            // ## m4b-t21-shots
+            M4b::ScriptEncoding
+            | M4b::ScriptRecovered
+            | M4b::ScriptReloadAsk
+            | M4b::ScriptLongConnection
+            | M4b::CrossNarrowProd => None,
             // ## m4b-t14-tabs
             M4b::ScriptTabs
             | M4b::ScriptChanged
@@ -469,6 +544,10 @@ impl M4b {
 
     /// The steps after [`M4b::open`].
     pub(super) fn steps(self) -> Vec<Step> {
+        // ## m4b-t21-shots
+        if self.is_t21() {
+            return t21::steps(self);
+        }
         // ## m4b-t17-secrets-ui
         if self.is_t17() {
             return t17::steps(self);
@@ -611,6 +690,12 @@ impl M4b {
             | M4b::RunAsScriptFailed
             | M4b::RunAsScriptCancelled
             | M4b::RunAsScriptConfirm => Vec::new(),
+            // ## m4b-t21-shots: reached through `t21::steps` above.
+            M4b::ScriptEncoding
+            | M4b::ScriptRecovered
+            | M4b::ScriptReloadAsk
+            | M4b::ScriptLongConnection
+            | M4b::CrossNarrowProd => Vec::new(),
         }
     }
 }
@@ -811,6 +896,12 @@ fn script_steps(state: M4b) -> Vec<Step> {
         | M4b::RunAsScriptFailed
         | M4b::RunAsScriptCancelled
         | M4b::RunAsScriptConfirm => {}
+        // ## m4b-t21-shots: `t21::steps`.
+        M4b::ScriptEncoding
+        | M4b::ScriptRecovered
+        | M4b::ScriptReloadAsk
+        | M4b::ScriptLongConnection
+        | M4b::CrossNarrowProd => {}
         // Task 13's states: `scripts::steps`.
         M4b::ScriptsProd
         | M4b::ScriptsStaging
@@ -1547,6 +1638,12 @@ mod scripts {
             | M4b::RunAsScriptFailed
             | M4b::RunAsScriptCancelled
             | M4b::RunAsScriptConfirm => {}
+            // ## m4b-t21-shots: Task 21's states (`t21::steps`).
+            M4b::ScriptEncoding
+            | M4b::ScriptRecovered
+            | M4b::ScriptReloadAsk
+            | M4b::ScriptLongConnection
+            | M4b::CrossNarrowProd => {}
         }
         out
     }
@@ -2050,3 +2147,246 @@ mod t17 {
     }
 }
 // ## m4b-t17-secrets-ui
+
+// ## m4b-t21-shots --------------------------------------------------------------------------------
+/// Task 21's states: surface 10 (encoding), surface 12 (recovery), the rest of surfaces 5 and
+/// 6, and the cross-surface state, on the script tabs' library (`shot_library`).
+mod t21 {
+    use super::*;
+    use hacivat_app::scripts::tabs::{Load, Notice};
+
+    /// A Windows-1254 script (Turkish): `ı` and `ş` are single bytes, so it is not UTF-8.
+    const ENC_FILE: &str = "tr_rapor.sql";
+    /// The cross-surface state's dump: past the 20 MB the editor reads whole, so the tab opens
+    /// it as a T2 preview.
+    const BIG_FILE: &str = "orders_dump.sql";
+    /// Controller ruling (d)'s fixture: a 47-character staging connection.
+    const LONG: &str = "orders-reporting-replica-eu-west-1-read-staging";
+
+    /// The library folder (`shot_library`'s), with this state's own files written before the
+    /// library is attached (its watcher is a fake: nothing is read again later).
+    fn library_dir(cx: &App) -> Option<std::path::PathBuf> {
+        let paths = cx.try_global::<hacivat_app::AppState>()?.paths.clone();
+        let root = paths.config.parent()?.join("library");
+        std::fs::create_dir_all(&root).ok()?;
+        Some(root)
+    }
+
+    pub(super) fn open(state: M4b, _window: &mut Window, cx: &mut App) {
+        save(cx, pg(DEV, EnvTag::Dev));
+        let mut prod = pg(PROD, EnvTag::Production);
+        if state.connects() {
+            // An IP literal: nothing resolves (the M3a fakes dial themselves).
+            prod.endpoint = ProfileEndpoint::Server {
+                host: "10.0.4.12".into(),
+                port: None,
+            };
+            prod.user = Some("deploy".into());
+            prod.auth = hacivat_secrets::AuthProviderId::None;
+        }
+        save(cx, prod);
+        save(cx, pg(STAGING, EnvTag::Staging));
+        if state == M4b::ScriptLongConnection {
+            save(cx, pg(LONG, EnvTag::Staging));
+        }
+        let Some(dir) = library_dir(cx) else {
+            return;
+        };
+        match state {
+            M4b::ScriptEncoding => {
+                // "-- müşteri raporu\nSELECT 'İzmir', 'ılık';\n" in Windows-1254.
+                let bytes: &[u8] = b"-- m\xfc\xfeteri raporu\nSELECT '\xddzmir', '\xfdl\xfdk';\n";
+                let _ = std::fs::write(dir.join(ENC_FILE), bytes);
+            }
+            M4b::CrossNarrowProd => {
+                let line =
+                    "INSERT INTO orders (id, city, total) VALUES (1204, 'İzmir', 1234567);\n";
+                let n = (21usize << 20) / line.len() + 1;
+                let _ = std::fs::write(
+                    dir.join(BIG_FILE),
+                    format!("-- orders dump\n{}", line.repeat(n)),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// The active script tab's doc (whatever its load state).
+    fn active_doc(
+        window: &mut Window,
+        cx: &App,
+    ) -> Option<hacivat_ui_core::gpui_surface::Entity<hacivat_app::scripts::tabs::ScriptDoc>> {
+        let tab = window
+            .root::<Workspace>()
+            .flatten()?
+            .read(cx)
+            .active_tab()?;
+        hacivat_app::scripts::tabs::doc_of_tab(tab, cx)
+    }
+
+    /// The active script tab's console.
+    fn active_console(window: &mut Window, cx: &App) -> Option<hacivat_app::console::ConsoleId> {
+        active_doc(window, cx)?.read(cx).console()
+    }
+
+    /// Connects orders-prod (over the M3a fakes) and waits until it is connected.
+    fn connect_prod() -> Step {
+        step(
+            |_, cx| {
+                if let Some(id) = profile_named(cx, PROD) {
+                    ConnectionsModel::connect(cx, id, None);
+                }
+            },
+            |_, cx| {
+                profile_named(cx, PROD).is_some_and(|id| {
+                    matches!(
+                        cx.global::<ConnectionsModel>().live(id),
+                        hacivat_session::LiveState::Connected(_)
+                    )
+                })
+            },
+        )
+    }
+
+    pub(super) fn steps(state: M4b) -> Vec<Step> {
+        let mut out = Vec::new();
+        match state {
+            M4b::ScriptEncoding => out.push(step(
+                |_, cx| {
+                    let Some(lib) = shot_library(cx) else {
+                        return;
+                    };
+                    let staging = profile_named(cx, STAGING);
+                    hacivat_app::scripts::open::open_script(
+                        cx,
+                        lib,
+                        hacivat_scripts::RelPath::parse(ENC_FILE).expect("a path"),
+                        staging,
+                        Some(hacivat_scripts::DatabaseName::new("orders")),
+                    );
+                },
+                |window, cx| {
+                    active_doc(window, cx)
+                        .is_some_and(|d| matches!(d.read(cx).load(), Load::NeedsEncoding { .. }))
+                },
+            )),
+            M4b::ScriptRecovered => {
+                out.push(open_step(REPORT, Some(STAGING), Some("orders")));
+                out.push(edit_step());
+                // A fixed instant for the copy's time: Nov 21 2026, 11:05 UTC (the mock's).
+                let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_795_259_100);
+                out.push(notice_step(Notice::Recovered {
+                    at,
+                    unknown: false,
+                    secret: false,
+                }));
+                out.push(step(
+                    |_, cx| {
+                        hacivat_app::scripts::restore::fixtures::toast(
+                            vec![
+                                (REPORT.to_string(), Some(STAGING.to_string())),
+                                ("haftalık_rapor.sql".to_string(), Some(PROD.to_string())),
+                            ],
+                            cx,
+                        );
+                    },
+                    |_, cx| !hacivat_ui::toast::ToastQueue::visible_ids(cx).is_empty(),
+                ));
+            }
+            M4b::ScriptReloadAsk => {
+                out.push(open_step(REPORT, Some(STAGING), Some("orders")));
+                out.push(edit_step());
+                out.push(notice_step(Notice::Changed));
+                out.push(step(
+                    |window, cx| {
+                        if let Some(doc) = ready_doc(window, cx) {
+                            hacivat_app::scripts::disk_bars::fixtures::confirm_reload(
+                                &doc, window, cx,
+                            );
+                        }
+                    },
+                    |window, cx| {
+                        window
+                            .root::<Workspace>()
+                            .flatten()
+                            .is_some_and(|ws| ws.read(cx).layer_ids().contains(&"dialog"))
+                    },
+                ));
+            }
+            M4b::ScriptLongConnection => {
+                out.push(open_step(REPORT, Some(PROD), Some("orders")));
+                out.push(open_step(REPORT, Some(LONG), Some("orders")));
+            }
+            M4b::CrossNarrowProd => {
+                out.push(connect_prod());
+                out.push(step(
+                    |_, cx| {
+                        let Some(lib) = shot_library(cx) else {
+                            return;
+                        };
+                        let prod = profile_named(cx, PROD);
+                        hacivat_app::scripts::open::open_script(
+                            cx,
+                            lib,
+                            hacivat_scripts::RelPath::parse(BIG_FILE).expect("a path"),
+                            prod,
+                            Some(hacivat_scripts::DatabaseName::new("orders")),
+                        );
+                    },
+                    |window, cx| {
+                        ready_doc(window, cx).is_some_and(|d| {
+                            d.read(cx).tier() == hacivat_scripts::SizeTier::Preview
+                        }) && editor_in(window, cx).is_some_and(|e| e.read(cx).preview().is_some())
+                    },
+                ));
+                // The strip of a run under way (no run behind it: nothing is sent).
+                out.push(step(
+                    |window, cx| {
+                        let Some(console) = active_console(window, cx) else {
+                            return;
+                        };
+                        let progress = hacivat_exec::ScriptProgress {
+                            phase: hacivat_exec::ScriptPhase::Running,
+                            bytes: 9 << 20,
+                            units_seen: 1_204,
+                            units_total: None,
+                            units_run: 1_204,
+                            units_failed: 0,
+                            line: 48_213,
+                        };
+                        hacivat_app::scripts::run_as_script::fixtures::show_strip(
+                            console,
+                            BIG_FILE,
+                            21 << 20,
+                            progress,
+                            None,
+                            cx,
+                        );
+                    },
+                    |window, cx| {
+                        active_console(window, cx)
+                            .is_some_and(|c| hacivat_app::scripts::run_as_script::running(c, cx))
+                    },
+                ));
+                out.push(notice_step(Notice::Changed));
+                // The find bar, over the editor that has the focus.
+                out.push(step(
+                    |window, cx| {
+                        if let Some(editor) = editor_in(window, cx) {
+                            let focus = editor.read(cx).focus_handle(cx);
+                            window.focus(&focus, cx);
+                        }
+                        hacivat_ui::actions::ActionRegistry::run("editor.find", window, cx);
+                    },
+                    |window, cx| {
+                        active_console(window, cx)
+                            .is_some_and(|c| hacivat_app::console::find_bar::is_open(c, cx))
+                    },
+                ));
+            }
+            _ => {}
+        }
+        out
+    }
+}
+// ## m4b-t21-shots

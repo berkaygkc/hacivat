@@ -186,6 +186,13 @@ fn offer(found: Vec<RecoveryEntry>, cx: &mut App) {
             ws.update(cx, |ws, cx| ws.open_script_tab(id, cx));
         });
     }
+    push_toast(items, cx);
+}
+
+// ## m4b-t21-shots (named exception): the launch toast on its own, so the shots show the
+// product's toast (`fixtures::toast`).
+/// The launch toast for the recovered tabs `items` (file, connection or unbound).
+fn push_toast(items: Vec<(String, Option<String>)>, cx: &mut App) {
     let n = items.len() as u64;
     let bullets: Vec<hacivat_ui::text::TextFn> = items
         .into_iter()
@@ -222,4 +229,15 @@ fn offer(found: Vec<RecoveryEntry>, cx: &mut App) {
     toast.sticky = true;
     toast.wide = true;
     ToastQueue::push(cx, toast);
+}
+
+// ## m4b-t21-shots
+/// Shot fixtures (`tests/shots/m4b.rs`): the launch toast with no recovery copy behind it.
+pub mod fixtures {
+    use super::*;
+
+    /// Pushes the "Recovered unsaved changes" toast for `items` (file, connection).
+    pub fn toast(items: Vec<(String, Option<String>)>, cx: &mut App) {
+        push_toast(items, cx);
+    }
 }

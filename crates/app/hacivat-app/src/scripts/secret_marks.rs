@@ -361,12 +361,17 @@ fn kind_selector(kind: SecretKind) -> &'static str {
 
 /// The tooltip's second line: how to silence the line (an unscanned text: that a save asks).
 fn hint(kind: SecretKind) -> TextFn {
-    let id = if kind == SecretKind::Unscanned {
-        "hv-scripts-secret-unscanned-hint"
-    } else {
-        "hv-scripts-secret-gutter-hint"
-    };
-    Rc::new(move |cx: &App| msg(cx, id, Vec::new()))
+    if kind == SecretKind::Unscanned {
+        return Rc::new(|cx: &App| msg(cx, "hv-scripts-secret-unscanned-hint", Vec::new()));
+    }
+    // ## m4b-t21-shots (T17 review m5): the marker is an argument, never translated text.
+    Rc::new(|cx: &App| {
+        msg(
+            cx,
+            "hv-scripts-secret-gutter-hint",
+            vec![("marker", ArgValue::Text(ALLOW_MARKER.to_string()))],
+        )
+    })
 }
 
 /// A finding's fingerprint (module docs); `None` for `Unscanned`. Never stored outside the

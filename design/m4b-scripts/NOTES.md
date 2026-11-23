@@ -547,7 +547,7 @@ Reused verbatim, not redefined: `hv-explorer-*` (M4), `hv-conn-menu-*`, `hv-caps
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-scripts-secret-gutter` | Looks like a password · [token] Looks like an access token · [key] Looks like a private key · [url] Looks like a connection URL with a password | Parolaya benziyor · [token] Erişim belirtecine benziyor · [key] Özel anahtara benziyor · [url] Parola içeren bir bağlantı adresine benziyor |
-| `hv-scripts-secret-gutter-hint` | Saving asks first. A comment on this line such as -- hacivat:allow-secret (with a space after the dashes) keeps it quiet. | Kaydederken önce sorulur. Bu satırdaki -- hacivat:allow-secret gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur. |
+| `hv-scripts-secret-gutter-hint` | Saving asks first. A comment on this line such as -- {marker} (with a space after the dashes) keeps it quiet. | Kaydederken önce sorulur. Bu satırdaki -- {marker} gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur. |
 | `hv-scripts-secret-title` | {n} lines in {file} look like secrets · [one] {n} line in {file} looks like a secret | {file} içinde {n} satır gizli bilgiye benziyor |
 | `hv-scripts-secret-body` | Hacivat found text that looks like a password or a token. The values aren't shown here. | Hacivat parolaya ya da belirtece benzeyen metin buldu. Değerler burada gösterilmez. |
 | `hv-scripts-secret-line` | Line {line} | Satır {line} |
@@ -1057,7 +1057,9 @@ hv-scripts-secret-gutter =
        *[password] Looks like a password
     }
 # Surface 8 (Secret warning).
-hv-scripts-secret-gutter-hint = Saving asks first. A comment on this line such as -- hacivat:allow-secret (with a space after the dashes) keeps it quiet.
+# Variables:
+#   $marker (String) - the literal hacivat:allow-secret (never translated).
+hv-scripts-secret-gutter-hint = Saving asks first. A comment on this line such as -- { $marker } (with a space after the dashes) keeps it quiet.
 # Surface 8 (Secret warning).
 # Variables:
 #   $n (Number) - a count, e.g. 3.
@@ -1078,7 +1080,7 @@ hv-scripts-secret-git = If you commit this file, the value is shared with everyo
 # Surface 8 (Secret warning).
 # Variables:
 #   $marker (String) - the literal hacivat:allow-secret (never translated).
-hv-scripts-secret-allow = To keep a line on purpose, add a comment with { $marker } on it.
+hv-scripts-secret-allow = To keep a line on purpose, add the comment -- { $marker } (with a space after the dashes) or /* { $marker } */ on it.
 # Surface 8 (Secret warning).
 hv-scripts-secret-remember = Save anyway is remembered for this tab until you quit.
 # Surface 8 (Secret warning).
@@ -1268,7 +1270,7 @@ hv-scripts-recover-dismiss = Dismiss
 # Surface 12 (Recovery).
 # Variables:
 #   $date (DateTime) - when the recovery copy was written, e.g. 2026-11-21 14:05.
-hv-scripts-recover-tab = Recovered unsaved changes from { DATETIME($date, month: "short", day: "numeric", hour: "numeric", minute: "numeric") }.
+hv-scripts-recover-tab = Recovered unsaved changes from { DATETIME($date, dateStyle: "medium", timeStyle: "short") }.
 # Surface 12 (Recovery).
 hv-scripts-recover-tab-body = Save keeps them. Discard goes back to the file on disk.
 # Surface 12 (Recovery).
@@ -1920,8 +1922,10 @@ hv-scripts-secret-gutter =
        *[password] Parolaya benziyor
     }
 # Surface 8 (Secret warning).
+# Variables:
+#   $marker (String) - the literal hacivat:allow-secret (never translated).
 # Review: PO
-hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırdaki -- hacivat:allow-secret gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur.
+hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırdaki -- { $marker } gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur.
 # Surface 8 (Secret warning).
 # Variables:
 #   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
@@ -1943,7 +1947,7 @@ hv-scripts-secret-git = Bu dosyayı commit ederseniz değer, depoyu okuyabilen h
 # Variables:
 #   $marker (String) - the literal hacivat:allow-secret (never translated).
 # Review: PO
-hv-scripts-secret-allow = Bir satırı bilerek tutmak için o satıra { $marker } içeren bir yorum ekleyin.
+hv-scripts-secret-allow = Bir satırı bilerek tutmak için o satıra -- { $marker } (tirelerden sonra bir boşlukla) ya da /* { $marker } */ yorumunu ekleyin.
 # Surface 8 (Secret warning).
 # Review: PO
 hv-scripts-secret-remember = Yine de kaydet, siz çıkana kadar bu sekme için hatırlanır.
@@ -2159,7 +2163,7 @@ hv-scripts-recover-dismiss = Kapat
 # Variables:
 #   $date (DateTime) - when the recovery copy was written, e.g. 2026-11-21 14:05.
 # Review: PO
-hv-scripts-recover-tab = { DATETIME($date, month: "short", day: "numeric", hour: "numeric", minute: "numeric") } tarihli kaydedilmemiş değişiklikler kurtarıldı.
+hv-scripts-recover-tab = { DATETIME($date, dateStyle: "medium", timeStyle: "short") } tarihli kaydedilmemiş değişiklikler kurtarıldı.
 # Surface 12 (Recovery).
 # Review: PO
 hv-scripts-recover-tab-body = Kaydet onları korur. At, diskteki dosyaya geri döner.

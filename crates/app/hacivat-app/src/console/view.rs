@@ -1108,6 +1108,16 @@ impl ConsoleHost {
             },
         );
         exec_attach(console, &editor, window, cx);
+        // ## m4b-t21-shots (named exception): while a Run-as-script strip shows, this host
+        // draws the T2 banner above it (see `render`).
+        editor.update(cx, |e, cx| {
+            e.set_host_banner(
+                Some(std::rc::Rc::new(move |cx: &App| {
+                    crate::scripts::run_as_script::strip(console, cx).is_some()
+                })),
+                cx,
+            );
+        });
         // ## m3c-t33-find (named exception): the console's find bar.
         crate::console::find_bar::attach(console, &editor, window, cx);
         let focus_handle = editor.focus_handle(cx);
@@ -1773,6 +1783,10 @@ impl Render for ConsoleHost {
         self.follow_display(cx);
         let model = self.toolbar_model(cx);
         let actions = self.actions(cx);
+        // ## m4b-t21-shots: the Run-as-script strip, if any (below).
+        let strip = self
+            .console()
+            .and_then(|c| crate::scripts::run_as_script::strip(c, cx));
         // ## m3b-t22-tx-ui (named exception): with the console's transaction items.
         let bar = toolbar::build_for(&model, &actions, self.console(), cx);
         let root = div()
@@ -1790,10 +1804,15 @@ impl Render for ConsoleHost {
             )
             // ## m4b-t18-run-as-script (named exception; NOTES surface 9): the Run-as-script
             // strip, under the notices (never over a trust signal).
-            .children(
-                self.console()
-                    .and_then(|c| crate::scripts::run_as_script::strip(c, cx)),
-            )
+            // ## m4b-t21-shots (named exception, T18 concern): and under the T2 banner, as the
+            // mock shows: while a strip shows, this host draws the editor's banner above it
+            // (`EditorView::set_host_banner`, set at attach).
+            .children(strip.as_ref().and_then(|_| {
+                editor
+                    .clone()
+                    .update(cx, |e, cx| e.banner_element(window, cx))
+            }))
+            .children(strip)
             // ## m3c-t33-find (named exception): the find bar, a row under the toolbar
             // (design/m3b-safe surface 16, M3c-9).
             .children(
