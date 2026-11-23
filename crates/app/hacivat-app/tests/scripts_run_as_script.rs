@@ -133,19 +133,37 @@ fn pg_profile(name: &str, env: EnvTag, host: &str, db: &str) -> Profile {
     p
 }
 
-/// `head`, then comment lines to past 20 MB, with `SELECT 0;` every 1.4 MB (module docs).
-fn big_script(head: &str) -> String {
-    let pad = "-- padding line of a large script\n";
-    let mut s = String::with_capacity(22 << 20);
+// ## m4b-cifix-6-big-script
+/// `head`, then comment lines to just past the 20 MiB preview threshold, with `SELECT 0;` every
+/// 1.4 MB (module docs); and this test's turn to stream it (the guard, held to the test's end).
+///
+/// A run reads the whole file twice, and in a debug build every byte costs (CI 45102908608,
+/// where the five tests that call this timed out on all three runners): lexing about 2.2 s and
+/// SHA-256 about 0.7 s of a fast core for pass 1 alone, measured. So:
+/// - the padding is long comment lines: a 2 KB line is one token where 34-byte lines were 60,
+///   which halves pass 1 (3.6 s to 1.7 s locally);
+/// - the file is no larger than the tier needs;
+/// - one test streams at a time. Four whole-file passes at once on a 3- or 4-vCPU runner (each
+///   with the UI thread redrawing its progress) is what took the waits past 10 s; on efficiency
+///   cores the same four took 43 to 49 s each.
+fn big_script(head: &str) -> (String, std::sync::MutexGuard<'static, ()>) {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pad = format!("-- padding of a large script {}\n", "x".repeat(2_000));
+    let past = usize::try_from(hacivat_scripts::fileio::REDUCED_MAX_BYTES).unwrap() + (64 << 10);
+    let mut s = String::with_capacity(past + (2 << 20));
     s.push_str(head);
-    while s.len() < (21 << 20) {
-        for _ in 0..40_000 {
-            s.push_str(pad);
+    while s.len() < past {
+        for _ in 0..(1_400_000 / pad.len()) {
+            s.push_str(&pad);
         }
         s.push_str("SELECT 0;\n");
     }
-    s
+    (s, turn)
 }
+// ## end m4b-cifix-6-big-script
 
 /// The statements `fake` ran as typed queries (Run's units), in order, without the context
 /// probe's.
@@ -484,7 +502,7 @@ fn dev_console(cx: &mut TestAppContext) -> (Rig, TabId) {
 
 #[gpui::test]
 fn run_as_script_asks_on_production_destructive_units(cx: &mut TestAppContext) {
-    let big = big_script("SELECT 1;\nDELETE FROM t;\nSELECT 2;\n");
+    let (big, _turn) = big_script("SELECT 1;\nDELETE FROM t;\nSELECT 2;\n");
     let (mut r, prod) = prod(cx, &[("big.sql", big.as_str())]);
     let tab = r.open("big.sql", prod);
     r.wait_session(tab);
@@ -673,7 +691,7 @@ fn paste_confirmation_as_preview_opens_a_preview(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn trust_signals_stay_visible_during_a_run(cx: &mut TestAppContext) {
-    let big = big_script("SELECT 1;\nSELECT 99;\n");
+    let (big, _turn) = big_script("SELECT 1;\nSELECT 99;\n");
     let (mut r, prod) = prod(cx, &[("big.sql", big.as_str())]);
     let tab = r.open("big.sql", prod);
     r.wait_session(tab);
@@ -743,7 +761,7 @@ fn stop_by_keyboard_presses_the_button_and_keeps_the_focus(cx: &mut TestAppConte
 #[gpui::test]
 fn run_as_script_refuses_when_the_session_is_on_another_database(cx: &mut TestAppContext) {
     // R-M4b-27 for streamed runs: the tab was opened under `orders`; its session says `other`.
-    let big = big_script("SELECT 1;\nSELECT 2;\n");
+    let (big, _turn) = big_script("SELECT 1;\nSELECT 2;\n");
     let mut r = rig(
         cx,
         vec![(DbmsKind::Postgres, PROD, pg_fake("other"))],
@@ -842,7 +860,7 @@ fn a_file_changed_during_the_run_stops_it(cx: &mut TestAppContext) {
     let mut head = String::from("SELECT 1;\nDELETE FROM t;\n");
     head.push_str(&"-- the first block\n".repeat(8_000));
     head.push_str("SELECT 42;\n");
-    let big = big_script(&head);
+    let (big, _turn) = big_script(&head);
     let (mut r, prod) = prod(cx, &[("big.sql", big.as_str())]);
     let tab = r.open("big.sql", prod);
     r.wait_session(tab);
@@ -1266,7 +1284,7 @@ fn a_streamed_units_commit_prompt_turns_lost_with_its_connection(cx: &mut TestAp
 fn a_change_between_the_passes_runs_nothing(cx: &mut TestAppContext) {
     // Review rv_a (m8): the file is rewritten (same length) while the between-pass database
     // check waits on a slow server: pass 2 refuses, nothing is sent.
-    let big = big_script("SELECT 1;\nSELECT 2;\n");
+    let (big, _turn) = big_script("SELECT 1;\nSELECT 2;\n");
     let mut r = rig(
         cx,
         vec![(DbmsKind::Postgres, PROD, pg_fake_slow_probe("orders"))],

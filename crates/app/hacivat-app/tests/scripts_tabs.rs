@@ -994,6 +994,11 @@ fn mysql_tab_reconnect_reapplies_its_database_before_run(cx: &mut TestAppContext
         });
         live && r.session_db(tab).as_deref() != Some("orders_archive")
     });
+    // ## m4b-cifix-6-reconnect-test: the lost session broke and the console took a new one,
+    // whose SQL context is read again; until it is, Run is disabled and a press is dropped (M3:
+    // Run waits for the context). The wait above can pass before that probe even reaches the
+    // session (CI 45102908608, Windows), so Run waits for the context, as a user's would.
+    r.wait_session(tab, "the new session's SQL context");
     let before = fake.executed().len();
     r.run(tab);
     wait_until(r.vcx, "ran after the switch back", |_| {

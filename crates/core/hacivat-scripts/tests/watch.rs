@@ -386,9 +386,16 @@ fn own_new_file_is_not_reported() {
 fn a_foreign_write_with_the_echos_length_and_time_is_still_reported() {
     // Same length, and the recorded time forced to match: only the hash tells them apart.
     let lib = Lib::new(&[("a.sql", "AAAA")]);
+    // ## m4b-cifix-6-echo-test: the write below must move the time the reconciler learned, or
+    // this is the racily clean case (the next test), not the echo check. Two writes inside one
+    // tick of the file system's clock (NTFS on CI 45102908608, ext4's coarse clock) keep the
+    // time, so the first file is dated a minute back.
+    age(&lib.path("a.sql"), 60);
+    let learned = fs::metadata(lib.path("a.sql")).unwrap().modified().unwrap();
     let mut r = lib.rec();
     lib.write("a.sql", "BBBB");
     let on_disk = fs::metadata(lib.path("a.sql")).unwrap().modified().unwrap();
+    assert_ne!(on_disk, learned, "the foreign write moved the time");
     r.echo().record(
         rel("a.sql"),
         DiskStamp {
@@ -402,6 +409,44 @@ fn a_foreign_write_with_the_echos_length_and_time_is_still_reported() {
         vec![WatchEvent::Changed(rel("a.sql"))]
     );
 }
+
+// ## m4b-cifix-6-echo-test
+/// The Windows shape of the test above (CI 45102908608): a foreign write inside the clock tick
+/// of the time the reconciler knows, same length, so `(len, mtime)` does not move, with an echo
+/// of that length and time recorded. A file a tab has open is hashed again and the write is
+/// `Changed`; one nobody has open is `PossiblyChanged` (R-T9-3). Neither is dropped as an echo.
+#[test]
+fn a_foreign_write_inside_the_clock_tick_is_never_an_echo() {
+    for open in [true, false] {
+        let lib = Lib::new(&[("a.sql", "AAAA")]);
+        let tick = fs::metadata(lib.path("a.sql")).unwrap().modified().unwrap();
+        let mut r = lib.rec();
+        if open {
+            r.remember(&rel("a.sql"), &lib.read_stamp("a.sql"));
+        }
+        lib.write("a.sql", "BBBB");
+        set_mtime(&lib.path("a.sql"), tick);
+        r.echo().record(
+            rel("a.sql"),
+            DiskStamp {
+                len: 4,
+                mtime: tick,
+                hash: 1,
+            },
+        );
+        let want = if open {
+            WatchEvent::Changed(rel("a.sql"))
+        } else {
+            WatchEvent::PossiblyChanged(rel("a.sql"))
+        };
+        assert_eq!(
+            run(&mut r, vec![lib.hint("a.sql")], t0()),
+            vec![want],
+            "open={open}"
+        );
+    }
+}
+// ## end m4b-cifix-6-echo-test
 
 // ---------------------------------------------------------------------------------------------
 // Reconciliation of editor save patterns (alg/28 §0.5, C3, C4).
