@@ -83,13 +83,21 @@ fn cp1254(s: &str) -> Vec<u8> {
 }
 
 /// Every file and folder name under `dir`, recursively, relative and sorted.
+/// Every name under `dir`, as library-relative text: `/`-separated on every OS, like a
+/// `RelPath` (m4b-cifix-5: the native `\` on Windows, CI 45091594060).
 fn names_under(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut todo = vec![dir.to_path_buf()];
     while let Some(d) = todo.pop() {
         for e in fs::read_dir(&d).unwrap().flatten() {
             let p = e.path();
-            out.push(p.strip_prefix(dir).unwrap().to_string_lossy().into_owned());
+            let parts: Vec<String> = p
+                .strip_prefix(dir)
+                .unwrap()
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            out.push(parts.join("/"));
             if e.file_type().unwrap().is_dir() {
                 todo.push(p);
             }

@@ -61,6 +61,11 @@
 
 // ## m4b-t05-fileio fix round 1 (review m1, m4, m12): Task 3's folder handles, shared.
 pub(crate) mod dir;
+// ## m4b-cifix-5-windows-identity
+mod windows_id;
+#[cfg(windows)]
+use windows_id::windows_identity;
+// ## m4b-cifix-5-windows-identity
 
 use std::fmt;
 use std::fs::{File, FileTimes, Metadata};
@@ -602,6 +607,9 @@ pub fn open_stream_checked(
     }
     Ok(ScriptStream(FileStream {
         at_open,
+        // ## m4b-cifix-5-windows-identity
+        path_id: path_identity(&opened.dir, &opened.name),
+        // ## m4b-cifix-5-windows-identity
         dir: opened.dir,
         name: opened.name,
         file: opened.file,
@@ -663,6 +671,11 @@ pub struct FileIdentity {
 
 impl FileIdentity {
     /// The identity `meta` describes (Unix); `None` off Unix, where `std` has none.
+    ///
+    /// ## m4b-cifix-5: a Windows `Metadata` carries no stable identity either (its volume
+    /// serial and file index are behind the unstable `windows_by_handle`), so a SQLite tab's
+    /// file stays path-only there (T14's residual). A folder's identity, and the read stream's
+    /// path check, read the real one by path instead (`windows_id::windows_identity`).
     pub fn of(meta: &Metadata) -> Option<Self> {
         #[cfg(unix)]
         {
@@ -745,15 +758,46 @@ fn unsettable_birth(meta: &std::fs::Metadata) -> Option<std::time::SystemTime> {
     }
 }
 
-/// The [`FolderIdentity`] of a folder (Unix); `None` where it cannot be read or the platform
-/// has none in stable `std`.
+/// The [`FolderIdentity`] of a folder (Unix, and Windows since m4b-cifix-5); `None` where it
+/// cannot be read or the path is not a real folder (a link or junction is never one).
 pub(crate) fn folder_identity(path: &std::path::Path) -> Option<FolderIdentity> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_dir() {
         return None;
     }
-    FileIdentity::of(&meta)
+    #[cfg(windows)]
+    {
+        // The id is read through a handle that follows a link: the path must still be a real
+        // folder afterwards, or the id may name the link's target.
+        let id = windows_identity(path)?;
+        let again = std::fs::symlink_metadata(path).ok()?;
+        again.is_dir().then_some(id)
+    }
+    #[cfg(not(windows))]
+    {
+        FileIdentity::of(&meta)
+    }
 }
+
+// ## m4b-cifix-5-windows-identity
+/// The Windows identity of `name` in `dir`, for the read stream's path check; `None` off
+/// Windows, where the [`Fingerprint`] already holds the device and inode.
+fn path_identity(dir: &Dir, name: &str) -> Option<FileIdentity> {
+    #[cfg(windows)]
+    {
+        let m = dir.lstat(name).ok()?;
+        if is_link(&m) {
+            return None;
+        }
+        windows_identity(&dir.child(name))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (dir, name);
+        None
+    }
+}
+// ## m4b-cifix-5-windows-identity
 // ## m4b-t10-service
 
 /// The temp name a save of `name` writes first: `.<name>.hv-<uuid v4>.tmp`, with `<name>` cut
@@ -1733,6 +1777,11 @@ struct FileStream {
     name: String,
     file: File,
     at_open: Fingerprint,
+    // ## m4b-cifix-5-windows-identity
+    /// The file's Windows identity at its path when opened (`None` off Windows): another file
+    /// renamed over the path is caught by it even when its size and times match.
+    path_id: Option<FileIdentity>,
+    // ## m4b-cifix-5-windows-identity
     decoder: StreamDecoder,
     done: bool,
     // ## m4b-t10-service fix round 1 (named exception; I7): the pass record.
@@ -1769,6 +1818,9 @@ impl FileStream {
         let handle = self.file.metadata().map(|m| Fingerprint::of(&m));
         let path = self.dir.lstat(&self.name).map(|m| Fingerprint::of(&m));
         matches!((handle, path), (Ok(h), Ok(p)) if h == self.at_open && p == self.at_open)
+            // ## m4b-cifix-5-windows-identity
+            && path_identity(&self.dir, &self.name) == self.path_id
+        // ## m4b-cifix-5-windows-identity
     }
 }
 
@@ -1913,9 +1965,14 @@ mod tests {
             born,
         };
         assert_eq!(reused(Some(t)), reused(Some(t)));
-        assert_ne!(reused(Some(t)), reused(Some(t + Duration::from_nanos(1))));
+        // m4b-cifix-5: a step every `SystemTime` holds (Windows counts in 100 ns, and
+        // `t + 1 ns` is `t` there, CI 45091594060).
+        let step = Duration::from_micros(1);
+        assert_ne!(t + step, t);
+        assert_ne!(reused(Some(t)), reused(Some(t + step)));
         assert_ne!(reused(Some(t)), reused(None));
-        #[cfg(unix)]
+        // m4b-cifix-5: Windows has a real folder identity too (volume serial and file id).
+        #[cfg(any(unix, windows))]
         {
             let d = tempfile::tempdir().unwrap();
             let root = d.path().join("scripts");
@@ -1923,17 +1980,17 @@ mod tests {
             let first = folder_identity(&root).unwrap();
             // Fix round (C1): the birth time is part of the identity on Linux only.
             assert_eq!(first.born.is_some(), cfg!(target_os = "linux"));
-            let born = std::fs::metadata(&root)
-                .unwrap()
-                .created()
-                .expect("the test file system reports no birth time");
             // Fix round (C1): a restore that sets the folder's time back (`rsync -a`,
             // `touch -t`) keeps the identity; on macOS it moves the birth time back as well.
-            let restored = SystemTime::UNIX_EPOCH + Duration::from_secs(946_684_800);
-            std::fs::File::open(&root)
-                .unwrap()
-                .set_modified(restored)
-                .unwrap();
+            // (A folder opens as a `File` on Unix only.)
+            #[cfg(unix)]
+            {
+                let restored = SystemTime::UNIX_EPOCH + Duration::from_secs(946_684_800);
+                std::fs::File::open(&root)
+                    .unwrap()
+                    .set_modified(restored)
+                    .unwrap();
+            }
             assert_eq!(folder_identity(&root), Some(first));
             let away = d.path().join("away");
             std::fs::rename(&root, &away).unwrap();
@@ -1942,21 +1999,25 @@ mod tests {
             assert_eq!(folder_identity(&root), Some(first));
             std::fs::remove_dir(&root).unwrap();
             // Linux stamps a new inode from the coarse clock: wait (on a condition) until a
-            // new file is born after the old folder, so the next one is too.
-            let probe = d.path().join("probe");
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            loop {
-                std::fs::write(&probe, b"").unwrap();
-                let later = std::fs::metadata(&probe).unwrap().created().unwrap() > born;
-                std::fs::remove_file(&probe).unwrap();
-                if later {
-                    break;
+            // new file is born after the old folder, so the next one is too. (m4b-cifix-5:
+            // only where the birth time is part of the identity; on Windows a probe made again
+            // within 15 s keeps its first creation time, NTFS tunnelling, so it never passes.)
+            if let Some(born) = first.born {
+                let probe = d.path().join("probe");
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    std::fs::write(&probe, b"").unwrap();
+                    let later = std::fs::metadata(&probe).unwrap().created().unwrap() > born;
+                    std::fs::remove_file(&probe).unwrap();
+                    if later {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the birth clock stood still"
+                    );
+                    std::thread::yield_now();
                 }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the birth clock stood still"
-                );
-                std::thread::yield_now();
             }
             std::fs::create_dir(&root).unwrap();
             assert_ne!(folder_identity(&root), Some(first));
@@ -1993,7 +2054,14 @@ mod tests {
             assert_eq!(FileIdentity::parse(&id.to_text()), Some(id), "{id:?}");
         }
         assert_eq!(none.to_text(), "16777232:4242");
-        assert_eq!(at(1, 5).to_text(), "16777232:4242:1.000000005");
+        // m4b-cifix-5: Windows holds a `SystemTime` in 100 ns steps, so `UNIX_EPOCH + 5 ns` is
+        // the epoch itself there (CI 45091594060). The text is exact for every time the
+        // platform holds; the nanosecond digit is asserted where the platform holds it.
+        assert_eq!(at(1, 500).to_text(), "16777232:4242:1.000000500");
+        if at(1, 5) != at(1, 0) {
+            assert_eq!(at(1, 5).to_text(), "16777232:4242:1.000000005");
+        }
+        assert_eq!(cfg!(windows), at(1, 5) == at(1, 0));
         for bad in [
             "",
             "1",
@@ -2009,6 +2077,22 @@ mod tests {
             assert_eq!(FileIdentity::parse(bad), None, "{bad:?}");
         }
     }
+
+    // ## m4b-cifix-5-windows-identity
+    /// A 128-bit Windows file id becomes `ino` exactly when it fits (NTFS), and by a hash when
+    /// it uses the high half (ReFS), so two such ids that share a half stay apart.
+    #[test]
+    fn a_file_id_folds_exactly_when_it_fits() {
+        use super::windows_id::fold_file_id;
+        assert_eq!(fold_file_id(0x0001_0000_0000_002a), 0x0001_0000_0000_002a);
+        assert_eq!(fold_file_id(u128::from(u64::MAX)), u64::MAX);
+        let high = |h: u64, l: u64| fold_file_id((u128::from(h) << 64) | u128::from(l));
+        assert_ne!(high(1, 7), 7);
+        assert_ne!(high(1, 7), high(2, 7));
+        assert_ne!(high(1, 7), high(1, 8));
+        assert_eq!(high(1, 7), high(1, 7));
+    }
+    // ## m4b-cifix-5-windows-identity
 
     /// A file deleted and written again at its path is another file, even where ext4 hands it
     /// the freed inode (CI 45077623376); a rename keeps the identity.
