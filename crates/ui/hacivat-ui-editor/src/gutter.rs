@@ -36,8 +36,8 @@ use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, AvailableSpace, BorderStyle, Bounds, Context,
     Corners, CursorStyle, Div, Edges, Entity, FocusHandle, Hsla, InteractiveElement as _,
     IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels, Point, Render, Role,
-    Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, fill, point, px, quad,
-    size,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, fill, point,
+    px, quad, size,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, popover_surface};
 use smallvec::SmallVec;
@@ -650,19 +650,13 @@ pub(crate) fn prepaint_buttons(
     // ## m3c-po (PO M3c-04): the rows that get a ▶ first (one per line), so the column's one
     // tab stop is known before the buttons are laid out.
     let mut cands: Vec<(usize, u32, Pixels)> = Vec::new();
-    // ## m4b-t17-secrets-ui (named lines): a row with a host line mark keeps its glyph (and
-    // its tooltip) under the pointer, so it shows no ▶.
-    let marked = crate::line_marks::lines(&v.line_marks, buf);
     for span in spans.iter() {
         let line =
             u32::try_from(buf.byte_to_line(span.header.min(buf.len_bytes()))).unwrap_or(u32::MAX);
         let Some(&(_, top)) = rows.iter().find(|(l, _)| *l == line) else {
             continue;
         };
-        if v.marks.busy_on(buf, line)
-            || cands.iter().any(|c| c.1 == line)
-            || marked.binary_search(&line).is_ok()
-        {
+        if v.marks.busy_on(buf, line) || cands.iter().any(|c| c.1 == line) {
             continue;
         }
         let shown = focused || hover == Some(line);
@@ -681,15 +675,28 @@ pub(crate) fn prepaint_buttons(
         let shown = focused || hover == Some(line);
         let button = GutterButton::Run(line);
         let key = v.marks.at_header(header);
+        // ## m4b-t17-secrets-ui fix round 1 (I1, R-T17-2; named lines): a shown ▶ takes the
+        // slot of the row's host line marks (as it takes a finished execution mark's), so
+        // their labels join its tooltip and its accessible name.
+        let marked = crate::line_marks::on_line(&v.line_marks, buf, line, cx);
         let tip = RunTip {
             runs: key.map(|k| v.marks.run_rows(k, cx)).unwrap_or_default(),
+            marks: marked.clone(),
         };
         // ## fix round 1 (M7): the name says which statement ("Run the statement at line 12").
-        let name = crate::commands::message(
+        let mut name = crate::commands::message(
             cx,
             "hv-gutter-run-line",
             &[("line", UiArg::Count(u64::from(line) + 1))],
         );
+        if let Some((_, labels)) = &marked {
+            let mut joined = name.to_string();
+            for label in labels {
+                joined.push_str(" · ");
+                joined.push_str(label);
+            }
+            name = joined.into();
+        }
         let version = snap.version;
         let target = view.clone();
         let mut el = div()
@@ -778,6 +785,9 @@ pub(crate) fn paint_buttons(f: &ButtonFrame, window: &mut Window, cx: &mut App) 
 #[derive(Clone)]
 struct RunTip {
     runs: Vec<crate::marks::RunRow>,
+    // ## m4b-t17-secrets-ui fix round 1 (I1; named item): the row's host line marks (their
+    // icon and labels), which the shown ▶ covers.
+    marks: Option<(IconName, Vec<SharedString>)>,
 }
 
 impl RunTip {
@@ -824,6 +834,31 @@ impl Render for RunTip {
             .flex_col()
             .gap(px(4.0))
             .child(title);
+        // ## m4b-t17-secrets-ui fix round 1 (I1): the covered line marks, under the title.
+        if let Some((icon, labels)) = &self.marks {
+            for label in labels {
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .pt(px(2.0))
+                                .child(Icon::new(*icon).size(IconSize::Chrome).color(dim)),
+                        )
+                        // A long label (a long locale) wraps, never clips.
+                        .child(div().flex_1().min_w(px(0.0)).child(paragraph(
+                            label.clone(),
+                            TextSource::Fluent,
+                            t.type_ramp.body_sm,
+                            ink,
+                        ))),
+                );
+            }
+        }
         if self.runs.is_empty() {
             col = col.child(Label::new(
                 msg(cx, "hv-gutter-never-run"),

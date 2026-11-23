@@ -8,8 +8,12 @@
 //! - **The scan** ([`scan_text`]) is `scan_secrets(text, &secret_spans(text))` (R-M4b-28: the
 //!   history redactor's spans, mapped one to one). It runs on the core runtime's blocking pool,
 //!   never on the UI thread ([`scan_off_ui`]), [`DEBOUNCE`] after the last edit of a script tab;
-//!   a newer edit replaces the waiting or running scan, and an answer for an older version than
-//!   the editor's is dropped (latest wins by document version).
+//!   a newer edit replaces the waiting debounce, and an answer for an older version than the
+//!   editor's is dropped (latest wins by document version). Fix round 1 (m2): at most one scan
+//!   runs per tab (an edit during it waits for it, then the newer text is scanned), the text is
+//!   copied out of the rope inside the blocking job, and the recovery copy reuses the tab's scan
+//!   of the same version. The save's own copy of the text (`save.rs`, T14's) stays on the UI
+//!   thread: it is bounded by the size tiers (a T2 preview, above 20 MB, is never saved).
 //! - **Fail closed.** A scan that cannot answer (no core runtime, or it panicked) answers one
 //!   `Unscanned` finding over the whole text, as the scanner does when its table fails to load:
 //!   the gutter says "couldn't be checked" and a save asks.
@@ -40,16 +44,28 @@ use crate::scripts::tabs::{ScriptDoc, msg};
 /// How long after the last edit a script tab's text is scanned again.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// The marker that silences a line (never translated).
-pub const ALLOW_MARKER: &str = "hacivat:allow-secret";
+/// The marker that silences a line (never translated): the scanner's own (fix round 1, m4).
+pub use hacivat_scripts::secrets::ALLOW_MARKER;
 
 /// One scan's answer, for the text at `version`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Scan {
     pub version: u64,
     pub findings: Arc<[SecretFinding]>,
     /// Each finding's fingerprint (`None`: never remembered, an `Unscanned` finding).
     prints: Arc<[Option<u64>]>,
+}
+
+// ## m4b-t17-secrets-ui fix round 1 (m1): counts only. A print is a fast hash over the literal
+// and its line, so it never reaches a `Debug` (a log or a panic message).
+impl std::fmt::Debug for Scan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scan")
+            .field("version", &self.version)
+            .field("findings", &self.findings.len())
+            .field("unscanned", &self.unscanned())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Scan {
@@ -83,18 +99,27 @@ impl Scan {
     }
 }
 
-/// A script tab's marks: the latest scan, and the scan waiting or running.
+/// A script tab's marks: the latest scan, the debounce waiting, and the scan running.
+///
+/// ## m4b-t17-secrets-ui fix round 1 (m2): at most one scan runs per tab. An edit while one
+/// runs starts no other; when the running scan lands for an older version than the editor's,
+/// its answer is dropped and the text is scanned again after the debounce. Blocking scans of a
+/// large text never stack up.
 #[derive(Default)]
 pub struct Marks {
     latest: Option<Scan>,
-    task: Option<Task<()>>,
+    /// The debounce, waiting.
+    timer: Option<Task<()>>,
+    /// The scan, running (its blocking job is not cancellable, so it is never dropped).
+    running: Option<Task<()>>,
 }
 
 impl std::fmt::Debug for Marks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Marks")
             .field("latest", &self.latest)
-            .field("pending", &self.task.is_some())
+            .field("waiting", &self.timer.is_some())
+            .field("scanning", &self.running.is_some())
             .finish()
     }
 }
@@ -112,7 +137,17 @@ impl Marks {
 
     /// A scan waits or runs.
     pub fn pending(&self) -> bool {
-        self.task.is_some()
+        self.timer.is_some() || self.running.is_some()
+    }
+
+    /// The debounce waits (a scan starts when it ends).
+    pub fn waiting(&self) -> bool {
+        self.timer.is_some()
+    }
+
+    /// A scan runs now (on the core runtime).
+    pub fn scanning(&self) -> bool {
+        self.running.is_some()
     }
 }
 
@@ -184,6 +219,16 @@ pub(crate) fn scan_off_ui(
     text: String,
     cx: &App,
 ) -> impl std::future::Future<Output = Scan> + use<> {
+    scan_with(version, move || text, cx)
+}
+
+/// [`scan_off_ui`] whose text is made by `text` in the blocking job too (fix round 1, m2: a
+/// tab's whole text is copied out of its rope there, never on the UI thread).
+fn scan_with<F: FnOnce() -> String + Send + 'static>(
+    version: u64,
+    text: F,
+    cx: &App,
+) -> impl std::future::Future<Output = Scan> + use<F> {
     let scan = scanner(cx);
     let rt = cx
         .try_global::<crate::connections::ConnectionsModel>()
@@ -192,6 +237,7 @@ pub(crate) fn scan_off_ui(
     if let Some(rt) = rt {
         rt.spawn(async move {
             let ran = tokio::task::spawn_blocking(move || {
+                let text = text();
                 let findings = scan(&text);
                 Scan::of(version, &text, findings)
             })
@@ -215,33 +261,51 @@ pub(crate) fn scan_off_ui(
     }
 }
 
-/// Scans `doc`'s editor text `after` from now (latest wins: a newer call replaces this one).
+/// Scans `doc`'s editor text `after` from now. A newer call replaces a waiting one; while a scan
+/// runs, nothing starts: its landing scans a newer text again (fix round 1, m2: one scan in
+/// flight per tab).
 pub(crate) fn schedule(doc: &mut ScriptDoc, after: Duration, cx: &mut Context<ScriptDoc>) {
+    if doc.editor().is_none() {
+        return;
+    }
+    if doc.secrets.running.is_some() {
+        doc.secrets.timer = None;
+        return;
+    }
+    let timer = cx.background_executor().timer(after);
+    doc.secrets.timer = Some(cx.spawn(async move |this, cx| {
+        timer.await;
+        let _ = this.update(cx, start);
+    }));
+}
+
+/// The debounce passed: the scan of the editor's text now starts.
+fn start(doc: &mut ScriptDoc, cx: &mut Context<ScriptDoc>) {
+    doc.secrets.timer = None;
     let Some(editor) = doc.editor().cloned() else {
         return;
     };
-    let timer = cx.background_executor().timer(after);
-    doc.secrets.task = Some(cx.spawn(async move |this, cx| {
-        timer.await;
-        let scan = cx.update(|cx| {
-            let snap = editor.read(cx).snapshot();
-            scan_off_ui(snap.version, snap.buffer.to_string(), cx)
-        });
+    let snap = editor.read(cx).snapshot();
+    let version = snap.version;
+    let scan = scan_with(version, move || snap.buffer.to_string(), cx);
+    doc.secrets.running = Some(cx.spawn(async move |this, cx| {
         let scan = scan.await;
         let _ = this.update(cx, |d, cx| landed(d, scan, cx));
     }));
 }
 
-/// A scan landed: kept, and drawn, when it is for the editor's current text.
+/// A scan landed: kept, and drawn, when it is for the editor's current text; a newer text is
+/// scanned again after the debounce.
 fn landed(doc: &mut ScriptDoc, scan: Scan, cx: &mut Context<ScriptDoc>) {
+    doc.secrets.running = None;
     let Some(editor) = doc.editor().cloned() else {
         return;
     };
     if editor.read(cx).snapshot().version != scan.version {
-        // An older text's answer: the newer scan follows.
+        // An older text's answer is dropped (latest wins by version); the text is scanned again.
+        schedule(doc, DEBOUNCE, cx);
         return;
     }
-    doc.secrets.task = None;
     let marks = line_marks(&scan);
     let version = scan.version;
     doc.secrets.latest = Some(scan);
@@ -358,6 +422,17 @@ mod tests {
         assert!(remembered.is_empty());
         assert!(s.asks(&remembered));
         assert!(s.unscanned());
+    }
+
+    // ## m4b-t17-secrets-ui fix round 1 (m1)
+    #[test]
+    fn a_scan_debug_holds_counts_only() {
+        let s = scan("CREATE USER app PASSWORD 's3cret';\n");
+        let dbg = format!("{s:?}");
+        let print = s.prints().next().expect("a print").to_string();
+        assert!(!dbg.contains(&print), "{dbg}");
+        assert!(!dbg.contains("s3cret"), "{dbg}");
+        assert!(dbg.contains("findings: 1"), "{dbg}");
     }
 
     #[test]

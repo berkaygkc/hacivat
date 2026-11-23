@@ -809,6 +809,13 @@ impl EditorView {
         crate::line_marks::lines(&self.line_marks, self.model.buffer())
     }
 
+    // ## m4b-t17-secrets-ui fix round 1 (named item)
+    /// The rows (0-based) whose line-mark glyph the last painted frame drew (a shown ▶ or an
+    /// execution mark's glyph holds the others' slots).
+    pub fn line_mark_rows(&self) -> &[u32] {
+        &self.line_marks.painted
+    }
+
     /// The last painted frame (Task 27's `bounds_for_range`, `character_index_for_point`).
     pub fn last_layout(&self) -> Option<&FrameLayout> {
         self.layout.as_ref()

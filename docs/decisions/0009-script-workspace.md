@@ -1622,3 +1622,23 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
   - `fileio::tests::file_identity_tells_a_file_written_again_from_a_renamed_one`, and `fileio::tests::file_identity_text_round_trips`.
   - `tests/recovery.rs` `recovery_round_trip_and_discard`: a birth time round-trips to the nanosecond.
   - `sqlite_tab_refuses_run_when_the_profile_points_to_another_file`: the CI failure, now GREEN on Linux.
+
+## m4b-t17 — fix round 1 (review I1, I2, m1–m4, m6; rulings R-T17-1, R-T17-2)
+
+- **Gutter (R-T17-2).** A shown ▶ takes the key's slot and carries its label (ADR 0007 `### m4b-t17 fix round 1`). The key shows otherwise. No ▶, arrow stop or focus is lost to a mark.
+- **Save inside the debounce (I2).** Two named tests guard it:
+  - a save of text the tab has not scanned yet scans that text first, and asks;
+  - a second secret on an answered line asks again.
+- **One scan in flight (m2).**
+  - An edit while a scan runs starts none. When that scan lands for an older version, its answer is dropped and the newer text is scanned after the debounce.
+  - The text is copied out of the rope inside the blocking job.
+  - The recovery copy reuses the tab's scan of the same version.
+  - The save's own copy of the text stays on the UI thread (T14's). It is bounded by the size tiers: a T2 preview (above 20 MB) is never saved.
+- **`Debug` (m1).** A scan's `Debug` shows its version and counts only, never a fingerprint.
+- **Allow marker (m4).** `hacivat_scripts::secrets::ALLOW_MARKER` is the scanner's own spelling; the app's hints use it.
+- **Tests (m6).**
+  - A cancel asserts that no write started, by a count (`save::writes_started`).
+  - The debounce and the one-in-flight rule are asserted on the tab's scan state.
+  - The console test has a positive control.
+- **Accepted (R-T17-1).** The Unscanned dialog has no rows, no allow hint and no "remembered" line.
+- **Residual (m7, T14's pattern).** With no workspace window, a save's question has nowhere to open. Nothing is written, and a Save all chain or a quit round stops without a word.

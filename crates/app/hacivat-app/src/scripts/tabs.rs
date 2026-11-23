@@ -877,6 +877,12 @@ impl ScriptDoc {
             return;
         };
         let snap = editor.read(cx).snapshot();
+        // ## m4b-t17-secrets-ui fix round 1 (m2; named line): the tab's scan of this very text,
+        // when there is one, is not run again.
+        let known = self
+            .secrets
+            .at(snap.version)
+            .map(|s| !s.findings.is_empty());
         let mut copy = CopyMeta {
             meta: self.meta,
             base: self.stamp,
@@ -898,7 +904,8 @@ impl ScriptDoc {
             tokio::task::spawn_blocking(move || {
                 let text = snap.buffer.to_string();
                 // ## m4b-t17-secrets-ui (named line, R-T5-4): the restore notice says so.
-                copy.secret_suspected = crate::scripts::secret_marks::suspected(&text);
+                copy.secret_suspected =
+                    known.unwrap_or_else(|| crate::scripts::secret_marks::suspected(&text));
                 let Some(instance) = rt.instance.get_or_init(|| {
                     recovery::Instance::start(&rt.paths)
                         .inspect_err(|e| tracing::warn!(?e, "scripts: no recovery instance"))

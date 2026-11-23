@@ -215,6 +215,18 @@ fn checked(
     );
 }
 
+// ## m4b-t17-secrets-ui fix round 1 (m6; named items)
+/// How many script writes started (each `write` call), since launch.
+#[derive(Debug, Default)]
+struct WritesStarted(u64);
+
+impl hacivat_ui_core::gpui_surface::Global for WritesStarted {}
+
+/// How many script writes started since launch (a Cancel starts none).
+pub fn writes_started(cx: &App) -> u64 {
+    cx.try_global::<WritesStarted>().map_or(0, |w| w.0)
+}
+
 /// Writes `text` (the editor at `version`) expecting the file at `expect` (`None`: whatever
 /// is there; `Some(None)`: no file; `Some(Some(s))`: the file at `s`).
 fn write(
@@ -227,6 +239,9 @@ fn write(
     then: Option<Then>,
 ) {
     let _ = window;
+    // ## m4b-t17-secrets-ui fix round 1 (m6; named line): counted, so a test can say no write
+    // started without waiting on a clock.
+    cx.default_global::<WritesStarted>().0 += 1;
     let (Some(tab), Some(service)) = (doc.read(cx).spec(cx), crate::scripts::open::service(cx))
     else {
         save_failed(doc, "missing", cx);

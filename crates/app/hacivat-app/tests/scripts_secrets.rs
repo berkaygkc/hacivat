@@ -368,6 +368,20 @@ fn wait_warning(vcx: &VisualTestContext) -> Vec<String> {
         .collect()
 }
 
+/// Answers the open warning with `key` (Escape, or Enter on Cancel), waits until it closed, and
+/// asserts that no write started (m6: a count, not a wait on the clock).
+fn cancel_writes_nothing(r: &mut Rig, key: &'static str) {
+    let w0 = r.vcx.cx.read(hacivat_app::scripts::save::writes_started);
+    press_key(r.vcx, key);
+    wait_until(r.vcx, "the warning closes", |vcx| !warning_open(vcx));
+    r.vcx.run_until_parked();
+    assert_eq!(
+        r.vcx.cx.read(hacivat_app::scripts::save::writes_started),
+        w0,
+        "no write started"
+    );
+}
+
 // ---- tests ------------------------------------------------------------------------------------
 
 /// Gate E4: a password literal typed into a script tab asks on ⌘S, listing "Line 1"; Escape
@@ -392,10 +406,7 @@ fn secret_literal_triggers_the_warning_on_save(cx: &mut TestAppContext) {
         "{texts:?}"
     );
     assert!(!texts.iter().any(|t| t == "Line 2"), "one row: {texts:?}");
-    press_key(r.vcx, "escape");
-    wait_until(r.vcx, "the warning closes", |vcx| !warning_open(vcx));
-    r.vcx.executor().advance_clock(Duration::from_secs(1));
-    settle(r.vcx, Duration::from_millis(50));
+    cancel_writes_nothing(&mut r, "escape");
     assert_eq!(r.on_disk("a.sql"), "", "nothing written");
     assert!(r.dirty(tab), "the tab stays unsaved");
     let code = r.code_focus(tab);
@@ -431,10 +442,14 @@ fn warning_never_echoes_the_value(cx: &mut TestAppContext) {
         names.iter().any(|n| n == "Looks like an access token"),
         "{names:?}"
     );
-    // The hover tooltip of line 2's glyph.
-    hover_mark(&r, tab, 1);
+    // The hover tooltip of line 3's glyph (a comment line: no ▶ covers it).
+    hover_mark(&r, tab, 2);
     let tip = drawn_by(r.vcx, "hacivat-ui-editor/src/line_marks.rs");
-    assert!(tip.iter().any(|t| t == "Looks like a password"), "{tip:?}");
+    assert!(
+        tip.iter()
+            .any(|t| t == "Looks like a connection URL with a password"),
+        "{tip:?}"
+    );
     assert!(
         tip.iter().any(|t| t.contains("hacivat:allow-secret")),
         "{tip:?}"
@@ -645,12 +660,19 @@ fn consoles_never_ask(cx: &mut TestAppContext) {
             );
         });
     });
+    // Nothing is scheduled for a console: past the debounce, the GPUI side has run everything.
+    let w0 = r.vcx.cx.read(hacivat_app::scripts::save::writes_started);
     r.vcx.executor().advance_clock(DEBOUNCE * 4);
-    settle(r.vcx, Duration::from_millis(50));
+    r.vcx.run_until_parked();
     press_key(r.vcx, SAVE);
     r.vcx.executor().advance_clock(DEBOUNCE * 4);
-    settle(r.vcx, Duration::from_millis(50));
+    r.vcx.run_until_parked();
     assert!(!layer_ids(r.vcx).contains(&"dialog"), "a console asked");
+    assert_eq!(
+        r.vcx.cx.read(hacivat_app::scripts::save::writes_started),
+        w0,
+        "a console saves nothing into a library"
+    );
     assert!(
         r.vcx
             .cx
@@ -658,6 +680,13 @@ fn consoles_never_ask(cx: &mut TestAppContext) {
             .is_empty()
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0, "a console was scanned");
+    // Positive control (m6): the same text in a script tab is scanned through the same counter.
+    let mut r = r;
+    let script = r.open("a.sql");
+    r.type_text(script, &format!("CREATE USER app PASSWORD '{PW}';"));
+    r.settle_scan(script);
+    assert!(calls.load(Ordering::SeqCst) > 0, "the counter sees a scan");
+    assert_eq!(r.marked(script), vec![0]);
 }
 
 /// The warning opens on Cancel: Enter answers Cancel and writes nothing. Both buttons are Tab
@@ -688,10 +717,7 @@ fn cancel_is_focused_and_enter_does_not_save(cx: &mut TestAppContext) {
     assert_eq!(focused(r.vcx), Some(0), "Tab: Save anyway");
     press_key(r.vcx, "tab");
     assert_eq!(focused(r.vcx), Some(1), "Tab again: Cancel (trapped)");
-    press_key(r.vcx, "enter");
-    wait_until(r.vcx, "closed", |vcx| !warning_open(vcx));
-    r.vcx.executor().advance_clock(Duration::from_secs(1));
-    settle(r.vcx, Duration::from_millis(50));
+    cancel_writes_nothing(&mut r, "enter");
     assert_eq!(r.on_disk("a.sql"), "SELECT 1;\n");
     assert!(r.dirty(tab));
 }
@@ -727,30 +753,45 @@ fn gutter_marks_appear_off_the_ui_thread(cx: &mut TestAppContext) {
     r.vcx.executor().advance_clock(DEBOUNCE / 3);
     r.type_text(tab, &format!("PASSWORD '{PW}';"));
     r.vcx.executor().advance_clock(DEBOUNCE / 3);
-    settle(r.vcx, Duration::from_millis(30));
+    r.vcx.run_until_parked();
+    let doc = r.doc(tab);
+    let state = |r: &Rig| {
+        r.vcx.cx.read(|cx| {
+            let m = doc.read(cx).secrets();
+            (m.waiting(), m.scanning())
+        })
+    };
+    // The debounce waits on the GPUI clock: nothing has started (m6: a state, not a sleep).
+    assert_eq!(state(&r), (true, false), "debounced");
     assert_eq!(calls.load(Ordering::SeqCst), 0, "debounced");
     // Quiet for the debounce: one scan starts, and is held.
     r.vcx.executor().advance_clock(DEBOUNCE);
     wait_until(r.vcx, "the scan starts", |_| {
         calls.load(Ordering::SeqCst) == 1
     });
+    let v_held = r.version(tab);
     // Typing goes on while it runs.
     r.type_text(tab, "\nSELECT 1;");
     assert!(
         r.text(tab).ends_with("\nSELECT 1;"),
         "the editor took the keys"
     );
-    let doc = r.doc(tab);
-    assert!(r.vcx.cx.read(|cx| doc.read(cx).secrets().pending()));
-    // The held scan (of the older text) finishes: its answer is dropped.
+    // m2: one scan in flight. Past the debounce, no second one waits or starts.
+    r.vcx.executor().advance_clock(DEBOUNCE * 2);
+    r.vcx.run_until_parked();
+    assert_eq!(state(&r), (false, true), "one scan runs, none waits");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // The held scan (of the older text) lands: its answer is dropped, and the newer text waits
+    // for its own scan.
     gate_tx.send(()).unwrap();
-    settle(r.vcx, Duration::from_millis(50));
+    wait_until(r.vcx, "the held scan lands", |_| state(&r) == (true, false));
     let v_now = r.version(tab);
-    assert!(
-        r.vcx
-            .cx
-            .read(|cx| doc.read(cx).secrets().at(v_now).is_none())
-    );
+    let latest = r
+        .vcx
+        .cx
+        .read(|cx| doc.read(cx).secrets().latest().map(|s| s.version));
+    assert_ne!(latest, Some(v_held), "the older text's answer was dropped");
+    assert_ne!(latest, Some(v_now));
     // The newer text's scan lands and marks line 1.
     r.vcx.executor().advance_clock(DEBOUNCE);
     wait_until(r.vcx, "the second scan starts", |_| {
@@ -882,9 +923,7 @@ fn save_all_asks_before_writing_a_secret(cx: &mut TestAppContext) {
     r.settle_scan(tab);
     assert!(run(r.vcx, "file.save_all"));
     wait_warning(r.vcx);
-    press_key(r.vcx, "escape");
-    r.vcx.executor().advance_clock(Duration::from_secs(1));
-    settle(r.vcx, Duration::from_millis(50));
+    cancel_writes_nothing(&mut r, "escape");
     assert_eq!(r.on_disk("a.sql"), "");
 }
 
@@ -1001,11 +1040,76 @@ fn the_unsaved_prompts_save_asks_first(cx: &mut TestAppContext) {
     press_key(r.vcx, "shift-tab");
     press_key(r.vcx, "enter");
     wait_warning(r.vcx);
-    press_key(r.vcx, "escape");
-    wait_until(r.vcx, "the warning closes", |vcx| !warning_open(vcx));
-    r.vcx.executor().advance_clock(Duration::from_secs(1));
-    settle(r.vcx, Duration::from_millis(50));
+    cancel_writes_nothing(&mut r, "escape");
     assert_eq!(tab_count(r.vcx), before, "the tab stays");
     assert!(r.dirty(tab));
     assert_eq!(r.on_disk("a.sql"), "");
+}
+
+// ## m4b-t17-secrets-ui fix round 1 (I2): the review's hostile tests H1 and H2, adopted.
+
+/// H1: ⌘S inside the debounce. The tab's only scan is of the clean text it opened with (no
+/// finding), so the save scans the text it writes, and asks.
+#[gpui::test]
+fn save_inside_the_debounce_scans_the_current_text(cx: &mut TestAppContext) {
+    let mut r = rig(cx, &[("a.sql", "SELECT 1;\n")]);
+    let tab = r.open("a.sql");
+    r.type_text(tab, &format!("CREATE USER app PASSWORD '{PW}';\n"));
+    let doc = r.doc(tab);
+    let v = r.version(tab);
+    assert!(
+        r.vcx.cx.read(|cx| doc.read(cx).secrets().at(v).is_none()),
+        "no scan of this text yet"
+    );
+    let clean_scan = r
+        .vcx
+        .cx
+        .read(|cx| doc.read(cx).secrets().latest().map(|s| s.findings.len()));
+    assert_eq!(clean_scan, Some(0), "the open-time scan found nothing");
+    r.save(tab);
+    let texts = wait_warning(r.vcx);
+    assert!(texts.iter().any(|t| t == "Line 2"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains(PW)), "{texts:?}");
+    cancel_writes_nothing(&mut r, "escape");
+    assert_eq!(r.on_disk("a.sql"), "SELECT 1;\n");
+}
+
+/// H2: "Save anyway" never covers a new secret: a second password on the answered line asks
+/// again (inside the debounce), with no value shown. And the allow marker counts only as a
+/// comment in both readings: `#` alone and `--` without a space stay marked; `/* … */` and
+/// `-- ` silence their line.
+#[gpui::test]
+fn remembered_answer_never_covers_a_new_secret(cx: &mut TestAppContext) {
+    let allow = [
+        "CREATE USER u1 PASSWORD 'x1'; # hacivat:allow-secret",
+        "CREATE USER u2 PASSWORD 'x2'; --hacivat:allow-secret",
+        "CREATE USER u3 PASSWORD 'x3'; /* hacivat:allow-secret */",
+        "CREATE USER u4 PASSWORD 'x4'; -- hacivat:allow-secret",
+        "",
+    ]
+    .join("\n");
+    let mut r = rig(cx, &[("a.sql", ""), ("b.sql", allow.as_str())]);
+    let tab = r.open("a.sql");
+    r.type_text(tab, &format!("CREATE USER app PASSWORD '{PW}';"));
+    r.settle_scan(tab);
+    r.save(tab);
+    wait_warning(r.vcx);
+    press_key(r.vcx, "shift-tab");
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "clean", |_| !r.dirty(tab));
+    // A second password on the same line, saved at once.
+    let second = "t1ger_x";
+    r.type_text(tab, &format!(" CREATE USER b PASSWORD '{second}';"));
+    r.save(tab);
+    let texts = wait_warning(r.vcx);
+    assert!(texts.iter().any(|t| t == "Line 1"), "{texts:?}");
+    assert!(
+        !texts.iter().any(|t| t.contains(PW) || t.contains(second)),
+        "{texts:?}"
+    );
+    cancel_writes_nothing(&mut r, "escape");
+    assert!(!r.on_disk("a.sql").contains(second));
+    // The allow marker's two readings.
+    let b = r.open("b.sql");
+    assert_eq!(r.marked(b), vec![0, 1]);
 }

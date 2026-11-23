@@ -1123,6 +1123,8 @@ pub(crate) fn prepaint_frame(
         .collect();
     frame.line_marks =
         crate::line_marks::prepaint(&v.line_marks, &frame.gutter(), &taken, window, cx);
+    // ## m4b-t17-secrets-ui fix round 1 (named line): the host reads them back.
+    v.line_marks.painted.clone_from(&frame.line_marks.rows);
     frame
 }
 

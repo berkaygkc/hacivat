@@ -109,7 +109,8 @@ pub(super) enum M4b {
     // ## m4b-t16-attach
     // ## m4b-t17-secrets-ui: surface 8.
     /// Surface 8: a script with three secret-like lines (password, connection URL, token) and an
-    /// allow-marked one: the gutter's key glyphs, the password line's tooltip open.
+    /// allow-marked one: the gutter's key glyphs, the connection URL line's tooltip open
+    /// (a comment line: no gutter ▶ covers its key, fix round 1).
     SecretGutter,
     /// Surface 8: ⌘S on it in a git library: "3 lines in create_reader.sql look like secrets",
     /// the lines and kinds, the commit sentence and the hints; Cancel focused.
@@ -1769,7 +1770,7 @@ mod t17 {
             ),
         ];
         match state {
-            M4b::SecretGutter => out.push(hover_mark(2)),
+            M4b::SecretGutter => out.push(hover_mark(4)),
             M4b::SecretDialog => out.push(step(
                 |window, cx| {
                     hacivat_ui::actions::ActionRegistry::run("file.save", window, cx);

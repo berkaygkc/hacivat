@@ -9,9 +9,11 @@
 //!   it on as a container range ([`on_commit`]: it grows with typing at its edges and goes when
 //!   one edit deleted all of it). The glyph sits on the row of the range's first line (a hidden
 //!   line: its fold's header row).
-//! - **Slots.** An execution mark's glyph keeps its slot (the line mark is not drawn on that
-//!   row). A row with a line mark shows no gutter ▶ (`gutter::prepaint_buttons`), so the glyph's
-//!   tooltip stays reachable under the pointer; Run itself (⌘↵) is unchanged.
+//! - **Slots** (fix round 1, I1, R-T17-2: as M3c does for execution marks). An execution
+//!   mark's glyph keeps its slot. A shown gutter ▶ (hover, a focused column, the column in "Tab
+//!   moves focus" mode while it shows) takes the slot too, and carries the row's labels in its
+//!   tooltip and its accessible name (`gutter::prepaint_buttons`); the key shows otherwise. A
+//!   line mark never removes a ▶: the column's ↑/↓ visit marked rows, and a focused ▶ stays.
 //! - **Texts.** The editor knows nothing of what a mark is about: the host gives its label
 //!   (the glyph's accessible name and the tooltip's first line) and the tooltip's other lines.
 //!   Two marks on one row list both labels once each, then the first mark's other lines.
@@ -22,7 +24,7 @@ use std::ops::Range;
 use hacivat_text::{ChangeLog, Committed, RangeKind, Rebased, Snapshot, TextBuffer};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::popover::{A11yDecl, Declare as _};
-use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
+use hacivat_ui::text::{TextFn, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, AvailableSpace, Context, InteractiveElement as _,
     IntoElement, ParentElement as _, Pixels, Render, Role, SharedString,
@@ -62,6 +64,32 @@ impl std::fmt::Debug for LineMark {
 #[derive(Debug, Default)]
 pub(crate) struct LineMarks {
     marks: Vec<LineMark>,
+    /// Fix round 1: the rows the last painted frame drew a glyph on.
+    pub(crate) painted: Vec<u32>,
+}
+
+/// Fix round 1 (I1): the icon and the labels (once each, in text order) of the marks on `line`,
+/// for the ▶ that covers them; `None` when the line has none.
+pub(crate) fn on_line(
+    s: &LineMarks,
+    buf: &TextBuffer,
+    line: u32,
+    cx: &App,
+) -> Option<(IconName, Vec<SharedString>)> {
+    let mut icon = None;
+    let mut labels: Vec<SharedString> = Vec::new();
+    for m in s
+        .marks
+        .iter()
+        .filter(|m| line_of(buf, m.range.start) == line)
+    {
+        icon.get_or_insert(m.icon);
+        let l = (m.label)(cx);
+        if !labels.contains(&l) {
+            labels.push(l);
+        }
+    }
+    icon.map(|i| (i, labels))
 }
 
 /// Replaces the marks with `marks`, computed at `version`, rebased to `snap.version`.
@@ -175,7 +203,8 @@ pub(crate) fn prepaint(
     }
     for (line, marks) in rows {
         let top = g.top_of(line);
-        if taken.contains(&top) {
+        // An execution mark's glyph, or a shown ▶ (fix round 1, I1), holds the slot.
+        if taken.contains(&top) || ov.play_rows.contains(&line) {
             continue;
         }
         let mut labels: Vec<SharedString> = Vec::new();
@@ -193,6 +222,13 @@ pub(crate) fn prepaint(
             .join(", ")
             .into();
         let icon = marks[0].icon;
+        // Fix round 1 (m3): the other lines (the hint) are the glyph's accessible description.
+        let description: SharedString = detail
+            .iter()
+            .map(|l| l.as_ref())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .into();
         let tip = LineMarkTip {
             icon,
             labels,
@@ -208,7 +244,7 @@ pub(crate) fn prepaint(
             .justify_center()
             .child(Icon::new(icon).size(IconSize::Chrome).color(inks.text_2))
             .tooltip(move |_, cx| tip.clone().view(cx))
-            .declare_full(A11yDecl::new(Role::Image, name))
+            .declare_full(A11yDecl::new(Role::Image, name).description(description))
             .into_any_element();
         el.prepaint_as_root(
             point(g.bounds.left() + px(GLYPH_X), top),
@@ -264,15 +300,21 @@ impl Render for LineMarkTip {
                 div()
                     .flex()
                     .flex_row()
-                    .items_center()
+                    .items_start()
                     .gap(px(6.0))
-                    .child(Icon::new(self.icon).size(IconSize::Chrome).color(dim))
-                    .child(Label::new(
+                    .child(
+                        div()
+                            .flex_none()
+                            .pt(px(2.0))
+                            .child(Icon::new(self.icon).size(IconSize::Chrome).color(dim)),
+                    )
+                    // Fix round 1: a long label (a long locale) wraps, never clips.
+                    .child(div().flex_1().min_w(px(0.0)).child(paragraph(
                         label.clone(),
                         TextSource::Fluent,
                         t.type_ramp.body_strong,
                         ink,
-                    )),
+                    ))),
             );
         }
         for line in &self.detail {

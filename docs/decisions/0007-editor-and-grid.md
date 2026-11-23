@@ -1503,3 +1503,13 @@ read-only preview and the 20–100 MB paste confirmation. `hacivat-text` gains
 - **Tooltip.** Its own small view (280 px): the icon and each label once, then the other lines as
   wrapping `text_2` paragraphs (the Raised Ink Rule). It does not use the shared `Tip`, whose
   single label cannot wrap (T13 fr1 n8).
+
+### m4b-t17 fix round 1 (review I1, ruling R-T17-2; m3)
+
+- **The ▶ is never lost to a line mark.** This supersedes "a row with a line mark shows no gutter ▶" above.
+  - As M3c does for a finished execution mark, a shown ▶ takes the mark slot. "Shown" means hover, a focused column, or the column in "Tab moves focus" mode while it shows. The key shows otherwise.
+  - The ▶ carries the row's labels: its tooltip lists them under "Run this statement", and its accessible name becomes "Run the statement at line N · <label>".
+  - ↑/↓ along the column visit marked rows.
+  - A focused ▶ stays focused and drawn when a scan marks its row.
+- `EditorView::line_mark_rows()` returns the rows the last frame drew a key on, beside `gutter_play_rows()`.
+- The key's accessible description is the rest of its tooltip (the host's hint), so the hint is not mouse-only.
