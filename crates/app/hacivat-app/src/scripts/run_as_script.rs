@@ -264,6 +264,15 @@ fn editor_of(console: ConsoleId, cx: &App) -> Option<Entity<EditorView>> {
     Consoles::get(cx, console)?.editor.clone()
 }
 
+// ## m4b-t21-shots (T18 concern: the strip under the T2 banner)
+/// Console `console`'s strip came or went: its editor (a cached view) draws again, so the
+/// banner moves between its column and the console host's (`EditorView::set_host_banner`).
+fn strip_changed(console: ConsoleId, cx: &mut App) {
+    if let Some(editor) = editor_of(console, cx) {
+        cx.notify(editor.entity_id());
+    }
+}
+
 fn streamed(console: ConsoleId, cx: &App) -> Option<Streamed> {
     let editor = editor_of(console, cx)?;
     editor.read(cx).preview()?;
@@ -610,6 +619,7 @@ fn launch(console: ConsoleId, what: Streamed, parts: Parts, cx: &mut App) {
     });
     cx.default_global::<Runs>().0.insert(console, view);
     notify_host(console, cx);
+    strip_changed(console, cx);
 }
 
 /// How a run opens its source (on the core runtime).
@@ -972,6 +982,7 @@ impl ScriptRunView {
                 cx.default_global::<Runs>().0.remove(&console);
             }
             notify_host(console, cx);
+            strip_changed(console, cx);
         });
     }
 
@@ -1380,6 +1391,7 @@ pub mod fixtures {
         });
         cx.default_global::<Runs>().0.insert(console, view);
         notify_host(console, cx);
+        super::strip_changed(console, cx);
     }
 }
 

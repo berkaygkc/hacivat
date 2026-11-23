@@ -556,11 +556,14 @@ fn library_row(
     let manifest = shown
         .as_ref()
         .and_then(|l| crate::scripts::diagnostics::manifest_problem(l, cx));
+    // ## m4b-t21-shots fix round 1 (m13, named exception): the text column keeps 260 px; in a
+    // narrower row the buttons move under it (the row wraps) instead of squeezing it into
+    // mid-word breaks.
     let mut col = div()
         .flex()
         .flex_col()
         .flex_1()
-        .min_w_0()
+        .min_w(px(260.0))
         .gap(px(t.spacing.xs))
         .child(
             Label::new(
@@ -648,6 +651,8 @@ fn library_row(
         })
         .flex()
         .flex_row()
+        // ## m4b-t21-shots fix round 1 (m13)
+        .flex_wrap()
         .items_start()
         .gap(px(t.spacing.lg))
         .px(px(t.spacing.lg))

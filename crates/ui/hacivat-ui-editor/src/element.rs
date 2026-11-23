@@ -1054,9 +1054,11 @@ pub(crate) fn prepaint_frame(
     // ## m3c-narrow: the banner's form follows the width this frame gave the editor; a frame
     // whose width crossed the narrow line draws once more with the other form.
     // ## m3c-narrow (fix round 1, M5): only while a banner shows.
+    // ## m4b-t21-shots fix round 1 (m7, named line): wherever the banner is drawn (a host
+    // draws it from this frame's width on the next render), a crossing asks for that render.
     let narrow_now =
         crate::large_file::shows_banner(&v.tier) && crate::large_file::narrow(bounds.size.width);
-    if narrow_now != v.banner_narrow {
+    if narrow_now != v.banner_narrow_seen {
         cx.on_next_frame(window, |_, _, cx| cx.notify());
     }
 

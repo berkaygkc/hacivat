@@ -4333,8 +4333,10 @@ hv-scripts-secret-gutter =
        *[password] Parolaya benziyor
     }
 # Surface 8 (Secret warning).
+# Variables:
+#   $marker (String) - the literal hacivat:allow-secret (never translated).
 # Review: PO
-hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırdaki -- hacivat:allow-secret gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur.
+hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırdaki -- { $marker } gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur.
 # Surface 8 (Secret warning).
 # Variables:
 #   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
@@ -4418,8 +4420,9 @@ hv-scripts-size-mb = { $n } MB
 # Review: PO
 hv-scripts-enc-title = { $file } UTF-8 metin değil.
 # Surface 10 (Encoding).
+# m4b-t21-shots fix round 1 (named exception, m3): no "Open read-only" is built, so the body no longer offers it.
 # Review: PO
-hv-scripts-enc-body = Kaydedildiği kodlamayı seçin ya da önce bakmak için salt okunur açın.
+hv-scripts-enc-body = Kaydedildiği kodlamayı seçin.
 # Surface 10 (Encoding).
 # Review: PO
 hv-scripts-enc-label = Kodlama
@@ -4571,8 +4574,9 @@ hv-scripts-recover-dismiss = Kapat
 # Surface 12 (Recovery).
 # Variables:
 #   $date (DateTime) - when the recovery copy was written, e.g. 2026-11-21 14:05.
+# m4b-t21-shots (named exception): DATETIME takes dateStyle and timeStyle only; the other options were ignored and the time was lost.
 # Review: PO
-hv-scripts-recover-tab = { DATETIME($date, month: "short", day: "numeric", hour: "numeric", minute: "numeric") } tarihli kaydedilmemiş değişiklikler kurtarıldı.
+hv-scripts-recover-tab = { DATETIME($date, dateStyle: "medium", timeStyle: "short") } tarihli kaydedilmemiş değişiklikler kurtarıldı.
 # Surface 12 (Recovery).
 # Review: PO
 hv-scripts-recover-tab-body = Kaydet onları korur. At, diskteki dosyaya geri döner.

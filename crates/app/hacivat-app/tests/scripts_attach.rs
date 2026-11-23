@@ -1254,3 +1254,57 @@ fn settings_actions_say_what_they_could_not_do(cx: &mut TestAppContext) {
     r.finish();
 }
 // ## m4b-t16-attach
+
+// ## m4b-t21-shots (plan Task 21: the Tab order of every new surface matches its NOTES order)
+/// Settings › Script libraries (NOTES surface 4): Attach a folder… → per row Reveal, Remove… →
+/// per mapping Remove.
+#[gpui::test]
+fn script_library_settings_tab_order_follows_the_notes(cx: &mut TestAppContext) {
+    let r = rig(cx, vec![prof("orders-local", None, "orders_berkay")]);
+    let dir = folder("orders", &["a.sql"]);
+    let id = r.attach(&dir);
+    let p = profile_id(r.vcx, "orders-local");
+    let svc = r.svc.clone();
+    block(r.vcx, async move {
+        svc.map(
+            LocalMapping {
+                profile: p,
+                database: DatabaseName::new("orders_berkay"),
+                library: id,
+            },
+            false,
+        )
+        .await
+    })
+    .unwrap();
+    // Tall enough that every row is on screen (the helper presses the button's centre).
+    r.vcx
+        .simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(1400.0)));
+    assert!(run(r.vcx, "workspace.open_settings"));
+    r.vcx
+        .cx
+        .update(|cx| settings_ui::fixtures::show_section(Section::Scripts, cx));
+    redraw_full(r.vcx);
+    let attach = handle_of(r.vcx, "button-scripts-set-attach");
+    let reveal = handle_of(r.vcx, row_button("reveal", id));
+    let remove = handle_of(r.vcx, row_button("remove", id));
+    let order = tab_order(r.vcx);
+    let at = |h: &gpui::FocusHandle| order.iter().position(|o| o == h);
+    let (a, v) = (
+        at(&attach).expect("Attach a folder… is a stop"),
+        at(&reveal).expect("Reveal is a stop"),
+    );
+    assert!(a < v, "Attach a folder… ({a}) before the row ({v})");
+    assert_consecutive(&order, &[("Reveal", &reveal), ("Remove…", &remove)]);
+    // Tab from Remove… is the mapping's Remove: Enter there removes the mapping (and only it).
+    in_window(r.vcx, |window, cx| window.focus(&remove, cx));
+    press_key(r.vcx, "tab");
+    assert_ne!(focused(r.vcx).as_ref(), Some(&remove), "Tab moved on");
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "the mapping goes", |_| {
+        r.svc.snapshot().mappings.is_empty()
+    });
+    assert!(r.library_at(&dir).is_some(), "the library stays");
+    r.finish();
+}
+// ## m4b-t21-shots

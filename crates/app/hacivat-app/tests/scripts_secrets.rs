@@ -1113,3 +1113,68 @@ fn remembered_answer_never_covers_a_new_secret(cx: &mut TestAppContext) {
     let b = r.open("b.sql");
     assert_eq!(r.marked(b), vec![0, 1]);
 }
+
+// ## m4b-t21-shots (T17 re-review n1)
+/// On a statement row the hovered ▶ takes the key's slot; its tooltip carries the key's label
+/// and the key's hint (how to keep the line quiet), so the ▶ hides nothing the key would say.
+/// The marker is an argument (T17 review m5): it reads `hacivat:allow-secret` whole.
+#[gpui::test]
+fn the_run_button_over_a_key_carries_its_hint(cx: &mut TestAppContext) {
+    let mut r = rig(cx, &[("a.sql", "")]);
+    let tab = r.open("a.sql");
+    r.type_text(tab, &format!("CREATE USER app PASSWORD '{PW}';\n"));
+    r.settle_scan(tab);
+    assert_eq!(r.marked(tab), vec![0]);
+    // The pointer over line 1's mark slot: a statement row, so the ▶ shows there.
+    let editor = r.editor(tab);
+    redraw_full(r.vcx);
+    let (x, y) = r
+        .vcx
+        .cx
+        .read(|cx| {
+            editor.read(cx).last_layout().map(|l| {
+                let rows = l.rows();
+                let lh = f32::from(rows.line_height);
+                (
+                    f32::from(rows.bounds.left()) - 58.0 + 14.0,
+                    f32::from(rows.first_y) + lh / 2.0,
+                )
+            })
+        })
+        .expect("a painted frame");
+    // The first move shows the ▶ (the row is hovered); the second is over the ▶ itself.
+    for dx in [0.0, 1.0] {
+        in_window(r.vcx, |window, cx| {
+            use gpui::InputEvent as _;
+            window.dispatch_event(
+                gpui::MouseMoveEvent {
+                    position: gpui::point(gpui::px(x + dx), gpui::px(y)),
+                    pressed_button: None,
+                    modifiers: gpui::Modifiers::none(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+        });
+        redraw_full(r.vcx);
+    }
+    r.vcx.executor().advance_clock(Duration::from_secs(1));
+    wait_until(r.vcx, "the ▶'s tooltip", |vcx| {
+        drawn_by(vcx, "hacivat-ui-editor/src/gutter.rs")
+            .iter()
+            .any(|t| t == "Run this statement")
+    });
+    let tip = drawn_by(r.vcx, "hacivat-ui-editor/src/gutter.rs");
+    assert!(tip.iter().any(|t| t == "Looks like a password"), "{tip:?}");
+    assert!(
+        tip.iter().any(|t| t
+            == "Saving asks first. A comment on this line such as -- hacivat:allow-secret \
+                (with a space after the dashes) keeps it quiet."),
+        "{tip:?}"
+    );
+    assert!(!tip.iter().any(|t| t.contains(PW)), "{tip:?}");
+    assert!(
+        drawn_by(r.vcx, "hacivat-ui-editor/src/line_marks.rs").is_empty(),
+        "the ▶ holds the slot"
+    );
+}

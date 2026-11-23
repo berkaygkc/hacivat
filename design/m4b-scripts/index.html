@@ -2712,7 +2712,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-scripts-secret-gutter#token": "Looks like an access token",
   "hv-scripts-secret-gutter#key": "Looks like a private key",
   "hv-scripts-secret-gutter#url": "Looks like a connection URL with a password",
-  "hv-scripts-secret-gutter-hint": "Saving asks first. A comment on this line such as -- hacivat:allow-secret (with a space after the dashes) keeps it quiet.",
+  "hv-scripts-secret-gutter-hint": "Saving asks first. A comment on this line such as -- {marker} (with a space after the dashes) keeps it quiet.",
   "hv-scripts-secret-title": "{n} lines in {file} look like secrets",
   "hv-scripts-secret-title#one": "{n} line in {file} looks like a secret",
   "hv-scripts-secret-body": "Hacivat found text that looks like a password or a token. The values aren't shown here.",
@@ -2965,7 +2965,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-scripts-secret-gutter#token": "Erişim belirtecine benziyor",
   "hv-scripts-secret-gutter#key": "Özel anahtara benziyor",
   "hv-scripts-secret-gutter#url": "Parola içeren bir bağlantı adresine benziyor",
-  "hv-scripts-secret-gutter-hint": "Kaydederken önce sorulur. Bu satırdaki -- hacivat:allow-secret gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur.",
+  "hv-scripts-secret-gutter-hint": "Kaydederken önce sorulur. Bu satırdaki -- {marker} gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur.",
   "hv-scripts-secret-title": "{file} içinde {n} satır gizli bilgiye benziyor",
   "hv-scripts-secret-body": "Hacivat parolaya ya da belirtece benzeyen metin buldu. Değerler burada gösterilmez.",
   "hv-scripts-secret-line": "Satır {line}",
@@ -3815,7 +3815,7 @@ function tipHTML(kind, k, el) {
     case "tab": { const T = W.tabs[+k.split(":")[1]]; if (!T || T.kind !== "script") return "";
       const runs = T.conn ? th("hv-scripts-tab-tip-runs", { conn:mono(T.conn), database:mono(T.db) }) : te("hv-scripts-tab-tip-unbound");
       return `<div class="pth">${esc((T.libPath || "") + "/" + T.rel)}</div><div>${th("hv-scripts-tab-tip-library", { library:mono(lib(T.lib)?.name || "") })}</div><div>${T.conn ? `${mark(conn(T.conn).env)} ` : ""}${runs}</div>${T.dirty ? `<div>${te("hv-scripts-tab-tip-unsaved")}</div>` : ""}`; }
-    case "secret": { const s = SECRETS.find(x => x.line === +el.dataset.line); return `<div class="th">${ic("key-round","i12")}${te("hv-scripts-secret-gutter", { kind:s.kind })}</div>${te("hv-scripts-secret-gutter-hint")}`; }
+    case "secret": { const s = SECRETS.find(x => x.line === +el.dataset.line); return `<div class="th">${ic("key-round","i12")}${te("hv-scripts-secret-gutter", { kind:s.kind })}</div>${th("hv-scripts-secret-gutter-hint", { marker:mono("hacivat:allow-secret") })}`; }
   }
   return "";
 }

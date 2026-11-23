@@ -68,7 +68,8 @@ use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{
     AnyView, App, AppContext as _, Context, Entity, Focusable as _, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Task, WeakEntity,
+    Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
 use hacivat_ui_editor::large_file::SizeText;
@@ -1108,6 +1109,16 @@ impl ConsoleHost {
             },
         );
         exec_attach(console, &editor, window, cx);
+        // ## m4b-t21-shots (named exception): while a Run-as-script strip shows, this host
+        // draws the T2 banner above it (see `render`).
+        editor.update(cx, |e, cx| {
+            e.set_host_banner(
+                Some(std::rc::Rc::new(move |cx: &App| {
+                    crate::scripts::run_as_script::strip(console, cx).is_some()
+                })),
+                cx,
+            );
+        });
         // ## m3c-t33-find (named exception): the console's find bar.
         crate::console::find_bar::attach(console, &editor, window, cx);
         let focus_handle = editor.focus_handle(cx);
@@ -1773,27 +1784,56 @@ impl Render for ConsoleHost {
         self.follow_display(cx);
         let model = self.toolbar_model(cx);
         let actions = self.actions(cx);
+        // ## m4b-t21-shots: the Run-as-script strip, if any (below).
+        let strip = self
+            .console()
+            .and_then(|c| crate::scripts::run_as_script::strip(c, cx));
+        let strip_shown = strip.is_some();
         // ## m3b-t22-tx-ui (named exception): with the console's transaction items.
         let bar = toolbar::build_for(&model, &actions, self.console(), cx);
         let root = div()
             .id(("console", self.tab.0))
+            // ## m4b-t21-shots fix round 2 (m-a): the tile's box, for the tests.
+            .debug_selector(|| "console-tile".to_string())
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.tokens.colors.panel.to_hsla())
             .child(bar)
             // ## m4b-t14-tabs (named exception): a script tab's notices, under its toolbar.
+            // ## m4b-t21-shots fix round 2 (m-a): the notices give way first while a strip
+            // shows (they scroll), so the code keeps its two lines inside the tile; the strip
+            // and the banner's title never shrink.
             .children(
                 self.script
                     .as_ref()
-                    .and_then(|doc| crate::scripts::disk_bars::render(doc, cx)),
+                    .and_then(|doc| crate::scripts::disk_bars::render(doc, cx))
+                    .map(|n| {
+                        if strip_shown {
+                            div()
+                                .id("script-notices")
+                                .flex_shrink(1.0)
+                                .min_h(px(0.0))
+                                .overflow_y_scroll()
+                                .child(hacivat_ui::text::scroll_viewport())
+                                .child(n)
+                                .into_any_element()
+                        } else {
+                            div().flex_none().child(n).into_any_element()
+                        }
+                    }),
             )
             // ## m4b-t18-run-as-script (named exception; NOTES surface 9): the Run-as-script
             // strip, under the notices (never over a trust signal).
-            .children(
-                self.console()
-                    .and_then(|c| crate::scripts::run_as_script::strip(c, cx)),
-            )
+            // ## m4b-t21-shots (named exception, T18 concern): and under the T2 banner, as the
+            // mock shows: while a strip shows, this host draws the editor's banner above it
+            // (`EditorView::set_host_banner`, set at attach).
+            .children(strip.as_ref().and_then(|_| {
+                editor
+                    .clone()
+                    .update(cx, |e, cx| e.banner_element(window, cx))
+            }))
+            .children(strip.map(|s| div().flex_none().child(s)))
             // ## m3c-t33-find (named exception): the find bar, a row under the toolbar
             // (design/m3b-safe surface 16, M3c-9).
             .children(
@@ -1805,7 +1845,14 @@ impl Render for ConsoleHost {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_h(px(0.0))
+                    // ## m4b-t21-shots fix round 1 (m1, named exception): while a strip shows,
+                    // the code keeps two lines; the condensed banner's body gives way first.
+                    .min_h(if strip_shown {
+                        // ## m4b-t21-shots fix round 2 (m-a): with the code's top inset.
+                        hacivat_ui_editor::EditorView::code_height(2, cx)
+                    } else {
+                        px(0.0)
+                    })
                     .child(a11y::embed(
                         &editor,
                         StyleRefinement::default().size_full(),

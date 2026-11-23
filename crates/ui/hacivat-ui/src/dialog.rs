@@ -196,6 +196,10 @@ pub struct Dialog {
     content_focus: Vec<FocusHandle>,
     // ## m4-t33b-carries (named exception): a line under the title (a size, a connection).
     subtitle: Option<TextFn>,
+    // ## m4b-t21-shots fix round 1 (named item; m4, controller ruling (e))
+    /// The first button, a Danger one, stands alone at the footer's far left, the
+    /// `danger_isolation` gap (28 px) before the rest ([`Dialog::isolate_danger`]).
+    isolate_danger: bool,
 }
 
 impl EventEmitter<DialogEvent> for Dialog {}
@@ -243,6 +247,8 @@ impl Dialog {
                 role: Role::Dialog,
                 content_focus: Vec::new(),
                 subtitle: None,
+                // ## m4b-t21-shots fix round 1
+                isolate_danger: false,
             }
         })
     }
@@ -275,6 +281,16 @@ impl Dialog {
     pub fn set_subtitle(&mut self, subtitle: TextFn) {
         self.subtitle = Some(subtitle);
     }
+
+    // ## m4b-t21-shots fix round 1 (named item; m4, controller ruling (e); moved out of M4's
+    // block in fix round 2, m-c)
+    /// Isolates a first Danger button (DESIGN's isolation): alone at the footer's far left,
+    /// 28 px and the free space before the other buttons. Without a Danger first button the
+    /// footer is unchanged.
+    pub fn isolate_danger(&mut self) {
+        self.isolate_danger = true;
+    }
+    // ## m4b-t21-shots
 
     // ## m4-t33b-carries (named exception)
     /// The tab stops of the content (a checkbox the answer needs), in order: Tab visits them
@@ -424,6 +440,10 @@ impl Render for Dialog {
             vec![AccessKey::None; self.spec.buttons.len()]
         };
 
+        // ## m4b-t21-shots fix round 1 (m4)
+        let isolated = self.isolate_danger
+            && self.spec.buttons.len() > 1
+            && self.spec.buttons.first().map(|b| b.kind) == Some(ButtonKind::Danger);
         let buttons: Vec<_> = self
             .spec
             .buttons
@@ -511,7 +531,29 @@ impl Render for Dialog {
                     c.text_2.to_hsla(),
                 )))
                 .children(self.content.clone())
-                .child(
+                .child(if isolated {
+                    // ## m4b-t21-shots fix round 1 (m4): the Danger answer alone at the far
+                    // left, the rest at the right, 28 px at least between them (they wrap,
+                    // still apart, when they do not fit).
+                    let mut buttons = buttons.into_iter();
+                    let danger = buttons.next();
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_x(px(t.spacing.danger_isolation))
+                        .gap_y(px(t.spacing.md))
+                        .children(danger)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .ml_auto()
+                                .gap(px(t.spacing.md))
+                                .children(buttons),
+                        )
+                } else {
                     div()
                         .flex()
                         .flex_row()
@@ -520,8 +562,8 @@ impl Render for Dialog {
                         .flex_wrap()
                         .justify_end()
                         .gap(px(t.spacing.md))
-                        .children(buttons),
-                );
+                        .children(buttons)
+                });
         A11yNode::new("dialog-node", self.role, title, true, card).description(body_text)
     }
 }

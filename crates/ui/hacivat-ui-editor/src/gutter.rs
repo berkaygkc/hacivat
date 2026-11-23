@@ -36,8 +36,8 @@ use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, AvailableSpace, BorderStyle, Bounds, Context,
     Corners, CursorStyle, Div, Edges, Entity, FocusHandle, Hsla, InteractiveElement as _,
     IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels, Point, Render, Role,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, fill, point,
-    px, quad, size,
+    Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, fill, point, px, quad,
+    size,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, popover_surface};
 use smallvec::SmallVec;
@@ -689,9 +689,9 @@ pub(crate) fn prepaint_buttons(
             "hv-gutter-run-line",
             &[("line", UiArg::Count(u64::from(line) + 1))],
         );
-        if let Some((_, labels)) = &marked {
+        if let Some(covered) = &marked {
             let mut joined = name.to_string();
-            for label in labels {
+            for label in &covered.labels {
                 joined.push_str(" · ");
                 joined.push_str(label);
             }
@@ -787,7 +787,8 @@ struct RunTip {
     runs: Vec<crate::marks::RunRow>,
     // ## m4b-t17-secrets-ui fix round 1 (I1; named item): the row's host line marks (their
     // icon and labels), which the shown ▶ covers.
-    marks: Option<(IconName, Vec<SharedString>)>,
+    // ## m4b-t21-shots (T17 re-review n1): and the first mark's other lines (its hint).
+    marks: Option<crate::line_marks::Covered>,
 }
 
 impl RunTip {
@@ -835,7 +836,12 @@ impl Render for RunTip {
             .gap(px(4.0))
             .child(title);
         // ## m4b-t17-secrets-ui fix round 1 (I1): the covered line marks, under the title.
-        if let Some((icon, labels)) = &self.marks {
+        if let Some(crate::line_marks::Covered {
+            icon,
+            labels,
+            detail,
+        }) = &self.marks
+        {
             for label in labels {
                 col = col.child(
                     div()
@@ -857,6 +863,16 @@ impl Render for RunTip {
                             ink,
                         ))),
                 );
+            }
+            // ## m4b-t21-shots (T17 re-review n1): the hint the key's own tooltip shows, so
+            // the ▶ that covers the key hides nothing (`text_2` on the popover, wrapping).
+            for line in detail {
+                col = col.child(paragraph(
+                    line.clone(),
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    dim,
+                ));
             }
         }
         if self.runs.is_empty() {

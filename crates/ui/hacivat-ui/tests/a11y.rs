@@ -36,6 +36,8 @@ fn tab(id: u32, title: &'static str) -> TabSpec {
         title_source: TextSource::Data,
         dirty: false,
         env: None,
+        // ## m4b-t21-shots (named line)
+        parts: None,
     }
 }
 

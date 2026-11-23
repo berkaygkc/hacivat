@@ -764,6 +764,8 @@ impl Surface {
             Surface::M3b(state) => state.required(),
             // ## m3c-t43-shots
             Surface::M3c(state) => state.required(),
+            // ## m4b-t21-shots (named line): a connected production script tab's too.
+            Surface::M4b(state) => state.required(),
             _ => return Vec::new(),
         };
         // ## m3b-t29-shots (T29 review I2): a trust signal counts only drawn whole: never
@@ -801,6 +803,8 @@ impl Surface {
             Surface::M3b(state) => (state.required(), state.shows_production()),
             // ## m3c-t43-shots
             Surface::M3c(state) => (state.required(), state.shows_production()),
+            // ## m4b-t21-shots (named line; fix round 1, I2)
+            Surface::M4b(state) => (state.required(), state.production_capsule()),
             _ => return Vec::new(),
         };
         let mut ids: Vec<&'static str> = required.iter().flat_map(|g| g.iter().copied()).collect();
@@ -1482,8 +1486,198 @@ fn shot_text_system() -> Arc<dyn PlatformTextSystem> {
     TEXT_SYSTEM.with(Arc::clone)
 }
 
+// ## m4b-t21-shots fix round 1 (I2)
+/// What is wrong with the chooser rows' declared names in `decls`: none declared, or a row
+/// whose name does not begin with an environment word (the swatch is the only other cue), or
+/// the production row without the production word.
+fn chooser_rows_named(cx: &App, decls: &[hacivat_ui::popover::A11yDecl]) -> Vec<String> {
+    use hacivat_app::connections::capsule::env_word;
+    use hacivat_proto::EnvTag;
+    let words: Vec<String> = [
+        Some(EnvTag::Production),
+        Some(EnvTag::Staging),
+        Some(EnvTag::Test),
+        Some(EnvTag::Dev),
+        Some(EnvTag::Local),
+        None,
+    ]
+    .into_iter()
+    .map(|t| strip(&env_word(cx, t)))
+    .collect();
+    let rows: Vec<String> = decls
+        .iter()
+        .filter(|d| d.role == Some(hacivat_ui_core::gpui_surface::Role::ListBoxOption))
+        .map(|d| strip(&d.name))
+        .filter(|n| n.contains("orders-"))
+        .collect();
+    let mut out = Vec::new();
+    if rows.is_empty() {
+        out.push("no chooser row declared its name".to_string());
+    }
+    for row in &rows {
+        if !words.iter().any(|w| row.starts_with(&format!("{w} "))) {
+            out.push(format!("a chooser row names no environment: {row:?}"));
+        }
+        if row.contains("orders-prod ") && !row.starts_with(&format!("{} ", words[0])) {
+            out.push(format!("the production row does not say so: {row:?}"));
+        }
+    }
+    out
+}
+
+// ## m4b-t21-shots (named exception, R-M4b-44): the shot's temp root outlives its app.
+thread_local! {
+    /// Where [`shot_root`] makes a shot's temp root (`None`: `$TMPDIR/hacivat-shots`).
+    /// `shots_render_leaves_no_temp_dir` points it at a folder of its own and checks that
+    /// every root is gone once its shot is.
+    static SHOT_TMP: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+// ## m4b-t21-shots fix round 1 (m10): a shot's root has a stable path (its shot's name hashed),
+// so a path the app shows (Settings, the attach dialog) reads the same in every run on a
+// machine; shards render different shots, so their roots never meet.
+/// The temp root of shot `name`, under [`SHOT_TMP`]'s folder or `$TMPDIR/hacivat-shots`.
+fn shot_root_path(name: &str) -> PathBuf {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::hash::DefaultHasher::new();
+    name.hash(&mut h);
+    let base = SHOT_TMP
+        .with(|t| t.borrow().clone())
+        .unwrap_or_else(|| std::env::temp_dir().join("hacivat-shots"));
+    base.join(format!("hv-{:08x}", h.finish() as u32))
+}
+
+/// A shot's temp root, held under its lock (`<root>.lock`), removed (then unlocked) when
+/// dropped.
+struct ShotRoot(PathBuf);
+
+impl ShotRoot {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn lock_of(root: &Path) -> PathBuf {
+        root.with_extension("lock")
+    }
+}
+
+impl Drop for ShotRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(Self::lock_of(&self.0));
+    }
+}
+
+// ## m4b-t21-shots fix round 2 (m-e): two runs on one machine (two worktrees, two agents)
+// that render the same shot share its stable path; the root's lock (an atomic `mkdir`) makes
+// the second wait for the first instead of deleting its live root. A lock older than
+// `STALE_LOCK` is a crashed run's and is taken over.
+/// How old a shot root's lock is before it counts as a crashed run's.
+const STALE_LOCK: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The temp root of shot `name` ([`shot_root_path`]): locked, then made empty (a crashed
+/// run's leftover goes).
+fn shot_root(name: &str) -> ShotRoot {
+    let path = shot_root_path(name);
+    let lock = ShotRoot::lock_of(&path);
+    if let Some(parent) = lock.parent() {
+        std::fs::create_dir_all(parent).expect("the shots' temp folder");
+    }
+    let deadline = std::time::Instant::now() + 2 * STALE_LOCK;
+    while std::fs::create_dir(&lock).is_err() {
+        let stale = std::fs::metadata(&lock)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_LOCK);
+        if stale {
+            let _ = std::fs::remove_dir_all(&lock);
+            continue;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{name}: another run holds {}",
+            lock.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("temp dir");
+    CURRENT_ROOT.with(|c| *c.borrow_mut() = Some(path.clone()));
+    ShotRoot(path)
+}
+
+thread_local! {
+    /// The root of the shot being rendered ([`shot_folder`]).
+    static CURRENT_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A fixture folder `name` inside the shot's own root (fix round 1, m10: a stable path the
+/// app may show, gone with the shot).
+fn shot_folder(name: &str) -> PathBuf {
+    CURRENT_ROOT
+        .with(|c| c.borrow().clone())
+        .expect("a shot is being rendered")
+        .join("folders")
+        .join(name)
+}
+
+/// The entries left in `base` (the temp roots of shots that are over).
+fn left_in(base: &Path) -> Vec<String> {
+    std::fs::read_dir(base)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Queues the shape of the CI flake: a task whose update flushes what is pending (any task's
+/// update does: the full frame `refresh_windows` asked for draws there), then, one poll later,
+/// redraws the window without refreshing it (it notifies the root view, so every cached view
+/// is reused), as a late status or session update does. Only a settle runs it, so it reaches
+/// the read frame only if the harness settles after asking for its full frame.
+fn late_redraw(cx: &mut HeadlessAppContext, handle: AnyWindowHandle) {
+    use hacivat_ui_core::gpui_surface::AppContext as _;
+    cx.update(|cx| {
+        cx.spawn(async move |cx| {
+            let _ = cx.update_window(handle, |_, _, _| {});
+            YieldOnce(false).await;
+            let _ = cx.update_window(handle, |root, _, cx| cx.notify(root.entity_id()));
+        })
+        .detach();
+    });
+}
+
+/// Pending once (waking itself), then ready: the task's next poll comes after the tasks
+/// already queued.
+struct YieldOnce(bool);
+
+impl std::future::Future for YieldOnce {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            return std::task::Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
+}
+// ## m4b-t21-shots
+
 /// Renders `shot` in a fresh app, checks the frame and writes the PNG. Returns the violations.
 fn render(shot: Shot, dir: &Path) -> Vec<String> {
+    // ## m4b-t21-shots (named exception, R-M4b-44): the root is made before the app, so it
+    // is dropped after it (locals drop in reverse order, on a panic too): the app's teardown
+    // saves the workspace again into `data/`, which used to re-create the root after its
+    // removal (the M4 gate's 3,464 `$TMPDIR/.tmp*/data/` folders).
+    let root = shot_root(&shot.file_name(2.0));
     let mut cx = HeadlessAppContext::with_platform(
         shot_text_system(),
         Arc::new(BundledAssets),
@@ -1501,7 +1695,6 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         // ## m4-t32-shots (m3carry review m3): a connected fixture's latency is fixed.
         cx.set_global(hacivat_app::connections::capsule::PinnedLatency(12));
     });
-    let root = tempfile::tempdir().expect("temp dir");
     let paths = LocalPaths::under(root.path());
     paths.ensure_dirs().expect("test dirs");
     let mut outcome = hacivat_settings::load(&paths.settings_toml());
@@ -1636,8 +1829,21 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         cx.update_window(handle, |_, window, cx| m3c::record_icons(window, cx))
             .expect("the window is open");
     }
-    cx.update(|cx| cx.refresh_windows());
+    // ## m4b-t21-shots (named exception, R-C0-6: the CI flakes `narrow-empty-dark-en-XA` and
+    // `marks-awaiting-dark-tr-XT`): the frame the checks read and the PNG shows is the last
+    // full frame, with nothing run after it. `cx.update` does not flush, so the old
+    // `refresh_windows` + `run_until_parked` drew its full frame inside the first task that
+    // ran, and a later task that notified any other view (a late status or session update
+    // under load) drew one more frame that reused the cached editor (`a11y::embed`), which
+    // records none of its labels: "no visible label from #editor-placeholder". Now the app
+    // settles first, and `update_window` draws the full frame as it returns.
     cx.run_until_parked();
+    // The guard: a redraw that only a later settle would run (as a late update does), on every
+    // shot. Any order that settles between the full frame and the read loses the cached views'
+    // labels on every shot that has one, not once in a hundred runs.
+    late_redraw(&mut cx, handle);
+    cx.update_window(handle, |_, window, _| window.refresh())
+        .expect("the window is open");
     if m3c_state.is_some() {
         m3c::take_icons();
     }
@@ -1691,6 +1897,16 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     }
     failures.extend(check_grid(&name, shot.locale, &frame));
     failures.extend(shot.surface.trust_missing(&name, &frame));
+    // ## m4b-t21-shots fix round 1 (I2): the chooser announces each row's environment.
+    if let Surface::M4b(state) = shot.surface
+        && state.is_chooser()
+    {
+        failures.extend(
+            cx.update(|cx| chooser_rows_named(cx, &decls))
+                .into_iter()
+                .map(|v| format!("{name}: (t) {v}")),
+        );
+    }
     if std::env::var_os("SHOTS_DUMP").is_some() {
         for r in &frame {
             println!(
@@ -1814,6 +2030,18 @@ fn render_all_surfaces(names: &[String], all: bool) {
         // ## m3a-t35-shots: the per-shot and total harness time (the plan's Step 4 record).
         let started = std::time::Instant::now();
         failures.extend(render(shot, &dir));
+        // ## m4b-t21-shots (R-M4b-44): the shot's root is gone with its app (fix round 1, m10:
+        // its stable path); reported once, then removed.
+        // Fix round 2 (m-e): a root another run holds now (its lock) is not ours to judge.
+        let root = shot_root_path(&shot.file_name(2.0));
+        if root.exists() && !ShotRoot::lock_of(&root).exists() {
+            failures.push(format!(
+                "{}: (r) left the temp root {} behind",
+                shot.file_name(2.0),
+                root.display()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+        }
         let took = started.elapsed();
         slowest = slowest.max(took);
         println!("shot time {}: {} ms", shot.file_name(2.0), took.as_millis());
@@ -1933,6 +2161,85 @@ fn a_run_whose_threads_keep_growing_fails() {
 fn every_shot_shares_one_platform_text_system() {
     assert!(Arc::ptr_eq(&shot_text_system(), &shot_text_system()));
 }
+
+// ## m4b-t21-shots
+/// Renders the shots named in `names` (file names, each `times` times) into a temp folder of
+/// its own, with every shot's temp root under `tmp`; `None` without a headless renderer.
+/// Returns each shot's violations and the temp roots it left behind.
+fn render_for_check(names: &[&str], times: usize, tmp: &Path) -> Option<Vec<String>> {
+    match current_headless_renderer() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            println!("shots: no headless renderer (R8)");
+            return None;
+        }
+        Err(err) => panic!("shots: the headless renderer failed to start: {err:#}"),
+    }
+    apply_text_rendering(TextRendering::Crisp);
+    let out = tempfile::tempdir().expect("an output folder");
+    SHOT_TMP.with(|t| *t.borrow_mut() = Some(tmp.to_path_buf()));
+    let mut found = Vec::new();
+    for shot in shots() {
+        let name = shot.file_name(2.0);
+        if !names.contains(&name.as_str()) {
+            continue;
+        }
+        for _ in 0..times {
+            found.extend(render(shot, out.path()));
+            found.extend(
+                left_in(tmp)
+                    .into_iter()
+                    .map(|left| format!("{name}: (r) left the temp root {left} behind")),
+            );
+        }
+    }
+    SHOT_TMP.with(|t| *t.borrow_mut() = None);
+    Some(found)
+}
+
+// ## m4b-t21-shots (R-M4b-44)
+/// A render of the M4b states (each once: dark, English, 1280x800) leaves no temp root behind:
+/// a shot's root outlives its app, whose teardown saves the workspace into it once more.
+fn shots_render_leaves_no_temp_dir() {
+    let names: Vec<String> = m4b::M4B_STATES
+        .iter()
+        .map(|s| format!("{}-dark-en-1280x800@2x.png", s.name()))
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let tmp = tempfile::tempdir().expect("the check's temp folder");
+    let Some(found) = render_for_check(&names, 1, tmp.path()) else {
+        return;
+    };
+    let left: Vec<&String> = found.iter().filter(|v| v.contains("(r)")).collect();
+    assert!(left.is_empty(), "temp roots left behind:\n{left:#?}");
+}
+
+// ## m4b-t21-shots (R-C0-6)
+/// The repeat guard of the CI flakes `narrow-empty-dark-en-XA-1280x800` (the editor's
+/// placeholder) and `marks-awaiting-dark-tr-XT-1280x800` (the gutter's marks): both draw
+/// their marker inside the cached editor, so a frame read after a redraw that reused it had
+/// lost the marker. Each renders ten times, every time with the late redraw `render` queues,
+/// and every frame shows its marker.
+fn cached_view_states_render_whole_every_time() {
+    let tmp = tempfile::tempdir().expect("the check's temp folder");
+    let Some(found) = render_for_check(
+        &[
+            "narrow-empty-dark-en-XA-1280x800@2x.png",
+            "marks-awaiting-dark-tr-XT-1280x800@2x.png",
+        ],
+        10,
+        tmp.path(),
+    ) else {
+        return;
+    };
+    assert!(
+        found.is_empty(),
+        "{} violations:\n{}",
+        found.len(),
+        found.join("\n")
+    );
+}
+// ## m4b-t21-shots
 
 fn the_matrix_covers_every_surface_locale_and_theme() {
     let all = shots();
@@ -2352,7 +2659,16 @@ fn main() {
         eprintln!("--shard {bad:?}: expected k/n with 1 <= k <= n");
         std::process::exit(2);
     }
-    let checks: [(&str, fn()); 13] = [
+    let checks: [(&str, fn()); 15] = [
+        // ## m4b-t21-shots (R-M4b-44, R-C0-6)
+        (
+            "shots_render_leaves_no_temp_dir",
+            shots_render_leaves_no_temp_dir,
+        ),
+        (
+            "cached_view_states_render_whole_every_time",
+            cached_view_states_render_whole_every_time,
+        ),
         // ## m3c-threads
         (
             "a_run_whose_threads_keep_growing_fails",
