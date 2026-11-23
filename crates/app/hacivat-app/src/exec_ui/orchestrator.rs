@@ -1255,10 +1255,7 @@ fn refuse_plain_run(console: ConsoleId, cx: &mut App) -> bool {
         say(console, "hv-scripts-run-session-busy", cx);
         return true;
     }
-    let preview = Consoles::get(cx, console)
-        .and_then(|s| s.editor.clone())
-        .is_some_and(|e| e.read(cx).preview().is_some());
-    if preview {
+    if crate::scripts::run_as_script::is_preview(console, cx) {
         say(console, "hv-scripts-preview-no-run", cx);
         return true;
     }

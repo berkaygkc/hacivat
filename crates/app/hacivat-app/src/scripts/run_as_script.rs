@@ -279,6 +279,16 @@ fn streamed(console: ConsoleId, cx: &App) -> Option<Streamed> {
 }
 
 // ## m4b-t18-run-as-script fix round 1 (I1)
+/// Whether console `console` shows a T2 preview (a script tab's, or a pasted one), read
+/// without the editor (the gutter asks from inside the editor's own update).
+pub fn is_preview(console: ConsoleId, cx: &App) -> bool {
+    if let Some(doc) = tabs::doc_of_console(console, cx) {
+        return doc.read(cx).tier() == hacivat_scripts::SizeTier::Preview;
+    }
+    cx.try_global::<Pasted>()
+        .is_some_and(|p| p.0.contains_key(&console))
+}
+
 /// Whether plain Run must not start on console `console`: a streamed run is under way on it, or
 /// on the session it shares (two runs never interleave on one session).
 pub fn blocks_run(console: ConsoleId, cx: &App) -> bool {
