@@ -180,6 +180,10 @@ fn includes_outside_the_repository_run_nothing() {
     let markers = top.join("markers");
     std::fs::create_dir_all(&markers).unwrap();
     let r = repo(&top, "repo");
+    write(&r.join("eol.sql"), b"select 1;\nselect 2;\n");
+    git(&r, &["add", "eol.sql"]);
+    git(&r, &["commit", "-q", "--no-verify", "-m", "eol"]);
+    write(&r.join("eol.sql"), b"select 1;\r\nselect 2;\r\n");
     let outside = top.join("outside.cfg");
     arm(&outside, &markers, "include");
     let cfg = r.join(".git/config");
@@ -194,31 +198,48 @@ fn includes_outside_the_repository_run_nothing() {
     ] {
         set(&cfg, key, &inc);
     }
-    write(&r.join(".gitattributes"), b"*.sql filter=x diff=x\n");
+    write(&r.join(".gitattributes"), b"a.sql filter=x diff=x\n");
+    // ## m4b-t20-adversarial fix round 1 (review m5): the outside config also sets a key the
+    // status honours, with an effect it shows: `core.autocrlf = true` makes a CRLF copy of an
+    // LF-committed file clean. Read, `eol.sql` would lose its badge. (`eol.sql` is committed
+    // before the includes are armed: the git CLI itself follows them and runs fsmonitor.)
+    set(&outside, "core.autocrlf", "true");
     let st = status(&r, &GitLimits::default());
-    assert!(
-        matches!(
-            st,
-            GitState::Ready(_) | GitState::Unavailable(_) | GitState::Untrusted(_)
-        ),
-        "{st:?}"
+    let GitState::Ready(s) = &st else {
+        panic!("the status reads the repository: {st:?}");
+    };
+    let badge = |p: &str| s.by_path.get(&hacivat_git::GitPath::new(p)).copied();
+    // A path whose attributes name a filter is never guessed.
+    assert_eq!(
+        badge("a.sql"),
+        Some(hacivat_git::FileStatus::Unknown(
+            hacivat_git::UnknownWhy::Filtered
+        )),
+        "{s:?}"
     );
-    if let GitState::Ready(s) = &st {
-        // A path whose attributes name a filter is never guessed.
-        assert!(
-            s.by_path
-                .get(&hacivat_git::GitPath::new("a.sql"))
-                .is_some_and(|b| matches!(b, hacivat_git::FileStatus::Unknown(_))),
-            "{s:?}"
-        );
-    }
+    // Nothing of the outside config was read: the CRLF copy is still modified.
+    assert_eq!(
+        badge("eol.sql"),
+        Some(hacivat_git::FileStatus::Modified),
+        "{s:?}"
+    );
     assert_eq!(markers_left(&markers), Vec::<String>::new());
+    // The whole map is pinned: nothing an included file could set changed a badge.
+    assert_eq!(s.by_path.len(), 3, "{s:?}");
+    // Recorded (fix round 1): no control can show an include being read through a badge.
+    // This pipeline's status honours none of `core.autocrlf`, `core.excludesFile` or
+    // `status.showUntrackedFiles` even from the repository's own config (observed), so the
+    // keys an include could bring that matter are the program keys, which the markers cover.
 }
 
-/// A 1 GiB index (sparse: no disk is used): never decoded, the status is unavailable within
-/// its own budget (`status` answers at the deadline at the latest; nothing to wait on here),
-/// never a partial map, never a panic.
+/// A 1 GiB index: never decoded (`TooLarge(Index)`, refused by its size before gix reads it),
+/// never a partial map, never a panic, never rewritten. The file is sparse on APFS and ext4
+/// (`set_len`); NTFS allocates the whole length, so the row is skipped on Windows (review m5).
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "NTFS set_len allocates the full 1 GiB; no sparse file without fsutil"
+)]
 fn a_one_gib_index_is_unavailable() {
     let top = tempfile::tempdir().unwrap();
     let r = repo(&canonical(top.path()), "repo");
@@ -233,7 +254,13 @@ fn a_one_gib_index_is_unavailable() {
         "t20 one_gib_index state={}",
         format!("{st:?}").replace(' ', "")
     ));
-    assert!(matches!(st, GitState::Unavailable(_)), "{st:?}");
+    assert!(
+        matches!(
+            st,
+            GitState::Unavailable(GitError::TooLarge(hacivat_git::TooLargeWhy::Index))
+        ),
+        "{st:?}"
+    );
     // The index was never rewritten (still the sparse 1 GiB file).
     assert_eq!(
         std::fs::metadata(r.join(".git/index")).unwrap().len(),
@@ -319,6 +346,78 @@ fn a_fan_out_of_alternates_is_refused_at_once() {
     write(&other.join(".git/objects/info/alternates"), b"");
     let st = status(&r, &GitLimits::default());
     assert!(matches!(st, GitState::Ready(_)), "{st:?}");
+}
+
+// ## m4b-t20-adversarial fix round 1 (review I1, the reviewer's probe H2)
+/// Short alternates lines that are expensive to resolve: each one goes through a 30-link chain
+/// whose every hop is an absolute path through a 150-deep folder chain. Before fix round 1
+/// each line was resolved (`canonicalize`) before it was counted, so 1,000 of them took about
+/// 8 s and the status answered `Timeout` (its worker went on, the library `Paused`). Now the
+/// lines are counted and de-duplicated by their text before any is resolved: 1,000 copies of
+/// one line resolve once, 1,000 distinct lines are refused at once. Both answer far
+/// inside the default 5 s budget (never `Timeout`), and a second status (a refresh) does the
+/// same bounded work again (never `Paused`).
+#[cfg(unix)]
+#[test]
+fn many_expensive_alternates_lines_are_refused_before_any_is_resolved() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let r = repo(&top, "repo");
+    let other = repo(&top, "other");
+    let mut deep = top.join("deep");
+    for _ in 0..150 {
+        deep.push("d");
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    // l0 → deep/l1 → … → deep/l29 → other's objects, each hop an absolute path.
+    let hops = 30;
+    for i in (1..hops).rev() {
+        let target = if i == hops - 1 {
+            other.join(".git/objects")
+        } else {
+            deep.join(format!("l{}", i + 1))
+        };
+        std::os::unix::fs::symlink(target, deep.join(format!("l{i}"))).unwrap();
+    }
+    let objects = r.join(".git/objects");
+    let alternates = objects.join("info/alternates");
+    let not_stuck = |what: &str| {
+        for pass in ["first", "refresh"] {
+            let st = status(&r, &GitLimits::default());
+            fact(&format!(
+                "t20 alternates_lines case={what} pass={pass} state={}",
+                match &st {
+                    GitState::Ready(_) => "ready".to_owned(),
+                    other => format!("{other:?}").replace(' ', ""),
+                }
+            ));
+            assert!(
+                !matches!(
+                    st,
+                    GitState::Unavailable(GitError::Timeout | GitError::Paused)
+                ),
+                "{what} {pass}: {st:?}"
+            );
+        }
+    };
+    // 1,000 copies of one short line: our check resolves it once (gix's own open then refuses
+    // a 30-link alternate: `Failed(Open)`, observed); answered at once either way.
+    std::os::unix::fs::symlink(deep.join("l1"), objects.join("a0")).unwrap();
+    write(&alternates, "a0\n".repeat(1_000).as_bytes());
+    not_stuck("repeated");
+    // 1,000 distinct short lines (each its own link into the chain): refused before one is
+    // resolved.
+    let mut lines = String::new();
+    for i in 1..1_000 {
+        std::os::unix::fs::symlink(deep.join("l1"), objects.join(format!("a{i}"))).unwrap();
+        lines.push_str(&format!("a{i}\n"));
+    }
+    write(&alternates, lines.as_bytes());
+    not_stuck("distinct");
+    assert!(matches!(
+        status(&r, &GitLimits::default()),
+        GitState::Unavailable(GitError::Redirected)
+    ));
 }
 
 /// The index with one more extension before its trailing SHA-1, the checksum recomputed.

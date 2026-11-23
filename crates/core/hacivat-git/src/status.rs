@@ -188,11 +188,17 @@ fn pipeline(
     };
     // p1: `check_layout` checks every file it reads (gitfile, `commondir`, alternates) for
     // placeholders before reading it.
-    let layout = match trust::check_layout(&found, &trust::current_user_owns, &placeholder) {
+    // ## m4b-t20-adversarial fix round 1 (named lines, I1): interruptible.
+    let layout = match trust::check_layout_bounded(
+        &found,
+        &trust::current_user_owns,
+        &placeholder,
+        interrupt,
+    ) {
         Ok(l) => l,
         Err(st) => return st,
     };
-    if let Err(st) = trust::check_internals_dataless(&layout, &placeholder) {
+    if let Err(st) = trust::check_internals_dataless(&layout, &placeholder, interrupt) {
         return st;
     }
     if trust::unsupported_format(&layout.git_dir, &layout.common_dir) {

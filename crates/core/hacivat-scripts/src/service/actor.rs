@@ -598,6 +598,16 @@ fn folder_db(path: &Path) -> Option<LogicalDb> {
     LogicalDb::parse(path.file_name()?.to_str()?).ok()
 }
 
+// ## m4b-t20-adversarial fix round 1 (named exception, review m3)
+/// The outer `index.lock` a status validated: only a `Ready` one names it.
+fn outer_lock_of(state: &GitState) -> Option<PathBuf> {
+    match state {
+        GitState::Ready(s) => s.index_lock.clone(),
+        _ => None,
+    }
+}
+// ## m4b-t20-adversarial
+
 /// Whether two status answers are the same (nothing to publish).
 fn same_git(a: &GitState, b: &GitState) -> bool {
     match (a, b) {
@@ -2004,6 +2014,12 @@ impl Actor {
                     }
                 }
                 self.echoes.set(id, Some(w.echo()));
+                // ## m4b-t20-adversarial fix round 1 (named lines, review m3): a watcher that
+                // starts after the status (a re-attach, an adoption, a watch-mode switch) gets
+                // the outer lock the latest status validated.
+                if let Some(state) = self.git.get(&id) {
+                    w.set_outer_lock(outer_lock_of(state));
+                }
                 let lib = &mut self.libs[i];
                 lib.unwatched = false;
                 lib.watcher = Some(w);
@@ -2287,10 +2303,11 @@ impl Actor {
         let again = std::mem::take(&mut lib.git.again);
         // ## m4b-t20-adversarial (named lines, the cifix-2 re-review's N3): the lock of a
         // repository above the library, as the status found and validated it, goes to the
-        // watcher (an `lstat` there, never a watch). A state that is not `Ready` changes
-        // nothing: the last validated lock stays until a status says otherwise.
-        if let (GitState::Ready(s), Some(w)) = (&state, &lib.watcher) {
-            w.set_outer_lock(s.index_lock.clone());
+        // watcher (an `lstat` there, never a watch). Fix round 1 (review m3): every status
+        // re-arms it, and one that is not `Ready` drops it (a path no status validates now is
+        // not looked at).
+        if let Some(w) = &lib.watcher {
+            w.set_outer_lock(outer_lock_of(&state));
         }
         if servable(&lib.state) {
             let same = self.git.get(&id).is_some_and(|old| same_git(old, &state));

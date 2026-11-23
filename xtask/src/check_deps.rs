@@ -2130,7 +2130,11 @@ fn names_git_testing_hooks(t: &[SrcTok]) -> bool {
         .iter()
         .map(|(path, name)| (name.clone(), path.clone()))
         .collect();
-    let hooks = |p: &[String]| p.len() >= 2 && p[0] == "hacivat_git" && p[1] == "testing";
+    // ## m4b-t20-adversarial fix round 1 (named line, review m1): `testing` anywhere after the
+    // crate (an alias of the crate root inside it: `hacivat_git::hv::testing`).
+    let hooks = |p: &[String]| {
+        p.len() >= 2 && p[0] == "hacivat_git" && p[1..].iter().any(|s| s == "testing")
+    };
     let crate_glob = |p: &[String]| p.len() == 1 && p[0] == "hacivat_git";
     globs.iter().any(|g| {
         let r = resolve_path(g, &renames);
@@ -2180,9 +2184,13 @@ fn is_pub_use(t: &[SrcTok], i: usize) -> bool {
 /// crate-local root (`pub use super::*`), which would re-export `testing` under another name.
 /// Outside code could then call a hook without naming `testing`.
 ///
-/// Known limit (recorded in ADR 0009 `m4b-t20`): a path a macro assembles from fragments
+/// Fix round 1 (review m1): also a public alias of a crate-local root (`pub use crate as hv`,
+/// `pub use super::super as root`, `pub extern crate self as hv`), and a public `type`,
+/// `const` or `static` whose tokens name a path through `testing`.
+///
+/// Known limits (recorded in ADR 0009 `m4b-t20`): a path a macro assembles from fragments
 /// (`macro_rules! m { ($m:ident) => { hacivat_git::$m::… } }`) is not seen, like the run-time
-/// program name of `NoGitSubprocess`.
+/// program name of `NoGitSubprocess`; nor is a public wrapper function that calls a hook.
 fn reexports_git_testing(t: &[SrcTok]) -> bool {
     let (imported, _) = imports(t);
     let renames: HashMap<String, Vec<String>> = imported
@@ -2195,6 +2203,26 @@ fn reexports_git_testing(t: &[SrcTok]) -> bool {
             .all(|s| ["crate", "self", "super"].contains(&s.as_str()))
     };
     (0..t.len()).any(|i| {
+        // ## m4b-t20-adversarial fix round 1 (named lines, review m1): `pub extern crate self
+        // as hv`, and public `type`/`const`/`static` items whose value or type goes through
+        // `testing` (an alias outside code can name).
+        if tok_ident(t, i, "extern")
+            && is_pub_use(t, i)
+            && tok_ident(t, i + 1, "crate")
+            && tok_ident(t, i + 2, "self")
+        {
+            return true;
+        }
+        if ["type", "const", "static"]
+            .iter()
+            .any(|k| tok_ident(t, i, k))
+            && is_pub_use(t, i)
+        {
+            let end = item_end(t, i).min(t.len());
+            return expr_paths(&t[i..end])
+                .iter()
+                .any(|p| through(&resolve_path(p, &renames)));
+        }
         if !tok_ident(t, i, "use") || !is_pub_use(t, i) {
             return false;
         }
@@ -2202,11 +2230,15 @@ fn reexports_git_testing(t: &[SrcTok]) -> bool {
         let mut out = Vec::new();
         let mut globs = Vec::new();
         flatten_use(t, i + 1, end, &[], &mut out, &mut globs);
-        out.iter().any(|(p, _)| through(&resolve_path(p, &renames)))
-            || globs.iter().any(|g| {
-                let r = resolve_path(g, &renames);
-                through(&r) || local_root(&r)
-            })
+        // Fix round 1 (m1): a public alias of a crate-local root (`pub use crate as hv`,
+        // `pub use super::super as root`) re-exports `testing` under another path.
+        out.iter().any(|(p, _)| {
+            let r = resolve_path(p, &renames);
+            through(&r) || local_root(&r)
+        }) || globs.iter().any(|g| {
+            let r = resolve_path(g, &renames);
+            through(&r) || local_root(&r)
+        })
     })
 }
 
@@ -2224,8 +2256,14 @@ fn names_default_trash_ctx(t: &[SrcTok]) -> bool {
 const FILEIO_ONLY_FILES: [&str; 3] = ["src/service.rs", "src/index.rs", "src/events.rs"];
 /// And every file under this folder.
 const FILEIO_ONLY_DIR: &str = "src/service/";
-/// File-system paths (`std::os::<os>::fs` is matched apart).
-const FS_PATHS: [&[&str]; 2] = [&["std", "fs"], &["tokio", "fs"]];
+/// File-system paths (`std::os::<os>::fs` is matched apart). ## m4b-t20-adversarial fix round 1
+/// (review m2): and `hacivat_settings::fsio`, a second, path-based writer (`registry` and
+/// `recovery` hold its uses; script content never goes through it).
+const FS_PATHS: [&[&str]; 3] = [
+    &["std", "fs"],
+    &["tokio", "fs"],
+    &["hacivat_settings", "fsio"],
+];
 /// Calls that open, read, list or remove by name, wherever they come from.
 const FS_IDENTS: [&str; 8] = [
     "OpenOptions",
@@ -2246,6 +2284,15 @@ fn names_the_file_system(t: &[SrcTok]) -> bool {
     if t.iter()
         .any(|x| matches!(x, SrcTok::Ident(s) if FS_IDENTS.contains(&s.as_str())))
     {
+        return true;
+    }
+    // ## m4b-t20-adversarial fix round 1 (named lines, review m2): no file of the service
+    // splices in another (`include!`, `#[path]`): the rule's file set is the whole service.
+    let splices = (0..t.len()).any(|i| {
+        (tok_ident(t, i, "include") && tok_punct(t, i + 1, '!'))
+            || (tok_punct(t, i, '#') && tok_punct(t, i + 1, '[') && tok_ident(t, i + 2, "path"))
+    });
+    if splices {
         return true;
     }
     let (imported, globs) = imports(t);
@@ -5707,7 +5754,17 @@ mod tests {
     /// crate-local root, is flagged there; private imports and plain re-exports are not.
     #[test]
     fn git_testing_reexport_inside_hacivat_git_is_flagged() {
-        let forms: [(&str, &str); 9] = [
+        let forms: [(&str, &str); 15] = [
+            // Fix round 1 (review m1): aliases of the crate root, and typed aliases.
+            ("alias_crate.rs", "pub use crate as hv;"),
+            ("alias_extern.rs", "pub extern crate self as hv;"),
+            (
+                "alias_super.rs",
+                "pub mod m { pub use super::super as root; }",
+            ),
+            ("alias_type.rs", "pub type Hook = crate::testing::Stall;"),
+            ("alias_const.rs", "pub const H: fn() = crate::testing::x;"),
+            ("alias_static.rs", "pub static H: fn() = self::testing::x;"),
             (
                 "reexp_crate.rs",
                 "pub use crate::testing::status_with_stall as stall_hook;",
@@ -5727,7 +5784,7 @@ mod tests {
             ),
             ("reexp_glob.rs", "mod inner { pub use super::*; }"),
         ];
-        let ok: [(&str, &str); 2] = [
+        let ok: [(&str, &str); 3] = [
             (
                 "private_use.rs",
                 "use crate::testing::Stall;\nfn f() { let _ = Stall::BeforeResolve; }",
@@ -5736,6 +5793,11 @@ mod tests {
                 "plain_reexport.rs",
                 "pub mod testing { pub fn x() {} }\npub use crate::status::GitLimits;\n\
                  pub use self::map::{testing_free, Found};",
+            ),
+            (
+                "plain_items.rs",
+                "pub type Limits = crate::GitLimits;\npub const N: usize = crate::MAX;\n\
+                 extern crate self as me;\ntype Private = crate::testing::Stall;",
             ),
         ];
         assert_forms(
@@ -5753,6 +5815,21 @@ mod tests {
         assert_eq!(
             source_hits(dir.path(), Rule::GitTestingHookOutsideTests),
             []
+        );
+        // Fix round 1 (m1): a consumer reaching the hooks through such an alias is flagged.
+        let dir = source_tree(&[
+            (
+                "crates/core/hacivat-scripts/src/alias.rs",
+                "fn f() { let _ = hacivat_git::hv::testing::Stall::BeforeResolve; }",
+            ),
+            (
+                "crates/core/hacivat-scripts/src/alias_use.rs",
+                "use hacivat_git::hv as g;\nfn f() { g::testing::x(); }",
+            ),
+        ]);
+        assert_eq!(
+            source_hits(dir.path(), Rule::GitTestingHookOutsideTests).len(),
+            2
         );
     }
 
@@ -5803,7 +5880,18 @@ mod tests {
     /// renames, brace groups and leading `::`, and a glob from outside the crate.
     #[test]
     fn script_content_outside_fileio_is_flagged() {
-        let forms: [(&str, &str); 14] = [
+        let forms: [(&str, &str); 18] = [
+            // Fix round 1 (review m2): the settings crate's path-based writer, and splicing.
+            (
+                "fsio.rs",
+                "fn f() { hacivat_settings::fsio::atomic_write(p, b); }",
+            ),
+            (
+                "fsio_rename.rs",
+                "use hacivat_settings::fsio as w;\nfn f() { w::atomic_write(p, b); }",
+            ),
+            ("include.rs", "include!(\"../x.rs\");"),
+            ("path_attr.rs", "#[path = \"../../x.rs\"]\nmod x;"),
             ("std_fs.rs", "fn f() { std::fs::read(\"x\"); }"),
             ("rooted.rs", "fn f() { ::std::fs::read(\"x\"); }"),
             ("use_fs.rs", "use std::fs;\nfn f() { fs::write(p, b); }"),

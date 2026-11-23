@@ -89,6 +89,11 @@ struct Rig {
 }
 
 async fn rig() -> Rig {
+    rig_with_fs(Arc::new(scan::RealFs)).await
+}
+
+/// [`rig`] with the file system the service and its watchers look through.
+async fn rig_with_fs(fs: Arc<dyn Fs + Send + Sync>) -> Rig {
     let app = tempfile::tempdir().unwrap();
     let trash = tempfile::tempdir().unwrap();
     let fake = FakeHandle::default();
@@ -102,6 +107,7 @@ async fn rig() -> Rig {
             recheck: Duration::from_millis(60),
             home: None,
             trasher: Arc::new(FolderTrash(trash.path().to_path_buf())),
+            fs,
             ..ServiceOptions::default()
         },
     );
@@ -860,5 +866,146 @@ async fn a_file_link_is_never_renamed_through_a_hard_link_on_windows() {
     );
     assert!(!d.path().join("m.sql").exists());
     fact("t20 windows_file_link_rename=refused");
+}
+
+// ## m4b-t20-adversarial fix round 1 (review m3): N3 end to end through the service.
+
+/// A file system that counts the `lstat`s of one path.
+struct LockLooks {
+    lock: PathBuf,
+    looks: std::sync::atomic::AtomicUsize,
+}
+
+impl LockLooks {
+    fn count(&self) -> usize {
+        self.looks.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Fs for LockLooks {
+    fn read_dir(&self, dir: &Path, cap: usize) -> io::Result<Vec<OsString>> {
+        scan::RealFs.read_dir(dir, cap)
+    }
+    fn symlink_metadata(&self, path: &Path) -> io::Result<Meta> {
+        if path == self.lock {
+            self.looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        scan::RealFs.symlink_metadata(path)
+    }
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        scan::RealFs.canonicalize(path)
+    }
+    fn read_link(&self, link: &Path) -> io::Result<PathBuf> {
+        scan::RealFs.read_link(link)
+    }
+}
+
+/// The git CLI, on this test's own fixture repository only (`NoGitSubprocess` exempts
+/// `tests/`), with no global or system config.
+fn git_cli(dir: &Path, args: &[&str]) {
+    let mut c = std::process::Command::new("git");
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_CONFIG_PARAMETERS",
+    ] {
+        c.env_remove(var);
+    }
+    let out = c
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", dir.join("hv-t20-no-global"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}");
+}
+
+/// A library inside a bigger repository: its status hands the watcher the outer
+/// `index.lock`, which a counted hint then makes it look at; a watcher started again (a watch
+/// mode switch) has it too; and a status that is no longer `Ready` takes it back, so it is not
+/// looked at any more.
+#[tokio::test(flavor = "multi_thread")]
+async fn git_the_outer_index_lock_reaches_every_watcher_and_leaves_with_the_status() {
+    let top = tempfile::tempdir().unwrap();
+    let repo = canonical(top.path()).join("repo");
+    write_files(&repo, &["lib/a.sql"]);
+    git_cli(&repo, &["init", "-q", "-b", "main"]);
+    git_cli(&repo, &["add", "-A"]);
+    git_cli(&repo, &["commit", "-q", "--no-verify", "-m", "base"]);
+    let lib = repo.join("lib");
+    let fs = Arc::new(LockLooks {
+        lock: repo.join(".git/index.lock"),
+        looks: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let r = rig_with_fs(fs.clone()).await;
+    let id = r.attach(&lib).await;
+    assert_eq!(
+        r.svc.snapshot().view(None).library(id).map(|l| l.git()),
+        Some(GitSummary::Ready)
+    );
+    let root = canonical(&lib);
+    let mut rx = r.svc.subscribe(None);
+    // One edit, its event awaited: the edit's hint made the watcher look at the outer lock.
+    let edit = |n: u32| {
+        std::fs::write(root.join("a.sql"), format!("SELECT {n};")).unwrap();
+        r.hint(&root, vec![RawHint::Path(root.join("a.sql"))]);
+    };
+    let changed = |e: &LibraryEvent| matches!(e, LibraryEvent::FileChanged { rel, .. } if rel.as_str() == "a.sql");
+    async fn next(rx: &mut hacivat_scripts::Subscription, f: impl Fn(&LibraryEvent) -> bool) {
+        let deadline = tokio::time::Instant::now() + CEILING;
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Ok(e)) if f(&e) => return,
+                Ok(_) => {}
+                Err(_) => panic!("no such event"),
+            }
+        }
+    }
+    // A tab has the file open (its events are the open files').
+    r.svc.read(id, &rel("a.sql"), None).await.unwrap();
+    edit(1);
+    next(&mut rx, changed).await;
+    wait_until("the status's lock was looked at", || fs.count() >= 1).await;
+    // A watcher started again (watch mode switch) has the lock too. (The restart's rescan also
+    // refreshes the status, so this does not isolate the hand-off at watcher start.)
+    r.svc
+        .set_watch(id, hacivat_scripts::WatchMode::Poll)
+        .await
+        .unwrap();
+    wait_until("the new watcher watches", || r.fake.emit(&root, Vec::new())).await;
+    r.svc.settled().await;
+    let before = fs.count();
+    r.svc.read(id, &rel("a.sql"), None).await.unwrap();
+    edit(2);
+    next(&mut rx, changed).await;
+    assert!(fs.count() > before, "the new watcher looks at the lock");
+    // A status that is not `Ready` (an unreadable repository config) takes it back.
+    std::fs::write(repo.join(".git/config"), b"[core\n\0garbage").unwrap();
+    r.svc.refresh(id).await;
+    wait_until("the status is no longer ready", || {
+        r.svc
+            .snapshot()
+            .view(None)
+            .library(id)
+            .is_some_and(|l| l.git() != GitSummary::Ready && l.git() != GitSummary::Pending)
+    })
+    .await;
+    r.svc.settled().await;
+    let after = fs.count();
+    r.svc.read(id, &rel("a.sql"), None).await.unwrap();
+    edit(3);
+    next(&mut rx, changed).await;
+    r.svc.settled().await;
+    assert_eq!(
+        fs.count(),
+        after,
+        "a path no status validates is not looked at"
+    );
 }
 // ## m4b-t20-adversarial

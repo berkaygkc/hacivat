@@ -23,6 +23,8 @@
 // ## m4b-t07-git
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+// ## m4b-t20-adversarial fix round 1 (named line, I1): the worker's interrupt flag.
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::discover::{DotGit, Found};
 use crate::{FailKind, GitError, GitState, TooLargeWhy, UntrustReason};
@@ -57,10 +59,32 @@ const SMALL_FILE_MAX: u64 = 64 * 1024;
 const ALTERNATES_DEPTH_MAX: usize = 4;
 // ## m4b-t20-adversarial (named exception)
 /// The most distinct alternate object folders one repository may name, its chain included
-/// (`git clone --shared` or `--reference` make one; a few is generous). With the per-folder
-/// loose-object cap, a status `lstat`s at most `(1 + ALTERNATES_MAX) × LOOSE_OBJECTS_MAX`
-/// entries for the placeholder check.
+/// (`git clone --shared` or `--reference` make one; a few is generous).
 const ALTERNATES_MAX: usize = 8;
+/// ## m4b-t20-adversarial fix round 1 (review I1): the most distinct alternates lines (raw
+/// text, comments and blanks left out) the whole chain may hold, counted **before** any line
+/// is resolved: a line's resolution (`canonicalize`, up to `MAXSYMLINKS` hops of any length)
+/// is the expensive step, so a file of many cheap lines is refused at once. Real clones have
+/// one or two.
+const ALTERNATE_LINES_MAX: usize = 4 * ALTERNATES_MAX;
+/// ## m4b-t20-adversarial fix round 1 (review I1): the most entries an object folder's `pack`
+/// folder may hold for the placeholder check (three files per pack; `git gc` keeps one pack).
+/// Past it the status answers `TooLarge(LooseObjects)` ("run git gc"), which repacks them.
+const PACK_ENTRIES_MAX: usize = 20_000;
+
+/// A flag never set (the unit tests, which have no worker to interrupt).
+#[cfg(test)]
+static NEVER: AtomicBool = AtomicBool::new(false);
+
+/// The answer of a worker whose caller gave up (it is discarded; the caller already answered
+/// `Timeout`): stop now, never finish the work.
+fn interrupted(interrupt: &AtomicBool) -> Result<(), GitState> {
+    if interrupt.load(Ordering::SeqCst) {
+        Err(GitState::Unavailable(GitError::Timeout))
+    } else {
+        Ok(())
+    }
+}
 
 fn redirected<T>() -> Result<T, GitState> {
     Err(GitState::Unavailable(GitError::Redirected))
@@ -112,10 +136,22 @@ fn resolve(base: &Path, text: &str) -> Option<PathBuf> {
 /// The checks before the open. `Err` is the state to answer. Every small file read here (a
 /// gitfile, `commondir`, alternates) is checked for a cloud placeholder first (p1), and so is
 /// every alternate's object folder.
+#[cfg(test)]
 pub(crate) fn check_layout(
     found: &Found,
     owned: Owner<'_>,
     placeholder: Placeholder<'_>,
+) -> Result<Layout, GitState> {
+    check_layout_bounded(found, owned, placeholder, &NEVER)
+}
+
+/// [`check_layout`], stopping as soon as `interrupt` is set (the status worker's flag, set when
+/// its caller answered `Timeout`). ## m4b-t20-adversarial fix round 1 (named exception, I1).
+pub(crate) fn check_layout_bounded(
+    found: &Found,
+    owned: Owner<'_>,
+    placeholder: Placeholder<'_>,
+    interrupt: &AtomicBool,
 ) -> Result<Layout, GitState> {
     require_owned(&found.worktree, owned)?;
     require_owned(&found.dot_git, owned)?;
@@ -143,7 +179,12 @@ pub(crate) fn check_layout(
     };
     require_owned(&layout.git_dir, owned)?;
     require_owned(&layout.common_dir, owned)?;
-    check_alternates(&layout.common_dir.join("objects"), 0, owned, placeholder)?;
+    check_alternates(
+        &layout.common_dir.join("objects"),
+        owned,
+        placeholder,
+        interrupt,
+    )?;
     Ok(layout)
 }
 
@@ -157,7 +198,15 @@ const LOOSE_OBJECTS_MAX: usize = 20_000;
 /// objects on every status (the HEAD commit, every tree reachable from it), so a placeholder
 /// among them answers `Unavailable(Dataless)`. More than [`LOOSE_OBJECTS_MAX`] loose entries
 /// answers `Unavailable(TooLarge(LooseObjects))`.
-fn check_objects_dataless(objects: &Path, placeholder: Placeholder<'_>) -> Result<(), GitState> {
+///
+/// ## m4b-t20-adversarial fix round 1 (named exception, review I1): `pack` entries are counted
+/// too (more than [`PACK_ENTRIES_MAX`] answers the same `TooLarge(LooseObjects)`), and the
+/// interrupt flag is read on every entry.
+fn check_objects_dataless(
+    objects: &Path,
+    placeholder: Placeholder<'_>,
+    interrupt: &AtomicBool,
+) -> Result<(), GitState> {
     if placeholder(objects) {
         return dataless();
     }
@@ -165,7 +214,9 @@ fn check_objects_dataless(objects: &Path, placeholder: Placeholder<'_>) -> Resul
         return Ok(());
     };
     let mut loose = 0usize;
+    let mut packed = 0usize;
     for fan in rd.filter_map(Result::ok) {
+        interrupted(interrupt)?;
         let name = fan.file_name();
         let Some(n) = name.to_str() else { continue };
         let is_fan = n.len() == 2 && n.bytes().all(|b| b.is_ascii_hexdigit());
@@ -179,13 +230,17 @@ fn check_objects_dataless(objects: &Path, placeholder: Placeholder<'_>) -> Resul
             continue;
         };
         for e in inner.filter_map(Result::ok) {
-            if is_fan {
-                loose += 1;
-                if loose > LOOSE_OBJECTS_MAX {
-                    return Err(GitState::Unavailable(GitError::TooLarge(
-                        TooLargeWhy::LooseObjects,
-                    )));
-                }
+            interrupted(interrupt)?;
+            let (count, max) = if is_fan {
+                (&mut loose, LOOSE_OBJECTS_MAX)
+            } else {
+                (&mut packed, PACK_ENTRIES_MAX)
+            };
+            *count += 1;
+            if *count > max {
+                return Err(GitState::Unavailable(GitError::TooLarge(
+                    TooLargeWhy::LooseObjects,
+                )));
             }
             if placeholder(&e.path()) {
                 return dataless();
@@ -318,6 +373,8 @@ fn check_index_size(index: &Path) -> Result<(), GitState> {
 pub(crate) fn check_internals_dataless(
     layout: &Layout,
     placeholder: Placeholder<'_>,
+    // ## m4b-t20-adversarial fix round 1 (named line, I1)
+    interrupt: &AtomicBool,
 ) -> Result<(), GitState> {
     let (g, c) = (&layout.git_dir, &layout.common_dir);
     let files = [
@@ -340,7 +397,7 @@ pub(crate) fn check_internals_dataless(
     }
     // G2: packs and loose objects (fix round 3; the fr2 residual was wrong: gix reads loose
     // objects on every status).
-    check_objects_dataless(&c.join("objects"), placeholder)
+    check_objects_dataless(&c.join("objects"), placeholder, interrupt)
 }
 
 /// The git dir's `sharedindex.*` files (a split index).
@@ -665,58 +722,92 @@ fn gitfile_layout(
 /// alternate folder is checked once (`seen`, by canonical path), and more than
 /// [`ALTERNATES_MAX`] distinct ones refuse the repository. The depth bound alone let a file of
 /// many lines fan out to `lines^depth` folder checks, a worker that outlived every budget.
+///
+/// ## m4b-t20-adversarial fix round 1 (review I1): the work is bounded before any line is
+/// resolved. Each file's lines are first de-duplicated by their raw text, and the distinct
+/// lines of the whole chain are counted: more than [`ALTERNATE_LINES_MAX`] refuse the
+/// repository at once, before a single `canonicalize`. The worker's interrupt flag is read
+/// before each resolution and inside every folder walk, so a worker whose caller answered
+/// `Timeout` stops instead of finishing.
 fn check_alternates(
     objects: &Path,
-    depth: usize,
     owned: Owner<'_>,
     placeholder: Placeholder<'_>,
+    interrupt: &AtomicBool,
 ) -> Result<(), GitState> {
-    let mut seen = Vec::new();
-    check_alternates_once(objects, depth, owned, placeholder, &mut seen)
+    let mut walk = AltWalk {
+        owned,
+        placeholder,
+        interrupt,
+        seen: Vec::new(),
+        lines: 0,
+    };
+    walk.visit(objects, 0)
 }
 
-fn check_alternates_once(
-    objects: &Path,
-    depth: usize,
-    owned: Owner<'_>,
-    placeholder: Placeholder<'_>,
-    seen: &mut Vec<PathBuf>,
-) -> Result<(), GitState> {
-    let file = objects.join("info").join("alternates");
-    if placeholder(&file) {
-        return dataless();
-    }
-    if !exists(&file) {
-        return Ok(());
-    }
-    let Some(text) = small_text(&file) else {
-        return redirected();
-    };
-    for line in text.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+/// One repository's alternates chain, with what it has spent so far.
+struct AltWalk<'a> {
+    owned: Owner<'a>,
+    placeholder: Placeholder<'a>,
+    interrupt: &'a AtomicBool,
+    /// The alternate folders checked (canonical): each once.
+    seen: Vec<PathBuf>,
+    /// The distinct lines of the chain met so far.
+    lines: usize,
+}
+
+// (A named lifetime: `check-deps`' `BackendInPublicApi` reads `'_` as a `_` import.)
+impl<'a> AltWalk<'a> {
+    fn visit(&mut self, objects: &Path, depth: usize) -> Result<(), GitState> {
+        let file = objects.join("info").join("alternates");
+        if (self.placeholder)(&file) {
+            return dataless();
         }
-        // The C-quoted form is not followed.
-        if line.starts_with('"') || depth >= ALTERNATES_DEPTH_MAX {
-            return redirected();
+        if !exists(&file) {
+            return Ok(());
         }
-        let Some(alt) = resolve(objects, line) else {
+        let Some(text) = small_text(&file) else {
             return redirected();
         };
-        // ## m4b-t20-adversarial (named lines): once each, and a bounded number of them.
-        if seen.contains(&alt) {
-            continue;
+        // Bounded text work first: no line is resolved before every line was counted.
+        let mut raw: Vec<&str> = Vec::new();
+        for line in text.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // The C-quoted form is not followed.
+            if line.starts_with('"') || depth >= ALTERNATES_DEPTH_MAX {
+                return redirected();
+            }
+            if raw.contains(&line) {
+                continue;
+            }
+            self.lines += 1;
+            if self.lines > ALTERNATE_LINES_MAX {
+                return redirected();
+            }
+            raw.push(line);
         }
-        if seen.len() >= ALTERNATES_MAX {
-            return redirected();
+        for line in raw {
+            interrupted(self.interrupt)?;
+            let Some(alt) = resolve(objects, line) else {
+                return redirected();
+            };
+            // ## m4b-t20-adversarial: once each, and a bounded number of them.
+            if self.seen.contains(&alt) {
+                continue;
+            }
+            if self.seen.len() >= ALTERNATES_MAX {
+                return redirected();
+            }
+            self.seen.push(alt.clone());
+            require_owned(&alt, self.owned)?;
+            // p1: an alternate's objects are read like ours (same caps, per folder).
+            check_objects_dataless(&alt, self.placeholder, self.interrupt)?;
+            self.visit(&alt, depth + 1)?;
         }
-        seen.push(alt.clone());
-        require_owned(&alt, owned)?;
-        // p1: an alternate's objects are read like ours (same cap, per folder).
-        check_objects_dataless(&alt, placeholder)?;
-        check_alternates_once(&alt, depth + 1, owned, placeholder, seen)?;
+        Ok(())
     }
-    Ok(())
 }
 
 /// The trust invariants after the open (C1, I1).

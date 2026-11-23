@@ -5330,8 +5330,8 @@ hv-scripts-run-session-busy = A script is running on this connection's session. 
 hv-scripts-run-cancelled-during = Stopped during statement { $n }; statements after it were not sent.
 
 ## m4b-t20-adversarial
-# Surface 2 (Context menus). The toast's body when a rename made the new name but could not remove the old one, nor take the new one back (T13 fr1 re-review n4): both names may show the same file.
-hv-scripts-op-rename-incomplete = The new name was made, but the old one couldn't be removed, so both names may show the same file. Check the folder in your file manager.
+# Surface 2 (Context menus). The toast's body when a rename may be half done (T13 fr1 re-review n4; fix round 1 m4): the new name was made, and the old one could not be removed, or a folder changed around its removal; both names may show the same file.
+hv-scripts-op-rename-incomplete = The rename may be half done: both names may show the same file. Check the folder in your file manager.
 # Surface 1 (Scripts node): the diagnostics popover line for a script left under a rename's temporary name by an interrupted rename (T13 fr1 re-review n5); the file is kept, never deleted.
 # Variables:
 #   $name (String) - the temporary file name, escaped for display, e.g. ".hv-rename-0123…".

@@ -498,9 +498,10 @@ pub enum FileOpError {
     /// The trash took it, but a folder on the way changed meanwhile (review m13).
     TrashedButChanged,
     // ## m4b-t20-adversarial (named exception, T13 fr1 re-review n4)
-    /// A rename made the new name, but the old one could not be removed and the new one could
-    /// not be taken back (or a folder changed around the removal): both names may reach the
-    /// file now. Never "nothing was changed".
+    /// A rename may be half done: it made the new name, but the old one could not be removed
+    /// and the new one was not taken back (it failed, the name is no longer the rename's own
+    /// link, or no identity proves it is: fix round 1, m4), or a folder changed around the
+    /// removal. Both names may show the file. Never "nothing was changed".
     RenameIncomplete,
 }
 

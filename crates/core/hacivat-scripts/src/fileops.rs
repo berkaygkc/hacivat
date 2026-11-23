@@ -493,7 +493,7 @@ pub(crate) fn rename(
         // A file (or a file link): `link` fails when the name exists, so nothing is replaced.
         Target::Absent => match dir.hard_link(old, new) {
             // ## m4b-t20-adversarial (named line, n4): a failed unlink is rolled back.
-            Ok(()) => unlink_old(&dir, old, new),
+            Ok(()) => unlink_old(&dir, old, new, &here),
             Err(FsError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => {
                 Err(FileOpError::Exists)
             }
@@ -513,14 +513,33 @@ pub(crate) fn rename(
 /// around the unlink fails (it may or may not have happened), the answer is
 /// [`FileOpError::RenameIncomplete`]: both names may reach the file, and the user is told so.
 /// The file itself is never removed: one of its two names always stays.
-fn unlink_old(dir: &Dir, old: &str, new: &str) -> Result<(), FileOpError> {
+///
+/// Fix round 1 (review m4): the new name is unlinked only when it is still the link this
+/// rename made: the same known identity (device and inode) as the old name's `here`. Another
+/// file that landed there meanwhile (a sync client) is never removed, and where no identity is
+/// known (Windows) nothing is rolled back: the answer is `RenameIncomplete`.
+fn unlink_old(
+    dir: &Dir,
+    old: &str,
+    new: &str,
+    here: &std::fs::Metadata,
+) -> Result<(), FileOpError> {
     match remove(dir, old) {
         Ok(()) => Ok(()),
-        // The unlink did not happen (the check before it passed): roll the link back.
-        Err(FsError::Io(e)) => match remove(dir, new) {
-            Ok(()) => Err(FileOpError::Io(e.kind())),
-            Err(_) => Err(FileOpError::RenameIncomplete),
-        },
+        // The unlink did not happen (the check before it passed): roll the link back, if the
+        // name is still ours.
+        Err(FsError::Io(e)) => {
+            let ours = dir
+                .lstat(new)
+                .is_ok_and(|there| identity(here).known() && identity(&there) == identity(here));
+            if !ours {
+                return Err(FileOpError::RenameIncomplete);
+            }
+            match remove(dir, new) {
+                Ok(()) => Err(FileOpError::Io(e.kind())),
+                Err(_) => Err(FileOpError::RenameIncomplete),
+            }
+        }
         Err(_) => Err(FileOpError::RenameIncomplete),
     }
 }
@@ -541,9 +560,22 @@ thread_local! {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Unit tests (fix round 1, m4): run at the next injected unlink fault (another program
+    /// acting in the window between the link and the roll-back).
+    static AT_FAULT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
 fn unlink_fault() -> bool {
     let n = UNLINK_FAULTS.get();
     UNLINK_FAULTS.set(n.saturating_sub(1));
+    if n > 0
+        && let Some(f) = AT_FAULT.take()
+    {
+        f();
+    }
     n > 0
 }
 
@@ -626,7 +658,10 @@ mod tests {
     }
 
     /// n4: the old name could not be unlinked after the new one was linked: the link is
-    /// taken back, so the refusal's "Nothing was changed" is true.
+    /// taken back, so the refusal's "Nothing was changed" is true. Unix only since fix round
+    /// 1 (m4): the roll-back needs a known identity, which Windows has not here (there the
+    /// answer is `RenameIncomplete`, both names kept).
+    #[cfg(unix)]
     #[test]
     fn a_failed_unlink_after_the_link_is_rolled_back() {
         let (_tmp, root, entries) = library(&["a.sql"]);
@@ -654,6 +689,33 @@ mod tests {
         for n in ["a.sql", "b.sql"] {
             assert_eq!(std::fs::read(root.canonical.join(n)).unwrap(), b"a.sql");
         }
+    }
+
+    /// Fix round 1 (review m4): a file another program put at the new name between the link
+    /// and the roll-back is never removed by the roll-back (it is not the link this rename
+    /// made); the answer says both names may show files.
+    #[cfg(unix)]
+    #[test]
+    fn the_roll_back_never_removes_a_file_that_replaced_the_link() {
+        let (_tmp, root, entries) = library(&["a.sql"]);
+        let r = |s: &str| RelPath::parse(s).unwrap();
+        let new = root.canonical.join("b.sql");
+        UNLINK_FAULTS.set(1);
+        AT_FAULT.set(Some(Box::new(move || {
+            std::fs::remove_file(&new).unwrap();
+            std::fs::write(&new, b"a teammate's b.sql").unwrap();
+        })));
+        let out = rename(&root, &entries, &[], &r("a.sql"), &r("b.sql"), None);
+        assert_eq!(out, Err(FileOpError::RenameIncomplete));
+        assert_eq!(names(&root), ["a.sql", "b.sql"]);
+        assert_eq!(
+            std::fs::read(root.canonical.join("b.sql")).unwrap(),
+            b"a teammate's b.sql"
+        );
+        assert_eq!(
+            std::fs::read(root.canonical.join("a.sql")).unwrap(),
+            b"a.sql"
+        );
     }
 
     /// n5: the temp name is exact (the prefix and a simple UUID), and the scan reports a

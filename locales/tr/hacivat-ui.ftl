@@ -5220,7 +5220,7 @@ hv-scripts-run-cancelled-during = { $n }. ifade sırasında durduruldu; ondan so
 
 ## m4b-t20-adversarial
 # Review: PO
-hv-scripts-op-rename-incomplete = Yeni ad oluşturuldu ama eskisi kaldırılamadı; iki ad da aynı dosyayı gösteriyor olabilir. Klasörü dosya yöneticinizde denetleyin.
+hv-scripts-op-rename-incomplete = Yeniden adlandırma yarım kalmış olabilir: iki ad da aynı dosyayı gösteriyor olabilir. Klasörü dosya yöneticinizde denetleyin.
 # Variables:
 #   $name (String) - the temporary file name, escaped for display, e.g. ".hv-rename-0123…".
 #   $folder (String) - the folder it is in, or the library's name for its top folder.

@@ -2,7 +2,7 @@
 //! from a library (HV-SCRIPT-03 step 4) never panics, whatever the bytes, and joining a path
 //! never yields a path outside the library root.
 //!
-//! Input: UTF-8 lines. The first is a name for `pathsafe::component`; the second a
+//! Input: lines. The first is a name for `pathsafe::component` (any bytes on Unix); the second a
 //! library-relative path for `RelPath::parse` and `pathsafe::join_with`; every further line
 //! describes the in-memory tree the join walks: `D<rel>` a folder, `F<rel>` a file,
 //! `L<rel>=<target>` a link with that text (relative, absolute, `..`, anything).
@@ -90,11 +90,11 @@ impl Fs for Tree {
 }
 
 /// The checks an accepted name passes, apart from the validator.
-fn check_component(name: &str) {
-    let Ok(ok) = pathsafe::component(OsStr::new(name)) else {
+fn check_component(name: &OsStr) {
+    let Ok(ok) = pathsafe::component(name) else {
         return;
     };
-    assert_eq!(ok, name, "an accepted name is the name itself");
+    assert_eq!(OsStr::new(ok), name, "an accepted name is the name itself");
     assert!(!ok.is_empty() && ok != "." && ok != "..", "{ok:?}");
     assert!(
         !ok.contains(['/', '\\', '\0']) && !ok.chars().any(char::is_control),
@@ -146,14 +146,35 @@ fn check_join(rel_text: &str, tree: &Tree) {
     }
 }
 
+/// The first line as the OS gives a name: on Unix any bytes (fix round 1, review m6: a name
+/// that is not UTF-8 is a name a library can hold), elsewhere UTF-8 only.
+#[cfg(unix)]
+fn os_name(bytes: &[u8]) -> Option<&OsStr> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn os_name(bytes: &[u8]) -> Option<&OsStr> {
+    std::str::from_utf8(bytes).ok().map(OsStr::new)
+}
+
 fuzz_target!(|data: &[u8]| {
-    let Ok(text) = std::str::from_utf8(data) else {
+    let (first, rest) = match data.iter().position(|b| *b == b'\n') {
+        Some(at) => (&data[..at], &data[at + 1..]),
+        None => (data, &[][..]),
+    };
+    if let Some(name) = os_name(first) {
+        check_component(name);
+    }
+    if let Ok(name) = std::str::from_utf8(first) {
+        let _ = RelPath::parse(name);
+    }
+    // The path and the tree are text.
+    let Ok(text) = std::str::from_utf8(rest) else {
         return;
     };
     let mut lines = text.split('\n');
-    let name = lines.next().unwrap_or("");
-    check_component(name);
-    let _ = RelPath::parse(name);
     let Some(rel_text) = lines.next() else {
         return;
     };
