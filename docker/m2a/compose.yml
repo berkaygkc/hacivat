@@ -275,7 +275,10 @@ services:
       - ./mysql-x509:/hv-x509:ro
       - ${HV_ARTIFACTS:-./artifacts}:/artifacts
     healthcheck:
-      test: ["CMD-SHELL", "test -s /artifacts/mysql-x509-ca.pem && test -s /artifacts/mysql-x509-server-key.pem && test -s /artifacts/mysql-x509-client-key-enc.pem"]
+      # ## m4b-t19-docker (named exception; CI 44990057141, 45091594060): healthy only once
+      # certs.sh has checked the set (one generation, parseable, readable by `mysql`) and
+      # written its ready marker, never on files that merely exist.
+      test: ["CMD-SHELL", "test -f /artifacts/.mysql-x509-ready && test -s /artifacts/mysql-x509-ca.pem && test -s /artifacts/mysql-x509-server-key.pem && test -s /artifacts/mysql-x509-client-key-enc.pem"]
       interval: 1s
       timeout: 5s
       retries: 60
