@@ -90,6 +90,11 @@ pub struct EditorStatus {
     pub mixed_line_endings: bool,
 }
 
+// ## m4b-t21-shots (named item, ADR 0007 `## m4b-t21`)
+/// Answers whether the host draws the large-file banner itself now
+/// ([`EditorView::set_host_banner`]).
+pub type HostBanner = Rc<dyn Fn(&App) -> bool>;
+
 /// What an editor tells its host.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
@@ -196,7 +201,7 @@ pub struct EditorView {
     pub(crate) banner_narrow: bool,
     // ## m4b-t21-shots (named item, ADR 0007 `## m4b-t21`)
     /// Whether the host draws the large-file banner itself now ([`EditorView::set_host_banner`]).
-    pub(crate) host_banner: Option<Rc<dyn Fn(&App) -> bool>>,
+    pub(crate) host_banner: Option<HostBanner>,
     // ## m3a-t01b-seams (fix round 1): module-owned state of the input handler (Task 27) and
     // the commands (Task 25), and the focus subscriptions.
     pub(crate) input: InputState,
@@ -795,11 +800,7 @@ impl EditorView {
     /// outside the editor, so its buttons keep their Tab order before the code). While it
     /// does, the editor's column holds no banner; the host draws [`EditorView::banner_element`]
     /// and notifies the editor whenever the answer changes.
-    pub fn set_host_banner(
-        &mut self,
-        draws: Option<Rc<dyn Fn(&App) -> bool>>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_host_banner(&mut self, draws: Option<HostBanner>, cx: &mut Context<Self>) {
         self.host_banner = draws;
         cx.notify();
     }

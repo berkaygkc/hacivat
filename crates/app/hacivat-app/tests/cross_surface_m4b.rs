@@ -346,10 +346,7 @@ fn a_production_script_tab_at_960_keeps_capsule_hairline_and_env_cell_whole(
     // Every row is there, none cut, stacked as the mock shows: notice, banner, strip, find
     // bar, code.
     let texts: Vec<&str> = frame.iter().map(|t| t.text.as_ref()).collect();
-    assert!(
-        texts.iter().any(|t| *t == "big.sql changed on disk."),
-        "{texts:?}"
-    );
+    assert!(texts.contains(&"big.sql changed on disk."), "{texts:?}");
     assert!(
         frame
             .iter()
