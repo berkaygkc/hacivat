@@ -179,8 +179,8 @@ Clickable mock: `design/m4b-scripts/index.html` (one file, one app, a surface sw
 **Purpose.** Warn before a password or token is saved into a folder others read, without ever showing the value.
 
 **Anatomy.**
-- **Gutter:** a `key-round` glyph in text-2 in the mark column of each finding's line (no hue). Tooltip (popover anatomy): "Looks like a password" (or an access token, a private key, a connection URL with a password) and "Saving asks first. A comment with hacivat:allow-secret on this line keeps it quiet."
-- **Save dialog** (480 alertdialog): "3 lines in create_reader.sql look like secrets", subtitle connection · database; "Hacivat found text that looks like a password or a token. The values aren't shown here."; a field well listing **Line n · kind**, never values; "If you commit this file, the value is shared with everyone who can read the repository." (shown when the library is a git repository); the hint "To keep a line on purpose, add a comment with hacivat:allow-secret on it."; "Save anyway is remembered for this tab until you quit." Footer: **Save anyway** (Default) · **Cancel** (Primary, focused). Escape = Cancel.
+- **Gutter:** a `key-round` glyph in text-2 in the mark column of each finding's line (no hue). Tooltip (popover anatomy): "Looks like a password" (or an access token, a private key, a connection URL with a password) and "Saving asks first. A comment on this line such as -- hacivat:allow-secret (with a space after the dashes) keeps it quiet."
+- **Save dialog** (480 alertdialog): "3 lines in create_reader.sql look like secrets", subtitle connection · database; "Hacivat found text that looks like a password or a token. The values aren't shown here."; a field well listing **Line n · kind**, never values; "If you commit this file, the value is shared with everyone who can read the repository." (shown when the library is a git repository); the hint "To keep a line on purpose, add the comment -- hacivat:allow-secret (with a space after the dashes) or /* hacivat:allow-secret */ on it."; "Save anyway is remembered for this tab until you quit." Footer: **Save anyway** (Default) · **Cancel** (Primary, focused). Escape = Cancel.
 - The sample's line 9 carries `-- hacivat:allow-secret` and is not reported. The token line is an obviously fake shape (R-C0-4).
 
 **States.** Gutter glyph (tooltip) · save dialog · 960 × 600 in Turkish.
@@ -547,12 +547,12 @@ Reused verbatim, not redefined: `hv-explorer-*` (M4), `hv-conn-menu-*`, `hv-caps
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-scripts-secret-gutter` | Looks like a password · [token] Looks like an access token · [key] Looks like a private key · [url] Looks like a connection URL with a password | Parolaya benziyor · [token] Erişim belirtecine benziyor · [key] Özel anahtara benziyor · [url] Parola içeren bir bağlantı adresine benziyor |
-| `hv-scripts-secret-gutter-hint` | Saving asks first. A comment with hacivat:allow-secret on this line keeps it quiet. | Kaydederken önce sorulur. Bu satırda hacivat:allow-secret içeren bir yorum onu susturur. |
+| `hv-scripts-secret-gutter-hint` | Saving asks first. A comment on this line such as -- hacivat:allow-secret (with a space after the dashes) keeps it quiet. | Kaydederken önce sorulur. Bu satırdaki -- hacivat:allow-secret gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur. |
 | `hv-scripts-secret-title` | {n} lines in {file} look like secrets · [one] {n} line in {file} looks like a secret | {file} içinde {n} satır gizli bilgiye benziyor |
 | `hv-scripts-secret-body` | Hacivat found text that looks like a password or a token. The values aren't shown here. | Hacivat parolaya ya da belirtece benzeyen metin buldu. Değerler burada gösterilmez. |
 | `hv-scripts-secret-line` | Line {line} | Satır {line} |
 | `hv-scripts-secret-git` | If you commit this file, the value is shared with everyone who can read the repository. | Bu dosyayı commit ederseniz değer, depoyu okuyabilen herkesle paylaşılır. |
-| `hv-scripts-secret-allow` | To keep a line on purpose, add a comment with {marker} on it. | Bir satırı bilerek tutmak için o satıra {marker} içeren bir yorum ekleyin. |
+| `hv-scripts-secret-allow` | To keep a line on purpose, add the comment -- {marker} (with a space after the dashes) or /* {marker} */ on it. | Bir satırı bilerek tutmak için o satıra -- {marker} (tirelerden sonra bir boşlukla) ya da /* {marker} */ yorumunu ekleyin. |
 | `hv-scripts-secret-remember` | Save anyway is remembered for this tab until you quit. | Yine de kaydet, siz çıkana kadar bu sekme için hatırlanır. |
 | `hv-scripts-secret-save` | Save anyway | Yine de kaydet |
 
@@ -1057,7 +1057,7 @@ hv-scripts-secret-gutter =
        *[password] Looks like a password
     }
 # Surface 8 (Secret warning).
-hv-scripts-secret-gutter-hint = Saving asks first. A comment with hacivat:allow-secret on this line keeps it quiet.
+hv-scripts-secret-gutter-hint = Saving asks first. A comment on this line such as -- hacivat:allow-secret (with a space after the dashes) keeps it quiet.
 # Surface 8 (Secret warning).
 # Variables:
 #   $n (Number) - a count, e.g. 3.
@@ -1921,7 +1921,7 @@ hv-scripts-secret-gutter =
     }
 # Surface 8 (Secret warning).
 # Review: PO
-hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırda hacivat:allow-secret içeren bir yorum onu susturur.
+hv-scripts-secret-gutter-hint = Kaydederken önce sorulur. Bu satırdaki -- hacivat:allow-secret gibi bir yorum (tirelerden sonra bir boşlukla) onu susturur.
 # Surface 8 (Secret warning).
 # Variables:
 #   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".

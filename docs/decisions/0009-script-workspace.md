@@ -1550,3 +1550,46 @@ Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES 
   - m9: Cancel and Show here stay together on the right when the footer wraps.
   - m10: the launch-time and remove-then-break residuals of R-T10-7 go to T20; a persisted last good binding would close them.
 
+
+## m4b-t17 — secret warning UI
+
+- **Scan.** `secret_marks::scan_text` is `scan_secrets(text, &secret_spans(text))`, the spans
+  mapped one to one (R-M4b-28). A script tab scans 300 ms after the last edit (and at once when
+  its file is read or reloaded) on the core runtime's blocking pool, never on the UI thread. A
+  newer edit replaces the waiting or running scan; an answer for an older version than the
+  editor's is dropped (latest wins by document version). A save uses the tab's scan when it is
+  for exactly the text being saved, else scans that text off the UI thread before it goes on.
+- **Fail closed.** A scan that cannot answer (no core runtime, or it panicked) is one
+  `Unscanned` finding over the whole text, as the scanner answers when its table fails to load.
+  The gutter puts "Couldn't be checked for secrets" on line 1, and every save asks ("…
+  couldn't be checked for secrets"). "Save anyway" is never remembered for it.
+- **Gutter.** One `key-round` line mark per finding (ADR 0007 `## m4b-t17`), whose tooltip and
+  accessible name name the kind ("Looks like a password", "… an access token", "… a private
+  key", "… a connection URL with a password") and how to silence the line. `TestKey` and JWT read
+  as an access token.
+- **Dialog** (`secret_dialog`). Every save of a library script goes through `save::save`, so
+  ⌘S, Save all, the unsaved prompt's Save (close, quit, restart), the recovery notice's Save and
+  "Deleted on disk"'s Save all ask here first. A 480 alertdialog: title, the tab's environment ·
+  connection · database, the body, a field well of **Line n · kind** rows (one per line and
+  kind, 8 shown, then "… and N more lines"), the commit sentence, the allow hint and the
+  "remembered" line. **Cancel** is Primary and focused; Escape, the close button and a window
+  close answer Cancel and the tab stays unsaved; Enter presses the focused button. The focus
+  returns where it was (the code). Nothing in it holds a value.
+- **Commit sentence.** Shown unless the library's git summary is `NotARepo`: a repository,
+  an untrusted or unavailable one, and a status not read yet all show it (errs toward the
+  warning).
+- **Remembered answers.** "Save anyway" remembers, in the tab's memory until quit (or the tab
+  closes), `xxh3(kind ‖ the line's text before the literal ‖ after it ‖ the literal)` per finding.
+  This joins the plan's rule (the line's text without the literal, and the kind) and `alg/28`'s
+  (`kind ‖ value`): a changed value or a changed line asks again; a line moved up or down does
+  not. Two identical lines are one answer.
+- **Recovery (R-T5-4).** The recovery copy's `secret_suspected` is set from a scan of the
+  copied text, run in the same blocking task that writes the copy (a panic counts as yes). The
+  restore notice adds "Some lines of this text look like a password or a token. Saving asks
+  first." when the copy's metadata says so; it never says which or shows a value.
+- **Consoles** never scan, mark or ask (Q7).
+- **Not in M4b.** There is no "Save as… into a library" and no "Move console to library…"; a
+  later one must call `secret_dialog::confirm` (through `save::save`) the same way.
+- **Copy.** The mock's hint copy follows the T6 fr2 FTL wording (a space after the dashes;
+  `design/m4b-scripts` NOTES and index.html synced). New strings: `hv-scripts-secret-unscanned`,
+  `-unscanned-hint`, `-unscanned-title`, `-unscanned-body`, `hv-scripts-recover-secret`.

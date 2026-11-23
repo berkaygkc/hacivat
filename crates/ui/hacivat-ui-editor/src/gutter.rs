@@ -650,13 +650,19 @@ pub(crate) fn prepaint_buttons(
     // ## m3c-po (PO M3c-04): the rows that get a ▶ first (one per line), so the column's one
     // tab stop is known before the buttons are laid out.
     let mut cands: Vec<(usize, u32, Pixels)> = Vec::new();
+    // ## m4b-t17-secrets-ui (named lines): a row with a host line mark keeps its glyph (and
+    // its tooltip) under the pointer, so it shows no ▶.
+    let marked = crate::line_marks::lines(&v.line_marks, buf);
     for span in spans.iter() {
         let line =
             u32::try_from(buf.byte_to_line(span.header.min(buf.len_bytes()))).unwrap_or(u32::MAX);
         let Some(&(_, top)) = rows.iter().find(|(l, _)| *l == line) else {
             continue;
         };
-        if v.marks.busy_on(buf, line) || cands.iter().any(|c| c.1 == line) {
+        if v.marks.busy_on(buf, line)
+            || cands.iter().any(|c| c.1 == line)
+            || marked.binary_search(&line).is_ok()
+        {
             continue;
         }
         let shown = focused || hover == Some(line);

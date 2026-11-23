@@ -435,6 +435,8 @@ pub struct FramePrepaint {
     pub(crate) folds: crate::fold_gutter::FoldFrame,
     // ## m3c-t34-editor (named exception): the gutter ▶ buttons.
     pub(crate) buttons: gutter::ButtonFrame,
+    // ## m4b-t17-secrets-ui (named item): the host's line-mark glyphs.
+    pub(crate) line_marks: crate::line_marks::LineMarkFrame,
     /// The whole element (wheel scrolling).
     pub(crate) hitbox: Hitbox,
     /// The text area (the I-beam, clicks and drags).
@@ -1099,6 +1101,8 @@ pub(crate) fn prepaint_frame(
         folds,
         // ## m3c-t34-editor (named exception)
         buttons,
+        // ## m4b-t17-secrets-ui (named item)
+        line_marks: crate::line_marks::LineMarkFrame::default(),
         hitbox,
         text_hitbox,
         focused,
@@ -1109,6 +1113,16 @@ pub(crate) fn prepaint_frame(
         thumb_hit,
     };
     frame.mark_hits = marks::prepaint(&v.marks, &frame.gutter(), window, cx);
+    // ## m4b-t17-secrets-ui (named lines): the host's line marks, on rows no execution mark's
+    // glyph took.
+    let taken: Vec<Pixels> = frame
+        .mark_hits
+        .glyphs
+        .iter()
+        .map(|(_, h)| h.bounds.origin.y)
+        .collect();
+    frame.line_marks =
+        crate::line_marks::prepaint(&v.line_marks, &frame.gutter(), &taken, window, cx);
     frame
 }
 
@@ -1153,6 +1167,8 @@ pub(crate) fn paint_frame(
         // ## m3c-t32-fold (named exception): the folded headers' lines, inlays and chevrons.
         crate::fold_gutter::paint(&frame.folds, layout.rows().bounds, window, cx);
         marks::paint(&v.marks, &g, layout, &frame.mark_hits, window, cx);
+        // ## m4b-t17-secrets-ui (named line)
+        crate::line_marks::paint(&frame.line_marks, window, cx);
         if frame.focused && v.blink.visible() {
             paint::carets(layout, &frame.snapshot, &theme, window);
         }

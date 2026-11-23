@@ -261,8 +261,9 @@ fn answered(doc: Entity<ScriptDoc>, what: For, answer: Answer, cx: &mut App) {
     }
 }
 
-/// The prompt's subtitle: environment · connection · database (I5).
-fn subtitle(doc: &ScriptDoc, cx: &App) -> String {
+/// The prompt's subtitle: environment · connection · database (I5). ## m4b-t17-secrets-ui
+/// (named item): crate-visible, the secret warning's subtitle too.
+pub(crate) fn subtitle(doc: &ScriptDoc, cx: &App) -> String {
     let tab = doc.spec(cx);
     let profile = tab
         .as_ref()

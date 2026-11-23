@@ -286,6 +286,9 @@ pub enum Notice {
     Recovered {
         at: std::time::SystemTime,
         unknown: bool,
+        /// ## m4b-t17-secrets-ui (named item, R-T5-4): the copy's metadata says its text looked
+        /// like it held a secret when it was written (never which, never the value).
+        secret: bool,
     },
     /// A Markdown note: it does not run.
     Markdown,
@@ -378,6 +381,8 @@ pub struct ScriptDoc {
     pending_reload: Option<DiskStamp>,
     /// "Save anyway" answers for this tab, by finding fingerprint (R-M4b-17).
     pub(crate) secret_ok: HashSet<u64>,
+    // ## m4b-t17-secrets-ui (named item): the secret scan of the text and its gutter marks.
+    pub(crate) secrets: crate::scripts::secret_marks::Marks,
     /// "Don't save" was answered (close or quit): not asked again.
     pub(crate) discarded: bool,
     /// The one-line status message ("Saved …", "Reloaded …"), for 3 s.
@@ -466,6 +471,8 @@ impl ScriptDoc {
             recovered: None,
             pending_reload: None,
             secret_ok: HashSet::new(),
+            // ## m4b-t17-secrets-ui (named item)
+            secrets: Default::default(),
             discarded: false,
             status: None,
             status_task: None,
@@ -551,6 +558,12 @@ impl ScriptDoc {
     /// The editor's tier for the file (a T2 preview is read-only, never saved or run).
     pub fn tier(&self) -> SizeTier {
         self.tier
+    }
+
+    // ## m4b-t17-secrets-ui (named item)
+    /// The tab's secret scan (the latest answer and whether one waits or runs).
+    pub fn secrets(&self) -> &crate::scripts::secret_marks::Marks {
+        &self.secrets
     }
 
     /// "Keep mine" on the "Changed on disk" bar: the bar goes, the next save asks before it
@@ -808,6 +821,8 @@ impl ScriptDoc {
                 Notice::Recovered {
                     at: entry.saved_at,
                     unknown: entry.liveness_unknown,
+                    // ## m4b-t17-secrets-ui (named line, R-T5-4)
+                    secret: entry.copy.secret_suspected,
                 },
                 cx,
             );
@@ -818,6 +833,8 @@ impl ScriptDoc {
         if self.is_dirty(cx) {
             self.schedule_recovery(Duration::ZERO, cx);
         }
+        // ## m4b-t17-secrets-ui (named line): the text's first secret scan, off the UI thread.
+        crate::scripts::secret_marks::schedule(self, Duration::ZERO, cx);
         cx.emit(ScriptDocEvent::Changed);
         cx.notify();
     }
@@ -826,6 +843,8 @@ impl ScriptDoc {
 
     /// The editor's text changed.
     pub(crate) fn on_edit(&mut self, cx: &mut Context<Self>) {
+        // ## m4b-t17-secrets-ui (named line): the secret scan follows the text, debounced.
+        crate::scripts::secret_marks::schedule(self, crate::scripts::secret_marks::DEBOUNCE, cx);
         if self.is_dirty(cx) {
             self.discarded = false;
             self.schedule_recovery(RECOVERY_IDLE, cx);
@@ -858,9 +877,10 @@ impl ScriptDoc {
             return;
         };
         let snap = editor.read(cx).snapshot();
-        let copy = CopyMeta {
+        let mut copy = CopyMeta {
             meta: self.meta,
             base: self.stamp,
+            // ## m4b-t17-secrets-ui (named line, R-T5-4): set below, off the UI thread.
             secret_suspected: false,
             damaged: false,
             // ## m4b-t14-tabs fix round 3 (m-fr2-1): the SQLite file the tab is bound to.
@@ -877,6 +897,8 @@ impl ScriptDoc {
         let task = on_core(cx, async move {
             tokio::task::spawn_blocking(move || {
                 let text = snap.buffer.to_string();
+                // ## m4b-t17-secrets-ui (named line, R-T5-4): the restore notice says so.
+                copy.secret_suspected = crate::scripts::secret_marks::suspected(&text);
                 let Some(instance) = rt.instance.get_or_init(|| {
                     recovery::Instance::start(&rt.paths)
                         .inspect_err(|e| tracing::warn!(?e, "scripts: no recovery instance"))
@@ -960,6 +982,8 @@ impl ScriptDoc {
                     Notice::Recovered {
                         at: entry.saved_at,
                         unknown: entry.liveness_unknown,
+                        // ## m4b-t17-secrets-ui (named line, R-T5-4)
+                        secret: entry.copy.secret_suspected,
                     },
                     cx,
                 );
@@ -1219,6 +1243,8 @@ impl ScriptDoc {
         let Some(stamp) = self.pending_reload.take() else {
             return;
         };
+        // ## m4b-t17-secrets-ui (named line): the reloaded text is scanned again.
+        crate::scripts::secret_marks::schedule(self, Duration::ZERO, cx);
         match version {
             Some(v) => {
                 self.clean_at(v, Some(stamp), cx);

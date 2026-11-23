@@ -10,9 +10,10 @@
 //!   saves a script on its own.
 //! - **A preview is never saved** (T5 I4): Save is disabled on a T2 preview and says why.
 //! - **The secret check** (R-M4b-17) runs first: `scan_secrets` over the text with the history
-//!   redactor's spans (R-M4b-28). Until Task 17's dialog lands, a finding asks in a minimal
-//!   confirm (Save anyway / Cancel, Cancel the default) that never shows a value; "Save anyway"
-//!   is remembered for the tab's findings until the app quits.
+//!   redactor's spans (R-M4b-28). ## m4b-t17-secrets-ui: the scan runs off the UI thread (the
+//!   tab's own scan of the same version when there is one) and a finding asks in Task 17's
+//!   warning (`secret_dialog`); "Save anyway" is remembered for the tab's findings until the
+//!   app quits.
 //! - **Never over a change on disk** (R-M4b-16): the save expects the stamp the tab last read
 //!   or saved; `ChangedOnDisk` asks "Overwrite?" (Overwrite / Cancel, Cancel focused) and only
 //!   then saves expecting what is on disk now. After "Deleted on disk" a save writes the file
@@ -25,7 +26,6 @@ use std::rc::Rc;
 
 use hacivat_l10n::ArgValue;
 use hacivat_scripts::fileio::{SaveError, SaveText, SizeTier};
-use hacivat_scripts::secrets::{SpanKind, scan_secrets};
 use hacivat_ui::actions::{ActionDef, ActionRegistry};
 use hacivat_ui::button::ButtonKind;
 use hacivat_ui::dialog::{DialogButton, DialogEvent, DialogSize, DialogSpec};
@@ -148,74 +148,71 @@ pub fn save(doc: &Entity<ScriptDoc>, window: &mut Window, cx: &mut App, then: Op
         info_toast(msg(cx, "hv-scripts-unlisted-off", Vec::new()), cx);
         return finish(then, SaveOutcome::NotSaved, cx);
     }
-    let text = editor.read(cx).snapshot().buffer.to_string();
-    // The secret check (R-M4b-17): the history redactor's spans, mapped (R-M4b-28).
-    let spans: Vec<(std::ops::Range<usize>, SpanKind)> = hacivat_exec::history::secret_spans(&text)
-        .into_iter()
-        .map(|(r, k)| {
-            let kind = match k {
-                hacivat_exec::history::SecretSpanKind::Value => SpanKind::Password,
-                hacivat_exec::history::SecretSpanKind::ConnectionValue => {
-                    SpanKind::ConnectionString
-                }
-                hacivat_exec::history::SecretSpanKind::Armed => SpanKind::Other,
-            };
-            (r, kind)
-        })
-        .collect();
-    let findings = scan_secrets(&text, &spans);
-    let prints: Vec<u64> = findings
-        .iter()
-        .map(|f| fingerprint(&text[f.range.clone()], f.line))
-        .collect();
-    let asked = !prints.is_empty() && !prints.iter().all(|p| doc.read(cx).secret_ok.contains(p));
-    let version = editor.read(cx).snapshot().version;
+    let snap = editor.read(cx).snapshot();
+    let (text, version) = (snap.buffer.to_string(), snap.version);
     let expect = {
         let d = doc.read(cx);
         if d.deleted { None } else { Some(d.stamp) }
     };
-    if asked {
-        let lines = findings.len() as u64;
-        let file = tabs::file_label(doc.read(cx), cx);
-        let doc = doc.clone();
-        confirm(
-            window,
-            cx,
-            ConfirmSpec {
-                title: Rc::new(move |cx: &App| {
-                    msg(
-                        cx,
-                        "hv-scripts-secret-title",
-                        vec![
-                            ("n", ArgValue::Count(lines)),
-                            ("file", ArgValue::Text(file.clone())),
-                        ],
-                    )
-                }),
-                body: crate::l10n_global::text_fn_id("hv-scripts-secret-body"),
-                yes: crate::l10n_global::text_fn_id("hv-scripts-secret-save"),
-                yes_kind: ButtonKind::Default,
-            },
-            Box::new(move |yes, window, cx| {
-                if !yes {
-                    return finish(then, SaveOutcome::NotSaved, cx);
-                }
-                doc.update(cx, |d, _| d.secret_ok.extend(prints));
-                write(&doc, text, version, expect, window, cx, then);
-            }),
-        );
-        return;
+    // ## m4b-t17-secrets-ui: the secret check (R-M4b-17) reads the tab's scan of exactly this
+    // text, or scans it now off the UI thread (`secret_marks::scan_off_ui`), then asks
+    // (`secret_dialog`) unless nothing new was found.
+    let known = doc.read(cx).secrets.at(version).cloned();
+    match known {
+        Some(scan) => checked(doc, scan, text, version, expect, window, cx, then),
+        None => {
+            let scan = crate::scripts::secret_marks::scan_off_ui(version, text.clone(), cx);
+            let doc = doc.clone();
+            cx.spawn(async move |cx| {
+                let scan = scan.await;
+                cx.update(|cx| {
+                    crate::exec_ui::in_workspace_window(cx, move |_, window, cx| {
+                        checked(&doc, scan, text, version, expect, window, cx, then);
+                    });
+                });
+            })
+            .detach();
+        }
     }
-    write(doc, text, version, expect, window, cx, then);
 }
 
-/// A finding's fingerprint (never stored, never shown): the literal and its line.
-fn fingerprint(literal: &str, line: u32) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    literal.hash(&mut h);
-    line.hash(&mut h);
-    h.finish()
+// ## m4b-t17-secrets-ui
+/// The secret check's answer for `text` (the editor at `version`): written at once when
+/// nothing asks, else after "Save anyway" (which remembers the findings for the tab).
+#[allow(clippy::too_many_arguments)]
+fn checked(
+    doc: &Entity<ScriptDoc>,
+    scan: crate::scripts::secret_marks::Scan,
+    text: String,
+    version: u64,
+    expect: Option<Option<hacivat_scripts::DiskStamp>>,
+    window: &mut Window,
+    cx: &mut App,
+    then: Option<Then>,
+) {
+    use crate::scripts::secret_dialog::{self, SaveDecision};
+    if secret_dialog::decide(&scan, doc.read(cx)) == Some(SaveDecision::Save) {
+        return write(doc, text, version, expect, window, cx, then);
+    }
+    let target = doc.clone();
+    let asked = scan.clone();
+    secret_dialog::confirm(
+        doc,
+        &asked,
+        window,
+        cx,
+        Box::new(move |answer, window, cx| match answer {
+            SaveDecision::Cancel => {
+                if let Some(then) = then {
+                    then(SaveOutcome::NotSaved, cx);
+                }
+            }
+            SaveDecision::Save => {
+                target.update(cx, |d, _| d.secret_ok.extend(scan.prints()));
+                write(&target, text, version, expect, window, cx, then);
+            }
+        }),
+    );
 }
 
 /// Writes `text` (the editor at `version`) expecting the file at `expect` (`None`: whatever

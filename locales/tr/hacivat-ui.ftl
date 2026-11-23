@@ -5169,3 +5169,23 @@ hv-scripts-set-failed =
 #   $n (Number) - a count, e.g. 3.
 # Review: PO
 hv-scripts-remove-dirty = Bu kitaplıktan açık { $n } betik sekmesinde kaydedilmemiş değişiklik var. Kitaplığı kaldırmak kurtarma kopyalarını siler; önce kaydedin.
+
+## m4b-t17-secrets-ui
+
+# Surface 8 (Secret warning): the gutter mark and the dialog of a script whose secret scan couldn't run (fail closed).
+# Review: PO
+hv-scripts-secret-unscanned = Gizli bilgi denetimi yapılamadı
+# Surface 8 (Secret warning): the unscanned mark's tooltip line.
+# Review: PO
+hv-scripts-secret-unscanned-hint = Kaydederken önce sorulur.
+# Surface 8 (Secret warning): the dialog's title when the scan couldn't run.
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+# Review: PO
+hv-scripts-secret-unscanned-title = { $file } gizli bilgi için denetlenemedi
+# Surface 8 (Secret warning): the dialog's text when the scan couldn't run.
+# Review: PO
+hv-scripts-secret-unscanned-body = { -brand-hacivat } bu metinde parola ya da belirteç arayamadı; bu yüzden kitaplığa kaydetmeden önce sorar.
+# Surface 12 (Recovery): the tab's recovered text looked like it held a password or a token when it was copied (never which, never the value; R-T5-4).
+# Review: PO
+hv-scripts-recover-secret = Bu metnin bazı satırları parolaya ya da belirtece benziyor. Kaydederken önce sorulur.

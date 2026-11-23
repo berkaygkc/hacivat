@@ -5285,3 +5285,18 @@ hv-scripts-remove-dirty =
         [one] { $n } open script tab from it has unsaved changes. Removing the library discards its recovery copy, so save it first.
        *[other] { $n } open script tabs from it have unsaved changes. Removing the library discards their recovery copies, so save them first.
     }
+
+## m4b-t17-secrets-ui
+
+# Surface 8 (Secret warning): the gutter mark and the dialog of a script whose secret scan couldn't run (fail closed).
+hv-scripts-secret-unscanned = Couldn't be checked for secrets
+# Surface 8 (Secret warning): the unscanned mark's tooltip line.
+hv-scripts-secret-unscanned-hint = Saving asks first.
+# Surface 8 (Secret warning): the dialog's title when the scan couldn't run.
+# Variables:
+#   $file (String) - a script's file name, verbatim (data), e.g. "orders_report.sql".
+hv-scripts-secret-unscanned-title = { $file } couldn't be checked for secrets
+# Surface 8 (Secret warning): the dialog's text when the scan couldn't run.
+hv-scripts-secret-unscanned-body = { -brand-hacivat } couldn't check this text for passwords or tokens, so it asks before saving it into the library.
+# Surface 12 (Recovery): the tab's recovered text looked like it held a password or a token when it was copied (never which, never the value; R-T5-4).
+hv-scripts-recover-secret = Some lines of this text look like a password or a token. Saving asks first.

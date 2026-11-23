@@ -356,7 +356,12 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                 .secondary(msg(cx, "hv-scripts-unbound-body", Vec::new()));
             with_open_under(n, doc, cx)
         }
-        Notice::Recovered { at, unknown } => {
+        // ## m4b-t17-secrets-ui (named lines): `secret` adds the R-T5-4 line.
+        Notice::Recovered {
+            at,
+            unknown,
+            secret,
+        } => {
             let unix_ms = at
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
@@ -373,6 +378,10 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
                 .secondary(msg(cx, "hv-scripts-recover-tab-body", Vec::new()));
             if *unknown {
                 n = n.secondary(msg(cx, "hv-scripts-recover-unknown", Vec::new()));
+            }
+            // ## m4b-t17-secrets-ui (R-T5-4): the copy holds secret-like text (never which).
+            if *secret {
+                n = n.secondary(msg(cx, "hv-scripts-recover-secret", Vec::new()));
             }
             let (a, b) = (weak.clone(), weak.clone());
             n.action(
