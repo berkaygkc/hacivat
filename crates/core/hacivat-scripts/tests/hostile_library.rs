@@ -24,9 +24,12 @@ use hacivat_scripts::scan::{self, Diag, Fs, LimitHit, Limits, Meta, MetaKind};
 use hacivat_scripts::service::{FolderTrash, LibraryDiag, LibraryService, ServiceOptions};
 use hacivat_scripts::testing::FakeHandle;
 use hacivat_scripts::{
-    FileOpError, GitSummary, LibraryEvent, LibraryId, LibraryRoot, LibraryState, RawHint,
-    ReadError, RelPath, SaveError, SaveText, UnavailableReason,
+    FileOpError, GitSummary, LibraryEvent, LibraryId, LibraryRoot, LibraryState, RawHint, RelPath,
+    UnavailableReason,
 };
+// The FIFO, link and hard-link rows are Unix only.
+#[cfg(unix)]
+use hacivat_scripts::{ReadError, SaveError, SaveText};
 use hacivat_settings::LocalPaths;
 
 const CEILING: Duration = Duration::from_secs(10);
@@ -64,6 +67,7 @@ async fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+#[cfg(unix)]
 fn save_text(s: &str) -> SaveText {
     SaveText {
         text: s.into(),
@@ -77,6 +81,10 @@ struct Rig {
     svc: LibraryService,
     fake: FakeHandle,
     _app: tempfile::TempDir,
+    #[cfg_attr(
+        not(unix),
+        expect(dead_code, reason = "read by the Unix-only trash row")
+    )]
     trash: tempfile::TempDir,
 }
 
@@ -520,7 +528,7 @@ async fn every_bidi_control_is_escaped_and_never_scopes() {
     }
     let d = tempfile::tempdir().unwrap();
     write_files(d.path(), &[&name]);
-    let spoof = format!("@\u{202E}noitcudorp\u{202C}");
+    let spoof = "@\u{202E}noitcudorp\u{202C}".to_string();
     write_files(
         d.path(),
         &[&format!("{spoof}/p.sql"), "@production/real.sql"],

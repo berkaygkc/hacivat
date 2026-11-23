@@ -726,32 +726,6 @@ fn pair_rank(from: &RelPath, to: &RelPath) -> u8 {
         2
     }
 }
-
-#[cfg(test)]
-mod t20_tests {
-    use super::*;
-
-    /// m-j: a candidate that kept the held file's name ranks first, one in its folder next,
-    /// and the sort keeps arrival order within a rank. (The end-to-end case, 40 same-length
-    /// arrivals past the read cap, is `tests/hostile_library.rs`: this folder never names
-    /// the file system, `ScriptContentOutsideFileio`.)
-    #[test]
-    fn candidates_that_kept_the_name_or_folder_rank_first() {
-        let r = |s: &str| RelPath::parse(s).unwrap();
-        assert_eq!(pair_rank(&r("a.sql"), &r("moved/a.sql")), 0);
-        assert_eq!(pair_rank(&r("x/a.sql"), &r("a.sql")), 0);
-        assert_eq!(pair_rank(&r("x/a.sql"), &r("x/b.sql")), 1);
-        assert_eq!(pair_rank(&r("a.sql"), &r("b.sql")), 1);
-        assert_eq!(pair_rank(&r("x/a.sql"), &r("y/b.sql")), 2);
-        assert_eq!(pair_rank(&r("a.sql"), &r("y/b.sql")), 2);
-        let mut arrivals = vec![r("i/1.sql"), r("x/b.sql"), r("i/2.sql"), r("y/a.sql")];
-        arrivals.sort_by_key(|c| pair_rank(&r("x/a.sql"), c));
-        assert_eq!(
-            arrivals,
-            [r("y/a.sql"), r("x/b.sql"), r("i/1.sql"), r("i/2.sql")]
-        );
-    }
-}
 // ## m4b-t20-adversarial
 
 /// G2 (R-T10-6): a manifest-only read after the watcher reported `.hacivat/workspace.toml`
@@ -827,3 +801,31 @@ pub(super) fn write_manifest(canonical: &Path, db: LogicalDb) -> Result<(), mani
     }
 }
 // ## m4b-t10-service
+
+// ## m4b-t20-adversarial (named exception, T10 fr3 m-j)
+#[cfg(test)]
+mod t20_tests {
+    use super::*;
+
+    /// m-j: a candidate that kept the held file's name ranks first, one in its folder next,
+    /// and the sort keeps arrival order within a rank. (The end-to-end case, 40 same-length
+    /// arrivals past the read cap, is `tests/hostile_library.rs`: this folder never names
+    /// the file system, `ScriptContentOutsideFileio`.)
+    #[test]
+    fn candidates_that_kept_the_name_or_folder_rank_first() {
+        let r = |s: &str| RelPath::parse(s).unwrap();
+        assert_eq!(pair_rank(&r("a.sql"), &r("moved/a.sql")), 0);
+        assert_eq!(pair_rank(&r("x/a.sql"), &r("a.sql")), 0);
+        assert_eq!(pair_rank(&r("x/a.sql"), &r("x/b.sql")), 1);
+        assert_eq!(pair_rank(&r("a.sql"), &r("b.sql")), 1);
+        assert_eq!(pair_rank(&r("x/a.sql"), &r("y/b.sql")), 2);
+        assert_eq!(pair_rank(&r("a.sql"), &r("y/b.sql")), 2);
+        let mut arrivals = vec![r("i/1.sql"), r("x/b.sql"), r("i/2.sql"), r("y/a.sql")];
+        arrivals.sort_by_key(|c| pair_rank(&r("x/a.sql"), c));
+        assert_eq!(
+            arrivals,
+            [r("y/a.sql"), r("x/b.sql"), r("i/1.sql"), r("i/2.sql")]
+        );
+    }
+}
+// ## m4b-t20-adversarial
