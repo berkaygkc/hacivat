@@ -48,6 +48,10 @@ use crate::registry::{
     LibraryId, LibraryRegistry, LibraryRoot, LocalMapping, RegisteredLibrary, RegistryDiag,
     RegistryError,
 };
+// ## m4b-t16-attach (named lines)
+use super::{PollReason, RootRefusal};
+use crate::registry::WatchMode;
+// ## m4b-t16-attach
 use crate::scan::ScriptEntry;
 use crate::watch::{
     Backend, EchoHandle, EventSource, HintSink, WatchBatch, WatchError, WatchEvent, WatchOpts,
@@ -124,9 +128,28 @@ pub(super) enum Msg {
         id: LibraryId,
         reply: oneshot::Sender<Result<(), RegistryError>>,
     },
+    // ## m4b-t16-attach (named exception)
+    /// An attach that writes exactly this manifest (the text the dialog showed).
+    AttachWriting {
+        path: PathBuf,
+        manifest: manifest::ManifestV1,
+        reply: oneshot::Sender<Result<LibraryId, AttachError>>,
+    },
+    SetWatch {
+        id: LibraryId,
+        watch: WatchMode,
+        reply: oneshot::Sender<Result<(), RegistryError>>,
+    },
+    AdoptRoot {
+        id: LibraryId,
+        reply: oneshot::Sender<Result<bool, RegistryError>>,
+    },
+    // ## m4b-t16-attach
     Map {
         m: LocalMapping,
         share_alias: bool,
+        // ## m4b-t16-attach (named line): the manifest bytes the alias edit was shown over.
+        expect: Option<Vec<u8>>,
         reply: oneshot::Sender<Result<(), MapError>>,
     },
     Unmap {
@@ -379,6 +402,13 @@ struct Lib {
     db: LogicalDb,
     aliases: Arc<[LogicalDb]>,
     manifest_diags: Vec<LibraryDiag>,
+    // ## m4b-t16-attach (named line; R-T10-7): `db` and `aliases` came from a manifest read.
+    manifest_good: bool,
+    // ## m4b-t16-attach fix round 1 (I3): a confirmed "Use this folder" waits for its
+    // validation, and the job that runs it.
+    adopting: bool,
+    adopt_job: Option<u64>,
+    adopt_reply: Option<oneshot::Sender<Result<bool, RegistryError>>>,
     scan_diags: Vec<LibraryDiag>,
     entries: Arc<[ScriptEntry]>,
     stopped: bool,
@@ -446,6 +476,8 @@ impl Lib {
             entries: Arc::from([]),
             state: LibraryState::Scanning,
             diagnostics: Arc::from([]),
+            // ## m4b-t16-attach (named line)
+            watch: reg.watch,
         });
         Lib {
             reg,
@@ -454,6 +486,11 @@ impl Lib {
             db,
             aliases: Arc::from([]),
             manifest_diags: Vec::new(),
+            // ## m4b-t16-attach (named line)
+            manifest_good: false,
+            adopting: false,
+            adopt_job: None,
+            adopt_reply: None,
             scan_diags: Vec::new(),
             entries: Arc::from([]),
             stopped: false,
@@ -534,6 +571,8 @@ impl Lib {
             entries: self.entries.clone(),
             state: self.state.clone(),
             diagnostics: Arc::from(diagnostics),
+            // ## m4b-t16-attach (named line)
+            watch: self.reg.watch,
         })
     }
 }
@@ -559,6 +598,8 @@ struct PendingAttach {
     path: PathBuf,
     db: Option<LogicalDb>,
     write_manifest: bool,
+    // ## m4b-t16-attach (named line): write exactly this one, never over an existing file.
+    exact: Option<manifest::ManifestV1>,
     root: Option<LibraryRoot>,
     identity: Option<crate::fileio::FolderIdentity>,
     reply: oneshot::Sender<Result<LibraryId, AttachError>>,
@@ -707,6 +748,28 @@ impl Actor {
             } => self.attach(path, db, write_manifest, reply),
             Msg::AttachResolved { token, result } => self.attach_resolved(token, result),
             Msg::AttachWritten { token, result } => self.attach_written(token, result),
+            // ## m4b-t16-attach (named exception)
+            Msg::AttachWriting {
+                path,
+                manifest,
+                reply,
+            } => self.attach_writing(path, manifest, reply),
+            Msg::SetWatch { id, watch, reply } => {
+                let r = self.set_watch(id, watch);
+                self.dispatch();
+                let _ = reply.send(r);
+            }
+            Msg::AdoptRoot { id, reply } => match self.adopt_root(id) {
+                // ## m4b-t16-attach fix round 1: answered when its validation is done.
+                Ok(i) => {
+                    self.libs[i].adopt_reply = Some(reply);
+                    self.dispatch();
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+            },
+            // ## m4b-t16-attach
             Msg::Detach { id, reply } => {
                 let r = self.detach(id);
                 self.flush();
@@ -715,8 +778,9 @@ impl Actor {
             Msg::Map {
                 m,
                 share_alias,
+                expect,
                 reply,
-            } => self.map(m, share_alias, reply),
+            } => self.map(m, share_alias, expect, reply),
             Msg::AliasWritten { token, result } => self.alias_written(token, result),
             Msg::Unmap {
                 profile,
@@ -773,7 +837,37 @@ impl Actor {
             Msg::GitDone { id, state } => self.git_done(id, state),
             Msg::Refreshed { id, job, out } => {
                 if let Some(i) = self.job_done(id, job) {
-                    self.refreshed(i, out);
+                    // ## m4b-t16-attach fix round 1 (I3): the adoption's own answer.
+                    let adoption = self.libs[i].adopt_job == Some(job);
+                    if adoption {
+                        let lib = &mut self.libs[i];
+                        lib.adopt_job = None;
+                        lib.adopting = false;
+                    }
+                    let reply = if adoption {
+                        self.libs[i].adopt_reply.take()
+                    } else {
+                        None
+                    };
+                    let adopted = match out {
+                        RefreshOut::Validated(v) if adoption => {
+                            if self.commit_adoption(i, &v) {
+                                self.refreshed(i, RefreshOut::Validated(v));
+                                true
+                            } else {
+                                let diags = self.libs[i].scan_diags.clone();
+                                self.make_unavailable(i, UnavailableReason::RootChanged, diags);
+                                false
+                            }
+                        }
+                        out => {
+                            self.refreshed(i, out);
+                            false
+                        }
+                    };
+                    if let Some(reply) = reply {
+                        let _ = reply.send(Ok(adopted));
+                    }
                 }
             }
             Msg::Stamped { id, job, rel, out } => {
@@ -895,6 +989,8 @@ impl Actor {
                 path,
                 db,
                 write_manifest,
+                // ## m4b-t16-attach (named line)
+                exact: None,
                 root: None,
                 identity: None,
                 reply,
@@ -935,6 +1031,18 @@ impl Actor {
             }
         };
         pa.identity = resolved.identity;
+        // ## m4b-t16-attach (named exception): the dialog's manifest, exactly.
+        if let Some(exact) = pa.exact.clone() {
+            let canonical = root.canonical.clone();
+            pa.root = Some(root);
+            self.attaches.insert(token, pa);
+            self.spawn(move || Msg::AttachWritten {
+                token,
+                result: manifest::write_new(&canonical, &exact),
+            });
+            return;
+        }
+        // ## m4b-t16-attach
         if pa.write_manifest {
             let Some(db) = pa.db.clone().or_else(|| folder_db(&pa.path)) else {
                 let _ = self.registry.remove(root.id);
@@ -997,6 +1105,118 @@ impl Actor {
         let _ = pa.reply.send(Ok(id));
     }
 
+    // ## m4b-t16-attach (named exception)
+    fn attach_writing(
+        &mut self,
+        path: PathBuf,
+        exact: manifest::ManifestV1,
+        reply: oneshot::Sender<Result<LibraryId, AttachError>>,
+    ) {
+        let token = self.token();
+        let (fs, rules) = (self.opts.fs.clone(), self.rules.clone());
+        let probe = path.clone();
+        self.attaches.insert(
+            token,
+            PendingAttach {
+                path,
+                db: Some(exact.database.clone()),
+                write_manifest: true,
+                exact: Some(exact),
+                root: None,
+                identity: None,
+                reply,
+            },
+        );
+        self.spawn(move || Msg::AttachResolved {
+            token,
+            result: work::resolve_attach(fs.as_ref(), &probe, &rules),
+        });
+    }
+
+    /// R-T9-1: the user's watch choice, saved; a library that is up gets a new watcher of that
+    /// kind (then a scan, as at the start).
+    fn set_watch(&mut self, id: LibraryId, watch: WatchMode) -> Result<(), RegistryError> {
+        let Some(i) = self.index(id) else {
+            return Err(RegistryError::UnknownLibrary);
+        };
+        if self.libs[i].reg.watch == watch {
+            return Ok(());
+        }
+        self.edit_registry(|reg| {
+            if reg.set_watch(id, watch) {
+                Ok(())
+            } else {
+                Err(RegistryError::UnknownLibrary)
+            }
+        })?;
+        if let Some(reg) = self.registry.library(id).cloned() {
+            self.libs[i].reg = reg;
+        }
+        if self.libs[i].up() {
+            self.drop_watcher(i);
+            let lib = &mut self.libs[i];
+            lib.unwatched = false;
+            lib.want.watch = true;
+            lib.want.scan = true;
+        }
+        self.dirty.insert(id);
+        Ok(())
+    }
+
+    /// T10 m-h: the user confirmed that the folder now at the library's path is the library.
+    fn adopt_root(&mut self, id: LibraryId) -> Result<usize, RegistryError> {
+        let Some(i) = self.index(id) else {
+            return Err(RegistryError::UnknownLibrary);
+        };
+        // ## m4b-t16-attach fix round 1 (I3): only a folder refused for its identity (moved or
+        // replaced) can be adopted; a link, an overlap or an app folder never can.
+        let lib = &mut self.libs[i];
+        if !adoptable(&lib.state, &lib.scan_diags) {
+            return Err(RegistryError::UnknownLibrary);
+        }
+        // Nothing is recorded yet: the folder is validated with only the identity checks
+        // waived (`RefreshJob::waived`), and the new identity is saved only if it passes
+        // (`commit_adoption`). A refusal leaves the old record and `RootChanged`.
+        lib.adopting = true;
+        lib.want.validate = true;
+        self.dirty.insert(id);
+        Ok(i)
+    }
+
+    /// The adopted folder passed validation: its identity is recorded (and saved) and its
+    /// binding is read from scratch (I2: nothing of the old folder's manifest is kept; only the
+    /// user's local mappings, which belong to the library). `false` when the save failed.
+    fn commit_adoption(&mut self, i: usize, v: &work::Valid) -> bool {
+        let id = self.libs[i].id();
+        let canonical = v.root.canonical.clone();
+        let inode = v.identity.map(|x| x.ino);
+        let saved = self.edit_registry(|reg| {
+            if reg.clear_resolved(id) && reg.set_resolved(id, &canonical, inode) {
+                Ok(())
+            } else {
+                Err(RegistryError::UnknownLibrary)
+            }
+        });
+        if saved.is_err() {
+            return false;
+        }
+        if let Some(reg) = self.registry.library(id).cloned() {
+            self.libs[i].reg = reg;
+        }
+        let lib = &mut self.libs[i];
+        lib.session = Session {
+            canonical: Some(canonical),
+            identity: v.identity,
+        };
+        lib.manifest_good = false;
+        lib.db = folder_db(&lib.reg.path).unwrap_or_else(LogicalDb::unbindable);
+        lib.aliases = Arc::from([]);
+        lib.manifest_diags.clear();
+        self.dirty.insert(id);
+        true
+    }
+    // ## m4b-t16-attach
+
     fn detach(&mut self, id: LibraryId) -> Result<(), RegistryError> {
         self.edit_registry(|reg| reg.remove(id))?;
         if let Some(i) = self.index(id) {
@@ -1024,6 +1244,8 @@ impl Actor {
         &mut self,
         m: LocalMapping,
         share_alias: bool,
+        // ## m4b-t16-attach (named line)
+        expect: Option<Vec<u8>>,
         reply: oneshot::Sender<Result<(), MapError>>,
     ) {
         if self.registry.library(m.library).is_none() {
@@ -1053,9 +1275,13 @@ impl Actor {
         };
         let token = self.token();
         self.aliases.insert(token, PendingMap { m, reply });
+        // ## m4b-t16-attach (named lines): only over the bytes the dialog showed.
         self.spawn(move || Msg::AliasWritten {
             token,
-            result: manifest::add_alias(&root.canonical, &alias),
+            result: match &expect {
+                Some(before) => manifest::add_alias_if_unchanged(&root.canonical, &alias, before),
+                None => manifest::add_alias(&root.canonical, &alias),
+            },
         });
     }
 
@@ -1201,10 +1427,16 @@ impl Actor {
                         }
                     }
                 });
+                // ## m4b-t16-attach (named lines; R-T9-1): the user's "poll" choice is kept.
+                let backend = match lib.reg.watch {
+                    WatchMode::Poll => Backend::Poll(PollReason::UserChoice),
+                    WatchMode::Automatic => WatchOpts::default().backend,
+                };
                 let opts = WatchOpts {
                     window: self.opts.settle,
                     limits: self.opts.limits,
                     fs: self.opts.fs.clone(),
+                    backend,
                     ..WatchOpts::default()
                 };
                 return Some(Job::Watch(Box::new(WatchJob {
@@ -1231,9 +1463,22 @@ impl Actor {
                 // The scan reads the manifest too.
                 lib.want.manifest = false;
             }
+            // ## m4b-t16-attach fix round 1 (I3): a confirmed adoption's validation waives
+            // only the identity checks.
+            let waived = lib.adopting && validate_only;
+            let mut reg = lib.reg.clone();
+            if waived {
+                reg.canonical = None;
+                reg.inode = None;
+            }
             let job = RefreshJob {
-                reg: lib.reg.clone(),
-                session: lib.session.clone(),
+                reg,
+                session: if waived {
+                    Session::default()
+                } else {
+                    lib.session.clone()
+                },
+                waived,
                 others,
                 rules: self.rules.clone(),
                 validate_only,
@@ -1282,6 +1527,10 @@ impl Actor {
         let lib = &mut self.libs[i];
         lib.busy = true;
         lib.job = Some(job_id);
+        // ## m4b-t16-attach fix round 1 (I3)
+        if matches!(&job, Job::Refresh(j) if j.waived) {
+            lib.adopt_job = Some(job_id);
+        }
         let (id, tx) = (lib.id(), self.tx.clone());
         self.in_flight += 1;
         self.jobs.insert(job_id, true);
@@ -1457,6 +1706,20 @@ impl Actor {
     /// database name, aliases and manifest diagnostics. Whether anything changed.
     fn apply_manifest(&mut self, i: usize, m: ManifestOut) -> bool {
         let lib = &mut self.libs[i];
+        // ## m4b-t16-attach (named exception; R-T10-7): a manifest that is there but cannot be
+        // read now (a half-merged file, a `.hacivat` swapped for a link) keeps the binding the
+        // last good read gave, with its diagnostic: it never falls back to the folder name,
+        // which could bind another database.
+        if m.unreadable && lib.manifest_good {
+            // ## m4b-t16-attach fix round 1 (I1): and says so, with the binding it keeps.
+            let mut diags = m.diags;
+            diags.push(LibraryDiag::ManifestKept(lib.db.display_escaped()));
+            let changed = lib.manifest_diags != diags;
+            lib.manifest_diags = diags;
+            return changed;
+        }
+        lib.manifest_good = m.good;
+        // ## m4b-t16-attach
         let text = |n: &[LogicalDb]| n.iter().map(|x| x.as_str().to_owned()).collect::<Vec<_>>();
         let changed = lib.db.as_str() != m.db.as_str()
             || text(&lib.aliases) != text(&m.aliases)
@@ -1849,6 +2112,11 @@ impl Actor {
     fn make_unavailable(&mut self, i: usize, reason: UnavailableReason, diags: Vec<LibraryDiag>) {
         self.drop_watcher(i);
         let lib = &mut self.libs[i];
+        // ## m4b-t16-attach fix round 1 (I2): a folder that is not this library's any more never
+        // hands its "last good binding" to the folder that comes back at the path.
+        if reason == UnavailableReason::RootChanged {
+            lib.manifest_good = false;
+        }
         let id = lib.id();
         let state = LibraryState::Unavailable(reason);
         let changed = lib.state != state || !lib.entries.is_empty() || lib.scan_diags != diags;
@@ -2055,3 +2323,31 @@ impl Actor {
 }
 
 // ## m4b-t10-service
+
+// ## m4b-t16-attach fix round 1 (I3)
+/// Whether "Use this folder" can fix the library: it is `RootChanged` only because the folder at
+/// its path is another one (moved or replaced), never a link, a non-folder, an overlap or an app
+/// folder.
+pub(super) fn adoptable(state: &LibraryState, diags: &[LibraryDiag]) -> bool {
+    *state == LibraryState::Unavailable(UnavailableReason::RootChanged)
+        && diags.iter().any(|d| {
+            matches!(
+                d,
+                LibraryDiag::RootRefused(RootRefusal::Moved | RootRefusal::IdentityChanged)
+            )
+        })
+        && !diags.iter().any(|d| {
+            matches!(
+                d,
+                LibraryDiag::RootRefused(
+                    RootRefusal::Link
+                        | RootRefusal::NotAFolder
+                        | RootRefusal::FilesystemRoot
+                        | RootRefusal::HomeFolder
+                        | RootRefusal::AppFolder
+                        | RootRefusal::Overlaps(_)
+                )
+            )
+        })
+}
+// ## m4b-t16-attach

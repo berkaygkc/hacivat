@@ -33,6 +33,16 @@
 //! Each pass also `lstat`s `<root>/.hacivat/workspace.toml` (`.hacivat` must be a real folder;
 //! nothing is read or followed); when its `(len, mtime, dataless)` moved, or it came or went,
 //! the pass also hints that path, which the reconciler reports as `ManifestChanged`.
+//!
+//! ## m4b-cifix-3-manifest-poll (CI 45068616161)
+//! - **Baselines at `watch`.** The repository's and the manifest's first stamps are taken when
+//!   a root is watched, not at its first pass, so a change between the watcher's start (the
+//!   service's scan reads the manifest after it) and the first pass is reported.
+//! - **Content.** The manifest's stamp also carries the hash of its bytes, read through
+//!   `manifest::content_hash` (the service's own reader: no link followed, at most
+//!   `MANIFEST_MAX_BYTES`; never a dataless file), so a rewrite that keeps the length and the
+//!   modification time (a coarse network clock) is still a change. This is the one read a pass
+//!   makes; scripts are still compared by `lstat` only.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -99,21 +109,36 @@ fn repository_stamps(root: &Path) -> Option<[GitStamp; 4]> {
     }))
 }
 
+/// ## m4b-cifix-3-manifest-poll: the manifest's `(len, mtime, dataless, content hash)`.
+type ManifestStamp = Option<(u64, SystemTime, bool, Option<u64>)>;
+
 /// ## m4b-t10-service fix round 3 (G2): the manifest's `(len, mtime, dataless)` from `lstat`
 /// only; `None` when `.hacivat` is not a real folder or the file is not a plain file.
-fn manifest_stamp(root: &Path) -> GitStamp {
+///
+/// ## m4b-cifix-3-manifest-poll: and the hash of its bytes (`manifest::content_hash`, the
+/// service's own no-link, size-capped read), so a rewrite that keeps the length and the
+/// modification time is still seen. A dataless manifest is never read (it would download).
+fn manifest_stamp(root: &Path) -> ManifestStamp {
     let dir = root.join(".hacivat");
     if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_dir()) {
         return None;
     }
     let m = std::fs::symlink_metadata(dir.join("workspace.toml")).ok()?;
-    m.file_type().is_file().then(|| {
-        (
-            m.len(),
-            m.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            crate::dataless::is_dataless(&m),
-        )
-    })
+    if !m.file_type().is_file() {
+        return None;
+    }
+    let dataless = crate::dataless::is_dataless(&m);
+    let hash = if dataless {
+        None
+    } else {
+        crate::manifest::content_hash(root)
+    };
+    Some((
+        m.len(),
+        m.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        dataless,
+        hash,
+    ))
 }
 
 struct Root {
@@ -122,10 +147,12 @@ struct Root {
     interval: Duration,
     last_pass: Instant,
     next: Instant,
-    /// `None` before the first pass.
-    git: Option<Option<[GitStamp; 4]>>,
-    /// Fix round 3 (G2): `None` before the first pass.
-    manifest: Option<GitStamp>,
+    /// The repository files' stamps; the first ones taken when the root is watched
+    /// (m4b-cifix-3-manifest-poll).
+    git: Option<[GitStamp; 4]>,
+    /// Fix round 3 (G2): the manifest's stamp; the first one taken when the root is watched
+    /// (m4b-cifix-3-manifest-poll).
+    manifest: ManifestStamp,
 }
 
 struct State {
@@ -214,17 +241,17 @@ fn run(shared: &Shared) {
         for root in st.roots.iter_mut().filter(|r| r.next <= now) {
             let mut batch = vec![RawHint::Path(root.path.clone())];
             let git = repository_stamps(&root.path);
-            if root.git.as_ref().is_some_and(|before| *before != git) {
+            if root.git != git {
                 batch.push(RawHint::Path(root.path.join(".git").join("index")));
             }
-            root.git = Some(git);
+            root.git = git;
             let manifest = manifest_stamp(&root.path);
-            if root.manifest.is_some_and(|before| before != manifest) {
+            if root.manifest != manifest {
                 batch.push(RawHint::Path(
                     root.path.join(".hacivat").join("workspace.toml"),
                 ));
             }
-            root.manifest = Some(manifest);
+            root.manifest = manifest;
             (root.sink)(batch);
             root.last_pass = Instant::now();
             root.next = root.last_pass + root.interval;
@@ -240,6 +267,12 @@ impl fmt::Debug for PollEventSource {
 
 impl EventSource for PollEventSource {
     fn watch(&mut self, root: &Path, sink: HintSink) -> Result<(), WatchError> {
+        // ## m4b-cifix-3-manifest-poll (CI 45068616161): the baselines are taken here, before
+        // the caller's first scan reads the manifest and the status, never at the first pass:
+        // a change between that read and the first pass (up to a whole interval) was recorded
+        // as the baseline and never reported.
+        let git = repository_stamps(root);
+        let manifest = manifest_stamp(root);
         let mut st = self.shared.lock();
         if st.stopped {
             return Err(WatchError::NotImplemented);
@@ -252,8 +285,8 @@ impl EventSource for PollEventSource {
             interval: self.base,
             last_pass: now,
             next: now + self.base,
-            git: None,
-            manifest: None,
+            git,
+            manifest,
         });
         drop(st);
         self.shared.wake.notify_all();

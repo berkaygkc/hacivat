@@ -275,7 +275,8 @@ pub(crate) fn menu(place: &Place, cx: &App) -> Vec<MenuItemSpec> {
     let reveal = || item(os_text("hv-scripts-menu-reveal"), "scripts.reveal", cx);
     let trash = || item(os_text("hv-scripts-menu-trash"), "scripts.trash", cx);
     let refresh = || i("hv-explorer-menu-refresh", "scripts.refresh");
-    let settings = || later("hv-scripts-menu-settings", "scripts.library_settings", None);
+    // ## m4b-t16-attach (named line): Settings › Script libraries is Task 16's.
+    let settings = || i("hv-scripts-menu-settings", "scripts.library_settings");
     let collapse = || {
         i(
             "hv-explorer-menu-collapse-children",
@@ -326,14 +327,15 @@ pub(crate) fn menu(place: &Place, cx: &App) -> Vec<MenuItemSpec> {
         Node::Entry { .. } => {
             let under_hint =
                 (!listed_elsewhere(place, cx)).then_some("hv-scripts-menu-open-under-none");
+            // ## m4b-t15-goto (named exception): Task 15's chooser fills it; disabled with its
+            // reason when no other connection shows the file.
+            let mut under = i("hv-scripts-menu-open-under", "scripts.open_under");
+            if let Some(h) = under_hint {
+                under = under.disabled(true).hint(text_fn_id(h));
+            }
             vec![
                 i("hv-scripts-menu-open", "scripts.open"),
-                // Task 15's chooser fills it.
-                later(
-                    "hv-scripts-menu-open-under",
-                    "scripts.open_under",
-                    under_hint,
-                ),
+                under,
                 sep(),
                 i("hv-scripts-menu-rename", "scripts.rename"),
                 trash(),

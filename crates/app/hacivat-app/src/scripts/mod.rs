@@ -77,7 +77,10 @@ const COMMANDS: [(&str, &str, &str); 6] = [
 // (`file_ops::filled`).
 // ## m4b-t14-tabs (named exception): `file.save` and `file.save_all` are Task 14's
 // (`save::register_commands`).
-pub const STUB_COMMANDS: [&str; 2] = ["scripts.goto", "scripts.attach"];
+// ## m4b-t15-goto (named exception): `scripts.goto` is Task 15's (`goto::filled`).
+// (merge of T15 and T16: none is a stub any more)
+// ## m4b-t16-attach (named exception): `scripts.attach` is Task 16's (`filled_t16`).
+pub const STUB_COMMANDS: [&str; 0] = [];
 
 /// A stub command is never enabled.
 fn not_yet(_: &App) -> bool {
@@ -98,7 +101,12 @@ pub fn install(cx: &mut App) {
     // Every command is a stub until its task fills it (and gives it its own run and enabled).
     for (id, title_id, context) in COMMANDS {
         // ## m4b-t13-explorer (named exception): Task 13's filled commands.
-        let (run, enabled) = file_ops::filled(id).unwrap_or_else(|| (Rc::new(|_, _| {}), not_yet));
+        // ## m4b-t15-goto (named exception): and Task 15's `scripts.goto`.
+        // ## m4b-t16-attach (named exception): and Task 16's `scripts.attach`.
+        let (run, enabled) = file_ops::filled(id)
+            .or_else(|| goto::filled(id))
+            .or_else(|| filled_t16(id))
+            .unwrap_or_else(|| (Rc::new(|_, _| {}), not_yet));
         // A duplicate keeps the first definition (registration order is the palette's order).
         let _ = reg.register(ActionDef {
             id,
@@ -113,6 +121,10 @@ pub fn install(cx: &mut App) {
     let contributor = ScriptsContributor::for_app(cx);
     crate::explorer::contrib::register_contributor(Rc::new(contributor), cx);
     // ## m4b-t13-explorer
+    // ## m4b-t15-goto (named line): `scripts.open_under` and the tabs' chooser hook.
+    chooser::install(cx);
+    // ## m4b-t16-attach (named line): `scripts.map` and `scripts.library_settings`.
+    install_t16(cx);
 }
 
 // ---- the database menus (R-M4b-34) -------------------------------------------------------------
@@ -120,14 +132,116 @@ pub fn install(cx: &mut App) {
 /// The Scripts items of a database node's menu ("Attach script library…", "Map to a script
 /// library…"; NOTES surface 2): appended after M4's items and a separator on a PostgreSQL
 /// database row and a MySQL/MariaDB schema row, and placed before the final Delete… on a SQLite
-/// profile root (`node` is then [`NodeInfo::Profile`]). Stub: no item, so every M4 menu is
-/// unchanged (Task 16 fills it).
+/// profile root (`node` is then [`NodeInfo::Profile`]). The Task 1b stub added no item.
+///
+/// ## m4b-t16-attach: filled. Only where a Scripts node can show (R-M4b-25, R-M4b-32): a
+/// PostgreSQL database row the profile's session is on (never a schema row, carries T1b m11,
+/// nor another database), every MySQL/MariaDB database, the SQLite root; elsewhere no item.
 pub fn database_menu_items(node: &NodeInfo, cx: &App) -> Vec<MenuItemSpec> {
     match cx.try_global::<DatabaseMenuHook>() {
         Some(hook) => (hook.0)(node, cx),
-        None => Vec::new(),
+        None => scripts_items(node, cx),
     }
 }
+
+// ## m4b-t16-attach
+/// The node `node` names, when a Scripts node can show there: its connection and exact
+/// database name.
+pub(crate) fn origin_of(node: &NodeInfo, cx: &App) -> Option<attach_dialog::Origin> {
+    use hacivat_meta::kind::{DbLevel, database_level};
+    let profile = match node {
+        NodeInfo::Database { profile, .. }
+        | NodeInfo::Schema { profile, .. }
+        | NodeInfo::Profile(profile) => *profile,
+        _ => return None,
+    };
+    let p = cx
+        .try_global::<crate::connections::ConnectionsModel>()?
+        .get(profile)?;
+    let database = match (node, database_level(p.engine)) {
+        (NodeInfo::Database { name, .. }, DbLevel::Database) => name.to_string(),
+        (NodeInfo::Schema { ns, .. }, DbLevel::SchemaIsDatabase) => ns.path.last()?.to_string(),
+        (NodeInfo::Profile(_), DbLevel::File) => "main".to_string(),
+        _ => return None,
+    };
+    projection::place_logical(&p, &database, cx)?;
+    Some(attach_dialog::Origin { profile, database })
+}
+
+/// The explorer cursor's database node, when it is one a Scripts node can show under.
+fn cursor_origin(cx: &App) -> Option<attach_dialog::Origin> {
+    let tree = crate::connections::explorer::tree(cx)?;
+    let t = tree.read(cx);
+    let info = t.model().info(t.cursor()?)?;
+    origin_of(&info, cx)
+}
+
+fn scripts_items(node: &NodeInfo, cx: &App) -> Vec<MenuItemSpec> {
+    let Some(origin) = origin_of(node, cx) else {
+        return Vec::new();
+    };
+    let label = crate::l10n_global::text_fn_id;
+    let attach = MenuItemSpec::new(label("hv-explorer-menu-attach-library"), "scripts.attach");
+    let mut map = MenuItemSpec::new(label("hv-explorer-menu-map-library"), "scripts.map");
+    if mapping::offers(origin.profile, &origin.database, cx).is_empty() {
+        map = map
+            .disabled(true)
+            .hint(label("hv-explorer-menu-map-library-none"));
+    }
+    vec![attach, map]
+}
+
+/// Task 16's filled stub: `scripts.attach` (palette and menu): the folder picker, then the
+/// attach dialog, prefilled from the explorer's cursor when it is on a database node.
+type Filled = (hacivat_ui::actions::ActionFn, fn(&App) -> bool);
+
+fn filled_t16(id: &str) -> Option<Filled> {
+    match id {
+        "scripts.attach" => Some((
+            Rc::new(|window, cx| {
+                let origin = cursor_origin(cx);
+                attach_dialog::start(origin, window, cx);
+            }),
+            |_| true,
+        )),
+        _ => None,
+    }
+}
+
+/// Task 16's own commands (menu and palette; no keymap row).
+pub const T16_COMMANDS: [(&str, &str); 2] = [
+    ("scripts.map", "hv-cmd-scripts-map"),
+    (
+        "scripts.library_settings",
+        "hv-cmd-scripts-library-settings",
+    ),
+];
+
+fn install_t16(cx: &mut App) {
+    let reg = cx.default_global::<ActionRegistry>();
+    let _ = reg.register(ActionDef {
+        id: "scripts.map",
+        title_id: "hv-cmd-scripts-map",
+        context: crate::explorer::EXPLORER_TREE_CONTEXT,
+        run: Rc::new(|window, cx| {
+            if let Some(o) = cursor_origin(cx) {
+                mapping::open_for(o.profile, o.database, window, cx);
+            }
+        }),
+        enabled: |cx| {
+            cursor_origin(cx)
+                .is_some_and(|o| !mapping::offers(o.profile, &o.database, cx).is_empty())
+        },
+    });
+    let _ = reg.register(ActionDef {
+        id: "scripts.library_settings",
+        title_id: "hv-cmd-scripts-library-settings",
+        context: "Workspace",
+        run: Rc::new(crate::settings_ui::scripts::open_page),
+        enabled: |_| true,
+    });
+}
+// ## m4b-t16-attach
 
 /// The items of a database node's menu.
 type MenuItemsFn = Rc<dyn Fn(&NodeInfo, &App) -> Vec<MenuItemSpec>>;

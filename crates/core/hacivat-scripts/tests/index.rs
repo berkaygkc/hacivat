@@ -396,3 +396,65 @@ fn counts_are_per_environment() {
             .all(|h| !h.rel.as_str().starts_with("@production"))
     );
 }
+
+// ## m4b-t15-goto (named exception: Task 15's per-library scope)
+/// Go to script offers each library's files under the environments of the connections that
+/// library is shown under, and only unscoped files for a library no connection shows.
+#[test]
+fn scoped_query_filters_each_library_by_its_own_connections() {
+    let staging_lib = library(
+        "orders",
+        vec![
+            entry("a.sql", LinkState::Plain),
+            entry("@production/p.sql", LinkState::Plain),
+            entry("@staging/s.sql", LinkState::Plain),
+        ],
+    );
+    let prod_lib = library(
+        "billing",
+        vec![
+            entry("b.sql", LinkState::Plain),
+            entry("@production/q.sql", LinkState::Plain),
+        ],
+    );
+    let unbound_lib = library(
+        "misc",
+        vec![
+            entry("m.sql", LinkState::Plain),
+            entry("@production/r.sql", LinkState::Plain),
+        ],
+    );
+    let (s, p) = (staging_lib.id, prod_lib.id);
+    let i = ScriptIndex::build(&snapshot(vec![staging_lib, prod_lib, unbound_lib]));
+    let mut scopes = std::collections::HashMap::new();
+    scopes.insert(s, vec![Some(EnvTag::Staging)]);
+    scopes.insert(p, vec![Some(EnvTag::Production)]);
+    let mut got: Vec<String> = i
+        .query_scoped("", opts_en(), 100, &scopes)
+        .iter()
+        .map(|h| format!("{}:{}", h.library_name, h.rel.as_str()))
+        .collect();
+    got.sort();
+    // `@production/p.sql` is in a library only staging shows: never offered, although another
+    // library is shown under production; the unbound library offers its unscoped file only.
+    assert_eq!(
+        got,
+        [
+            "billing:@production/q.sql",
+            "billing:b.sql",
+            "misc:m.sql",
+            "orders:@staging/s.sql",
+            "orders:a.sql",
+        ]
+    );
+    // An empty environment list is the unbound view too.
+    scopes.insert(p, Vec::new());
+    let billing: Vec<String> = i
+        .query_scoped("", opts_en(), 100, &scopes)
+        .iter()
+        .filter(|h| h.library_name == "billing")
+        .map(|h| h.rel.as_str().to_owned())
+        .collect();
+    assert_eq!(billing, ["b.sql"]);
+}
+// ## m4b-t15-goto

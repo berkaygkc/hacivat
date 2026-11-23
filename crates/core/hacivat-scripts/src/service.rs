@@ -162,6 +162,8 @@ pub struct LibrarySnapshot {
     pub state: LibraryState,
     /// ## m4b-t10-service fix round 1 (m2): read through [`LibraryView::diagnostics`].
     pub(crate) diagnostics: Arc<[LibraryDiag]>,
+    // ## m4b-t16-attach (named exception; R-T9-1): how its changes are found, as chosen.
+    pub watch: crate::registry::WatchMode,
 }
 
 // ## m4b-t10-service fix round 2 (m-b): a log line never names a file (or a root) of any
@@ -193,6 +195,13 @@ impl fmt::Debug for LibrarySnapshot {
 // ## m4b-t10-service
 
 impl LibrarySnapshot {
+    // ## m4b-t16-attach fix round 1 (I3)
+    /// Whether "Use this folder" can fix it: it is `RootChanged` only because another folder is
+    /// at its path (moved or replaced), never a link, an overlap or an app folder.
+    pub fn can_adopt(&self) -> bool {
+        actor::adoptable(&self.state, &self.diagnostics)
+    }
+
     // ## m4b-t10-service fix round 1
     /// A library snapshot (tests, `binding` callers): no diagnostics, generation 1.
     pub fn new(
@@ -211,6 +220,8 @@ impl LibrarySnapshot {
             entries: Arc::from(entries),
             state,
             diagnostics: Arc::from([]),
+            // ## m4b-t16-attach (named line)
+            watch: crate::registry::WatchMode::Automatic,
         }
     }
     // ## m4b-t10-service
@@ -237,6 +248,9 @@ pub enum PollReason {
     WatchBudget,
     /// The event source stopped, or would not start.
     BackendLost,
+    // ## m4b-t16-attach (named exception; R-T9-1)
+    /// The user chose "Checking every 2 seconds" for it in Settings › Script libraries.
+    UserChoice,
 }
 
 /// Why a library shows nothing.
@@ -283,6 +297,10 @@ pub enum LibraryDiag {
     // ## m4b-t10-service fix round 1
     /// Why the root is `Unavailable(RootChanged)` (I3).
     RootRefused(RootRefusal),
+    // ## m4b-t16-attach fix round 1 (I1, R-T10-7)
+    /// The manifest beside it cannot be read now, so the library keeps the binding its last
+    /// good read gave (this logical database, display form) until the file is fixed.
+    ManifestKept(String),
     /// This many diagnostics name paths this connection does not show (a [`LibraryView`]
     /// counts them instead of naming them, m2).
     HiddenProblems(usize),
@@ -622,6 +640,56 @@ impl LibraryService {
         .unwrap_or(Err(AttachError::Stopped))
     }
 
+    // ## m4b-t16-attach (named exception; R-M4b-8, Q6)
+    /// Registers `path` and writes exactly `manifest` as its `.hacivat/workspace.toml`: the
+    /// text the attach dialog showed ([`ManifestV1::to_toml`](manifest::ManifestV1::to_toml)),
+    /// byte for byte. A file already there (it appeared after the dialog read the folder) is
+    /// never replaced: the attach is refused with `Manifest(Exists)` and nothing is registered,
+    /// so the dialog can show what it found.
+    pub async fn attach_writing(
+        &self,
+        path: PathBuf,
+        manifest: manifest::ManifestV1,
+    ) -> Result<LibraryId, AttachError> {
+        self.ask(|reply| Msg::AttachWriting {
+            path,
+            manifest,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(AttachError::Stopped))
+    }
+
+    /// Sets how library `id`'s changes are found (R-T9-1; Settings › Script libraries) and
+    /// restarts its watcher that way. Saved in `libraries.toml`.
+    pub async fn set_watch(
+        &self,
+        id: LibraryId,
+        watch: crate::registry::WatchMode,
+    ) -> Result<(), RegistryError> {
+        self.ask(|reply| Msg::SetWatch { id, watch, reply })
+            .await
+            .unwrap_or(Err(actor::STOPPED))
+    }
+
+    /// The user's confirmed "Use this folder" for library `id`, refused as
+    /// `Unavailable(RootChanged)` because its folder moved or was replaced (T10 m-h): the
+    /// folder at the path is validated with only the identity checks waived (every other check
+    /// still applies), so the library keeps its id, its mappings and its tabs' bindings instead
+    /// of a detach and attach.
+    ///
+    /// ## m4b-t16-attach fix round 1 (I2, I3): answers once that validation is done:
+    /// `Ok(true)` adopted (the new identity is saved and the folder's binding is read from
+    /// scratch), `Ok(false)` refused (nothing saved: the old identity and `RootChanged` stay).
+    /// `UnknownLibrary` when the library is not refused for its identity (a link, an overlap,
+    /// an app folder, or not refused at all).
+    pub async fn adopt_root(&self, id: LibraryId) -> Result<bool, RegistryError> {
+        self.ask(|reply| Msg::AdoptRoot { id, reply })
+            .await
+            .unwrap_or(Err(actor::STOPPED))
+    }
+    // ## m4b-t16-attach
+
     /// Forgets library `id`; the folder is never touched.
     ///
     /// ## m4b-t10-service
@@ -644,11 +712,30 @@ impl LibraryService {
         self.ask(|reply| Msg::Map {
             m,
             share_alias,
+            // ## m4b-t16-attach (named line)
+            expect: None,
             reply,
         })
         .await
         .unwrap_or(Err(MapError::Stopped))
     }
+
+    // ## m4b-t16-attach (named exception; R-M4b-8, Q5)
+    /// [`map`](Self::map) with the alias shared, written only while the library's manifest is
+    /// still `before` (the bytes the mapping dialog read and showed its edit of,
+    /// `manifest::preview`): a file changed since refuses with `Alias(Changed)` and nothing
+    /// changes, so what is written is what was shown.
+    pub async fn map_sharing(&self, m: LocalMapping, before: Vec<u8>) -> Result<(), MapError> {
+        self.ask(|reply| Msg::Map {
+            m,
+            share_alias: true,
+            expect: Some(before),
+            reply,
+        })
+        .await
+        .unwrap_or(Err(MapError::Stopped))
+    }
+    // ## m4b-t16-attach
 
     // ## m4b-t10-service
     /// Removes the local mapping of the node `(profile, database)`; whether there was one.

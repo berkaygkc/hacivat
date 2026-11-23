@@ -1438,6 +1438,118 @@ Task 14 fills `scripts::{tabs,open,save,disk_bars,restore,unsaved_prompt}` and t
   - A copy written before this change still takes the profile's file at the first Run (fix round 2's rule).
 - **m-fr2-3:** a comment on `QuitDiscards` now says that only the quit guard pushes to it (when the quit goes on) and only the quit hook drains it. Its futures are `!Send`.
 
+## m4b-cifix-3 — a polled library never misses a manifest change
+
+- **Finding (CI 45068616161, macOS).**
+  - `h15_manifest_change_rebinds_on_a_polled_library` timed out waiting for the new binding.
+  - The poll source took its first stamps of `.hacivat/workspace.toml` and of the repository files at its first pass, one interval after `watch`. The service's scan reads the manifest after `watch`.
+  - A rewrite that landed between that read and the first pass became the baseline, and no pass reported it. Only the 60 s backstop re-read the manifest. In the app the gap is up to one interval, 2 s. In the test it is 30 ms plus however late the poll thread first runs on a loaded runner.
+  - The stamp was `(len, mtime, dataless)`. A rewrite that kept the length inside one modification-time tick was never seen. Network shares, the reason a library is polled, often keep coarse times.
+- **Decision.**
+  - `PollEventSource::watch` takes the repository and manifest baselines itself, on the caller's thread, before it returns. The watcher calls it before its first scan, so a change is caught either by that scan or by the next pass.
+  - The manifest's stamp also carries the XXH3-64 of its bytes. `manifest::content_hash` reads them with the service's own reader: directory handles, no link followed, a plain file of at most `MANIFEST_MAX_BYTES`.
+  - A dataless manifest is never read, because reading it would download it. Its stamp keeps `dataless = true` and no hash.
+  - This is the only content a pass reads. Scripts are still compared by `lstat` alone ("never read what you only list"). A manifest is tiny and the service reads it on every scan anyway.
+- **Tests.** In `tests/watch.rs`:
+  - `a_manifest_rewrite_before_the_first_poll_pass_is_hinted`. RED: no pass named it in 10 s.
+  - `a_same_length_same_mtime_manifest_rewrite_is_hinted`. RED: 358 passes, none named it.
+  - `an_unchanged_manifest_is_never_hinted_by_a_poll_pass`, the control.
+  - `h15_manifest_change_rebinds_on_a_polled_library` no longer sleeps 150 ms before the rewrite.
+
+## m4b-t15 — Go to script and the connection chooser
+
+Task 15 fills `scripts::{goto,chooser}` (HV-SCRIPT-09, R-M4b-9, R-M4b-31; NOTES surface 7) and wires the "Open under another connection…" items Tasks 13 and 14 left disabled. The one rule: **production is never chosen for the user**, on every path that opens the chooser.
+
+- **Its own layer, the palette's anatomy.** `scripts.goto` (⇧⌘O / Ctrl+Shift+O, R-M4b-37; now enabled, `STUB_COMMANDS` holds only `scripts.attach`) pushes layer `scripts-goto` (context `Palette`, non-modal) at the command palette's place and width, with the shipped palette's query field, 23 px rows, 12 visible rows, popover surface and 24 px key-hint footer. **Deviation:** it is a view of its own, not `hacivat_ui::palette::Palette` with `set_items`: the widget draws one title per row and always has an active row, while these rows carry a folder with its environment mark, a library, the chooser's columns (mark, connection, database, "current", engine), and the chooser must be able to have **no** active row. Extending the shared widget would have been a UI-crate change under every command-palette shot; the cost is about 200 lines of layout that copy the widget's tokens.
+- **Results.** Names only (R-M4b-15): `ScriptIndex::build` over the snapshot, off the UI thread, once per snapshot generation; every query runs `ScriptIndex::query_scoped` (new, named exception in `hacivat-scripts/src/index.rs`) with `commands::palette::search_opts` (I18N-09, D-074). `query_scoped` filters **each library by the environments of the connections it is shown under** (`projection::script_places`); a library no connection shows offers what an unbound tab sees (unscoped files). Why not `query_for_any` over every profile's environment: a `@production` file of a library only staging shows would be listed because some other library is shown under production. Past 2,000 scripts (`ScriptIndex::is_large`, a yes/no, never a count: T10 m2) a query runs off the UI thread; answers carry a sequence number and only the latest is shown. The 256-character cap is the index's. Names, folders and libraries are the index's escaped display text; connection names go through `display_name` too.
+- **Candidates** (`chooser::candidates`): every place of `projection::script_places` (the databases the explorer asked about, C-M4-3, plus each profile's configured database, R-M4b-31; PostgreSQL limited to the database its session or profile is on, R-M4b-25), whose binding includes the library, whose `view(environment)` lists the file as an openable file, and where `open::session_plan` allows it (so a row never opens a refusal), minus the connection a tab or tree row is under, every database of it (fix round 1, R-T15-1; first written as "the place"). T13's `shown_under_another_connection` and T14's `other_places` now call it (named exceptions), so a menu item or notice button is enabled exactly when the chooser it opens has a row.
+- **Order and the active row** (`chooser::order`, `preselect`): the active tab's connection (its own database first), then local, dev, test, staging, production, then untagged, then the connection's name in the UI language's order. "The focused connection" is the **active tab's** (`ActiveTab` → its script binding or its console's profile), never the explorer's selection or a tree row. The active row is the first that is not production or is the focused connection; with only production elsewhere no row is active and Enter does nothing until the user moves onto one. The footer adds "Production is never chosen for you." whenever a production row other than the focused one is listed.
+- **A pick** (`chooser::decide`): one non-production candidate opens at once; production or two or more show the chooser; none offers "Open without a connection" (an unbound tab, R-M4b-30) — only when an unbound tab can show the file, otherwise the hit is stale and the results are refreshed. Opening goes through `open_script`, which focuses the tab already open for the same (file, connection, database) (R-M4b-4).
+- **Live rows, no stale Enter.** The chooser's rows are recomputed when a profile changes (`observe_global::<ConnectionsModel>`) and on every library-service event, and **again on every Enter, before anything opens**, from the live snapshot and profiles (the review probe "Enter racing the candidate computation"; `enter_checks_the_live_snapshot_before_opening` moves the file into `@production` and presses Enter before the event reaches the layer). A row the user moved onto stays active only while it is the same place **in the same environment**; a retag sends it back to the preselection rule, so a staging row that becomes production is never left active.
+- **"Open under another connection…".** The tree file row's item is the new command `scripts.open_under` (`ExplorerTree`, menu and palette only, title `hv-cmd-scripts-open-under` in `## m4b-t15-goto`); it opens the chooser without the row's connection (every database of it, R-T15-1). The script tab's notices call `open::open_under_another`, whose hook (`open::set_open_under_another`) now opens the chooser without the tab's connection (R-T15-1). Both leave the tab where it is: a new tab or the focused existing one, never a rebind. Escape closes a chooser opened from a menu and goes back to the results from Go to script.
+- **Focus** (R-M4b-43): the query field holds the focus in the results, the chooser's own focus handle (a Tab stop) in the chooser; the view is a focus home whose primary follows the mode, so rows that vanish never strand the focus. Closing restores the focus the layer recorded; an open hands it to the new tab's editor.
+- **Not built:** recently opened scripts first on the empty query (the index's order is used); the chooser header draws the file name in the header's sans face, not mono (one Fluent message).
+
+### Fix round 1 (review C1, I1, minors 1–8; controller rulings R-T15-1, R-T15-2)
+
+- **C1, R-T15-1: "Open under another connection…" leaves out the whole starting connection.** `chooser::candidates(library, rel, exclude: Option<ProfileId>, cx)` skips every place of the excluded profile, not only its (profile, database). So a MySQL production tab on `api` whose library is also bound to `kampanya` (an alias or a local mapping) never offers `api-prod · kampanya`, and production is never preselected on an "another connection" path (NOTES cross-cutting 6, surface 7, the mock's `c.id !== exclude`). T13's tree item (`shown_under_another_connection`), T14's notice button (`other_places`) and the tree command all go through this function; the workspace tab strip has no tab menu yet, so there is no other caller. Tests: `open_under_another_from_a_mysql_tab_never_offers_its_own_connection` (the reviewer's H2) and `tree_open_under_never_offers_another_database_of_the_rows_connection`.
+- **I1, R-T15-2: activation opens only what the user saw.** Enter or a click records the row shown active (connection, database, environment), or "Open without a connection", then re-checks the rows against the live snapshot and profiles. It opens that row only if it survived unchanged, and "Open without a connection" only while there is still no candidate; otherwise it redraws and opens nothing. The preselection rule is never applied at activation time. Tests: `enter_never_opens_a_row_the_user_did_not_highlight` (the reviewer's H1: an alias removed on disk drops the highlighted staging row before Enter) and `a_click_never_opens_a_row_the_user_did_not_click` (the same with a click, dispatched before the event's redraw).
+- **Minors.**
+  1. `script_places` syncs the per-generation caches before it reads the snapshot.
+  2. A chooser row's accessible name starts with the environment word.
+  3. A Go to script hit listed only where the script may not run (a single-session MySQL profile, R-T14-3), and an Enter on a chooser with no row and no unbound open, both go through `open_script`, whose refusal says why (`chooser::refused_place`).
+  4. In `index.rs` the T15 items are inside one `## m4b-t15-goto` fence: the `HashMap` path is spelled out, and `LARGE_INDEX` is an associated const.
+  5. The layer closes by its view (`Workspace::remove_layer`), wherever it is in the stack.
+  6. A refresh of the same query keeps the active result by its (library, path).
+  7. The header draws the file name in mono: the Fluent message is split around its `$file` argument (a private-use marker), with a whole-message fallback.
+  8. The T1b routing test is renamed `goto_script_without_a_library_lists_nothing`.
+- **Not changed:** "recently opened" on the empty query (no store of recently opened scripts exists; alg/28 lists recency only as a tie-break), and the layer's own view instead of `Palette` + `set_items` (the deviation recorded above).
+
+### Fix round 2 (re-review fr1: I-fr1-1, m-fr1-1 to m-fr1-3)
+
+- **I-fr1-1 (R-T15-2 for clicks).** A chooser row's click carries the identity of the row it was painted for, `goto::Seen::Row(connection, database, environment)`, and "Open without a connection" carries `Seen::Unbound`; neither carries an index. `GotoHost::activate(seen)` re-checks the rows and opens only that identity while it is still a candidate (unbound: while there is still none). It never uses the current active row, so a row gone since the last frame, a reordered list or a candidate that just appeared opens nothing and redraws. Test: `a_click_with_a_stale_row_identity_opens_nothing` drives the handler's entry point with stale identities, so the test window's redraw after every update cannot hide the race.
+- **m-fr1-1.** Enter acts on what the last frame drew as active (`painted`, recorded while drawing and after the user's own ↑/↓, never by a refresh), under the same rule.
+- **m-fr1-2, m-fr1-3.** The original bullets above now say "connection" (R-T15-1), and the `chooser.rs` module doc is wrapped at 100 columns.
+## m4b-t16 — attach dialog, manual mapping, Settings › Script libraries
+
+**What is written into a library, and how it is shown first (L14, R-M4b-8, Q5, Q6).**
+
+- **The attach dialog shows the bytes it writes.** The folder is read on the core runtime before anything is offered: `manifest::preview` (new) reads `.hacivat/workspace.toml` through the same no-link `Dir` handle as `manifest::read` (no link followed, never a FIFO, at most 64 KiB), and `envscope::root_env_folder` checks the root. With no manifest, the inset shows `ManifestV1::to_toml()` of the typed name and aliases, line by line, and Attach hands that same `ManifestV1` to the new `LibraryService::attach_writing`, which writes its `to_toml()` (`manifest::write_new`). `ManifestV1` has exactly `format`, `database` and `aliases`, so no profile id, connection name, host, port, user, keyring slot or password can reach the folder from the dialog.
+- **Never over a file that appeared meanwhile.** `attach_writing` refuses `Manifest(Exists)` and registers nothing when a manifest appeared between the dialog's read and the press (the older `attach(.., write_manifest: true)` silently read it instead). The dialog then reads the folder again and shows what it found.
+- **A found manifest is shown, never rewritten.** Its text (comments included) is shown read-only; Attach calls `attach(path, None, false)`. A manifest that is there but cannot be read is said so, and the folder binds by its own name until it can be read.
+- **The shared alias is written only over what was shown.** `manifest::with_alias` (new) is the pure edit that `add_alias` now runs (behaviour unchanged, through `toml_edit`, comments, line endings and the BOM kept). The mapping dialog shows its result over the bytes `manifest::preview` read, the added line on the selection tint. `LibraryService::map_sharing(m, before)` (new) writes it only while the file is still exactly `before` (`manifest::add_alias_if_unchanged`), else `Alias(Changed)` and nothing changes. The default mapping writes `libraries.toml` only, so the folder's bytes are identical before and after (Q5).
+- **Tested byte for byte:** `scripts_attach.rs` compares the written file with the lines the dialog drew, checks that its keys are exactly `format`, `database`, `aliases`, that no profile name, host, user, environment or profile id appears in it, and that the rest of the folder is unchanged. Mutations that write one more alias than shown, or share the alias on the one-click mapping, fail those tests.
+- **Untrusted text** (the path, the found file's lines, its binding, library and connection names) is shown through `escape_untrusted` (bidi and invisible characters as `<U+XXXX>`); a found file's lines are cut at 512 characters each, and each line is a truncating data label (its tooltip has the whole line).
+
+**Where the Scripts items appear (R-M4b-25, R-M4b-32, R-M4b-34).** `scripts::database_menu_items` answers "Attach script library…" and "Map to a script library…" only on a node where a Scripts node can show: the PostgreSQL database the profile's session is on (or, without a session, its configured database), every MySQL/MariaDB database, and the SQLite profile root. A PostgreSQL schema row, another PostgreSQL database and a SQLite attached database get no Scripts items (carries T1b m11). The placement rule is `projection::place_logical`, the same `match` as the Scripts node's. "Map…" is disabled with "No other library is attached" when every library already shows there. The attach's "Shows under" list uses the explorer's places plus each profile's configured database (R-M4b-31), as Go to script does.
+
+**Refused up front.** A folder inside an `@<env>` folder, a folder already attached, and the 32-library limit disable Attach with an ink line. The service's own refusals (a link, the home folder, an app folder, a filesystem root, a nested library, a read-only registry) come back as the same line. Nothing is written in any refused case.
+
+**R-T9-1: Watch: automatic / poll.** The registry row gains an optional `watch = "poll"` (`registry::WatchMode`). It is written only when not automatic, and any other value reads as automatic, so a hand edit never stops a library being watched. `LibraryService::set_watch` saves it and restarts an up library's watcher with `Backend::Poll(PollReason::UserChoice)` (Task 9's `Watcher::open` keeps a poll backend the caller sets). The snapshot carries `LibrarySnapshot::watch`. A chosen poll is not a library problem in the diagnostics popover. A library nothing watches (`Unwatched`) now is one, and the popover suggests "Watch: Every 2 seconds".
+
+**T10 m-h: "Use this folder…".** For a library in `Unavailable(RootChanged)`, Settings shows a confirmed action (Cancel is the default). `LibraryService::adopt_root` refuses any other state. It forgets the recorded canonical path and inode (`LibraryRegistry::clear_resolved`) and this session's resolution, then validates the root from scratch: every other check still applies, so a link root, an app folder or an overlap is refused again (tested with a link). The library keeps its id, its mappings and its tabs' bindings. A detach and re-attach would lose the mappings.
+
+**R-T10-7: an unreadable manifest keeps the last good binding.** When a manifest that bound the library (`database` or aliases read and understood) is later present but unreadable (`manifest::is_read_failure`: a link, not a file, changed while read, an I/O error, too large, not UTF-8, too deep, invalid TOML, missing or bad `format`, a bad `database`), the actor keeps the last `db`/aliases and shows the diagnostic instead of falling back to the folder name, which could bind another database. A newer `format` still binds by folder name (R-M4b-21), and a removed file binds by folder name as before. Residual: at launch there is no last good binding, so an unreadable manifest binds by folder name, as before.
+
+**Keys and focus (R-T33-1, R-M4b-43).**
+- Both dialogs are modal layers, which are focus homes (`shell::layers`). Tab is trapped in NOTES order, and every button is a Tab stop; the header × is not.
+- The fields are real window Tab stops through a new opt-in, `TextInput::set_tab_stop`. This is a named exception in `hacivat-ui`: GPUI reads the flag from the tracked handle. It is off by default, so no existing form changes.
+- Escape (a field's `Cancelled` too) cancels. Enter presses the focused button, and in a field it attaches.
+- The Settings section is a first-stop focus home, so a removed row's focused button hands the focus to "Attach a folder…".
+
+**Named exceptions.**
+- Core files: `registry.rs`, `manifest.rs`, `service.rs`, `service/actor.rs`, `service/work.rs`, `lib.rs`.
+- App files: `scripts/{mod, projection, diagnostics, file_ops}.rs` ("Script library settings…" enabled), `settings_ui/{mod, rows}.rs` (`Section::Scripts`, 9 sections).
+- Tests: `tests/m4b_routing.rs` (the stub count, the filled menus, the two new rows) and `tests/shots/m4b.rs` (five states).
+- UI: `hacivat-ui/src/input/mod.rs` and `hacivat-ui/src/checkbox.rs` (`Checkbox::wrap`; fix round 1, m8: the stacked layout's label is a `paragraph`, which takes only a static id, so it has no `checkbox-label-<id>`; no shot marker uses it).
+
+**Deviations from the mock.**
+- The inset is plain mono ink, not syntax-coloured.
+- The polling reason is a caption line under the state, not a tooltip: the settings rows have no tooltip primitive.
+- The added alias line in the mapping inset is the whole edited line (`toml_edit` rewrites the `aliases = [...]` line).
+
+### Fix round 1 (review I1–I6, m1–m10; ruling R-T16-1)
+
+- **I1 (R-T10-7 said truly).** When a broken manifest's last good binding is kept, the snapshot carries `LibraryDiag::ManifestKept(<database>)`. The popover shows one line in place of the read failure: ".hacivat/workspace.toml in <folder> can't be read, so the library keeps its last binding, <database>, until the file is fixed." The Settings row shows the same line, through `diagnostics::manifest_problem`; a test compares the two.
+- **I2 (no inherited binding).** An adopted folder is read from scratch: `manifest_good`, `db`, aliases and the manifest diagnostics are reset. A root refused as `RootChanged` also forgets `manifest_good`. Only the user's local mappings stay; they belong to the library, not to the folder. The review's probe is now `an_adopted_folder_never_inherits_the_old_binding`.
+- **I3 (transactional "Use this folder").**
+  - `adopt_root` records nothing up front. It marks the library, and the next validation runs with only the identity checks waived (`RefreshJob::waived`: no recorded or session identity). The new canonical path and inode are saved only when that validation passes (`commit_adoption`). A refusal leaves the old record and `RootChanged`, so a folder that later takes the path is never adopted without a new confirmation.
+  - `adopt_root` now answers once the validation is done: `Ok(true)` adopted, `Ok(false)` refused.
+  - It is accepted, and the button is offered, only for `RootRefused(Moved | IdentityChanged)`, never for a link, a non-folder, an overlap, the home or an app folder (`LibrarySnapshot::can_adopt`).
+  - Residual (m4): the confirmation is bound to the refusal reason and the path, not to a folder identity seen when the dialog opened (the snapshot exposes no identity). A swap between the question and the press is validated afresh and, if it is another real folder, adopted.
+- **I4.** A found manifest with a read failure, or a newer `format`, heads the dialog with "Found .hacivat/workspace.toml, but it can't be read (<reason>); the library will bind by its folder name, <folder>, until it is fixed." There is one reason per diagnostic kind (`hv-scripts-manifest-reason`).
+- **I5 (R-T16-1).** The mapping dialog's "Attach another folder…" opens the attach dialog with `Prefill::Folder`: the Database field shows the chosen folder's name, never the node's local name, and follows Change… while untouched. A new file can be attached, by Enter or click, only after a frame drew its fields and text. The plain database-menu attach keeps the node's name (the plan's "prefilled with the node's database name").
+- **I6.** Every Settings action (Remove, "Use this folder", Watch, a mapping's Remove) reports what it could not do on its row (`hv-scripts-set-failed`: read-only registry, the library changed meanwhile, the folder refused, a failed save). The error clears on the next attempt.
+- **Minor findings.**
+  - m1: the inset draws at most 200 lines, then "… and N more lines".
+  - m2: another library unticks the share box.
+  - m3: Enter on the box presses Show here.
+  - m5: Settings controls are keyed by `LibraryId`, and the mapping rows by their node.
+  - m6: the tests assert the initial and Cancel focus, and wait for the service before negative checks.
+  - m7: Remove's question says when open script tabs of the library have unsaved changes, whose recovery copies go with it.
+  - m9: Cancel and Show here stay together on the right when the footer wraps.
+  - m10: the launch-time and remove-then-break residuals of R-T10-7 go to T20; a persisted last good binding would close them.
+
 ## m4b-t18 — Run as script
 
 `scripts::run_as_script` (HV-SCRIPT-12, R-M4b-20; NOTES surface 9). The runner and its exec changes are ADR 0006 `m4b-t18`.

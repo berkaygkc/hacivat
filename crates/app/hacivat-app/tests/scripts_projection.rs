@@ -1071,7 +1071,8 @@ fn file_and_database_menus_carry_the_scripts_items(cx: &mut TestAppContext) {
             "scripts.reveal",
             "scripts.copy_path",
             "—",
-            "(scripts.library_settings)",
+            // ## m4b-t16-attach (named line): enabled since Task 16 (Settings › Script libraries).
+            "scripts.library_settings",
             "explorer.collapse_children",
         ]
     );

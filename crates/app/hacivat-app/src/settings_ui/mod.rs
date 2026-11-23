@@ -13,6 +13,8 @@ pub mod value_limit;
 pub mod metadata;
 // ## m4-t32-shots (named exception; PO R-W5-14 a): Settings › General › Time zone.
 pub mod time_zone;
+// ## m4b-t16-attach (named line): Settings › Script libraries (M4b Task 16).
+pub mod scripts;
 
 use std::rc::Rc;
 
@@ -129,6 +131,8 @@ pub struct SettingsPage {
     metadata: metadata::MetadataControls,
     // ## m4-t32-shots (named exception; PO R-W5-14 a)
     time_zone: time_zone::TimeZoneControl,
+    // ## m4b-t16-attach (named line)
+    scripts: Entity<scripts::ScriptsSection>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -193,6 +197,8 @@ impl SettingsPage {
         let metadata = metadata::MetadataControls::new(window, cx);
         // ## m4-t32-shots (named exception; PO R-W5-14 a)
         let time_zone = time_zone::TimeZoneControl::new(cx);
+        // ## m4b-t16-attach (named line)
+        let scripts = cx.new(scripts::ScriptsSection::new);
         Self {
             search,
             query: String::new(),
@@ -208,6 +214,8 @@ impl SettingsPage {
             metadata,
             // ## m4-t32-shots (named exception; PO R-W5-14 a)
             time_zone,
+            // ## m4b-t16-attach (named line)
+            scripts,
             _subscriptions: vec![
                 subscription,
                 limit_events,
@@ -787,7 +795,38 @@ impl Render for SettingsPage {
                 list = list.child(self.row(row, &settings, &theme, cx));
             }
         }
-        if keys.is_empty() {
+        // ## m4b-t16-attach (named exception): Script libraries is its own content; a search
+        // also lists the libraries it finds (NOTES M4b surface 4), under the section's title.
+        let query = self.query.clone();
+        self.scripts
+            .update(cx, |s, cx| s.set_query(query.trim(), cx));
+        let scripts_shown = if query.trim().is_empty() {
+            self.section == Section::Scripts
+        } else {
+            scripts::any_match(&query, cx)
+        };
+        if scripts_shown {
+            if !query.trim().is_empty() {
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .h(px(t.spacing.panel_header_height))
+                        .pl(px(t.spacing.xl))
+                        .child(
+                            Label::new(
+                                tr(cx, Section::Scripts.heading(), NoArgs),
+                                TextSource::Fluent,
+                                t.type_ramp.panel_title,
+                                c.text_2.to_hsla(),
+                            )
+                            .id("settings-scripts-title"),
+                        ),
+                );
+            }
+            list = list.child(self.scripts.clone());
+        }
+        if keys.is_empty() && !scripts_shown {
             list = list.child(
                 div().pl(px(t.spacing.xl)).pt(px(t.spacing.lg)).child(
                     Label::new(
