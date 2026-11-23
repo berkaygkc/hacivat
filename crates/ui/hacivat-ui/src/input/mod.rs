@@ -848,6 +848,7 @@ impl Element for InputText {
                 path: "hacivat-ui/src/input/mod.rs#placeholder".into(),
                 visible,
                 outside_card,
+                folded: false,
             });
         }
 

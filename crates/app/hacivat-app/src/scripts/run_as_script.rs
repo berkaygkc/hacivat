@@ -1393,6 +1393,13 @@ pub mod fixtures {
         notify_host(console, cx);
         super::strip_changed(console, cx);
     }
+
+    // ## m4b-t22-pre fix round 1 (T22-pre review I1)
+    /// Whether Stop was asked of the run on console `console` (a strip of [`show_strip`] has no
+    /// run to end).
+    pub fn stop_asked(console: ConsoleId, cx: &App) -> bool {
+        view_of(console, cx).is_some_and(|v| *v.read(cx).cancel.borrow())
+    }
 }
 
 #[cfg(test)]

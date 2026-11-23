@@ -14,15 +14,19 @@
 //! "Open under another connection…" is disabled, with the reason as its label's neighbour,
 //! when no other connection shows the file (N2).
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use hacivat_l10n::ArgValue;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::focus_home::{HomeSlot, first_stop_home};
+use hacivat_ui::follow::FollowFocus;
 use hacivat_ui::notice::{InlineNotice, NoticeIcon};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Entity, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
-    div, px,
+    AnyElement, App, Entity, EntityId, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px,
 };
-use hacivat_ui_core::theme::Theme;
+use hacivat_ui_core::theme::{Theme, ThemeTokens};
 
 use crate::scripts::open;
 use crate::scripts::save::{self, ConfirmSpec};
@@ -32,8 +36,13 @@ use crate::scripts::tabs::{
 
 /// The notices of script tab `doc`, under its toolbar (`None`: none).
 pub(crate) fn render(doc: &Entity<ScriptDoc>, cx: &mut App) -> Option<AnyElement> {
-    let notices = doc.read(cx).notices.clone();
-    let shown: Vec<AnyElement> = notices.iter().filter_map(|n| notice(doc, n, cx)).collect();
+    let shown: Vec<InlineNotice> = doc
+        .read(cx)
+        .notices
+        .clone()
+        .iter()
+        .filter_map(|n| notice(doc, n, cx).map(|card| card.title_id(NOTICE_TITLE_IDS[rank(n)])))
+        .collect();
     if shown.is_empty() {
         return None;
     }
@@ -48,6 +57,305 @@ pub(crate) fn render(doc: &Entity<ScriptDoc>, cx: &mut App) -> Option<AnyElement
             .children(shown)
             .into_any_element(),
     )
+}
+
+// ## m4b-t22-pre (T21 r1); fix round 1 (T22-pre review I3, ruling R-T22-1)
+/// The ids appended to a script notice's title in the text registry, by severity
+/// ([`rank`]): the frame checks require the most severe one shown whole.
+pub const NOTICE_TITLE_IDS: [&str; 4] = [
+    "script-notice-title-0",
+    "script-notice-title-1",
+    "script-notice-title-2",
+    "script-notice-title-3",
+];
+
+/// How severe a notice is, most severe first: the connection deleted, the file deleted, the
+/// file changed, then every other notice (ruling R-T22-1).
+fn rank(n: &Notice) -> usize {
+    match n {
+        Notice::Removed => 0,
+        Notice::Deleted => 1,
+        Notice::Changed => 2,
+        _ => 3,
+    }
+}
+
+// ## m4b-t22-pre (named item, T21 r1); fix round 1 (T22-pre review I1–I3, m1; ruling R-T22-1)
+/// Where a script tab's notices sit while a Run-as-script strip shows. Inside the console tile,
+/// highest first: the toolbar and the trust signals; the strip with Stop; the title and button
+/// row of the most severe notice; the code's two lines; the other notices. A lower item gives
+/// way first:
+/// - The notices are ordered by severity ([`rank`]). The most severe sits in a scroll area of
+///   its own (the head) whose floor is its title and its button row, measured each frame; the
+///   others share a second scroll area that gives up its height first (a far larger shrink
+///   factor, no floor).
+/// - The head's floor gives way to the strip: when the strip ran past the tile's bottom in the
+///   last frame, the floor drops by that much (`cap`), and rises again as room comes back.
+/// - The head notice is condensed (its buttons drawn under its title, its explanation below
+///   them) only while it does not fit whole, so a tile with room shows it as without a strip.
+/// - Both areas follow the focus (a button Tab lands on scrolls into view) and scroll back to
+///   their top when the focus leaves them.
+///
+/// Kept by the console host across frames.
+#[derive(Clone)]
+pub(crate) struct NoticeArea {
+    head: FollowFocus,
+    rest: FollowFocus,
+    /// The head column's top in this frame (window coordinates).
+    top: Rc<Cell<f32>>,
+    /// This frame's head title bottom and button row height (prepaint scratch).
+    title_bottom: Rc<Cell<Option<f32>>>,
+    row_h: Rc<Cell<Option<f32>>>,
+    /// The head's floor as last measured: title and row, and room for the focus margin.
+    floor: Rc<Cell<Option<f32>>>,
+    /// The floor's cap while the strip needs the room (`None`: no cap).
+    cap: Rc<Cell<Option<f32>>>,
+    /// The head notice is drawn condensed.
+    condensed: Rc<Cell<bool>>,
+    /// The tile's bottom in this frame.
+    tile_bottom: Rc<Cell<f32>>,
+    /// A button of the other notices held the focus in the last frame: their area keeps room
+    /// to show it, taken from the head down to its floor first.
+    rest_focus: Rc<Cell<bool>>,
+}
+
+impl Default for NoticeArea {
+    fn default() -> Self {
+        NoticeArea {
+            head: FollowFocus::new().home_on_leave(),
+            rest: FollowFocus::new().home_on_leave(),
+            top: Rc::default(),
+            title_bottom: Rc::default(),
+            row_h: Rc::default(),
+            floor: Rc::default(),
+            cap: Rc::default(),
+            condensed: Rc::default(),
+            tile_bottom: Rc::default(),
+            rest_focus: Rc::default(),
+        }
+    }
+}
+
+/// Room kept under the head's button row: the focus-follow margin, so Tab onto the row never
+/// scrolls the title away.
+const HEAD_PAD_PX: f32 = 8.0;
+
+impl NoticeArea {
+    /// The notices of `doc` in their two areas (empty: none); `host`, the view drawing them,
+    /// is drawn again when a measure changes.
+    pub(crate) fn render(
+        &self,
+        doc: &Entity<ScriptDoc>,
+        host: EntityId,
+        cx: &mut App,
+    ) -> Vec<AnyElement> {
+        let mut notices = doc.read(cx).notices.clone();
+        notices.sort_by_key(rank);
+        let mut shown: Vec<InlineNotice> = notices
+            .iter()
+            .filter_map(|n| notice(doc, n, cx).map(|card| card.title_id(NOTICE_TITLE_IDS[rank(n)])))
+            .collect();
+        if shown.is_empty() {
+            return Vec::new();
+        }
+        let t = Theme::get(cx).tokens;
+        let first = shown.remove(0);
+        let has_rest = !shown.is_empty();
+        let (title_bottom, row_h) = (self.title_bottom.clone(), self.row_h.clone());
+        let first = first
+            .actions_first(self.condensed.get())
+            .on_title_bounds(Rc::new(move |b, _, _| {
+                title_bottom.set(Some(f32::from(b.bottom())))
+            }))
+            .on_actions_bounds(Rc::new(move |b, _, _| {
+                row_h.set(Some(f32::from(b.size.height)))
+            }));
+        // The head column; its first child notes its top and clears the frame's scratch.
+        let (top, tb, rh) = (
+            self.top.clone(),
+            self.title_bottom.clone(),
+            self.row_h.clone(),
+        );
+        let head_col = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .px(px(t.spacing.lg))
+            .pt(px(t.spacing.sm))
+            .pb(px(if has_rest { 0.0 } else { t.spacing.sm }))
+            .child(
+                canvas(
+                    move |b, _, _| {
+                        top.set(f32::from(b.top()));
+                        tb.set(None);
+                        rh.set(None);
+                    },
+                    |_, (), _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_0(),
+            )
+            .child(first);
+        let floor = self.floor.get().unwrap_or_else(|| fallback_floor(t));
+        let floor = self.cap.get().map_or(floor, |cap| floor.min(cap));
+        let end = self.head.clone();
+        let this = self.clone();
+        let head = div()
+            .child(self.head.scope_start())
+            .on_children_prepainted(move |_, window, cx| {
+                end.scope_end(window, cx);
+                this.measured(host, cx);
+            })
+            .id("script-notice-head")
+            .debug_selector(|| "script-notice-head".to_string())
+            .flex_shrink(1.0)
+            .min_h(px(floor))
+            .overflow_y_scroll()
+            .track_scroll(self.head.scroll_handle())
+            .child(hacivat_ui::text::scroll_viewport())
+            .child(head_col)
+            .into_any_element();
+        let mut out = vec![head];
+        if has_rest {
+            let end = self.rest.clone();
+            let focus = self.rest_focus.clone();
+            // The other notices give way first, but a focused button of theirs keeps the room
+            // that shows it (a Tab stop is never drawn nowhere).
+            let rest_min = if self.rest_focus.get() {
+                t.spacing.control_height + 2.0 * HEAD_PAD_PX
+            } else {
+                0.0
+            };
+            out.push(
+                div()
+                    .child(self.rest.scope_start())
+                    .on_children_prepainted(move |_, window, cx| {
+                        end.scope_end(window, cx);
+                        if focus.replace(end.holds_focus()) != end.holds_focus() {
+                            cx.defer(move |cx| cx.notify(host));
+                        }
+                    })
+                    .id("script-notices")
+                    .debug_selector(|| "script-notices".to_string())
+                    .flex_shrink(REST_SHRINK)
+                    .min_h(px(rest_min))
+                    .overflow_y_scroll()
+                    .track_scroll(self.rest.scroll_handle())
+                    .child(hacivat_ui::text::scroll_viewport())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(t.spacing.sm))
+                            .px(px(t.spacing.lg))
+                            .py(px(t.spacing.sm))
+                            .children(shown),
+                    )
+                    .into_any_element(),
+            );
+        }
+        out
+    }
+
+    /// After the head laid out: its floor (title and row) and whether it fits whole; a change
+    /// draws the host again (one frame: neither depends on the floor or the form).
+    fn measured(&self, host: EntityId, cx: &mut App) {
+        let mut changed = false;
+        if let Some(title) = self.title_bottom.get() {
+            let row = self
+                .row_h
+                .get()
+                .map_or(0.0, |h| h + Theme::get(cx).tokens.spacing.md);
+            let want = title - self.top.get() + row + HEAD_PAD_PX;
+            if self.floor.get().is_none_or(|f| (f - want).abs() > 0.5) {
+                self.floor.set(Some(want));
+                changed = true;
+            }
+        }
+        // Condensed while the head does not fit whole. A condensed head is a little taller
+        // (the gap above its explanation), so it goes back only once that fits too: no flip.
+        let cut = f32::from(self.head.scroll_handle().max_offset().y) > 0.5;
+        if cut != self.condensed.get() {
+            self.condensed.set(cut);
+            changed = true;
+        }
+        if changed {
+            cx.defer(move |cx| cx.notify(host));
+        }
+    }
+
+    /// An absolute probe for the console tile: notes the tile's bottom.
+    pub(crate) fn tile_probe(&self) -> AnyElement {
+        let bottom = self.tile_bottom.clone();
+        canvas(
+            move |b, _, _| bottom.set(f32::from(b.bottom())),
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
+    }
+
+    /// An absolute probe for the strip's row: when the strip ran past the tile's bottom, the
+    /// head's floor gives up that much; when room is left under it, the floor takes it back
+    /// (up to the measured floor). The strip outranks the head (ruling R-T22-1).
+    pub(crate) fn strip_probe(&self, host: EntityId) -> AnyElement {
+        let this = self.clone();
+        canvas(
+            move |b, _, cx| {
+                let Some(full) = this.floor.get() else {
+                    return;
+                };
+                let now = this.cap.get().map_or(full, |c| c.min(full));
+                let spare = this.tile_bottom.get() - f32::from(b.bottom());
+                let next = (now + spare).clamp(0.0, full);
+                let cap = (next < full - 0.5).then_some(next);
+                let moved = match (this.cap.get(), cap) {
+                    (None, None) => false,
+                    (Some(a), Some(b)) => (a - b).abs() > 0.5,
+                    _ => true,
+                };
+                if moved {
+                    this.cap.set(cap);
+                    cx.defer(move |cx| cx.notify(host));
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
+    }
+
+    /// No strip shows: back to the top, measures kept, nothing condensed or capped.
+    pub(crate) fn reset(&self) {
+        for f in [&self.head, &self.rest] {
+            f.scroll_handle().set_offset(point(px(0.0), px(0.0)));
+        }
+        self.condensed.set(false);
+        self.cap.set(None);
+        self.rest_focus.set(false);
+    }
+}
+
+/// The other notices' shrink factor against the head's 1: they give way first.
+const REST_SHRINK: f32 = 1000.0;
+
+/// The head's floor before its first measure: a one-line title, a button row, the padding.
+fn fallback_floor(t: &ThemeTokens) -> f32 {
+    t.spacing.sm
+        + 1.0
+        + t.spacing.md
+        + t.type_ramp.body_sm.line_height
+        + t.spacing.md
+        + t.spacing.control_height
+        + HEAD_PAD_PX
 }
 
 /// The state of a tab whose text is not shown yet (or will not be), in its own home.
@@ -133,7 +441,7 @@ pub(crate) fn render_unloaded(
 /// The encodings the question offers (NOTES surface 10; the Turkish ones first).
 const ENCODINGS: [&str; 4] = ["windows-1254", "ISO-8859-9", "windows-1252", "UTF-16LE"];
 
-fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElement> {
+fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<InlineNotice> {
     let file = tabs::file_label(doc.read(cx), cx);
     let conn = tabs::conn_label(doc.read(cx), cx);
     let tab = doc.read(cx).tab.0;
@@ -424,7 +732,7 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
             InlineNotice::new(NoticeIcon::Info).line(msg(cx, "hv-scripts-one-session", Vec::new()))
         }
     };
-    Some(card.into_any_element())
+    Some(card)
 }
 
 /// Adds "Open under another connection…", disabled with its reason when no other connection

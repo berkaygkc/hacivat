@@ -615,3 +615,270 @@ fn a_connections_short_form_cuts_whole_clusters_after_nfc_and_escapes_each_part(
     assert_eq!(tab_conn_short(&"x".repeat(40)), None);
     assert_eq!(tab_conn_short(&format!("{}ş", "x".repeat(39))), None);
 }
+
+// ## m4b-t22-pre (T21 r1, MUST); fix round 1 (T22-pre review I1–I3, ruling R-T22-1): inside a
+// console tile during a Run as script, highest first: the toolbar and the trust signals; the
+// strip with Stop; the title and button row of the most severe notice; the code's two lines;
+// the other notices.
+
+/// Where the notices show while a strip shows: from the toolbar's foot to the T2 banner's top
+/// (the row under them).
+fn notice_room(r: &mut Rig) -> (f32, f32) {
+    redraw_full(r.vcx);
+    let bar = r
+        .vcx
+        .debug_bounds("toolbar-console-toolbar")
+        .expect("the toolbar");
+    let banner = r
+        .vcx
+        .debug_bounds("editor-t2-banner")
+        .expect("the T2 banner");
+    (f32::from(bar.bottom()), f32::from(banner.top()))
+}
+
+/// The drawn record of a notice title: the one whose text is `title`, among the titles the
+/// notices record at prepaint (`#script-notice-title…`).
+fn title_record(r: &mut Rig, title: &str) -> hacivat_ui::text::RenderedText {
+    let frame = full_frame(r.vcx);
+    frame
+        .iter()
+        .find(|t| t.path.contains("#script-notice-title") && t.text.as_ref() == title)
+        .cloned()
+        .unwrap_or_else(|| {
+            let titles: Vec<_> = frame
+                .iter()
+                .filter(|t| t.path.contains("#script-notice-title"))
+                .collect();
+            panic!("no notice title {title:?}: {titles:?}")
+        })
+}
+
+/// The text of the first notice title drawn (the most severe notice's, under a strip).
+fn first_title_text(r: &mut Rig) -> String {
+    full_frame(r.vcx)
+        .into_iter()
+        .find(|t| t.path.contains("#script-notice-title"))
+        .map(|t| t.text.to_string())
+        .expect("a notice title")
+}
+
+/// `title` is drawn whole: visible, not clipped, not cut or hidden at a scroll fold.
+#[track_caller]
+fn assert_title_whole(r: &mut Rig, title: &str, when: &str) {
+    let t = title_record(r, title);
+    assert!(
+        t.visible && !t.clipped && !t.folded,
+        "{when}: the title {title:?} is not whole: {t:?}"
+    );
+}
+
+/// Drags the seam between the editor tile and the results up to the tile's top plus `h` (a
+/// shorter console tile: the results split dragged up).
+fn console_tile_to(r: &mut Rig, h: f32) {
+    let tile = r
+        .vcx
+        .debug_bounds("console-tile")
+        .expect("the console tile");
+    let x = tile.center().x;
+    let from = gpui::point(x, tile.bottom() + gpui::px(0.5));
+    let to = gpui::point(x, tile.top() + gpui::px(h));
+    r.vcx
+        .simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
+    r.vcx
+        .simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::none());
+    r.vcx
+        .simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+    r.vcx.run_until_parked();
+    redraw_full(r.vcx);
+    let now = r
+        .vcx
+        .debug_bounds("console-tile")
+        .expect("the console tile");
+    assert!(
+        f32::from(now.size.height) < f32::from(tile.size.height) - 50.0,
+        "the tile is shorter: {tile:?} → {now:?}"
+    );
+}
+
+/// A big script's tab at 960 × 600 in `lang`: `notices` shown in that order, a strip, and the
+/// find bar when `find`.
+fn under_a_strip(
+    cx: &mut TestAppContext,
+    lang: &str,
+    notices: &[Notice],
+    find: bool,
+) -> (Rig, TabId) {
+    let (mut r, prod) = prod_rig_in(cx, lang, &[("big.sql", big_script().into_bytes())]);
+    let tab = r.open_until("big.sql", prod, ready);
+    r.vcx
+        .simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+    for n in notices {
+        r.notice(tab, n.clone());
+    }
+    r.strip(tab);
+    if find {
+        let editor = r.editor(tab);
+        in_window(r.vcx, |window, cx| {
+            let f = gpui::Focusable::focus_handle(editor.read(cx), cx);
+            window.focus(&f, cx);
+            hacivat_ui::actions::ActionRegistry::run("editor.find", window, cx);
+        });
+        let console = r.console(tab);
+        wait_until(r.vcx, "the find bar", |vcx| {
+            vcx.cx
+                .read(|cx| hacivat_app::console::find_bar::is_open(console, cx))
+        });
+    }
+    redraw_full(r.vcx);
+    (r, tab)
+}
+
+/// Tab onto each of the Deleted notice's buttons (Save, Close tab: the two stops before the
+/// strip's Stop) shows it whole in the notices' room, the drawn `keep` title stays whole after
+/// each Tab, and once the focus moves on to Stop it is whole too (the areas scroll back).
+fn tab_through_the_deleted_notice(r: &mut Rig, tab: TabId, keep: &str, what: &str) {
+    assert_title_whole(r, keep, what);
+    let stop = handle_of(r.vcx, "button-script-run-stop");
+    let order = tab_order(r.vcx);
+    let at = order
+        .iter()
+        .position(|h| *h == stop)
+        .expect("Stop is a Tab stop");
+    assert!(
+        at >= 3,
+        "{what}: the toolbar and the notice's two buttons come first"
+    );
+    let buttons = [
+        ("Save", format!("button-script-recreate-{}", tab.0), at - 2),
+        (
+            "Close tab",
+            format!("button-script-close-{}", tab.0),
+            at - 1,
+        ),
+    ];
+    for (name, button, i) in buttons {
+        in_window(r.vcx, |window, cx| window.focus(&order[i - 1], cx));
+        redraw_full(r.vcx);
+        press_key(r.vcx, "tab");
+        assert_focus_on(r.vcx, name, &order[i]);
+        // The scroll lands in the next frame.
+        redraw_full(r.vcx);
+        redraw_full(r.vcx);
+        let (top, bottom) = notice_room(r);
+        let b = r
+            .vcx
+            .debug_bounds(selector(&button))
+            .unwrap_or_else(|| panic!("{what}: {name} is drawn"));
+        assert!(
+            f32::from(b.top()) >= top - 0.5 && f32::from(b.bottom()) <= bottom + 0.5,
+            "{what}: Tab onto {name} shows it whole: {b:?} in {top}..{bottom}"
+        );
+        assert_title_whole(r, keep, &format!("{what}, after Tab onto {name}"));
+    }
+    // On to Stop: the focus leaves the notices.
+    press_key(r.vcx, "tab");
+    assert_focus_on(r.vcx, "Stop", &order[at]);
+    redraw_full(r.vcx);
+    redraw_full(r.vcx);
+    assert_title_whole(r, keep, &format!("{what}, after Tab onto Stop"));
+}
+
+/// I2 at 960 × 600 (tr-XT, the longest copy), with a strip, the banner and the find bar: the
+/// connection was deleted, then the file. The most severe title (the connection's) stays
+/// whole through every Tab onto the Deleted notice's buttons, which scroll into view.
+#[gpui::test]
+fn a_deleted_notice_under_a_strip_keeps_its_title_and_reveals_its_buttons_at_960(
+    cx: &mut TestAppContext,
+) {
+    let (mut r, tab) = under_a_strip(cx, "tr-XT", &[Notice::Removed, Notice::Deleted], true);
+    let keep = first_title_text(&mut r);
+    tab_through_the_deleted_notice(&mut r, tab, &keep, "960 × 600");
+}
+
+/// I2 in a tile where the notice sits at its floor (the results split dragged up): the floor
+/// is the title and the button row, so Tab onto either button never scrolls the title away,
+/// and leaving the notice leaves it whole.
+#[gpui::test]
+fn tab_onto_a_notice_at_its_floor_keeps_its_title(cx: &mut TestAppContext) {
+    let (mut r, tab) = under_a_strip(cx, "en", &[Notice::Deleted], true);
+    console_tile_to(&mut r, 230.0);
+    let (top, bottom) = notice_room(&mut r);
+    let card = r
+        .vcx
+        .debug_bounds("inline-notice")
+        .expect("the notice's card");
+    assert!(
+        bottom - top < f32::from(card.size.height),
+        "the notice is at its floor: {top}..{bottom} for {card:?}"
+    );
+    tab_through_the_deleted_notice(&mut r, tab, "big.sql was deleted on disk.", "a 230 px tile");
+}
+
+/// I3 at 960 × 600: "Recovered…" came first, then "Deleted on disk". Under a strip the most
+/// severe notice comes first and keeps its floor: the Deleted title is whole.
+#[gpui::test]
+fn the_most_severe_notice_under_a_strip_keeps_its_title(cx: &mut TestAppContext) {
+    let recovered = Notice::Recovered {
+        at: std::time::UNIX_EPOCH + Duration::from_secs(1_795_259_100),
+        unknown: false,
+        secret: false,
+    };
+    let (mut r, _) = under_a_strip(cx, "en", &[recovered, Notice::Deleted], true);
+    assert_title_whole(&mut r, "big.sql was deleted on disk.", "960 × 600");
+    assert_eq!(
+        first_title_text(&mut r),
+        "big.sql was deleted on disk.",
+        "the most severe notice first"
+    );
+}
+
+/// I1 in a console tile at the seam's 120 px floor: the strip outranks the notice's floor, so
+/// the strip and its Stop are drawn inside the tile, and the toolbar's run button is Stop for
+/// the whole run (its first row never leaves the tile).
+#[gpui::test]
+fn a_short_tile_keeps_the_strip_and_stop(cx: &mut TestAppContext) {
+    let (mut r, tab) = under_a_strip(cx, "en", &[Notice::Deleted], true);
+    console_tile_to(&mut r, 120.0);
+    redraw_full(r.vcx);
+    redraw_full(r.vcx);
+    let tile = r
+        .vcx
+        .debug_bounds("console-tile")
+        .expect("the console tile");
+    let inside = |b: gpui::Bounds<gpui::Pixels>| {
+        b.top() >= tile.top() - gpui::px(0.5) && b.bottom() <= tile.bottom() + gpui::px(0.5)
+    };
+    let stop = r
+        .vcx
+        .debug_bounds("button-script-run-stop")
+        .expect("the strip's Stop");
+    assert!(inside(stop), "the strip's Stop {stop:?} inside {tile:?}");
+    let run = r
+        .vcx
+        .debug_bounds("button-console-run")
+        .expect("the toolbar's run button");
+    assert!(inside(run), "the toolbar's Stop {run:?} inside {tile:?}");
+    let stop_word = full_frame(r.vcx).into_iter().any(|t| {
+        t.visible && t.path.ends_with("#button-label-console-run") && t.text.as_ref() == "Stop"
+    });
+    assert!(stop_word, "the toolbar's run button says Stop");
+    // Tab onto the strip's Stop lands on a Stop drawn inside the tile.
+    let handle = handle_of(r.vcx, "button-script-run-stop");
+    in_window(r.vcx, |window, cx| window.blur(cx));
+    in_window(r.vcx, |window, cx| window.focus(&handle, cx));
+    redraw_full(r.vcx);
+    let stop = r
+        .vcx
+        .debug_bounds("button-script-run-stop")
+        .expect("the strip's Stop");
+    assert!(inside(stop), "focused, Stop {stop:?} is inside {tile:?}");
+    // The toolbar's Stop stops the run.
+    let console = r.console(tab);
+    let handle = handle_of(r.vcx, "button-console-run");
+    assert_focus_on(r.vcx, "the toolbar's Stop", &handle);
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "the run stops", |vcx| {
+        vcx.cx
+            .read(|cx| run_as_script::fixtures::stop_asked(console, cx))
+    });
+}

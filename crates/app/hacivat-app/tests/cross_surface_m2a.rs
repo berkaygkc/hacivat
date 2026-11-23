@@ -385,6 +385,7 @@ fn the_leak_check_finds_english_text() {
         // ## m2b-t24-shots (fix round 1): the registry's two new facts.
         visible: true,
         outside_card: false,
+        folded: false,
     };
     let leaks = english_leaks(&[
         label("New connection"),

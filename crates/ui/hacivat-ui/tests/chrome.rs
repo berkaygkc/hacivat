@@ -1342,3 +1342,187 @@ fn names_that_differ_in_the_middle_read_apart(cx: &mut TestAppContext) {
     assert!(texts.contains(&LONG.to_string()), "{texts:?}");
     assert!(texts.contains(&us.to_string()), "{texts:?}");
 }
+
+// ## m4b-t22-pre (T21 r2, r3)
+
+/// A view that counts its renders (drawn cached by its host).
+struct Counted(Rc<Cell<usize>>);
+
+impl gpui::Render for Counted {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        self.0.set(self.0.get() + 1);
+        div().size(px(10.0))
+    }
+}
+
+/// A strip with a two-part title (so it plans with its width) beside a cached view, in a
+/// window of its own; the cached view's render count.
+fn strip_beside_a_cached_view(
+    cx: &mut TestAppContext,
+) -> (&mut VisualTestContext, Rc<Cell<usize>>) {
+    let renders = Rc::new(Cell::new(0));
+    let counted = cx.update(|cx| gpui::AppContext::new(cx, |_| Counted(renders.clone())));
+    let tabs = vec![
+        script_tab(1, "orders_report.sql", " · orders-prod", None),
+        script_tab(2, "orders_report.sql", LONG, Some(LONG_SHORT)),
+    ];
+    let vcx = host(cx, move |_, _| {
+        div()
+            .w(px(900.0))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .child(TabStrip::new(PaneId(0), tabs.clone()).active(1)),
+            )
+            .child(
+                gpui::AnyView::from(counted.clone())
+                    .cached(gpui::StyleRefinement::default().size(px(10.0))),
+            )
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    (vcx, renders)
+}
+
+/// T21 r2: a strip whose width changed draws its own view again, not every window in full: a
+/// cached view beside it is drawn once (a full refresh draws it again, uncached).
+#[gpui::test]
+fn a_strip_width_change_redraws_only_its_view(cx: &mut TestAppContext) {
+    // Another window, drawn before the strip's.
+    let other = Rc::new(Cell::new(0));
+    let o = other.clone();
+    let _other = cx.add_window(move |_, _| Counted(o));
+    cx.run_until_parked();
+    let before = other.get();
+    assert!(before >= 1, "the other window drew");
+    let (vcx, renders) = strip_beside_a_cached_view(cx);
+    // The first frame recorded the strip's width; its follow-up frame planned with it.
+    assert_eq!(
+        vcx.cx.read(hacivat_ui::panes::strip_widths_held),
+        1,
+        "the strip's width is recorded"
+    );
+    assert_eq!(
+        renders.get(),
+        1,
+        "the cached view is drawn once, not refreshed"
+    );
+    assert_eq!(other.get(), before, "the other window is not redrawn");
+}
+
+/// T21 r2: the widths of a closed window's strips, and of a pane its owner no longer draws, go.
+#[gpui::test]
+fn strip_widths_go_with_their_window_and_pane(cx: &mut TestAppContext) {
+    let live = Rc::new(Cell::new(2u32));
+    let shown = live.clone();
+    let vcx = host(cx, move |window, cx| {
+        let n = shown.get();
+        hacivat_ui::panes::keep_strip_widths(window, (0..n).map(PaneId), cx);
+        let mut row = div().w(px(900.0)).flex().flex_col();
+        for pane in 0..n {
+            row = row.child(
+                div().flex().flex_row().child(
+                    TabStrip::new(
+                        PaneId(pane),
+                        vec![script_tab(pane + 1, "a.sql", " · orders-prod", None)],
+                    )
+                    .active(0),
+                ),
+            );
+        }
+        row.into_any_element()
+    });
+    vcx.run_until_parked();
+    assert_eq!(vcx.cx.read(hacivat_ui::panes::strip_widths_held), 2);
+    // Pane 1 closes: its owner draws pane 0 only.
+    live.set(1);
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.cx.read(hacivat_ui::panes::strip_widths_held),
+        1,
+        "the closed pane's width goes"
+    );
+    // The window closes.
+    vcx.update(|window, _| window.remove_window());
+    vcx.run_until_parked();
+    assert_eq!(
+        cx.read(hacivat_ui::panes::strip_widths_held),
+        0,
+        "the closed window's widths go"
+    );
+}
+
+/// T21 r3: the width the strip's plan gives each tab is the width the tab is laid out at
+/// (a two-part title's plan keeps its documented pixel of slack per part, the rounding of its
+/// two labels), for a sample of
+/// tabs: plain and data titles, an environment swatch, the dirty dot, the active tab's close
+/// button, two-part titles active and not.
+#[gpui::test]
+fn the_plans_tab_widths_are_the_laid_out_widths(cx: &mut TestAppContext) {
+    let tabs = vec![
+        TabSpec {
+            title_source: TextSource::Fluent,
+            ..tab(1, "Settings")
+        },
+        TabSpec {
+            env: Some(EnvKind::Production),
+            dirty: true,
+            ..tab(2, "orders.sql")
+        },
+        TabSpec {
+            env: Some(EnvKind::Staging),
+            ..script_tab(3, "orders_report.sql", " · orders-prod", None)
+        },
+        TabSpec {
+            dirty: true,
+            ..script_tab(4, "a.sql", LONG, Some(LONG_SHORT))
+        },
+        tab(5, "scratch.sql"),
+    ];
+    for active in [1usize, 3] {
+        let specs = tabs.clone();
+        let vcx = host(cx, move |_, _| {
+            div()
+                .w(px(2400.0))
+                .flex()
+                .flex_row()
+                .child(TabStrip::new(PaneId(0), specs.clone()).active(active))
+                .into_any_element()
+        });
+        // No tab is hovered (a hovered tab shows its close button, which no plan counts).
+        vcx.simulate_mouse_move(
+            gpui::point(px(10.0), px(300.0)),
+            None,
+            gpui::Modifiers::none(),
+        );
+        vcx.run_until_parked();
+        for (i, spec) in tabs.iter().enumerate() {
+            let selector: &'static str = Box::leak(format!("tab-{}", spec.id.0).into_boxed_str());
+            let laid = f32::from(
+                vcx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} is drawn"))
+                    .size
+                    .width,
+            );
+            let planned = vcx.update(|window, cx| {
+                hacivat_ui::panes::planned_tab_width(spec, i == active, window, cx)
+            });
+            // Never less than laid out; more only by a two-part title's slack (its labels lay
+            // out at whole pixels).
+            let slack = if spec.parts.is_some() { 2.0 } else { 0.0 };
+            assert!(
+                planned >= laid - 0.5 && planned - laid <= slack + 0.5,
+                "{selector} (active {}): planned {planned} (slack {slack}), laid out {laid}",
+                i == active
+            );
+        }
+    }
+}

@@ -5,11 +5,12 @@
 //! existing [`Button`]s. Announced as a status.
 
 use std::panic::Location;
+use std::rc::Rc;
 
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Hsla, InteractiveElement, IntoElement, ParentElement, Role, SharedString,
-    Styled, div, px,
+    AnyElement, App, Bounds, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Role,
+    SharedString, Styled, Window, canvas, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, TypeStyle};
 
@@ -31,6 +32,10 @@ pub enum NoticeIcon {
     Done,
 }
 
+// ## m4b-t22-pre (named item, T21 r1)
+/// Called at prepaint with the bounds of a notice's title lines ([`InlineNotice::on_title_bounds`]).
+pub type TitleBounds = Rc<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)>;
+
 /// A notice inside a form (NOTES "NEW primitives").
 pub struct InlineNotice {
     icon: NoticeIcon,
@@ -39,6 +44,12 @@ pub struct InlineNotice {
     params: Vec<(SharedString, SharedString)>,
     actions: Vec<Button>,
     trailing: Option<Button>,
+    // ## m4b-t22-pre (T21 r1)
+    title_id: Option<&'static str>,
+    on_title: Option<TitleBounds>,
+    actions_first: bool,
+    // ## m4b-t22-pre fix round 1 (T22-pre review I2)
+    on_actions: Option<TitleBounds>,
 }
 
 impl InlineNotice {
@@ -50,6 +61,10 @@ impl InlineNotice {
             params: Vec::new(),
             actions: Vec::new(),
             trailing: None,
+            title_id: None,
+            on_title: None,
+            actions_first: false,
+            on_actions: None,
         }
     }
 
@@ -82,12 +97,45 @@ impl InlineNotice {
         self.trailing = Some(button);
         self
     }
+
+    // ## m4b-t22-pre (named items, T21 r1): a notice that may sit in a scroll area too short
+    // for it (a script tab's notices while a Run-as-script strip shows).
+    /// Records the title lines (the [`InlineNotice::line`]s) with `#id` appended to their path,
+    /// and completes their records at prepaint with what the clip they are painted in shows
+    /// (`visible`, `clipped`, [`crate::text::RenderedText::folded`]), so the frame checks can
+    /// require the title whole.
+    pub fn title_id(mut self, id: &'static str) -> Self {
+        self.title_id = Some(id);
+        self
+    }
+
+    /// Calls `f` at prepaint with the bounds the title lines were laid out in.
+    pub fn on_title_bounds(mut self, f: TitleBounds) -> Self {
+        self.on_title = Some(f);
+        self
+    }
+
+    /// Draws the action row right under the title lines, above the secondary lines and
+    /// parameters: in a notice cut short, its buttons show before its explanation.
+    /// ## m4b-t22-pre fix round 1 (T22-pre review m1): only the drawing moves; the explanation
+    /// still comes before the buttons in the element tree (reading order) and the Tab order.
+    pub fn actions_first(mut self, first: bool) -> Self {
+        self.actions_first = first;
+        self
+    }
+
+    // ## m4b-t22-pre fix round 1 (named item; T22-pre review I2)
+    /// Calls `f` at prepaint with the bounds of the action row (no row: never called).
+    pub fn on_actions_bounds(mut self, f: TitleBounds) -> Self {
+        self.on_actions = Some(f);
+        self
+    }
 }
 
 impl IntoElement for InlineNotice {
     type Element = AnyElement;
 
-    fn into_element(self) -> AnyElement {
+    fn into_element(mut self) -> AnyElement {
         lazy(move |_, cx| {
             let theme = *Theme::get(cx);
             let t = theme.tokens;
@@ -108,11 +156,53 @@ impl IntoElement for InlineNotice {
                 text_run(text, TextSource::Fluent, t.type_ramp.body_sm, ink, cx)
             };
             let mut body = div().flex().flex_col().flex_1().min_w_0();
-            for text in self.lines {
-                body = body.child(line(text, c.text.to_hsla(), cx));
+            // ## m4b-t22-pre (T21 r1): the title lines in a block of their own when they are
+            // checked or measured; otherwise as before.
+            if self.title_id.is_some() || self.on_title.is_some() {
+                body = body.child(title_block(
+                    self.lines,
+                    self.title_id,
+                    self.on_title,
+                    t.type_ramp.body_sm,
+                    c.text.to_hsla(),
+                    cx,
+                ));
+            } else {
+                for text in self.lines {
+                    body = body.child(line(text, c.text.to_hsla(), cx));
+                }
             }
+            let on_actions = self.on_actions.take();
+            let actions = (!self.actions.is_empty()).then(|| {
+                let row = div()
+                    .flex()
+                    .flex_row()
+                    // ## m4b-t21-shots (named exception): a row of buttons wider than the
+                    // notice wraps (the encoding notice's four "Open as …" at 960 in the
+                    // pseudo-locales); a row that fits lays out as before.
+                    .flex_wrap()
+                    .gap(px(t.spacing.sm))
+                    .mt(px(t.spacing.md))
+                    .children(self.actions);
+                match on_actions {
+                    // ## m4b-t22-pre fix round 1: the row reports where it was laid out.
+                    Some(f) => row.relative().child(
+                        canvas(
+                            move |bounds, window, cx| f(bounds, window, cx),
+                            |_, (), _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    ),
+                    None => row,
+                }
+            });
+            // The explanation: the secondary lines, then the parameters.
+            let mut explanation: Vec<AnyElement> = Vec::new();
             for text in self.secondary {
-                body = body.child(line(text, c.text_2.to_hsla(), cx));
+                explanation.push(line(text, c.text_2.to_hsla(), cx));
             }
             if !self.params.is_empty() {
                 let mut list = div().flex().flex_col().mt(px(t.spacing.xs));
@@ -137,21 +227,28 @@ impl IntoElement for InlineNotice {
                             ))),
                     );
                 }
-                body = body.child(list);
+                explanation.push(list.into_any_element());
             }
-            if !self.actions.is_empty() {
-                body = body.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        // ## m4b-t21-shots (named exception): a row of buttons wider than the
-                        // notice wraps (the encoding notice's four "Open as …" at 960 in the
-                        // pseudo-locales); a row that fits lays out as before.
-                        .flex_wrap()
-                        .gap(px(t.spacing.sm))
-                        .mt(px(t.spacing.md))
-                        .children(self.actions),
-                );
+            match actions {
+                // ## m4b-t22-pre fix round 1 (T22-pre review m1): drawn under the title, the
+                // explanation below it, in a reversed column: the explanation stays first in
+                // the element tree.
+                Some(row) if self.actions_first => {
+                    let mut stack = div().flex().flex_col_reverse();
+                    if !explanation.is_empty() {
+                        stack = stack.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .mt(px(t.spacing.sm))
+                                .children(explanation),
+                        );
+                    }
+                    body = body.child(stack.child(row));
+                }
+                row => {
+                    body = body.children(explanation).children(row);
+                }
             }
             let card = div()
                 .debug_selector(|| "inline-notice".to_string())
@@ -186,8 +283,81 @@ fn text_run(
     color: Hsla,
     cx: &mut App,
 ) -> AnyElement {
+    text_run_at(text, source, style, color, None, cx).0
+}
+
+// ## m4b-t22-pre (T21 r1)
+/// A notice's title lines in one block: each recorded as [`text_run`] records (with `#id`
+/// appended to its path), then completed at prepaint from the clip it is painted in; `on_title`
+/// gets the block's bounds.
+#[track_caller]
+fn title_block(
+    lines: Vec<SharedString>,
+    id: Option<&'static str>,
+    on_title: Option<TitleBounds>,
+    style: TypeStyle,
+    color: Hsla,
+    cx: &mut App,
+) -> AnyElement {
+    let mut block = div().relative().flex().flex_col().w_full();
+    for text in lines {
+        let (el, index) = text_run_at(text.clone(), TextSource::Fluent, style, color, id, cx);
+        let el = match index {
+            Some(index) => div()
+                .relative()
+                .w_full()
+                .child(el)
+                .child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            let (visible, clipped, folded) =
+                                crate::text::fit_in_clip(bounds, window, cx);
+                            TextRegistry::update_at(cx, index, &text, |r| {
+                                r.visible = visible;
+                                r.clipped = clipped;
+                                r.folded = folded;
+                            });
+                        },
+                        |_, (), _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                )
+                .into_any_element(),
+            None => el,
+        };
+        block = block.child(el);
+    }
+    if let Some(f) = on_title {
+        block = block.child(
+            canvas(
+                move |bounds, window, cx| f(bounds, window, cx),
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
+    }
+    block.into_any_element()
+}
+
+/// [`text_run`], with `#id` appended to the recorded path, and the record's index in the frame
+/// when one was made with an id (the title lines complete it at prepaint).
+#[track_caller]
+fn text_run_at(
+    text: SharedString,
+    source: TextSource,
+    style: TypeStyle,
+    color: Hsla,
+    id: Option<&'static str>,
+    cx: &mut App,
+) -> (AnyElement, Option<usize>) {
     let at = Location::caller();
-    TextRegistry::record(cx, || RenderedText {
+    let make = || RenderedText {
         text: text.clone(),
         source,
         size_px: style.size_px,
@@ -197,20 +367,37 @@ fn text_run(
         // ## m2b-t24-shots: recorded when built, before layout.
         visible: true,
         outside_card: false,
-        path: format!(
-            "{}:{}:{}",
-            at.file().replace('\\', "/"),
-            at.line(),
-            at.column()
-        )
+        folded: false,
+        path: match id {
+            Some(id) => format!(
+                "{}:{}:{}#{id}",
+                at.file().replace('\\', "/"),
+                at.line(),
+                at.column()
+            ),
+            None => format!(
+                "{}:{}:{}",
+                at.file().replace('\\', "/"),
+                at.line(),
+                at.column()
+            ),
+        }
         .into(),
-    });
-    div()
+    };
+    let index = match id {
+        Some(_) => TextRegistry::record_index(cx, make),
+        None => {
+            TextRegistry::record(cx, make);
+            None
+        }
+    };
+    let el = div()
         .w_full()
         .font(font_for(&style))
         .text_size(px(style.size_px))
         .line_height(px(style.line_height))
         .text_color(color)
         .child(text)
-        .into_any_element()
+        .into_any_element();
+    (el, index)
 }

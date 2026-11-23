@@ -1768,6 +1768,8 @@ impl Render for Workspace {
         // ## m3a-t34-status-follows (fix round 1, C1): every path to a new active tab (a
         // restored layout included) is mirrored before the status bar and capsule are built.
         self.mirror_active_tab(cx);
+        // ## m4b-t22-pre (named line, T21 r2): a closed pane's tab-strip width goes.
+        hacivat_ui::panes::keep_strip_widths(window, self.panes.panes.keys().copied(), cx);
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;

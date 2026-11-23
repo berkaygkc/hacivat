@@ -408,19 +408,128 @@ fn clear_cache_confirms_deletes_and_revalidates(cx: &mut TestAppContext) {
 
 // ---- carries ----------------------------------------------------------------------------------
 
+// ## m4b-t22-pre (T21 m12)
+/// Writes one line straight to stdout, which libtest does not capture: a CI log shows it for a
+/// passing test and a failing one alike (M4 T33c).
+macro_rules! fact {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let line = format!($($arg)*).replace('\n', " ");
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    }};
+}
+
+/// The steps of a test that waits on durable writes, timed (T21 m12: the CI flake of
+/// `introspect_live_choice_persists`, never seen locally in 824 runs). Each step's time is
+/// kept; when the test fails (a wait timed out), the guard prints every step's time, the step
+/// under way, the profile's data state and the profile data saves' lock wait and write times,
+/// as `HV-FACT` lines; a passing test prints one summary line.
+struct Steps {
+    test: &'static str,
+    started: std::time::Instant,
+    at: std::time::Instant,
+    current: &'static str,
+    done: Vec<(&'static str, u128)>,
+    state: Box<dyn Fn() -> String>,
+}
+
+impl Steps {
+    fn new(test: &'static str, state: Box<dyn Fn() -> String>) -> Self {
+        let now = std::time::Instant::now();
+        Steps {
+            test,
+            started: now,
+            at: now,
+            current: "start",
+            done: Vec::new(),
+            state,
+        }
+    }
+
+    /// Ends the step under way and starts `next`.
+    fn step(&mut self, next: &'static str) {
+        let now = std::time::Instant::now();
+        self.done
+            .push((self.current, now.duration_since(self.at).as_millis()));
+        self.current = next;
+        self.at = now;
+    }
+}
+
+impl Drop for Steps {
+    fn drop(&mut self) {
+        let t = hacivat_settings::profile_data::timings::get();
+        let saves = format!(
+            "saves={} lock_wait_max_us={} locked_max_us={} lock_wait_last_us={} \
+             locked_last_us={}",
+            t.saves, t.lock_wait_max_us, t.locked_max_us, t.lock_wait_last_us, t.locked_last_us
+        );
+        let total = self.started.elapsed().as_millis();
+        if std::thread::panicking() {
+            for (name, ms) in &self.done {
+                fact!("HV-FACT m4b-t22-pre {} step={name} ms={ms}", self.test);
+            }
+            fact!(
+                "HV-FACT m4b-t22-pre {} failed_in={} after_ms={} total_ms={total} {saves} {}",
+                self.test,
+                self.current,
+                self.at.elapsed().as_millis(),
+                (self.state)()
+            );
+        } else {
+            let slowest = self.done.iter().max_by_key(|(_, ms)| *ms);
+            fact!(
+                "HV-FACT m4b-t22-pre {} ok total_ms={total} slowest={:?} {saves}",
+                self.test,
+                slowest
+            );
+        }
+    }
+}
+
 /// T26 carry: the "Introspect live" choice for a system namespace is kept in the profile's data
 /// file and read back.
 #[gpui::test]
 fn introspect_live_choice_persists(cx: &mut TestAppContext) {
     let vcx = shell_with_fake(cx, "en", answers_probe(FakeDriver::new(DbmsKind::Postgres)));
     let id = add_profile(vcx, pg_profile("app-dev"));
+    // ## m4b-t22-pre (T21 m12): what a timed-out wait saw.
+    let file = paths(vcx).profile_toml(&id.0.to_string());
+    let app = vcx.cx.clone();
+    let mut steps = Steps::new(
+        "introspect_live_choice_persists",
+        Box::new(move || {
+            // Read while unwinding: a borrow the panic left open must not abort the run.
+            let ud = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                app.read(|cx| {
+                    (
+                        userdata::requests(cx),
+                        userdata::get(id, cx).is_some(),
+                        userdata::is_unreadable(id, cx),
+                    )
+                })
+            }));
+            format!(
+                "userdata={ud:?} file_bytes={:?}",
+                std::fs::metadata(&file).ok().map(|m| m.len())
+            )
+        }),
+    );
+    steps.step("ensure");
     vcx.cx.update(|cx| userdata::ensure(id, cx));
     wait_until(vcx, "the data read", |vcx| {
         vcx.cx.read(|cx| userdata::get(id, cx)).is_some()
     });
     let pg_catalog = NsKey::schema(["app", "pg_catalog"]);
     let info = NsKey::schema(["app", "information_schema"]);
-    for ns in [pg_catalog.clone(), info.clone(), pg_catalog.clone()] {
+    for (ns, step) in [
+        (pg_catalog.clone(), "write pg_catalog"),
+        (info.clone(), "write information_schema"),
+        (pg_catalog.clone(), "write pg_catalog again"),
+    ] {
+        steps.step(step);
         let task = vcx
             .cx
             .update(|cx| userdata::set_live_system(id, ns, true, cx));
@@ -432,6 +541,7 @@ fn introspect_live_choice_persists(cx: &mut TestAppContext) {
         "sorted, no duplicates"
     );
     // Read back from the file by a fresh reader.
+    steps.step("read again");
     vcx.cx.update(userdata::forget_all);
     vcx.cx.update(|cx| userdata::ensure(id, cx));
     wait_until(vcx, "read again", |vcx| {
@@ -441,6 +551,7 @@ fn introspect_live_choice_persists(cx: &mut TestAppContext) {
         vcx.cx.read(|cx| userdata::live_system(id, cx)),
         vec![info.clone(), pg_catalog.clone()]
     );
+    steps.step("write without information_schema");
     let task = vcx
         .cx
         .update(|cx| userdata::set_live_system(id, info, false, cx));
@@ -449,6 +560,7 @@ fn introspect_live_choice_persists(cx: &mut TestAppContext) {
         vcx.cx.read(|cx| userdata::live_system(id, cx)),
         vec![pg_catalog]
     );
+    steps.step("end");
 }
 
 /// The M3c carry (P-M4-18): the navigation's click and the shots' fixture show a section the

@@ -149,9 +149,15 @@ pub(super) enum M4b {
     /// narrow-toolbar rule).
     CrossNarrowProd,
     // ## m4b-t21-shots
+    // ## m4b-t22-pre fix round 1 (T22-pre review I3, m2; ruling R-T22-1)
+    /// Two notices under a running strip on production: "Recovered unsaved changes" came first,
+    /// then "Deleted on disk". The most severe notice comes first under a strip and keeps its
+    /// title and buttons (check (s)); in arrival order its title was hidden at 960.
+    RunNoticesSevere,
 }
 
 /// Every M4b state, in shot order.
+// ## m4b-t22-pre fix round 1 (named exception): its one state after Task 21's.
 // ## m4b-t13-explorer: Task 13's four after Task 11's two.
 // ## m4b-t13-explorer fix round 1 (review m7): and its four more.
 // ## m4b-t14-tabs (named exception): Task 14's states after Task 11's.
@@ -160,7 +166,7 @@ pub(super) enum M4b {
 // ## m4b-t17-secrets-ui (named exception): Task 17's two after Task 16's.
 // ## m4b-t18-run-as-script (named exception): Task 18's five after Task 17's.
 // ## m4b-t21-shots (named exception): Task 21's five after Task 18's.
-pub(super) const M4B_STATES: [M4b; 40] = [
+pub(super) const M4B_STATES: [M4b; 41] = [
     M4b::T2Preview,
     M4b::PasteConfirm,
     M4b::ScriptsProd,
@@ -206,6 +212,8 @@ pub(super) const M4B_STATES: [M4b; 40] = [
     M4b::ScriptReloadAsk,
     M4b::ScriptLongConnection,
     M4b::CrossNarrowProd,
+    // ## m4b-t22-pre fix round 1
+    M4b::RunNoticesSevere,
 ];
 
 /// The preview's file: 148 MB (the mock's).
@@ -268,6 +276,8 @@ impl M4b {
             M4b::ScriptReloadAsk => "m4b-script-reload-ask",
             M4b::ScriptLongConnection => "m4b-script-long-connection",
             M4b::CrossNarrowProd => "m4b-script-cross-prod",
+            // ## m4b-t22-pre fix round 1
+            M4b::RunNoticesSevere => "m4b-script-run-notices",
         }
     }
 
@@ -318,6 +328,8 @@ impl M4b {
             M4b::ScriptReloadAsk => ("hacivat-ui/src/dialog.rs:", None),
             M4b::ScriptLongConnection => ("#tab-title", None),
             M4b::CrossNarrowProd => ("#script-run-state", None),
+            // ## m4b-t22-pre fix round 1
+            M4b::RunNoticesSevere => ("#script-run-state", None),
         }
     }
 
@@ -366,6 +378,8 @@ impl M4b {
             M4b::ScriptEncoding | M4b::ScriptReloadAsk | M4b::ScriptLongConnection => &[],
             M4b::ScriptRecovered => &[],
             M4b::CrossNarrowProd => &["#editor-t2-title", "#script-run-sent"],
+            // ## m4b-t22-pre fix round 1
+            M4b::RunNoticesSevere => &["#editor-t2-title", "#script-run-sent"],
         }
     }
 
@@ -443,6 +457,8 @@ impl M4b {
             || self == M4b::RunAsScriptRunning
             // ## m4b-t21-shots (named line)
             || self == M4b::CrossNarrowProd
+            // ## m4b-t22-pre fix round 1 (named line)
+            || self == M4b::RunNoticesSevere
     }
 
     // ## m4b-t21-shots
@@ -455,6 +471,8 @@ impl M4b {
                 | M4b::ScriptReloadAsk
                 | M4b::ScriptLongConnection
                 | M4b::CrossNarrowProd
+                // ## m4b-t22-pre fix round 1 (named line)
+                | M4b::RunNoticesSevere
         )
     }
 
@@ -543,7 +561,8 @@ impl M4b {
             | M4b::ScriptRecovered
             | M4b::ScriptReloadAsk
             | M4b::ScriptLongConnection
-            | M4b::CrossNarrowProd => None,
+            | M4b::CrossNarrowProd
+            | M4b::RunNoticesSevere => None,
             // ## m4b-t14-tabs
             M4b::ScriptTabs
             | M4b::ScriptChanged
@@ -723,7 +742,8 @@ impl M4b {
             | M4b::ScriptRecovered
             | M4b::ScriptReloadAsk
             | M4b::ScriptLongConnection
-            | M4b::CrossNarrowProd => Vec::new(),
+            | M4b::CrossNarrowProd
+            | M4b::RunNoticesSevere => Vec::new(),
         }
     }
 }
@@ -929,7 +949,8 @@ fn script_steps(state: M4b) -> Vec<Step> {
         | M4b::ScriptRecovered
         | M4b::ScriptReloadAsk
         | M4b::ScriptLongConnection
-        | M4b::CrossNarrowProd => {}
+        | M4b::CrossNarrowProd
+        | M4b::RunNoticesSevere => {}
         // Task 13's states: `scripts::steps`.
         M4b::ScriptsProd
         | M4b::ScriptsStaging
@@ -1675,7 +1696,8 @@ mod scripts {
             | M4b::ScriptRecovered
             | M4b::ScriptReloadAsk
             | M4b::ScriptLongConnection
-            | M4b::CrossNarrowProd => {}
+            | M4b::CrossNarrowProd
+            | M4b::RunNoticesSevere => {}
         }
         out
     }
@@ -2232,7 +2254,7 @@ mod t21 {
                 let bytes: &[u8] = b"-- m\xfc\xfeteri raporu\nSELECT '\xddzmir', '\xfdl\xfdk';\n";
                 let _ = std::fs::write(dir.join(ENC_FILE), bytes);
             }
-            M4b::CrossNarrowProd => {
+            M4b::CrossNarrowProd | M4b::RunNoticesSevere => {
                 let line =
                     "INSERT INTO orders (id, city, total) VALUES (1204, 'İzmir', 1234567);\n";
                 let n = (21usize << 20) / line.len() + 1;
@@ -2352,56 +2374,7 @@ mod t21 {
                 out.push(open_step(REPORT, Some(LONG), Some("orders")));
             }
             M4b::CrossNarrowProd => {
-                out.push(connect_prod());
-                out.push(step(
-                    |_, cx| {
-                        let Some(lib) = shot_library(cx) else {
-                            return;
-                        };
-                        let prod = profile_named(cx, PROD);
-                        hacivat_app::scripts::open::open_script(
-                            cx,
-                            lib,
-                            hacivat_scripts::RelPath::parse(BIG_FILE).expect("a path"),
-                            prod,
-                            Some(hacivat_scripts::DatabaseName::new("orders")),
-                        );
-                    },
-                    |window, cx| {
-                        ready_doc(window, cx).is_some_and(|d| {
-                            d.read(cx).tier() == hacivat_scripts::SizeTier::Preview
-                        }) && editor_in(window, cx).is_some_and(|e| e.read(cx).preview().is_some())
-                    },
-                ));
-                // The strip of a run under way (no run behind it: nothing is sent).
-                out.push(step(
-                    |window, cx| {
-                        let Some(console) = active_console(window, cx) else {
-                            return;
-                        };
-                        let progress = hacivat_exec::ScriptProgress {
-                            phase: hacivat_exec::ScriptPhase::Running,
-                            bytes: 9 << 20,
-                            units_seen: 1_204,
-                            units_total: None,
-                            units_run: 1_204,
-                            units_failed: 0,
-                            line: 48_213,
-                        };
-                        hacivat_app::scripts::run_as_script::fixtures::show_strip(
-                            console,
-                            BIG_FILE,
-                            21 << 20,
-                            progress,
-                            None,
-                            cx,
-                        );
-                    },
-                    |window, cx| {
-                        active_console(window, cx)
-                            .is_some_and(|c| hacivat_app::scripts::run_as_script::running(c, cx))
-                    },
-                ));
+                big_tab_running(&mut out);
                 out.push(notice_step(Notice::Changed));
                 // The find bar, over the editor that has the focus.
                 out.push(step(
@@ -2418,9 +2391,76 @@ mod t21 {
                     },
                 ));
             }
+            // ## m4b-t22-pre fix round 1 (T22-pre review I3, m2)
+            M4b::RunNoticesSevere => {
+                big_tab_running(&mut out);
+                let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_795_259_100);
+                out.push(notice_step(Notice::Recovered {
+                    at,
+                    unknown: false,
+                    secret: false,
+                }));
+                out.push(notice_step(Notice::Deleted));
+            }
             _ => {}
         }
         out
+    }
+
+    /// Connects orders-prod, opens the dump as a T2 preview under it and shows the strip of a
+    /// run under way (no run behind it: nothing is sent). ## m4b-t22-pre fix round 1: shared
+    /// by the cross-surface state and the two-notice state.
+    fn big_tab_running(out: &mut Vec<Step>) {
+        out.push(connect_prod());
+        out.push(step(
+            |_, cx| {
+                let Some(lib) = shot_library(cx) else {
+                    return;
+                };
+                let prod = profile_named(cx, PROD);
+                hacivat_app::scripts::open::open_script(
+                    cx,
+                    lib,
+                    hacivat_scripts::RelPath::parse(BIG_FILE).expect("a path"),
+                    prod,
+                    Some(hacivat_scripts::DatabaseName::new("orders")),
+                );
+            },
+            |window, cx| {
+                ready_doc(window, cx)
+                    .is_some_and(|d| d.read(cx).tier() == hacivat_scripts::SizeTier::Preview)
+                    && editor_in(window, cx).is_some_and(|e| e.read(cx).preview().is_some())
+            },
+        ));
+        // The strip of a run under way (no run behind it: nothing is sent).
+        out.push(step(
+            |window, cx| {
+                let Some(console) = active_console(window, cx) else {
+                    return;
+                };
+                let progress = hacivat_exec::ScriptProgress {
+                    phase: hacivat_exec::ScriptPhase::Running,
+                    bytes: 9 << 20,
+                    units_seen: 1_204,
+                    units_total: None,
+                    units_run: 1_204,
+                    units_failed: 0,
+                    line: 48_213,
+                };
+                hacivat_app::scripts::run_as_script::fixtures::show_strip(
+                    console,
+                    BIG_FILE,
+                    21 << 20,
+                    progress,
+                    None,
+                    cx,
+                );
+            },
+            |window, cx| {
+                active_console(window, cx)
+                    .is_some_and(|c| hacivat_app::scripts::run_as_script::running(c, cx))
+            },
+        ));
     }
 }
 // ## m4b-t21-shots

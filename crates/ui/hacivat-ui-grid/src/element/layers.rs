@@ -633,6 +633,7 @@ pub fn record_text(
         path: SharedString::new_static(path),
         visible: true,
         outside_card: false,
+        folded: false,
     });
 }
 

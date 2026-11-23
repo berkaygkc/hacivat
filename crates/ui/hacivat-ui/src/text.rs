@@ -66,6 +66,11 @@ pub struct RenderedText {
     /// It runs past a side of the dialog card it is drawn in ([`card_scope`]): the card's own
     /// clip is the window, so check (b) cannot see this.
     pub outside_card: bool,
+    // ## m4b-t22-pre (named item, T21 r1)
+    /// It is cut, or hidden, at a scroll viewport's fold (its top or bottom edge): check (b)
+    /// lets such text through as scrolling, so the checks that must see a label whole (trust
+    /// signals, a notice's title) read this too.
+    pub folded: bool,
 }
 
 /// What the last frame drew, when `enabled` (tests and debug tooling; off by default). Each
@@ -96,6 +101,40 @@ impl TextRegistry {
         let text = text();
         begin_record(cx);
         cx.global_mut::<TextRegistry>().frame.push(text);
+    }
+
+    // ## m4b-t22-pre (named items, T21 r1)
+    /// [`TextRegistry::record`], returning where the text sits in the current frame (`None`:
+    /// not recorded), so a later step of the same frame can complete it
+    /// ([`TextRegistry::update_at`]).
+    pub fn record_index(cx: &mut App, text: impl FnOnce() -> RenderedText) -> Option<usize> {
+        let reg = cx.try_global::<TextRegistry>()?;
+        if !reg.enabled {
+            return None;
+        }
+        let text = text();
+        begin_record(cx);
+        let frame = &mut cx.global_mut::<TextRegistry>().frame;
+        frame.push(text);
+        Some(frame.len() - 1)
+    }
+
+    /// Applies `update` to the text recorded at `index` in the current frame when it is still
+    /// `text` (a record of an earlier frame is never touched: a new frame clears the list).
+    pub fn update_at(
+        cx: &mut App,
+        index: usize,
+        text: &SharedString,
+        update: impl FnOnce(&mut RenderedText),
+    ) {
+        if !cx.try_global::<TextRegistry>().is_some_and(|r| r.enabled) {
+            return;
+        }
+        if let Some(r) = cx.global_mut::<TextRegistry>().frame.get_mut(index)
+            && r.text == *text
+        {
+            update(r);
+        }
     }
 
     // ## m2a-t21-shots
@@ -806,7 +845,9 @@ impl Element for LabelElement {
             None => px(0.0),
         };
         let mask = window.content_mask().bounds;
-        let cut = cut_by_clip(bounds, mask, cut_at_fold(cx, bounds, mask));
+        let scrolls = cut_at_fold(cx, bounds, mask);
+        let cut = cut_by_clip(bounds, mask, scrolls);
+        let folded = !drew_nothing && scrolls && past_fold(bounds, mask);
         let outside = outside_card(cx, bounds.left(), bounds.left() + painted_width);
         TextRegistry::record(cx, || RenderedText {
             text: self.label.text.clone(),
@@ -818,6 +859,7 @@ impl Element for LabelElement {
             path: self.label.path(),
             visible: !drew_nothing && shows_in(bounds, mask),
             outside_card: outside,
+            folded,
         });
         painted
     }
@@ -942,6 +984,29 @@ fn cut_by_clip(bounds: Bounds<Pixels>, mask: Bounds<Pixels>, scrolls: bool) -> b
     sideways || (vertically && !scrolls)
 }
 
+// ## m4b-t22-pre (named item, T21 r1)
+/// Whether text laid out in `bounds` runs past `mask`'s top or bottom edge, or lies wholly
+/// above or below it (half a pixel of slack): with `mask` a scroll viewport's clip, the text is
+/// [`RenderedText::folded`].
+fn past_fold(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> bool {
+    let slack = px(0.5);
+    bounds.top() < mask.top() - slack || bounds.bottom() > mask.bottom() + slack
+}
+
+/// What a text laid out in `bounds` and painted in the current clip shows, by the policy
+/// [`Label`] and [`Paragraph`] record with: (`visible`, `clipped`, `folded`). For text
+/// recorded before layout (an inline notice's lines) that updates its record at prepaint
+/// ([`TextRegistry::update_at`]).
+pub(crate) fn fit_in_clip(bounds: Bounds<Pixels>, window: &Window, cx: &App) -> (bool, bool, bool) {
+    let mask = window.content_mask().bounds;
+    let scrolls = cut_at_fold(cx, bounds, mask);
+    (
+        shows_in(bounds, mask),
+        cut_by_clip(bounds, mask, scrolls),
+        scrolls && past_fold(bounds, mask),
+    )
+}
+
 /// What a paragraph laid out in `bounds` (clipped to `mask`) drew: its widest line and whether
 /// part of it is cut off. `lines` holds each wrapped line's width and height. Half a pixel of
 /// slack absorbs rounding.
@@ -1031,6 +1096,8 @@ impl IntoElement for Paragraph {
                     path,
                     visible: shows_in(bounds, mask),
                     outside_card: outside,
+                    // ## m4b-t22-pre (T21 r1)
+                    folded: scrolls && past_fold(bounds, mask),
                 });
             },
             |_, (), _, _| {},
