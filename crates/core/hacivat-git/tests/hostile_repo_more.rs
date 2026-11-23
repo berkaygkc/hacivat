@@ -241,6 +241,27 @@ fn a_one_gib_index_is_unavailable() {
     );
 }
 
+/// The cifix-2 re-review's N3: a library inside a bigger repository gets the outer git dir's
+/// `index.lock` path with its status (the watcher `lstat`s it to tell a checkout's burst); a
+/// library that is the worktree, with its own `.git` folder, gets none (its watcher sees the
+/// lock there). The path is the validated git dir's, never one the index or worktree names.
+#[test]
+fn a_library_inside_a_bigger_repository_gets_its_index_lock_path() {
+    let top = tempfile::tempdir().unwrap();
+    let r = repo(&canonical(top.path()), "repo");
+    write(&r.join("lib/b.sql"), b"select 2;\n");
+    let lock_of = |st: &GitState| match st {
+        GitState::Ready(s) => s.index_lock.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(lock_of(&status(&r, &GitLimits::default())), None);
+    let inner = lock_of(&status(&r.join("lib"), &GitLimits::default()));
+    assert_eq!(
+        inner.map(|p| canonical(p.parent().unwrap()).join(p.file_name().unwrap())),
+        Some(canonical(&r.join(".git")).join("index.lock"))
+    );
+}
+
 /// The index with one more extension before its trailing SHA-1, the checksum recomputed.
 fn with_extension(index: &[u8], signature: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let body = &index[..index.len() - 20];

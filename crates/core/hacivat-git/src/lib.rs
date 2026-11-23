@@ -134,6 +134,15 @@ pub enum FailKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitStatus {
     pub by_path: BTreeMap<GitPath, FileStatus>,
+    // ## m4b-t20-adversarial (named exception, the cifix-2 re-review's N3)
+    /// When the repository's git dir is not the library's own `.git` folder (a library inside
+    /// a bigger repository, or a gitfile at the root): that git dir's `index.lock`, the file
+    /// git holds for a whole checkout, merge or reset. Its git dir was discovered and validated
+    /// by this status, under reduced trust; the path is fixed, never derived from the index or
+    /// the worktree. The library's watcher `lstat`s it (never watches it) to tell a checkout's
+    /// burst. `None` when the git dir is the library's own `.git` folder (the watcher sees that
+    /// lock there).
+    pub index_lock: Option<std::path::PathBuf>,
 }
 
 /// A library-relative path with `/` separators, as the status keys it. `hacivat-scripts`

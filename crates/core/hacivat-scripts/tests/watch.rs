@@ -2690,3 +2690,154 @@ fn an_unchanged_manifest_is_never_hinted_by_a_poll_pass() {
     }
 }
 // ## m4b-cifix-3-manifest-poll
+
+// ---------------------------------------------------------------------------------------------
+// ## m4b-t20-adversarial (named exception, the cifix-2 re-review's N3): a library inside a
+// bigger repository. Its checkout lock is in the outer `.git`, which nothing watches; the
+// status hands the reconciler that lock's path, and the reconciler `lstat`s it at most once a
+// window while counted hints arrive.
+
+/// A file system that counts the `lstat`s of one path and records every path outside the
+/// library (`root` canonical, `spelt` as registered) it is asked about.
+struct OuterCounting {
+    root: PathBuf,
+    spelt: PathBuf,
+    lock: PathBuf,
+    lock_looks: Mutex<usize>,
+    outside: Mutex<Vec<PathBuf>>,
+}
+
+impl OuterCounting {
+    fn note(&self, p: &Path) {
+        if p == self.lock {
+            *self.lock_looks.lock().unwrap() += 1;
+        } else if !p.starts_with(&self.root) && !p.starts_with(&self.spelt) {
+            self.outside.lock().unwrap().push(p.to_path_buf());
+        }
+    }
+}
+
+impl Fs for OuterCounting {
+    fn read_dir(&self, dir: &Path, cap: usize) -> io::Result<Vec<OsString>> {
+        self.note(dir);
+        RealFs.read_dir(dir, cap)
+    }
+    fn symlink_metadata(&self, path: &Path) -> io::Result<Meta> {
+        self.note(path);
+        RealFs.symlink_metadata(path)
+    }
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        self.note(path);
+        RealFs.canonicalize(path)
+    }
+    fn read_link(&self, link: &Path) -> io::Result<PathBuf> {
+        self.note(link);
+        RealFs.read_link(link)
+    }
+}
+
+/// A library of `n` known scripts with no `.git` of its own (its repository's git dir is
+/// elsewhere), and that outer git dir.
+fn monorepo_lib(n: usize) -> (Lib, tempfile::TempDir) {
+    let lib = Lib::new(&[]);
+    for i in 0..n {
+        let name = format!("many/f{i:04}.sql");
+        lib.write(&name, "SELECT 1;");
+        age(&lib.path(&name), 3_600);
+    }
+    let outer = tempfile::tempdir().unwrap();
+    fs::create_dir_all(outer.path().join(".git")).unwrap();
+    (lib, outer)
+}
+
+#[test]
+fn a_checkout_of_the_repository_above_the_library_is_one_burst() {
+    // The control: the lock is held, but no status has handed its path on.
+    let (lib, outer) = monorepo_lib(1_200);
+    let lock = outer.path().canonicalize().unwrap().join(".git/index.lock");
+    fs::write(&lock, "").unwrap();
+    let mut r = lib.rec();
+    let t = t0() + Duration::from_secs(400);
+    rewrite(&mut r, &lib, 0..600, t);
+    let mut out = r.tick(t + ms(10));
+    out.extend(r.tick(t + ms(200)));
+    rewrite(&mut r, &lib, 600..1_200, t + ms(350));
+    out.extend(drain(&mut r, t + ms(360)));
+    assert_eq!(
+        per_file(&out),
+        1_200,
+        "without the path, the pause splits it"
+    );
+
+    // With the outer lock's path (from the status): one burst across the pause, one rescan
+    // when the lock goes, and the lock is looked at a few times, not once per hint.
+    let (lib, outer) = monorepo_lib(1_200);
+    let lock = outer.path().canonicalize().unwrap().join(".git/index.lock");
+    fs::write(&lock, "").unwrap();
+    let fs_seen = Arc::new(OuterCounting {
+        root: lib.root.canonical.clone(),
+        spelt: lib.root.path.clone(),
+        lock: lock.clone(),
+        lock_looks: Mutex::new(0),
+        outside: Mutex::new(Vec::new()),
+    });
+    let mut r = lib.rec_with(WatchOpts {
+        fs: fs_seen.clone(),
+        ..WatchOpts::default()
+    });
+    r.set_outer_lock(Some(lock.clone()));
+    let t = t0() + Duration::from_secs(500);
+    rewrite(&mut r, &lib, 0..600, t);
+    let mut out = r.tick(t + ms(10));
+    out.extend(r.tick(t + ms(200)));
+    rewrite(&mut r, &lib, 600..1_200, t + ms(350));
+    out.extend(r.tick(t + ms(360)));
+    out.extend(r.tick(t + ms(600)));
+    assert_eq!(per_file(&out), 0, "nothing settles under the lock: {out:?}");
+    fs::remove_file(&lock).unwrap();
+    out.extend(drain(&mut r, t + ms(700)));
+    assert!(out.contains(&WatchEvent::Rescan), "{out:?}");
+    assert_eq!(per_file(&out), 0, "{out:?}");
+    let looks = *fs_seen.lock_looks.lock().unwrap();
+    assert!(
+        (1..=12).contains(&looks),
+        "the lock is looked at once per window, not per hint: {looks}"
+    );
+    // Nothing else outside the library was asked about.
+    assert_eq!(*fs_seen.outside.lock().unwrap(), Vec::<PathBuf>::new());
+}
+
+/// Ordinary edits in a library under a bigger repository, with no checkout running: each
+/// still settles on its own, and the outer lock costs one `lstat` a window at most.
+#[test]
+fn edits_under_a_bigger_repository_settle_as_usual() {
+    let (lib, outer) = monorepo_lib(3);
+    let lock = outer.path().canonicalize().unwrap().join(".git/index.lock");
+    let fs_seen = Arc::new(OuterCounting {
+        root: lib.root.canonical.clone(),
+        spelt: lib.root.path.clone(),
+        lock: lock.clone(),
+        lock_looks: Mutex::new(0),
+        outside: Mutex::new(Vec::new()),
+    });
+    let mut r = lib.rec_with(WatchOpts {
+        fs: fs_seen.clone(),
+        ..WatchOpts::default()
+    });
+    r.set_outer_lock(Some(lock));
+    let t = t0() + Duration::from_secs(600);
+    rewrite(&mut r, &lib, 0..3, t);
+    let out = drain(&mut r, t + ms(5));
+    let changed = out
+        .iter()
+        .filter(|e| matches!(e, WatchEvent::Changed(_)))
+        .count();
+    assert_eq!(changed, 3, "{out:?}");
+    assert_eq!(*fs_seen.lock_looks.lock().unwrap(), 1);
+    // A status that finds no repository above takes the path back: never looked at again.
+    r.set_outer_lock(None);
+    rewrite(&mut r, &lib, 0..3, t + Duration::from_secs(5));
+    let _ = drain(&mut r, t + Duration::from_secs(5));
+    assert_eq!(*fs_seen.lock_looks.lock().unwrap(), 1);
+}
+// ## m4b-t20-adversarial

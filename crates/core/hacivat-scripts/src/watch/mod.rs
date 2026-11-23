@@ -797,6 +797,12 @@ pub struct Reconciler {
     /// was last looked at (it is looked at again a window later, so a missed removal hint
     /// costs a window, never the 30 s bound).
     lock_checked: Option<Instant>,
+    // ## m4b-t20-adversarial (named exception, the cifix-2 re-review's N3)
+    /// The `index.lock` of the repository above the library (its git dir, as the status
+    /// discovered and validated it; `hacivat_git::GitStatus::index_lock`), and when a counted
+    /// hint last made the reconciler look at it.
+    outer_lock: Option<PathBuf>,
+    outer_looked: Option<Instant>,
 }
 
 impl fmt::Debug for Reconciler {
@@ -830,6 +836,9 @@ impl Reconciler {
             hinted_since_backstop: false,
             info: TickInfo::default(),
             lock_checked: None,
+            // ## m4b-t20-adversarial (named lines, N3)
+            outer_lock: None,
+            outer_looked: None,
         };
         let started = SystemTime::now();
         let s = r.scan();
@@ -870,7 +879,28 @@ impl Reconciler {
                     || self.lookup(&rel).is_some()
             }
         };
+        // ## m4b-t20-adversarial (named lines, N3): no hint ever names the lock of a
+        // repository above the library (nothing outside the library is watched), so while
+        // counted hints arrive it is looked at, at most once per window.
+        if counted
+            && self.outer_lock.is_some()
+            && !self.debouncer.in_operation()
+            && self.outer_looked.is_none_or(|t| at >= t + self.opts.window)
+        {
+            self.outer_looked = Some(at);
+            self.check_repository_lock(at);
+        }
         self.debouncer.push_path(path, at, counted);
+    }
+
+    // ## m4b-t20-adversarial (named exception, N3)
+    /// The `index.lock` of the repository above the library, from its latest status (`None`:
+    /// the library's own `.git` folder, or no repository).
+    pub fn set_outer_lock(&mut self, lock: Option<PathBuf>) {
+        if self.outer_lock != lock {
+            self.outer_lock = lock;
+            self.outer_looked = None;
+        }
     }
 
     // ## m4b-cifix-2-repo-op (review I1, R-CI2-3)
@@ -881,10 +911,16 @@ impl Reconciler {
     fn repository_lock_held(&self) -> bool {
         let fs = &*self.opts.fs;
         let git = self.root.canonical.join(".git");
-        matches!(fs.symlink_metadata(&git), Ok(m) if m.kind == MetaKind::Dir)
+        let local = matches!(fs.symlink_metadata(&git), Ok(m) if m.kind == MetaKind::Dir)
             && matches!(
                 fs.symlink_metadata(&git.join(REPOSITORY_LOCK)),
                 Ok(m) if m.kind == MetaKind::File
+            );
+        // ## m4b-t20-adversarial (named lines, N3): or the repository above the library holds
+        // its lock (one `lstat` of a fixed path; never followed, never watched).
+        local
+            || self.outer_lock.as_ref().is_some_and(
+                |lock| matches!(fs.symlink_metadata(lock), Ok(m) if m.kind == MetaKind::File),
             )
     }
 
@@ -1971,6 +2007,15 @@ impl Watcher {
         self.queue.remember(rel, stamp);
     }
 
+    // ## m4b-t20-adversarial (named exception, N3)
+    /// The `index.lock` of the repository above the library, from its latest status
+    /// (`hacivat_git::GitStatus::index_lock`; `None` when there is none): the watcher looks at
+    /// it, at most once per window, while counted hints arrive, so a checkout there is one
+    /// burst. Nothing outside the library is watched.
+    pub fn set_outer_lock(&self, lock: Option<PathBuf>) {
+        self.queue.set_outer_lock(lock);
+    }
+
     /// How the library is watched now.
     pub fn backend(&self) -> Backend {
         *lock(&self.backend)
@@ -2016,6 +2061,10 @@ impl Running {
             let now = Instant::now();
             for (rel, stamp) in &taken.remembered {
                 self.rec.remember(rel, stamp);
+            }
+            // ## m4b-t20-adversarial (named lines, N3)
+            if let Some(lock) = taken.outer_lock {
+                self.rec.set_outer_lock(lock);
             }
             if taken.overflowed {
                 self.rec

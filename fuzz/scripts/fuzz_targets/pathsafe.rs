@@ -132,7 +132,11 @@ fn check_join(rel_text: &str, tree: &Tree) {
     );
     match &joined.target {
         Some(target) => {
-            assert_eq!(joined.kind, JoinedKind::File, "only a file link has a target");
+            assert_eq!(
+                joined.kind,
+                JoinedKind::File,
+                "only a file link has a target"
+            );
             for c in target.components() {
                 assert!(pathsafe::component(OsStr::new(c)).is_ok(), "{c:?}");
             }

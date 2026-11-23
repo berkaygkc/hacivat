@@ -2285,6 +2285,13 @@ impl Actor {
         let lib = &mut self.libs[i];
         lib.git.in_flight = false;
         let again = std::mem::take(&mut lib.git.again);
+        // ## m4b-t20-adversarial (named lines, the cifix-2 re-review's N3): the lock of a
+        // repository above the library, as the status found and validated it, goes to the
+        // watcher (an `lstat` there, never a watch). A state that is not `Ready` changes
+        // nothing: the last validated lock stays until a status says otherwise.
+        if let (GitState::Ready(s), Some(w)) = (&state, &lib.watcher) {
+            w.set_outer_lock(s.index_lock.clone());
+        }
         if servable(&lib.state) {
             let same = self.git.get(&id).is_some_and(|old| same_git(old, &state));
             if !same {

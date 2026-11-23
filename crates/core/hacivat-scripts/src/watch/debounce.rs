@@ -373,6 +373,10 @@ pub struct Taken {
     pub overflowed: bool,
     /// Content stamps the service learned (a tab read or saved the file), for rename pairing.
     pub remembered: Vec<(RelPath, DiskStamp)>,
+    // ## m4b-t20-adversarial (named exception, N3)
+    /// The latest `index.lock` of the repository above the library the service handed on,
+    /// when it handed one since the last take (`Some(None)`: there is none any more).
+    pub outer_lock: Option<Option<std::path::PathBuf>>,
 }
 
 #[derive(Debug, Default)]
@@ -382,6 +386,8 @@ struct QState {
     lost: bool,
     stopped: bool,
     remembered: Vec<(RelPath, DiskStamp)>,
+    // ## m4b-t20-adversarial (named line, N3)
+    outer_lock: Option<Option<std::path::PathBuf>>,
 }
 
 /// The bounded hand-over between an event source's thread and the watcher's thread.
@@ -447,6 +453,16 @@ impl HintQueue {
         self.ready.notify_one();
     }
 
+    // ## m4b-t20-adversarial (named exception, N3)
+    /// Hands the watcher the `index.lock` of the repository above the library (the latest
+    /// one wins).
+    pub fn set_outer_lock(&self, lock: Option<std::path::PathBuf>) {
+        let mut st = self.lock();
+        st.outer_lock = Some(lock);
+        drop(st);
+        self.ready.notify_one();
+    }
+
     /// Waits until something is queued, `until` passes (then answers an empty [`Taken`]), or
     /// the queue is stopped (`None`).
     pub fn take(&self, until: Option<Instant>) -> Option<Taken> {
@@ -455,7 +471,12 @@ impl HintQueue {
             if st.stopped {
                 return None;
             }
-            if !st.hints.is_empty() || st.overflowed || st.lost || !st.remembered.is_empty() {
+            if !st.hints.is_empty()
+                || st.overflowed
+                || st.lost
+                || !st.remembered.is_empty()
+                || st.outer_lock.is_some()
+            {
                 let mut hints = std::mem::take(&mut st.hints);
                 if std::mem::take(&mut st.lost) {
                     hints.push(RawHint::Lost);
@@ -464,6 +485,8 @@ impl HintQueue {
                     hints,
                     overflowed: std::mem::take(&mut st.overflowed),
                     remembered: std::mem::take(&mut st.remembered),
+                    // ## m4b-t20-adversarial (named line, N3)
+                    outer_lock: st.outer_lock.take(),
                 });
             }
             match until {

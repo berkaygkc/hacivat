@@ -27,7 +27,11 @@ fn passes_rules(db: &LogicalDb) {
         "a control or bidi control character bound: {s:?}"
     );
     let again = LogicalDb::parse(s).expect("a bound name parses again");
-    assert_eq!(again.as_str(), s, "a bound name is stored in its normal form");
+    assert_eq!(
+        again.as_str(),
+        s,
+        "a bound name is stored in its normal form"
+    );
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -37,12 +41,19 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 fuzz_target!(|data: &[u8]| {
     let read = manifest::read_bytes(data, "library");
     if data.len() > MANIFEST_MAX_BYTES {
-        assert!(read.db.is_none() && read.aliases.is_empty(), "an oversized manifest bound");
+        assert!(
+            read.db.is_none() && read.aliases.is_empty(),
+            "an oversized manifest bound"
+        );
     }
     if let Some(db) = &read.db {
         passes_rules(db);
     }
-    assert!(read.aliases.len() <= MAX_ALIASES, "{} aliases", read.aliases.len());
+    assert!(
+        read.aliases.len() <= MAX_ALIASES,
+        "{} aliases",
+        read.aliases.len()
+    );
     for (i, a) in read.aliases.iter().enumerate() {
         passes_rules(a);
         if let Some(db) = &read.db {
@@ -54,6 +65,9 @@ fuzz_target!(|data: &[u8]| {
         );
     }
     if !contains(data, b"database") && !contains(data, b"\\u") && !contains(data, b"\\U") {
-        assert!(read.db.is_none(), "a database bound by a key outside the schema");
+        assert!(
+            read.db.is_none(),
+            "a database bound by a key outside the schema"
+        );
     }
 });

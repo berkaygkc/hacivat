@@ -48,7 +48,7 @@ use std::time::Duration;
 
 use gix::bstr::{BStr, BString, ByteSlice as _};
 
-use crate::discover::{self, Discovery, Found};
+use crate::discover::{self, Discovery, DotGit, Found};
 use crate::map::{self, Badges};
 use crate::trust;
 use crate::{FailKind, FileStatus, GitError, GitLimits, GitPath, GitState, GitStatus, UnknownWhy};
@@ -229,6 +229,12 @@ fn pipeline(
         return st;
     }
     match collect(&repo, &found, &root, limits, &extra, &facts, interrupt) {
+        // ## m4b-t20-adversarial (named lines, N3): the lock of a git dir above the library.
+        Ok(GitState::Ready(s)) if !found.prefix.is_empty() || found.kind != DotGit::Dir => {
+            let mut s = Arc::unwrap_or_clone(s);
+            s.index_lock = Some(layout.git_dir.join("index.lock"));
+            GitState::Ready(Arc::new(s))
+        }
         Ok(st) | Err(st) => st,
     }
 }
@@ -623,7 +629,10 @@ fn collect(
     if by_path.len() > limits.max_entries {
         return Err(too_many());
     }
-    Ok(GitState::Ready(Arc::new(GitStatus { by_path })))
+    Ok(GitState::Ready(Arc::new(GitStatus {
+        by_path,
+        index_lock: None,
+    })))
 }
 
 /// Whether `path`'s attributes set `filter` (set, or to a value). An attribute lookup that
