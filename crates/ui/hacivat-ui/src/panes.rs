@@ -349,10 +349,35 @@ pub struct TitleParts {
 }
 
 /// The width each pane's tab strip had in the last frame (the room the next frame plans with).
+// ## m4b-t22-pre (T21 r2): keyed by (window, pane); a closed window's widths go
+// (`on_window_closed`, hooked on the first width), and a closed pane's when its workspace next
+// draws ([`keep_strip_widths`]).
 #[derive(Default)]
-struct StripWidths(std::collections::HashMap<(u64, usize), f32>);
+struct StripWidths {
+    widths: std::collections::HashMap<(u64, usize), f32>,
+    hooked: bool,
+}
 
 impl hacivat_ui_core::gpui_surface::Global for StripWidths {}
+
+// ## m4b-t22-pre (named items, T21 r2)
+/// Drops the recorded strip widths of `window`'s panes that are not in `live` (closed panes).
+/// The pane tree's owner calls it as it draws.
+pub fn keep_strip_widths(window: &Window, live: impl IntoIterator<Item = PaneId>, cx: &mut App) {
+    if !cx.has_global::<StripWidths>() {
+        return;
+    }
+    let win = window.window_handle().window_id().as_u64();
+    let live: std::collections::HashSet<usize> = live.into_iter().map(|p| p.0 as usize).collect();
+    cx.global_mut::<StripWidths>()
+        .widths
+        .retain(|(w, pane), _| *w != win || live.contains(pane));
+}
+
+/// How many strip widths are recorded (tests: none is kept for a closed window or pane).
+pub fn strip_widths_held(cx: &App) -> usize {
+    cx.try_global::<StripWidths>().map_or(0, |g| g.widths.len())
+}
 
 type TabHandler = Rc<dyn Fn(PaneId, TabId, &mut Window, &mut App)>;
 
@@ -415,14 +440,17 @@ pub const TAB_TITLE_ID: &str = "tab-title";
 pub const TAB_TITLE_TAIL_ID: &str = "tab-title-conn";
 /// How many visible characters of a two-part title's head always show (ruling (d)).
 const HEAD_FLOOR_CHARS: usize = 4;
-/// A tab's padding (12 px each side), its icon (12 px), its right border (1 px), the gap
-/// between its children (7 px), and the widths of its marks: the environment swatch, the dirty
-/// dot, the close button (the estimates the strip plans with).
-const TAB_PAD: f32 = 24.0 + 12.0 + 1.0;
+// ## m4b-t22-pre (T21 r3): one source for the tab's layout and the strip's plan.
+/// A tab's padding, each side.
+const TAB_PAD_X: f32 = 12.0;
+/// The gap between a tab's children.
 const TAB_GAP: f32 = 7.0;
-const SWATCH_W: f32 = 8.0;
+/// A tab's right border.
+const TAB_BORDER: f32 = 1.0;
+/// The dirty dot.
 const DIRTY_W: f32 = 6.0;
-const CLOSE_W: f32 = 12.0;
+/// The tab's icon and its close button's icon.
+const TAB_ICON: IconSize = IconSize::Chrome;
 /// An inactive tab's flex shrink against the active tab's 1: in a strip too narrow for its tabs
 /// the inactive tabs give their width first.
 const INACTIVE_TAB_SHRINK: f32 = 1000.0;
@@ -490,14 +518,15 @@ enum Fit {
 }
 
 /// The width of a tab's chrome: padding, icon, border, its marks and the gaps between its
-/// children (`title`: whether a title is one of them).
+/// children (`title`: whether a title is one of them). Read from the constants the tab is laid
+/// out with (T21 r3).
 fn chrome(tab: &TabSpec, active: bool, title: bool) -> f32 {
     let marks = [
-        (tab.env.is_some(), SWATCH_W),
+        (tab.env.is_some(), crate::capsule::MARK_PX),
         (tab.dirty, DIRTY_W),
-        (active, CLOSE_W),
+        (active, TAB_ICON.px()),
     ];
-    let mut w = TAB_PAD;
+    let mut w = 2.0 * TAB_PAD_X + TAB_ICON.px() + TAB_BORDER;
     let mut children = 1;
     if title {
         children += 1;
@@ -509,6 +538,43 @@ fn chrome(tab: &TabSpec, active: bool, title: bool) -> f32 {
         }
     }
     w + TAB_GAP * (children - 1) as f32
+}
+
+/// A tab's width with its whole title: its chrome and its title (a two-part title with a
+/// pixel of slack per part, as measured).
+fn natural_width(tab: &TabSpec, active: bool, measured: Option<Measured>, title: f32) -> f32 {
+    chrome(tab, active, true) + measured.map_or(title, |m| m.head + 1.0 + m.tail)
+}
+
+// ## m4b-t22-pre (named item, T21 r3)
+/// The width the strip's plan gives `tab` drawn whole (`active`: with its close button), for
+/// tests that hold it against the laid-out tab.
+pub fn planned_tab_width(tab: &TabSpec, active: bool, window: &Window, cx: &App) -> f32 {
+    let t = Theme::get(cx).tokens;
+    let style = tab_style(tab.title_source, t);
+    let ink = t.colors.text.to_hsla();
+    let measured = tab
+        .parts
+        .as_ref()
+        .map(|p| Measured::of(p, style, ink, window));
+    natural_width(
+        tab,
+        active,
+        measured,
+        shaped_width(&tab.title, style, ink, window),
+    )
+}
+
+/// The type style a tab title of `source` is drawn in.
+fn tab_style(source: TextSource, t: &hacivat_ui_core::theme::ThemeTokens) -> TypeStyle {
+    match source {
+        TextSource::Data | TextSource::Catalog => TypeStyle {
+            size_px: 12.0,
+            line_height: 12.0 * 1.35,
+            ..t.type_ramp.code
+        },
+        _ => t.type_ramp.body,
+    }
 }
 
 /// Plans each tab's [`Fit`] for a strip `room` px wide (the last frame's; `None`: everything
@@ -526,10 +592,7 @@ fn plan(
     let Some(room) = room else {
         return fits;
     };
-    let natural = |i: usize| {
-        let t = &tabs[i];
-        chrome(t, i == active, true) + measured[i].map_or(titles[i], |m| m.head + 1.0 + m.tail)
-    };
+    let natural = |i: usize| natural_width(&tabs[i], i == active, measured[i], titles[i]);
     let min = |i: usize| {
         let t = &tabs[i];
         match measured[i] {
@@ -625,15 +688,32 @@ fn two_part_title(
         .into_any_element()
 }
 
-/// Records the strip's width for the next frame's plan; a changed width draws once more.
+/// Records the strip's width for the next frame's plan; a changed width draws the view that
+/// holds the strip once more.
+///
+/// ## m4b-t22-pre (T21 r2): that view only (a notify), not every window in full: the cached
+/// views in it (the editor) stay cached.
 fn width_probe(key: (u64, usize)) -> impl IntoElement {
     div().absolute().top_0().left_0().size_full().child(
         hacivat_ui_core::gpui_surface::canvas(
-            move |bounds, _, cx| {
+            move |bounds, window, cx| {
                 let w = f32::from(bounds.size.width);
-                let old = cx.default_global::<StripWidths>().0.insert(key, w);
+                let g = cx.default_global::<StripWidths>();
+                let old = g.widths.insert(key, w);
+                if !std::mem::replace(&mut g.hooked, true) {
+                    cx.on_window_closed(|cx, id| {
+                        if cx.has_global::<StripWidths>() {
+                            let id = id.as_u64();
+                            cx.global_mut::<StripWidths>()
+                                .widths
+                                .retain(|(w, _), _| *w != id);
+                        }
+                    })
+                    .detach();
+                }
                 if old.is_none_or(|o| (o - w).abs() > 0.5) {
-                    cx.defer(|cx| cx.refresh_windows());
+                    let view = window.current_view();
+                    cx.defer(move |cx| cx.notify(view));
                 }
             },
             |_, _, _, _| {},
@@ -667,14 +747,7 @@ impl TabStrip {
             .min_w(px(0.0))
             .bg(c.head.to_hsla());
         // ## m4b-t21-shots fix round 2 (N-I2, m-d): the plan, from the last frame's width.
-        let style_of = |source: TextSource| match source {
-            TextSource::Data | TextSource::Catalog => TypeStyle {
-                size_px: 12.0,
-                line_height: 12.0 * 1.35,
-                ..t.type_ramp.code
-            },
-            _ => t.type_ramp.body,
-        };
+        let style_of = |source: TextSource| tab_style(source, t);
         let has_parts = self.tabs.iter().any(|t| t.parts.is_some());
         // Keyed by window and pane: two windows' strips never share a width.
         let strip_key = (window.window_handle().window_id().as_u64(), pane.0 as usize);
@@ -696,7 +769,7 @@ impl TabStrip {
                 .collect();
             let room = cx
                 .try_global::<StripWidths>()
-                .and_then(|g| g.0.get(&strip_key).copied());
+                .and_then(|g| g.widths.get(&strip_key).copied());
             let fits = plan(&self.tabs, self.active, &measured, &titles, room);
             fits.into_iter().zip(measured).collect()
         } else {
@@ -708,14 +781,7 @@ impl TabStrip {
             let (hover, _) = interaction_state(&id, window, cx);
             let hovered = *hover.read(cx);
             let ink = if active { c.text } else { c.text_2 }.to_hsla();
-            let style = match tab.title_source {
-                TextSource::Data | TextSource::Catalog => TypeStyle {
-                    size_px: 12.0,
-                    line_height: 12.0 * 1.35,
-                    ..t.type_ramp.code
-                },
-                _ => t.type_ramp.body,
-            };
+            let style = tab_style(tab.title_source, t);
             let selector = format!("tab-{}", tab.id.0);
             let tab_id = tab.id;
             let mut el = div()
@@ -728,16 +794,13 @@ impl TabStrip {
                 .h(height)
                 // ## m3c-narrow (F12): was `flex_none`: the tab gives way (below).
                 .min_w(px(0.0))
-                .px(px(12.0))
-                .gap(px(7.0))
-                .border_r_1()
+                // ## m4b-t22-pre (T21 r3): the constants the plan reads.
+                .px(px(TAB_PAD_X))
+                .gap(px(TAB_GAP))
+                .border_r(px(TAB_BORDER))
                 .border_color(c.seam.to_hsla())
                 .cursor_pointer()
-                .child(
-                    Icon::new(IconName::FileCode)
-                        .size(IconSize::Chrome)
-                        .color(ink),
-                )
+                .child(Icon::new(IconName::FileCode).size(TAB_ICON).color(ink))
                 // ## m3c-narrow (F12): the title ellipsizes (its tooltip and the tab's
                 // accessible name keep it whole) under a stable id.
                 // ## m4b-t21-shots (named exception): or two parts (`TabSpec::parts`), as the
@@ -804,7 +867,7 @@ impl TabStrip {
             if tab.dirty {
                 el = el.child(
                     div()
-                        .size(px(6.0))
+                        .size(px(DIRTY_W))
                         .flex_none()
                         .rounded_full()
                         .bg(c.text_2.to_hsla()),
@@ -833,7 +896,7 @@ impl TabStrip {
                             // Raised Ink Rule: the active tab is raised, so its × is text-2;
                             // an inactive tab (head, or hover) keeps text-3.
                             Icon::new(IconName::X)
-                                .size(IconSize::Chrome)
+                                .size(TAB_ICON)
                                 .color(if active { c.text_2 } else { c.text_3 }.to_hsla()),
                         ),
                 );

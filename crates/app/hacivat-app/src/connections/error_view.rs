@@ -1080,6 +1080,7 @@ pub(crate) fn record_text(
             // ## m2b-t24-shots
             visible: true,
             outside_card: false,
+            folded: false,
         }
     });
 }

@@ -770,7 +770,9 @@ impl Surface {
         };
         // ## m3b-t29-shots (T29 review I2): a trust signal counts only drawn whole: never
         // ellipsized nor clipped (NOTES cross-cutting #7, "never hidden or truncated").
-        let whole = |r: &RenderedText| drawn(r) && !r.truncated && !r.clipped;
+        // ## m4b-t22-pre (T21 r1): nor cut or hidden at a scroll area's fold (`folded`), which
+        // check (b) lets through as scrolling.
+        let whole = |r: &RenderedText| drawn(r) && !r.truncated && !r.clipped && !r.folded;
         let mut out: Vec<String> = required
             .iter()
             .filter(|group| {
@@ -784,9 +786,9 @@ impl Surface {
             self.uncut_trust()
                 .into_iter()
                 .filter(|id| {
-                    frame
-                        .iter()
-                        .any(|r| r.visible && r.path.ends_with(id) && (r.truncated || r.clipped))
+                    frame.iter().any(|r| {
+                        r.visible && r.path.ends_with(id) && (r.truncated || r.clipped || r.folded)
+                    })
                 })
                 .map(|id| format!("{name}: (t) a trust label is cut short: {id}")),
         );
@@ -1583,15 +1585,35 @@ fn shot_root(name: &str) -> ShotRoot {
     if let Some(parent) = lock.parent() {
         std::fs::create_dir_all(parent).expect("the shots' temp folder");
     }
+    take_lock(&lock, name);
+    // ## m4b-t22-pre (T21 r4): the guard owns the lock from here, so a panic below (the root's
+    // `create_dir_all`) still releases it.
+    let root = ShotRoot(path);
+    let _ = std::fs::remove_dir_all(root.path());
+    std::fs::create_dir_all(root.path()).expect("temp dir");
+    CURRENT_ROOT.with(|c| *c.borrow_mut() = Some(root.path().to_path_buf()));
+    root
+}
+
+// ## m4b-t22-pre (T21 r4): the lock names its owner (`<lock>/pid`): a lock whose owner is no
+// longer running (a killed or aborted run) is taken over at once; `STALE_LOCK` stays the rule
+// for a lock with no readable owner, or an owner that cannot be checked.
+/// The file in a shot root's lock that holds its owner's process id.
+const LOCK_OWNER: &str = "pid";
+
+/// Takes the lock `lock` (an atomic `mkdir`) for shot `name`, writing this process's id into
+/// it: waits while another live run holds it, takes it over when its owner is dead or it is
+/// older than [`STALE_LOCK`].
+fn take_lock(lock: &Path, name: &str) {
     let deadline = std::time::Instant::now() + 2 * STALE_LOCK;
-    while std::fs::create_dir(&lock).is_err() {
-        let stale = std::fs::metadata(&lock)
+    while std::fs::create_dir(lock).is_err() {
+        let stale = std::fs::metadata(lock)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age > STALE_LOCK);
-        if stale {
-            let _ = std::fs::remove_dir_all(&lock);
+        if stale || lock_owner_dead(lock) {
+            let _ = std::fs::remove_dir_all(lock);
             continue;
         }
         assert!(
@@ -1601,10 +1623,117 @@ fn shot_root(name: &str) -> ShotRoot {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(&path).expect("temp dir");
-    CURRENT_ROOT.with(|c| *c.borrow_mut() = Some(path.clone()));
-    ShotRoot(path)
+    // A run that sees the lock before this write reads no owner, and waits.
+    let _ = std::fs::write(
+        lock.join(LOCK_OWNER),
+        std::process::id().to_string().as_bytes(),
+    );
+}
+
+/// Whether the lock `lock` names an owner that is no longer running. `false` when it names
+/// none (yet), names this process, or the check cannot run.
+fn lock_owner_dead(lock: &Path) -> bool {
+    let Some(pid) = std::fs::read_to_string(lock.join(LOCK_OWNER))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+    else {
+        return false;
+    };
+    pid != std::process::id() && process_gone(pid)
+}
+
+/// Whether no process `pid` runs (`ps -p`, as `live_threads` reads; `false` when `ps` cannot
+/// run, or off Unix).
+fn process_gone(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.code() == Some(1))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// T21 r4: a shot root's lock left by a run that is gone is taken over at once; one held by a
+/// live run is waited for; the stale rule still takes over an old lock whose owner is unknown.
+#[cfg(not(unix))]
+fn a_dead_runs_shot_lock_is_taken_over_at_once() {}
+
+/// T21 r4 (Unix: the shots run there).
+#[cfg(unix)]
+fn a_dead_runs_shot_lock_is_taken_over_at_once() {
+    let tmp = tempfile::tempdir().expect("the check's temp folder");
+    // A process that has exited: its id names no running process.
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn `true`");
+    let dead = child.id();
+    child.wait().expect("`true` ends");
+    if !process_gone(dead) {
+        // Its id was taken again at once: nothing to check with it.
+        println!("shots: the dead child's id {dead} is running again; check skipped");
+        return;
+    }
+    let run = |lock: PathBuf| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            take_lock(&lock, "check");
+            let _ = tx.send(std::fs::read_to_string(lock.join(LOCK_OWNER)).ok());
+        });
+        rx
+    };
+    let held = |name: &str, owner: Option<u32>| {
+        let lock = tmp.path().join(name);
+        std::fs::create_dir(&lock).expect("a held lock");
+        if let Some(pid) = owner {
+            std::fs::write(lock.join(LOCK_OWNER), pid.to_string()).expect("its owner");
+        }
+        lock
+    };
+    let me = std::process::id().to_string();
+    // A dead owner: taken over at once, and the lock now names this process.
+    let rx = run(held("dead.lock", Some(dead)));
+    let owner = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("a dead run's lock is taken over at once, not after STALE_LOCK");
+    assert_eq!(
+        owner.as_deref(),
+        Some(me.as_str()),
+        "the lock names its new owner"
+    );
+    // A live owner (another live process: this one's parent, or `launchd`/`init`): waited for.
+    let parent = std::os::unix::process::parent_id();
+    let lock = held("live.lock", Some(parent));
+    let rx = run(lock.clone());
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "a live run's lock is not taken"
+    );
+    // Its owner lets go: the waiter takes it.
+    std::fs::remove_dir_all(&lock).expect("let go");
+    let owner = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the lock is taken once free");
+    assert_eq!(owner.as_deref(), Some(me.as_str()));
+    // No owner named, but older than STALE_LOCK: the stale rule takes it over.
+    let lock = held("old.lock", None);
+    let old = std::time::SystemTime::now() - STALE_LOCK - std::time::Duration::from_secs(60);
+    std::fs::File::open(&lock)
+        .and_then(|f| f.set_modified(old))
+        .expect("age the lock");
+    let rx = run(lock);
+    let owner = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("a stale lock is taken over");
+    assert_eq!(owner.as_deref(), Some(me.as_str()));
 }
 
 thread_local! {
@@ -1897,6 +2026,8 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     }
     failures.extend(check_grid(&name, shot.locale, &frame));
     failures.extend(shot.surface.trust_missing(&name, &frame));
+    // ## m4b-t22-pre (T21 r1)
+    failures.extend(check_notice_title(&name, &frame));
     // ## m4b-t21-shots fix round 1 (I2): the chooser announces each row's environment.
     if let Surface::M4b(state) = shot.surface
         && state.is_chooser()
@@ -1983,6 +2114,26 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         });
     }
     failures
+}
+
+// ## m4b-t22-pre (T21 r1)
+/// (s) A script tab's first notice shows its title whole: visible, not clipped, and not cut or
+/// hidden at the fold of the scroll area the notices sit in while a Run-as-script strip shows
+/// (check (b) lets a fold through as scrolling). The titles record that at prepaint
+/// (`InlineNotice::title_id`); later notices may scroll.
+fn check_notice_title(name: &str, frame: &[RenderedText]) -> Option<String> {
+    let id = format!("#{}", hacivat_app::scripts::disk_bars::NOTICE_TITLE_ID);
+    let first = frame.iter().find(|r| r.path.ends_with(id.as_str()))?;
+    (!first.visible || first.clipped || first.folded).then(|| {
+        format!(
+            "{name}: (s) the first notice's title is not shown whole: {:?} (visible {}, \
+             clipped {}, folded {})",
+            strip(&first.text),
+            first.visible,
+            first.clipped,
+            first.folded
+        )
+    })
 }
 
 // ## m2b-t24-shots
@@ -2399,6 +2550,7 @@ fn pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px() {
         path: "x.rs:1:1".into(),
         visible: true,
         outside_card: false,
+        folded: false,
     };
     let frame = [
         label("[Ŝéåŕçĥ]", TextSource::Fluent, 13.0, false),
@@ -2512,6 +2664,7 @@ fn pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px() {
     // (f) A label that runs past its dialog card, in any locale.
     let past = RenderedText {
         outside_card: true,
+        folded: false,
         ..label("Applies to every hop", TextSource::Fluent, 12.0, false)
     };
     let found = check_labels("s", "en", &[past]);
@@ -2659,7 +2812,12 @@ fn main() {
         eprintln!("--shard {bad:?}: expected k/n with 1 <= k <= n");
         std::process::exit(2);
     }
-    let checks: [(&str, fn()); 15] = [
+    let checks: [(&str, fn()); 16] = [
+        // ## m4b-t22-pre (T21 r4)
+        (
+            "a_dead_runs_shot_lock_is_taken_over_at_once",
+            a_dead_runs_shot_lock_is_taken_over_at_once,
+        ),
         // ## m4b-t21-shots (R-M4b-44, R-C0-6)
         (
             "shots_render_leaves_no_temp_dir",
@@ -2874,6 +3032,7 @@ fn grid_text_is_data_and_never_clipped() {
         path: path.to_string().into(),
         visible: true,
         outside_card: false,
+        folded: false,
     };
     let header = "crates/ui/hacivat-ui-grid/src/element/layers.rs#header";
     let cell = "crates/ui/hacivat-ui-grid/src/element/layers.rs#cell";
@@ -2927,6 +3086,7 @@ fn an_m3a_grid_state_without_its_grid_fails() {
         path: path.to_string().into(),
         visible: true,
         outside_card: false,
+        folded: false,
     };
     let strip = at(
         "crates/app/hacivat-app/src/results/strip.rs:329:21#strip-sentence",
@@ -3029,6 +3189,7 @@ fn trust_signals_must_be_drawn() {
         path: format!("crates/x.rs:1:1#{id}").into(),
         visible,
         outside_card: false,
+        folded: false,
     };
     // A marker that drew nothing, or is hidden, does not count.
     let cursor = Surface::M3a(m3a::M3a::StatusCursorOpen);
@@ -3083,6 +3244,43 @@ fn trust_signals_must_be_drawn() {
     assert!(
         found.len() == 1 && found[0].contains("#capsule-text-name"),
         "{found:?}"
+    );
+    // ## m4b-t22-pre (T21 r1): a trust label cut or hidden at a scroll area's fold does not
+    // count as shown either, and is a cut trust label.
+    let folded = RenderedText {
+        folded: true,
+        ..at("status-env-label", 90.0, true)
+    };
+    let found = prod.trust_missing("s", &[full[0].clone(), folded]);
+    assert!(
+        found.iter().any(|v| v.contains("not shown whole"))
+            && found.iter().any(|v| v.contains("cut short")),
+        "{found:?}"
+    );
+    // (s) The first notice's title: whole passes; folded, clipped or hidden fails; a later
+    // notice's title may fold.
+    let title = |folded: bool| RenderedText {
+        folded,
+        ..at("script-notice-title", 90.0, true)
+    };
+    assert_eq!(check_notice_title("s", &[title(false), title(true)]), None);
+    assert!(
+        check_notice_title("s", &[title(true), title(false)]).is_some_and(|v| v.contains("(s)"))
+    );
+    let clipped_title = RenderedText {
+        clipped: true,
+        ..title(false)
+    };
+    assert!(check_notice_title("s", &[clipped_title]).is_some());
+    let hidden_title = RenderedText {
+        visible: false,
+        ..title(false)
+    };
+    assert!(check_notice_title("s", &[hidden_title]).is_some());
+    assert_eq!(
+        check_notice_title("s", &[]),
+        None,
+        "no notice, nothing to check"
     );
     // Transaction and cursor.
     let everything = Surface::M3a(m3a::M3a::StatusEverything);
@@ -3186,6 +3384,7 @@ fn every_m3b_state_has_its_own_marker() {
         path: path.to_string().into(),
         visible: true,
         outside_card: false,
+        folded: false,
     };
     let shell: Vec<RenderedText> = [
         (
@@ -3391,6 +3590,7 @@ fn every_m3c_state_has_its_own_marker() {
         path: path.to_string().into(),
         visible: true,
         outside_card: false,
+        folded: false,
     };
     let console: Vec<RenderedText> = [
         (
@@ -3687,6 +3887,7 @@ fn a_missing_surface_fails_its_frame() {
         path: path.to_string().into(),
         visible: true,
         outside_card: false,
+        folded: false,
     };
     let shell = [at(
         "crates/ui/hacivat-ui/src/titlebar.rs:297:25#palette-placeholder",

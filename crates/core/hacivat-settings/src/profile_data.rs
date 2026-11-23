@@ -118,7 +118,10 @@ impl ProfileDataDoc {
         section.set_implicit(false);
         clear_positions(&mut section);
 
+        // ## m4b-t22-pre (T21 m12): how long the save waited for the lock, and wrote.
+        let asked = std::time::Instant::now();
         let _writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+        let locked = std::time::Instant::now();
         let (mut doc, layout) = read_doc(&self.path)?;
         if layout.mixed {
             return Err(ProfileDataError::MixedLineEndings);
@@ -144,9 +147,61 @@ impl ProfileDataDoc {
         if layout.bom {
             out.insert(0, BOM);
         }
-        fsio::atomic_write(&self.path, out.as_bytes()).map_err(ProfileDataError::Io)?;
+        let written = fsio::atomic_write(&self.path, out.as_bytes()).map_err(ProfileDataError::Io);
+        timings::note(locked - asked, locked.elapsed());
+        written?;
         self.doc = doc;
         Ok(())
+    }
+}
+
+// ## m4b-t22-pre (named item, T21 m12)
+/// How long saves took in this process: for the diagnostics a test prints when a save it
+/// waited on timed out (the durable write syncs twice, under the process-wide lock). Nothing
+/// reads these to decide anything.
+pub mod timings {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    static SAVES: AtomicU64 = AtomicU64::new(0);
+    static LOCK_WAIT_MAX_US: AtomicU64 = AtomicU64::new(0);
+    static LOCKED_MAX_US: AtomicU64 = AtomicU64::new(0);
+    static LOCK_WAIT_LAST_US: AtomicU64 = AtomicU64::new(0);
+    static LOCKED_LAST_US: AtomicU64 = AtomicU64::new(0);
+
+    /// The saves so far: how many, and the longest and the last wait for the lock and time
+    /// under it (the read, the write and its syncs), in microseconds.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct SaveTimings {
+        pub saves: u64,
+        pub lock_wait_max_us: u64,
+        pub locked_max_us: u64,
+        pub lock_wait_last_us: u64,
+        pub locked_last_us: u64,
+    }
+
+    pub(super) fn note(wait: Duration, locked: Duration) {
+        let (wait, locked) = (micros(wait), micros(locked));
+        SAVES.fetch_add(1, Ordering::Relaxed);
+        LOCK_WAIT_MAX_US.fetch_max(wait, Ordering::Relaxed);
+        LOCKED_MAX_US.fetch_max(locked, Ordering::Relaxed);
+        LOCK_WAIT_LAST_US.store(wait, Ordering::Relaxed);
+        LOCKED_LAST_US.store(locked, Ordering::Relaxed);
+    }
+
+    fn micros(d: Duration) -> u64 {
+        u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
+    }
+
+    /// The timings so far.
+    pub fn get() -> SaveTimings {
+        SaveTimings {
+            saves: SAVES.load(Ordering::Relaxed),
+            lock_wait_max_us: LOCK_WAIT_MAX_US.load(Ordering::Relaxed),
+            locked_max_us: LOCKED_MAX_US.load(Ordering::Relaxed),
+            lock_wait_last_us: LOCK_WAIT_LAST_US.load(Ordering::Relaxed),
+            locked_last_us: LOCKED_LAST_US.load(Ordering::Relaxed),
+        }
     }
 }
 

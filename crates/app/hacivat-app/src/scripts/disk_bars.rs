@@ -14,15 +14,19 @@
 //! "Open under another connection…" is disabled, with the reason as its label's neighbour,
 //! when no other connection shows the file (N2).
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use hacivat_l10n::ArgValue;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::focus_home::{HomeSlot, first_stop_home};
+use hacivat_ui::follow::FollowFocus;
 use hacivat_ui::notice::{InlineNotice, NoticeIcon};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Entity, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
-    div, px,
+    AnyElement, App, Entity, EntityId, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px,
 };
-use hacivat_ui_core::theme::Theme;
+use hacivat_ui_core::theme::{Theme, ThemeTokens};
 
 use crate::scripts::open;
 use crate::scripts::save::{self, ConfirmSpec};
@@ -32,22 +36,116 @@ use crate::scripts::tabs::{
 
 /// The notices of script tab `doc`, under its toolbar (`None`: none).
 pub(crate) fn render(doc: &Entity<ScriptDoc>, cx: &mut App) -> Option<AnyElement> {
+    column(doc, None, cx)
+}
+
+/// The id appended to each script notice's title in the text registry (the frame checks
+/// require the first one whole).
+pub const NOTICE_TITLE_ID: &str = "script-notice-title";
+
+/// The notices' column; under a strip (`area`) condensed and measured.
+fn column(
+    doc: &Entity<ScriptDoc>,
+    area: Option<(&NoticeArea, EntityId)>,
+    cx: &mut App,
+) -> Option<AnyElement> {
     let notices = doc.read(cx).notices.clone();
-    let shown: Vec<AnyElement> = notices.iter().filter_map(|n| notice(doc, n, cx)).collect();
+    let mut shown: Vec<InlineNotice> = notices.iter().filter_map(|n| notice(doc, n, cx)).collect();
     if shown.is_empty() {
         return None;
     }
     let t = Theme::get(cx).tokens;
-    Some(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(t.spacing.sm))
-            .px(px(t.spacing.lg))
-            .py(px(t.spacing.sm))
-            .children(shown)
-            .into_any_element(),
-    )
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap(px(t.spacing.sm))
+        .px(px(t.spacing.lg))
+        .py(px(t.spacing.sm));
+    // ## m4b-t22-pre (T21 r1): every title is checked; under a strip each notice shows its
+    // buttons right under its title, and the first title's bottom is the area's floor.
+    shown = shown
+        .into_iter()
+        .map(|n| n.title_id(NOTICE_TITLE_ID).actions_first(area.is_some()))
+        .collect();
+    if let Some((area, host)) = area {
+        let top = area.top.clone();
+        col = col.relative().child(
+            canvas(move |b, _, _| top.set(f32::from(b.top())), |_, (), _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_0(),
+        );
+        let (top, floor) = (area.top.clone(), area.floor.clone());
+        let pad = t.spacing.sm;
+        let first = shown.remove(0).on_title_bounds(Rc::new(move |b, _, cx| {
+            let want = f32::from(b.bottom()) - top.get() + pad;
+            if floor.get().is_none_or(|f| (f - want).abs() > 0.5) {
+                floor.set(Some(want));
+                cx.defer(move |cx| cx.notify(host));
+            }
+        }));
+        shown.insert(0, first);
+    }
+    Some(col.children(shown).into_any_element())
+}
+
+// ## m4b-t22-pre (named item, T21 r1)
+/// Where a script tab's notices sit while a Run-as-script strip shows: a scroll area that
+/// gives up its height first (so the code keeps two lines), down to a floor that keeps the
+/// first notice's title whole; its buttons come right under the title, so they show wherever
+/// the room allows, and a button the focus moves to scrolls into view. Kept by the console
+/// host across frames.
+#[derive(Clone, Default)]
+pub(crate) struct NoticeArea {
+    follow: FollowFocus,
+    /// The column's top in the last frame (window coordinates).
+    top: Rc<Cell<f32>>,
+    /// The first title's bottom below the column's top, plus the column's own bottom
+    /// padding: the area's floor (the last frame's measure).
+    floor: Rc<Cell<Option<f32>>>,
+}
+
+impl NoticeArea {
+    /// The notices of `doc` in the area (`None`: none); `host`, the view drawing them, is drawn
+    /// again when the floor it measured changes.
+    pub(crate) fn render(
+        &self,
+        doc: &Entity<ScriptDoc>,
+        host: EntityId,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        let col = column(doc, Some((self, host)), cx)?;
+        let t = Theme::get(cx).tokens;
+        let floor = self.floor.get().unwrap_or_else(|| one_line_floor(t));
+        let end = self.follow.clone();
+        Some(
+            div()
+                .child(self.follow.scope_start())
+                .on_children_prepainted(move |_, window, cx| end.scope_end(window, cx))
+                .id("script-notices")
+                .debug_selector(|| "script-notices".to_string())
+                .flex_shrink(1.0)
+                .min_h(px(floor))
+                .overflow_y_scroll()
+                .track_scroll(self.follow.scroll_handle())
+                .child(hacivat_ui::text::scroll_viewport())
+                .child(col)
+                .into_any_element(),
+        )
+    }
+
+    /// Back to the top (no strip shows: the next strip starts with the first title).
+    pub(crate) fn reset(&self) {
+        self.follow
+            .scroll_handle()
+            .set_offset(point(px(0.0), px(0.0)));
+    }
+}
+
+/// The floor before the title was measured: a one-line title in its notice in the column.
+fn one_line_floor(t: &ThemeTokens) -> f32 {
+    t.spacing.sm + 1.0 + t.spacing.md + t.type_ramp.body_sm.line_height + t.spacing.sm
 }
 
 /// The state of a tab whose text is not shown yet (or will not be), in its own home.
@@ -133,7 +231,7 @@ pub(crate) fn render_unloaded(
 /// The encodings the question offers (NOTES surface 10; the Turkish ones first).
 const ENCODINGS: [&str; 4] = ["windows-1254", "ISO-8859-9", "windows-1252", "UTF-16LE"];
 
-fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElement> {
+fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<InlineNotice> {
     let file = tabs::file_label(doc.read(cx), cx);
     let conn = tabs::conn_label(doc.read(cx), cx);
     let tab = doc.read(cx).tab.0;
@@ -424,7 +522,7 @@ fn notice(doc: &Entity<ScriptDoc>, n: &Notice, cx: &mut App) -> Option<AnyElemen
             InlineNotice::new(NoticeIcon::Info).line(msg(cx, "hv-scripts-one-session", Vec::new()))
         }
     };
-    Some(card.into_any_element())
+    Some(card)
 }
 
 /// Adds "Open under another connection…", disabled with its reason when no other connection

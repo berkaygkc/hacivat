@@ -49,7 +49,8 @@ use crate::step_trail::run_marker;
 use crate::text::{Label, TextSource};
 
 /// The size of every environment mark (DESIGN.md: state marks are 7 px).
-const MARK_PX: f32 = 7.0;
+// ## m4b-t22-pre (T21 r3): the tab strip's plan reads it too.
+pub(crate) const MARK_PX: f32 = 7.0;
 /// The dev mark's centre dot (NOTES "Environment marks: dev, test").
 const DEV_DOT_PX: f32 = 3.0;
 /// The step and clock keep at least this width so the capsule does not jump as they tick

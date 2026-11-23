@@ -68,8 +68,7 @@ use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{
     AnyView, App, AppContext as _, Context, Entity, Focusable as _, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Task, WeakEntity,
-    Window, div, px,
+    StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
 use hacivat_ui_editor::large_file::SizeText;
@@ -567,6 +566,8 @@ pub struct ConsoleHost {
     // not-yet-shown states.
     script: Option<Entity<ScriptDoc>>,
     script_home: HomeSlot,
+    // ## m4b-t22-pre (named line, T21 r1): the notices' area under a strip.
+    notice_area: crate::scripts::disk_bars::NoticeArea,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -635,6 +636,7 @@ impl ConsoleHost {
             // ## m4b-t14-tabs
             script: None,
             script_home: HomeSlot::new(),
+            notice_area: Default::default(),
             _subscriptions: subscriptions,
         };
         // A binding the hook handed out is for the tab built in this frame; whatever no host
@@ -1789,6 +1791,11 @@ impl Render for ConsoleHost {
             .console()
             .and_then(|c| crate::scripts::run_as_script::strip(c, cx));
         let strip_shown = strip.is_some();
+        // ## m4b-t22-pre (T21 r1)
+        let host = cx.entity_id();
+        if !strip_shown {
+            self.notice_area.reset();
+        }
         // ## m3b-t22-tx-ui (named exception): with the console's transaction items.
         let bar = toolbar::build_for(&model, &actions, self.console(), cx);
         let root = div()
@@ -1804,25 +1811,17 @@ impl Render for ConsoleHost {
             // ## m4b-t21-shots fix round 2 (m-a): the notices give way first while a strip
             // shows (they scroll), so the code keeps its two lines inside the tile; the strip
             // and the banner's title never shrink.
-            .children(
-                self.script
-                    .as_ref()
-                    .and_then(|doc| crate::scripts::disk_bars::render(doc, cx))
-                    .map(|n| {
-                        if strip_shown {
-                            div()
-                                .id("script-notices")
-                                .flex_shrink(1.0)
-                                .min_h(px(0.0))
-                                .overflow_y_scroll()
-                                .child(hacivat_ui::text::scroll_viewport())
-                                .child(n)
-                                .into_any_element()
-                        } else {
-                            div().flex_none().child(n).into_any_element()
-                        }
-                    }),
-            )
+            // ## m4b-t22-pre (T21 r1): down to a floor that keeps the first notice's title
+            // whole, its buttons under the title, a focused button scrolled into view
+            // (`NoticeArea`).
+            .children(self.script.as_ref().and_then(|doc| {
+                if strip_shown {
+                    self.notice_area.render(doc, host, cx)
+                } else {
+                    crate::scripts::disk_bars::render(doc, cx)
+                        .map(|n| div().flex_none().child(n).into_any_element())
+                }
+            }))
             // ## m4b-t18-run-as-script (named exception; NOTES surface 9): the Run-as-script
             // strip, under the notices (never over a trust signal).
             // ## m4b-t21-shots (named exception, T18 concern): and under the T2 banner, as the

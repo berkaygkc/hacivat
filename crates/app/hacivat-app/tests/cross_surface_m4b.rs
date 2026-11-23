@@ -615,3 +615,159 @@ fn a_connections_short_form_cuts_whole_clusters_after_nfc_and_escapes_each_part(
     assert_eq!(tab_conn_short(&"x".repeat(40)), None);
     assert_eq!(tab_conn_short(&format!("{}ş", "x".repeat(39))), None);
 }
+
+// ## m4b-t22-pre (T21 r1, MUST): a notice under a strip keeps its title whole, and a button
+// Tab lands on inside the notices' scroll area scrolls into view.
+
+/// Where the notices show while a strip shows: from the toolbar's foot to the T2 banner's top
+/// (the row under them).
+fn notice_room(r: &mut Rig) -> (f32, f32) {
+    redraw_full(r.vcx);
+    let bar = r
+        .vcx
+        .debug_bounds("toolbar-console-toolbar")
+        .expect("the toolbar");
+    let banner = r
+        .vcx
+        .debug_bounds("editor-t2-banner")
+        .expect("the T2 banner");
+    (f32::from(bar.bottom()), f32::from(banner.top()))
+}
+
+/// The first notice's title, the notices not scrolled: under the toolbar (`room_top`), the
+/// notices' column padding, the card's border and padding, one line of `body_sm` (these
+/// titles are one line at 960 in every locale).
+fn first_title(r: &mut Rig, room_top: f32) -> (f32, f32) {
+    let t = r
+        .vcx
+        .cx
+        .read(|cx| hacivat_ui_core::theme::Theme::get(cx).tokens);
+    let top = room_top + t.spacing.sm + 1.0 + t.spacing.md;
+    (top, top + t.type_ramp.body_sm.line_height)
+}
+
+/// Drags the seam between the editor tile and the results up to the tile's top plus `h` (a
+/// shorter console tile: the results split dragged up).
+fn console_tile_to(r: &mut Rig, h: f32) {
+    let tile = r
+        .vcx
+        .debug_bounds("console-tile")
+        .expect("the console tile");
+    let x = tile.center().x;
+    let from = gpui::point(x, tile.bottom() + gpui::px(0.5));
+    let to = gpui::point(x, tile.top() + gpui::px(h));
+    r.vcx
+        .simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
+    r.vcx
+        .simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::none());
+    r.vcx
+        .simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+    r.vcx.run_until_parked();
+    redraw_full(r.vcx);
+    let now = r
+        .vcx
+        .debug_bounds("console-tile")
+        .expect("the console tile");
+    assert!(
+        f32::from(now.size.height) < f32::from(tile.size.height) - 50.0,
+        "the tile is shorter: {tile:?} → {now:?}"
+    );
+}
+
+/// A big script's tab at 960 × 600 in `lang`: `first` (a notice shown before), "Deleted on
+/// disk", a strip and the find bar.
+fn deleted_under_a_strip(
+    cx: &mut TestAppContext,
+    lang: &str,
+    first: Option<Notice>,
+) -> (Rig, TabId) {
+    let (mut r, prod) = prod_rig_in(cx, lang, &[("big.sql", big_script().into_bytes())]);
+    let tab = r.open_until("big.sql", prod, ready);
+    r.vcx
+        .simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+    if let Some(first) = first {
+        r.notice(tab, first);
+    }
+    r.notice(tab, Notice::Deleted);
+    r.strip(tab);
+    let editor = r.editor(tab);
+    in_window(r.vcx, |window, cx| {
+        let f = gpui::Focusable::focus_handle(editor.read(cx), cx);
+        window.focus(&f, cx);
+        hacivat_ui::actions::ActionRegistry::run("editor.find", window, cx);
+    });
+    let console = r.console(tab);
+    wait_until(r.vcx, "the find bar", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::console::find_bar::is_open(console, cx))
+    });
+    (r, tab)
+}
+
+/// The first notice's title is whole in the room above the banner, and Tab onto each of the
+/// notice's buttons (Save, Close tab: the two stops before the strip's Stop) shows it whole
+/// there.
+fn title_whole_and_tab_reveals(r: &mut Rig, tab: TabId, what: &str) {
+    let (top, bottom) = notice_room(r);
+    let (title_top, title_bottom) = first_title(r, top);
+    assert!(
+        title_top >= top - 0.5 && title_bottom <= bottom + 0.5,
+        "{what}: the first notice's title is whole: {title_top}..{title_bottom} in {top}..{bottom}"
+    );
+    let stop = handle_of(r.vcx, "button-script-run-stop");
+    let order = tab_order(r.vcx);
+    let at = order
+        .iter()
+        .position(|h| *h == stop)
+        .expect("Stop is a Tab stop");
+    assert!(
+        at >= 3,
+        "{what}: the toolbar and the notice's two buttons come first"
+    );
+    let buttons = [
+        ("Save", format!("button-script-recreate-{}", tab.0), at - 2),
+        (
+            "Close tab",
+            format!("button-script-close-{}", tab.0),
+            at - 1,
+        ),
+    ];
+    for (name, button, i) in buttons {
+        in_window(r.vcx, |window, cx| window.focus(&order[i - 1], cx));
+        redraw_full(r.vcx);
+        press_key(r.vcx, "tab");
+        assert_focus_on(r.vcx, name, &order[i]);
+        // The scroll lands in the next frame.
+        redraw_full(r.vcx);
+        redraw_full(r.vcx);
+        let (top, bottom) = notice_room(r);
+        let b = r
+            .vcx
+            .debug_bounds(selector(&button))
+            .unwrap_or_else(|| panic!("{what}: {name} is drawn"));
+        assert!(
+            f32::from(b.top()) >= top - 0.5 && f32::from(b.bottom()) <= bottom + 0.5,
+            "{what}: Tab onto {name} shows it whole: {b:?} in {top}..{bottom}"
+        );
+    }
+}
+
+/// At 960 × 600 (tr-XT, the longest copy), with a strip, the banner and the find bar: the
+/// connection was deleted, then the file. The first title (the connection's) stays whole, and
+/// Tab onto the Deleted notice's buttons, under it, scrolls each into view.
+#[gpui::test]
+fn a_deleted_notice_under_a_strip_keeps_its_title_and_reveals_its_buttons_at_960(
+    cx: &mut TestAppContext,
+) {
+    let (mut r, tab) = deleted_under_a_strip(cx, "tr-XT", Some(Notice::Removed));
+    title_whole_and_tab_reveals(&mut r, tab, "960 × 600");
+}
+
+/// In a console tile the results split left short (its 120 px floor): the notices' area keeps
+/// its floor, so the title stays; each button scrolls into the floor's room.
+#[gpui::test]
+fn a_deleted_notice_under_a_strip_keeps_its_title_in_a_short_tile(cx: &mut TestAppContext) {
+    let (mut r, tab) = deleted_under_a_strip(cx, "en", None);
+    console_tile_to(&mut r, 190.0);
+    title_whole_and_tab_reveals(&mut r, tab, "a 190 px tile");
+}
