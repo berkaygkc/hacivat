@@ -262,3 +262,15 @@ opt-level = 1
 # re-encode of every committed snapshot) does not take 15 s at -O0 (minicat spike §6).
 [profile.dev.package.zstd-sys]
 opt-level = 2
+
+# ## m4b-cifix-6 (controller ruling R-C0-14): the script stream's hot path (lexing, splitting and
+# SHA-256 of a 20 MiB file, read twice by Run as script) at -O2 in debug builds, so the app tests
+# that stream a large preview are not CPU-bound on 3-4 vCPU CI runners. Release builds are unchanged.
+[profile.dev.package.sql-lexer]
+opt-level = 2
+
+[profile.dev.package.sql-split]
+opt-level = 2
+
+[profile.dev.package.sha2]
+opt-level = 2
