@@ -50,7 +50,7 @@ pub struct TabDecor {
     pub hairline: bool,
     // ## m4b-t21-shots (named item; ruling (d)): the title drawn in two parts
     // (`hacivat_ui::panes::TabSpec::parts`).
-    pub title_parts: Option<(SharedString, SharedString)>,
+    pub title_parts: Option<hacivat_ui::panes::TitleParts>,
 }
 
 impl Default for TabDecor {

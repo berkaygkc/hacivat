@@ -103,9 +103,14 @@ impl Drop for Rig {
 /// A shell with orders-prod (production, connected over the fake) and a library bound to
 /// `orders` holding `files`.
 fn prod_rig(cx: &mut TestAppContext, files: &[(&str, Vec<u8>)]) -> (Rig, ProfileId) {
+    prod_rig_in(cx, "en", files)
+}
+
+/// [`prod_rig`] in `lang` (fix round 2, m-a: the pseudo-locales too).
+fn prod_rig_in(cx: &mut TestAppContext, lang: &str, files: &[(&str, Vec<u8>)]) -> (Rig, ProfileId) {
     let (vcx, _fakes) = shell_with_routes(
         cx,
-        "en",
+        lang,
         vec![(DbmsKind::Postgres, PROD, pg_fake("orders"))],
     );
     in_window(vcx, |window, _| window.activate_window());
@@ -378,12 +383,8 @@ fn a_production_script_tab_at_960_keeps_capsule_hairline_and_env_cell_whole(
     assert!(swatch.bottom() <= reload.top(), "all under the toolbar");
     let code = r.vcx.debug_bounds("editor-column").expect("the code");
     assert!(stop.bottom() <= code.top(), "the code under the strip");
-    // Fix round 1 (m1): the code keeps two lines; the condensed banner's body gave way.
-    let line = r.vcx.cx.read(hacivat_ui_editor::EditorView::line_height);
-    assert!(
-        code.size.height >= line * 2.0,
-        "the code area keeps two lines: {code:?}, line {line:?}"
-    );
+    // Fix round 1 (m1), fix round 2 (m-a): two whole lines of code show (`code_lines`).
+    assert!(code_lines(&r, tab) >= 2, "two whole lines of code");
     #[cfg(feature = "scene-check")]
     {
         // The hairline is drawn: a 1 px red quad across the pane, under the tab strip.
@@ -519,4 +520,92 @@ fn the_recovered_notice_offers_save_then_discard(cx: &mut TestAppContext) {
         line.contains(':'),
         "the copy's time is shown, not only its day: {line}"
     );
+}
+
+// ## m4b-t21-shots fix round 2 (m-a)
+/// How many whole lines of code the editor of `tab` shows in its last frame (rows from the
+/// first painted one to the text area's bottom).
+fn code_lines(r: &Rig, tab: TabId) -> usize {
+    let editor = r.editor(tab);
+    redraw_full(r.vcx);
+    r.vcx
+        .cx
+        .read(|cx| {
+            editor.read(cx).last_layout().map(|l| {
+                let rows = l.rows();
+                let lh = f32::from(rows.line_height);
+                let room = f32::from(rows.bounds.bottom()) - f32::from(rows.first_y);
+                (room / lh + 0.01).floor().max(0.0) as usize
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// The cross-surface rows at 960 × 600 in `lang`: two whole lines of code still show.
+fn two_lines_at_960(cx: &mut TestAppContext, lang: &str) {
+    let (mut r, prod) = prod_rig_in(cx, lang, &[("big.sql", big_script().into_bytes())]);
+    let tab = r.open_until("big.sql", prod, ready);
+    r.vcx
+        .simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+    r.notice(tab, Notice::Changed);
+    r.strip(tab);
+    let editor = r.editor(tab);
+    in_window(r.vcx, |window, cx| {
+        let f = gpui::Focusable::focus_handle(editor.read(cx), cx);
+        window.focus(&f, cx);
+        hacivat_ui::actions::ActionRegistry::run("editor.find", window, cx);
+    });
+    let console = r.console(tab);
+    wait_until(r.vcx, "the find bar", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::console::find_bar::is_open(console, cx))
+    });
+    let n = code_lines(&r, tab);
+    assert!(n >= 2, "{lang}: {n} whole lines of code at 960");
+}
+
+#[gpui::test]
+fn two_whole_lines_of_code_at_960_in_english(cx: &mut TestAppContext) {
+    two_lines_at_960(cx, "en");
+}
+
+#[gpui::test]
+fn two_whole_lines_of_code_at_960_in_en_xa(cx: &mut TestAppContext) {
+    two_lines_at_960(cx, "en-XA");
+}
+
+#[gpui::test]
+fn two_whole_lines_of_code_at_960_in_tr_xt(cx: &mut TestAppContext) {
+    two_lines_at_960(cx, "tr-XT");
+}
+
+// ## m4b-t21-shots fix round 2 (N-I1): the short form of a connection on a tab.
+#[test]
+fn a_connections_short_form_cuts_whole_clusters_after_nfc_and_escapes_each_part() {
+    use hacivat_app::scripts::tabs::tab_conn_short;
+    let a = "a".repeat(19);
+    let b = "b".repeat(30);
+    // A flag at either end, a skin-tone emoji, a ZWJ sequence: whole on their side.
+    let s = tab_conn_short(&format!("{a}🇹🇷{b}")).unwrap();
+    assert!(s.starts_with(&format!("{a}🇹🇷…")), "{s}");
+    let s = tab_conn_short(&format!("{b}🇹🇷{}", "c".repeat(18))).unwrap();
+    assert!(s.ends_with(&format!("…🇹🇷{}", "c".repeat(18))), "{s}");
+    let s = tab_conn_short(&format!("{a}👍🏽{b}")).unwrap();
+    assert!(s.starts_with(&format!("{a}👍🏽…")), "{s}");
+    // A combining mark never lands on the "…".
+    let s = tab_conn_short(&format!("{b}x\u{0307}{}", "c".repeat(18))).unwrap();
+    assert!(!s.contains("…\u{0307}"), "{s:?}");
+    // A ZWJ sequence is one cluster; its joiner is shown escaped, whole.
+    let s = tab_conn_short(&format!("{a}👩\u{200d}💻{b}")).unwrap();
+    assert!(s.contains("<U+200D>"), "{s}");
+    assert!(!s.contains("<U+2…"), "{s}");
+    // An escaped control at the cut: its token whole (a control is one cluster).
+    let s = tab_conn_short(&format!("{a}\u{7}{b}")).unwrap();
+    assert!(!s.contains("<U+0…") && !s.contains("<U…"), "{s}");
+    // Turkish after NFC: a decomposed ş at the cut is one cluster and shows composed.
+    let s = tab_conn_short(&format!("{a}s\u{0327}{b}")).unwrap();
+    assert!(s.starts_with(&format!("{a}ş…")), "{s}");
+    // 40 clusters or fewer: no short form.
+    assert_eq!(tab_conn_short(&"x".repeat(40)), None);
+    assert_eq!(tab_conn_short(&format!("{}ş", "x".repeat(39))), None);
 }

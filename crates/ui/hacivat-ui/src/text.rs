@@ -1054,11 +1054,101 @@ impl IntoElement for Paragraph {
     }
 }
 
+// ## m4b-t21-shots fix round 2 (named items; N-I1, m-b)
+/// The first `head` and the last `tail` grapheme clusters of `text`, when it has more than
+/// `head + tail + 1` of them (the parts a middle shortening keeps: "first…last"); `None` when
+/// it is short enough to show whole. Cuts only between grapheme clusters, so a flag, a
+/// skin-tone emoji, a ZWJ sequence or a base with its combining marks is kept whole on its side.
+/// A caller that escapes invisible characters escapes each part after the cut, so an escape
+/// token is never split.
+pub fn middle_parts(text: &str, head: usize, tail: usize) -> Option<(&str, &str)> {
+    let bounds: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).collect();
+    let n = bounds.len();
+    if n <= head + tail + 1 {
+        return None;
+    }
+    let head_end = bounds[head];
+    let tail_start = bounds[n - tail];
+    Some((&text[..head_end], &text[tail_start..]))
+}
+
+/// The first `n` visible grapheme clusters of `text` and "…" (a truncation floor): Fluent's
+/// isolate marks (U+2068, U+2069) and a pseudo-locale's opening `[` before the first visible
+/// cluster are kept but not counted. `None` when `text` has at most `n` visible clusters.
+pub fn floor_prefix(text: &str, n: usize) -> Option<String> {
+    let mut out = String::new();
+    let mut counted = 0;
+    let mut started = false;
+    let mut rest = text.graphemes(true);
+    for g in rest.by_ref() {
+        out.push_str(g);
+        let isolate = g == "\u{2068}" || g == "\u{2069}";
+        let bracket = !started && g == "[";
+        if !isolate && !bracket {
+            started = true;
+            counted += 1;
+        }
+        if counted == n {
+            break;
+        }
+    }
+    let more = rest.any(|g| g != "\u{2068}" && g != "\u{2069}" && g != "]");
+    more.then(|| {
+        out.push('…');
+        out
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{TestAppContext, point, size};
     use hacivat_ui_core::theme::DARK;
+
+    // ## m4b-t21-shots fix round 2 (N-I1, m-b)
+    #[test]
+    fn middle_parts_cut_only_between_grapheme_clusters() {
+        let pad = |s: &str| format!("{s}{}", "a".repeat(30));
+        // A flag at the head's cut: kept whole (two regional indicators).
+        let t = format!("{}🇹🇷{}", "a".repeat(19), "b".repeat(30));
+        let (h, _) = middle_parts(&t, 20, 19).expect("long");
+        assert!(h.ends_with("🇹🇷"), "{h}");
+        // A flag at the tail's cut.
+        let t = format!("{}🇹🇷{}", "a".repeat(30), "b".repeat(18));
+        let (_, tl) = middle_parts(&t, 20, 19).expect("long");
+        assert!(tl.starts_with("🇹🇷"), "{tl}");
+        // A skin-tone emoji keeps its modifier.
+        let t = format!("{}👍🏽{}", "a".repeat(19), "b".repeat(30));
+        let (h, _) = middle_parts(&t, 20, 19).expect("long");
+        assert!(h.ends_with("👍🏽"), "{h}");
+        // A combining mark stays on its base, never on the "…".
+        let t = format!("{}x\u{0307}{}", "a".repeat(30), "b".repeat(18));
+        let (_, tl) = middle_parts(&t, 20, 19).expect("long");
+        assert!(tl.starts_with("x\u{0307}"), "{tl:?}");
+        // A ZWJ sequence is one cluster.
+        let t = format!("{}👩\u{200d}💻{}", "a".repeat(19), "b".repeat(30));
+        let (h, _) = middle_parts(&t, 20, 19).expect("long");
+        assert!(h.ends_with("👩\u{200d}💻"), "{h:?}");
+        // Short enough: whole.
+        assert_eq!(middle_parts(&pad(""), 20, 19), None);
+        assert_eq!(middle_parts(&"a".repeat(40), 20, 19), None);
+        assert!(middle_parts(&"a".repeat(41), 20, 19).is_some());
+    }
+
+    #[test]
+    fn the_floor_counts_visible_clusters_only() {
+        // Fluent isolates the file name; the pseudo-locale brackets the message.
+        assert_eq!(
+            floor_prefix("\u{2068}orders_report.sql\u{2069}", 4).as_deref(),
+            Some("\u{2068}orde…")
+        );
+        assert_eq!(
+            floor_prefix("[\u{2068}orders_report.sql\u{2069}", 4).as_deref(),
+            Some("[\u{2068}orde…")
+        );
+        assert_eq!(floor_prefix("🇹🇷🇹🇷ab.sql", 4).as_deref(), Some("🇹🇷🇹🇷ab…"));
+        assert_eq!(floor_prefix("\u{2068}a.sq\u{2069}", 4), None);
+    }
 
     #[gpui::test]
     fn label_lays_out_one_line_of_its_style(cx: &mut TestAppContext) {

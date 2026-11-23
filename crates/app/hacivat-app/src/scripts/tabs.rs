@@ -1967,64 +1967,78 @@ pub fn tab_decor(tab: TabId, script: ScriptTabId, cx: &App) -> TabDecor {
 }
 
 // ## m4b-t21-shots (ruling (d), R-T2-5 d) ---------------------------------------------------
-/// A connection name longer than this is shortened in the middle on the tab (ruling (d)).
+/// A connection name longer than this many grapheme clusters has a short form for its tab
+/// (ruling (d)), shown only when the active tab would overflow (R-T21-1).
 pub const TAB_CONN_MAX_CHARS: usize = 40;
 
-/// `name` as a script tab draws it: whole up to [`TAB_CONN_MAX_CHARS`] characters, else its
-/// first 20, "…" and its last 19, both ends kept. The full name stays in the tab's tooltip and
-/// accessible name, the capsule, the crumb and the status segment.
-pub fn tab_conn_name(name: &str) -> String {
-    let n = name.chars().count();
-    if n <= TAB_CONN_MAX_CHARS {
-        return name.to_string();
-    }
-    let head: String = name.chars().take(20).collect();
-    let tail: String = name.chars().skip(n - 19).collect();
-    format!("{head}…{tail}")
+// ## m4b-t21-shots fix round 2 (N-I1): grapheme clusters, cut before escaping.
+/// The short form of connection `name` on a script tab: its first 20 and last 19 grapheme
+/// clusters around "…", each part shown as `display_name` shows names (NFC, invisible
+/// characters as `<U+XXXX>`), so neither a cluster nor an escape token is ever split; `None`
+/// when the name has at most [`TAB_CONN_MAX_CHARS`] clusters. The full name stays in the tab's
+/// tooltip and accessible name, the capsule, the crumb and the status segment.
+pub fn tab_conn_short(name: &str) -> Option<String> {
+    let (head, tail) = hacivat_ui::text::middle_parts(name, 20, 19)?;
+    Some(format!("{}…{}", display_name(head), display_name(tail)))
 }
 
 /// The tab title's two drawn parts (`TabSpec::parts`): the file name, which ellipsizes, and
 /// the rest of the localized title (" · connection" and, under another MySQL database,
-/// " · database"), which never does; the connection shortened in the middle past 40
-/// characters. `None` when the localized title does not hold the file name.
-fn title_parts(id: ScriptTabId, cx: &App) -> Option<(SharedString, SharedString)> {
+/// " · database"), which never does; the same rest with the connection's short form, which the
+/// strip shows only when the active tab would overflow. `None` when the localized title does
+/// not hold the file name.
+fn title_parts(id: ScriptTabId, cx: &App) -> Option<hacivat_ui::panes::TitleParts> {
     let tab = spec(id, cx)?;
     let file = display_name(crate::scripts::file_name(&tab.rel));
-    let shown = match tab.profile.and_then(|p| open::profile_of(p, cx)) {
-        Some(p) => {
-            let conn = tab_conn_name(&display_name(&p.name));
-            let other_db = tab.database.as_ref().filter(|db| {
-                hacivat_meta::kind::database_level(p.engine)
-                    == hacivat_meta::kind::DbLevel::SchemaIsDatabase
-                    && p.database.as_deref() != Some(db.as_str())
-            });
-            match other_db {
-                Some(db) => msg(
-                    cx,
-                    "hv-scripts-tab-title-db",
-                    vec![
-                        ("file", ArgValue::Text(file.clone())),
-                        ("conn", ArgValue::Text(conn)),
-                        ("database", ArgValue::Text(display_name(db.as_str()))),
-                    ],
-                ),
-                None => msg(
-                    cx,
-                    "hv-scripts-tab-title",
-                    vec![
-                        ("file", ArgValue::Text(file.clone())),
-                        ("conn", ArgValue::Text(conn)),
-                    ],
-                ),
+    let shown = |conn: Option<String>| -> SharedString {
+        match tab.profile.and_then(|p| open::profile_of(p, cx)) {
+            Some(p) => {
+                let conn = conn.unwrap_or_else(|| display_name(&p.name));
+                let other_db = tab.database.as_ref().filter(|db| {
+                    hacivat_meta::kind::database_level(p.engine)
+                        == hacivat_meta::kind::DbLevel::SchemaIsDatabase
+                        && p.database.as_deref() != Some(db.as_str())
+                });
+                match other_db {
+                    Some(db) => msg(
+                        cx,
+                        "hv-scripts-tab-title-db",
+                        vec![
+                            ("file", ArgValue::Text(file.clone())),
+                            ("conn", ArgValue::Text(conn)),
+                            ("database", ArgValue::Text(display_name(db.as_str()))),
+                        ],
+                    ),
+                    None => msg(
+                        cx,
+                        "hv-scripts-tab-title",
+                        vec![
+                            ("file", ArgValue::Text(file.clone())),
+                            ("conn", ArgValue::Text(conn)),
+                        ],
+                    ),
+                }
             }
+            None => msg(
+                cx,
+                "hv-scripts-tab-title-unbound",
+                vec![("file", ArgValue::Text(file.clone()))],
+            ),
         }
-        None => msg(
-            cx,
-            "hv-scripts-tab-title-unbound",
-            vec![("file", ArgValue::Text(file.clone()))],
-        ),
     };
-    split_title(&shown, &file)
+    let (head, tail) = split_title(&shown(None), &file)?;
+    let short = tab
+        .profile
+        .and_then(|p| open::profile_of(p, cx))
+        .and_then(|p| tab_conn_short(&p.name));
+    let tail_short = short
+        .and_then(|c| split_title(&shown(Some(c)), &file))
+        .map(|(_, t)| t);
+    Some(hacivat_ui::panes::TitleParts {
+        head,
+        tail,
+        tail_short,
+    })
 }
 
 /// `shown` split after the first `file` in it (Fluent isolates arguments with U+2068/U+2069;

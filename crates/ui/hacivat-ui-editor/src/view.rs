@@ -837,6 +837,13 @@ impl EditorView {
         crate::theme::EditorTheme::get(cx).line_height
     }
 
+    // ## m4b-t21-shots fix round 2 (named item; m-a)
+    /// The height that shows `lines` whole lines of code: the code's top inset and the lines.
+    pub fn code_height(lines: usize, cx: &App) -> Pixels {
+        hacivat_ui_core::gpui_surface::px(crate::scroll::TOP_PAD)
+            + Self::line_height(cx) * lines as f32
+    }
+
     // ## m4b-t17-secrets-ui (named items, ADR 0007 `## m4b-t17`)
     /// Replaces the host's line marks with `marks`, byte ranges of the text at `version`
     /// (rebased to the current text; `line_marks.rs`).

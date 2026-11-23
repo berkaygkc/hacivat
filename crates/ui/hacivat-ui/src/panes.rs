@@ -330,12 +330,29 @@ pub struct TabSpec {
     pub dirty: bool,
     pub env: Option<EnvMark>,
     // ## m4b-t21-shots (named item; ruling (d), R-T2-5 d)
-    /// The title drawn in two parts, `(head, tail)`: the head (a script's file name) ellipsizes
-    /// down to its first four characters, the tail (" · connection") never does. An inactive
-    /// tab too narrow for both clips them whole and shows its icon. `title` stays the tab's
-    /// accessible name. `None`: one ellipsizing title, as before.
-    pub parts: Option<(SharedString, SharedString)>,
+    /// The title drawn in two parts ([`TitleParts`]). `title` stays the tab's accessible name.
+    /// `None`: one ellipsizing title, as before.
+    pub parts: Option<TitleParts>,
 }
+
+// ## m4b-t21-shots fix round 2 (named item; N-I2, ruling R-T21-1)
+/// A two-part tab title. The head (a script's file name) ellipsizes down to its first four
+/// visible characters; the tail (" · connection") never ellipsizes. Only when the active tab
+/// would still overflow the strip with its head at that floor does it show `tail_short` (the
+/// connection shortened in the middle, both ends kept) instead. An inactive tab that does not
+/// fit collapses to its icon and marks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TitleParts {
+    pub head: SharedString,
+    pub tail: SharedString,
+    pub tail_short: Option<SharedString>,
+}
+
+/// The width each pane's tab strip had in the last frame (the room the next frame plans with).
+#[derive(Default)]
+struct StripWidths(std::collections::HashMap<(u64, usize), f32>);
+
+impl hacivat_ui_core::gpui_surface::Global for StripWidths {}
 
 type TabHandler = Rc<dyn Fn(PaneId, TabId, &mut Window, &mut App)>;
 
@@ -396,8 +413,16 @@ pub const TAB_TITLE_ID: &str = "tab-title";
 // ## m4b-t21-shots (named item)
 /// The never-ellipsized tail of a two-part title (`#tab-title-conn`).
 pub const TAB_TITLE_TAIL_ID: &str = "tab-title-conn";
-/// How many characters of a two-part title's head always show (ruling (d)).
+/// How many visible characters of a two-part title's head always show (ruling (d)).
 const HEAD_FLOOR_CHARS: usize = 4;
+/// A tab's padding (12 px each side), its icon (12 px), its right border (1 px), the gap
+/// between its children (7 px), and the widths of its marks: the environment swatch, the dirty
+/// dot, the close button (the estimates the strip plans with).
+const TAB_PAD: f32 = 24.0 + 12.0 + 1.0;
+const TAB_GAP: f32 = 7.0;
+const SWATCH_W: f32 = 8.0;
+const DIRTY_W: f32 = 6.0;
+const CLOSE_W: f32 = 12.0;
 /// An inactive tab's flex shrink against the active tab's 1: in a strip too narrow for its tabs
 /// the inactive tabs give their width first.
 const INACTIVE_TAB_SHRINK: f32 = 1000.0;
@@ -426,35 +451,139 @@ fn shaped_width(text: &str, style: TypeStyle, ink: Hsla, window: &Window) -> f32
     )
 }
 
-/// A two-part tab title: `head` ellipsizes to its first [`HEAD_FLOOR_CHARS`] characters,
-/// `tail` never ellipsizes. An inactive tab's parts sit in a wrapping row behind a zero-width
-/// first item, so when the tab is narrower than the head's floor plus the tail, the parts wrap
-/// onto a second line that the tab clips whole: the tab shows only its icon (and its marks),
-/// never a cut connection name.
+/// A two-part title's measured widths: the whole head, its floor, the tail (and its short form).
+#[derive(Debug, Clone, Copy)]
+struct Measured {
+    head: f32,
+    floor: f32,
+    tail: f32,
+    tail_short: Option<f32>,
+}
+
+impl Measured {
+    fn of(parts: &TitleParts, style: TypeStyle, ink: Hsla, window: &Window) -> Measured {
+        let head = shaped_width(&parts.head, style, ink, window);
+        let floor = crate::text::floor_prefix(&parts.head, HEAD_FLOOR_CHARS)
+            .map_or(head, |f| shaped_width(&f, style, ink, window).min(head));
+        // One pixel of slack: the label measures what it paints, rounding included.
+        Measured {
+            head,
+            floor,
+            tail: shaped_width(&parts.tail, style, ink, window) + 1.0,
+            tail_short: parts
+                .tail_short
+                .as_ref()
+                .map(|t| shaped_width(t, style, ink, window) + 1.0),
+        }
+    }
+}
+
+/// How the strip draws one tab this frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Fit {
+    /// As built: a two-part title whose head gives way first, or one ellipsizing title.
+    Title,
+    /// An inactive two-part tab that does not fit: its icon and marks only.
+    Collapsed,
+    /// The active two-part tab that overflows even with its head at the floor: the short tail.
+    Short,
+}
+
+/// The width of a tab's chrome: padding, icon, border, its marks and the gaps between its
+/// children (`title`: whether a title is one of them).
+fn chrome(tab: &TabSpec, active: bool, title: bool) -> f32 {
+    let marks = [
+        (tab.env.is_some(), SWATCH_W),
+        (tab.dirty, DIRTY_W),
+        (active, CLOSE_W),
+    ];
+    let mut w = TAB_PAD;
+    let mut children = 1;
+    if title {
+        children += 1;
+    }
+    for (shown, width) in marks {
+        if shown {
+            w += width;
+            children += 1;
+        }
+    }
+    w + TAB_GAP * (children - 1) as f32
+}
+
+/// Plans each tab's [`Fit`] for a strip `room` px wide (the last frame's; `None`: everything
+/// as built). Ruling (d) and R-T21-1: the tabs fit whole, else the inactive tabs give way
+/// (their file names first, by flex), else the inactive two-part tabs collapse to their icons,
+/// and only then does the active tab show its short connection.
+fn plan(
+    tabs: &[TabSpec],
+    active: usize,
+    measured: &[Option<Measured>],
+    titles: &[f32],
+    room: Option<f32>,
+) -> Vec<Fit> {
+    let mut fits = vec![Fit::Title; tabs.len()];
+    let Some(room) = room else {
+        return fits;
+    };
+    let natural = |i: usize| {
+        let t = &tabs[i];
+        chrome(t, i == active, true) + measured[i].map_or(titles[i], |m| m.head + 1.0 + m.tail)
+    };
+    let min = |i: usize| {
+        let t = &tabs[i];
+        match measured[i] {
+            Some(m) => chrome(t, i == active, true) + m.floor + m.tail,
+            None if i == active => chrome(t, true, true) + titles[i],
+            None => chrome(t, false, false),
+        }
+    };
+    if (0..tabs.len()).map(natural).sum::<f32>() <= room {
+        return fits;
+    }
+    let others_min: f32 = (0..tabs.len()).filter(|&i| i != active).map(min).sum();
+    let active_min = if active < tabs.len() {
+        min(active)
+    } else {
+        0.0
+    };
+    if active_min + others_min <= room {
+        return fits;
+    }
+    let mut others = 0.0;
+    for i in (0..tabs.len()).filter(|&i| i != active) {
+        if measured[i].is_some() {
+            fits[i] = Fit::Collapsed;
+            others += chrome(&tabs[i], false, false);
+        } else {
+            others += min(i);
+        }
+    }
+    if let Some(m) = measured.get(active).copied().flatten()
+        && m.tail_short.is_some()
+        && active_min + others > room
+    {
+        fits[active] = Fit::Short;
+    }
+    fits
+}
+
+/// A two-part tab title: `head` ellipsizes to its floor (its first [`HEAD_FLOOR_CHARS`]
+/// visible characters), `tail` never ellipsizes. An inactive tab's parts sit in a wrapping row
+/// behind a zero-width first item, so if the plan was wrong and the tab is narrower than the
+/// floor plus the tail, the parts wrap onto a second line that the tab clips whole: never a
+/// cut connection name.
 fn two_part_title(
     head: SharedString,
     tail: SharedString,
+    m: Measured,
     source: TextSource,
     style: TypeStyle,
     ink: Hsla,
     active: bool,
-    window: &Window,
 ) -> AnyElement {
-    let floor_text: String = head
-        .chars()
-        .take(HEAD_FLOOR_CHARS)
-        .chain(std::iter::once('…'))
-        .collect();
-    let head_w = shaped_width(&head, style, ink, window);
-    let floor = if head.chars().count() > HEAD_FLOOR_CHARS {
-        shaped_width(&floor_text, style, ink, window).min(head_w)
-    } else {
-        head_w
-    };
-    // One pixel of slack: the label measures what it paints, rounding included.
-    let tail_w = shaped_width(&tail, style, ink, window) + 1.0;
-    let natural = head_w + 1.0 + tail_w;
-    let min = floor + tail_w;
+    let natural = m.head + 1.0 + m.tail;
+    let min = m.floor + m.tail;
     let parts = div()
         .flex()
         .flex_row()
@@ -464,7 +593,7 @@ fn two_part_title(
         .child(
             div()
                 .flex_shrink(1.0)
-                .min_w(px(floor))
+                .min_w(px(m.floor))
                 .overflow_hidden()
                 .child(
                     Label::new(head, source, style, ink)
@@ -496,6 +625,23 @@ fn two_part_title(
         .into_any_element()
 }
 
+/// Records the strip's width for the next frame's plan; a changed width draws once more.
+fn width_probe(key: (u64, usize)) -> impl IntoElement {
+    div().absolute().top_0().left_0().size_full().child(
+        hacivat_ui_core::gpui_surface::canvas(
+            move |bounds, _, cx| {
+                let w = f32::from(bounds.size.width);
+                let old = cx.default_global::<StripWidths>().0.insert(key, w);
+                if old.is_none_or(|o| (o - w).abs() > 0.5) {
+                    cx.defer(|cx| cx.refresh_windows());
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .size_full(),
+    )
+}
+
 impl TabStrip {
     fn build(self, window: &mut Window, cx: &mut App) -> AnyElement {
         let theme = *Theme::get(cx);
@@ -520,7 +666,43 @@ impl TabStrip {
             .flex_shrink(1.0)
             .min_w(px(0.0))
             .bg(c.head.to_hsla());
-        for (index, tab) in self.tabs.into_iter().enumerate() {
+        // ## m4b-t21-shots fix round 2 (N-I2, m-d): the plan, from the last frame's width.
+        let style_of = |source: TextSource| match source {
+            TextSource::Data | TextSource::Catalog => TypeStyle {
+                size_px: 12.0,
+                line_height: 12.0 * 1.35,
+                ..t.type_ramp.code
+            },
+            _ => t.type_ramp.body,
+        };
+        let has_parts = self.tabs.iter().any(|t| t.parts.is_some());
+        // Keyed by window and pane: two windows' strips never share a width.
+        let strip_key = (window.window_handle().window_id().as_u64(), pane.0 as usize);
+        let fits = if has_parts {
+            let ink = c.text.to_hsla();
+            let measured: Vec<Option<Measured>> = self
+                .tabs
+                .iter()
+                .map(|t| {
+                    t.parts
+                        .as_ref()
+                        .map(|p| Measured::of(p, style_of(t.title_source), ink, window))
+                })
+                .collect();
+            let titles: Vec<f32> = self
+                .tabs
+                .iter()
+                .map(|t| shaped_width(&t.title, style_of(t.title_source), ink, window))
+                .collect();
+            let room = cx
+                .try_global::<StripWidths>()
+                .and_then(|g| g.0.get(&strip_key).copied());
+            let fits = plan(&self.tabs, self.active, &measured, &titles, room);
+            fits.into_iter().zip(measured).collect()
+        } else {
+            vec![(Fit::Title, None); self.tabs.len()]
+        };
+        for ((index, tab), (fit, measured)) in self.tabs.into_iter().enumerate().zip(fits) {
             let active = index == self.active;
             let id = ElementId::from((SharedString::from("tab"), tab.id.0 as usize));
             let (hover, _) = interaction_state(&id, window, cx);
@@ -558,15 +740,43 @@ impl TabStrip {
                 )
                 // ## m3c-narrow (F12): the title ellipsizes (its tooltip and the tab's
                 // accessible name keep it whole) under a stable id.
-                // ## m4b-t21-shots (named exception): or two parts (`TabSpec::parts`).
-                .child(match tab.parts {
-                    None => Label::new(tab.title, tab.title_source, style, ink)
-                        .truncate(true)
-                        .id(TAB_TITLE_ID)
-                        .into_any_element(),
-                    Some((head, tail)) => {
-                        two_part_title(head, tail, tab.title_source, style, ink, active, window)
-                    }
+                // ## m4b-t21-shots (named exception): or two parts (`TabSpec::parts`), as the
+                // strip's plan draws them (fix round 2).
+                .children(match (tab.parts, measured) {
+                    (Some(parts), Some(m)) => match fit {
+                        Fit::Collapsed => None,
+                        Fit::Short => {
+                            let m = Measured {
+                                tail: m.tail_short.unwrap_or(m.tail),
+                                ..m
+                            };
+                            let tail = parts.tail_short.unwrap_or(parts.tail);
+                            Some(two_part_title(
+                                parts.head,
+                                tail,
+                                m,
+                                tab.title_source,
+                                style,
+                                ink,
+                                active,
+                            ))
+                        }
+                        Fit::Title => Some(two_part_title(
+                            parts.head,
+                            parts.tail,
+                            m,
+                            tab.title_source,
+                            style,
+                            ink,
+                            active,
+                        )),
+                    },
+                    _ => Some(
+                        Label::new(tab.title, tab.title_source, style, ink)
+                            .truncate(true)
+                            .id(TAB_TITLE_ID)
+                            .into_any_element(),
+                    ),
                 });
             // ## m3c-narrow (F12; design/m3b-safe surface 24): a strip narrower than its tabs
             // (a pane at the split floor) is a declared give-way: the inactive tabs shrink first,
@@ -575,6 +785,9 @@ impl TabStrip {
             // with room draws every tab at its natural width.
             el = if active {
                 el.flex_shrink(1.0)
+            } else if fit == Fit::Collapsed {
+                // ## m4b-t21-shots fix round 2 (m-d): its icon and marks, no empty width.
+                el.flex_none()
             } else {
                 el.flex_shrink(INACTIVE_TAB_SHRINK).overflow_hidden()
             };
@@ -635,6 +848,17 @@ impl TabStrip {
                 });
             strip = strip.child(el);
         }
-        strip.into_any_element()
+        // ## m4b-t21-shots fix round 2 (N-I2): the strip in a row as wide as the header, which
+        // records its width (only where a two-part title plans with it).
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_w(px(0.0))
+            .h(height)
+            .relative()
+            .children(has_parts.then(|| width_probe(strip_key)))
+            .child(strip)
+            .into_any_element()
     }
 }

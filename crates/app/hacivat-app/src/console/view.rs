@@ -1830,7 +1830,8 @@ impl Render for ConsoleHost {
                     // ## m4b-t21-shots fix round 1 (m1, named exception): while a strip shows,
                     // the code keeps two lines; the condensed banner's body gives way first.
                     .min_h(if strip_shown {
-                        hacivat_ui_editor::EditorView::line_height(cx) * 2.0
+                        // ## m4b-t21-shots fix round 2 (m-a): with the code's top inset.
+                        hacivat_ui_editor::EditorView::code_height(2, cx)
                     } else {
                         px(0.0)
                     })

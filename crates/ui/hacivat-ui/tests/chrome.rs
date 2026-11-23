@@ -1217,16 +1217,21 @@ fn a_menu_wider_than_the_window_is_capped_and_its_hint_gives_way(cx: &mut TestAp
     assert!(hint.truncated && !hint.clipped, "{hint:?}");
 }
 
-// ## m4b-t21-shots (ruling (d), R-T2-5 d)
-/// A tab with a two-part title.
-fn script_tab(id: u32, head: &'static str, tail: &'static str) -> TabSpec {
+// ## m4b-t21-shots (ruling (d), R-T2-5 d; fix round 2: R-T21-1, width-based)
+/// A tab with a two-part title (`short`: its connection's short form).
+fn script_tab(id: u32, head: &str, tail: &str, short: Option<&str>) -> TabSpec {
     TabSpec {
-        parts: Some((head.into(), tail.into())),
+        parts: Some(hacivat_ui::panes::TitleParts {
+            head: head.to_string().into(),
+            tail: tail.to_string().into(),
+            tail_short: short.map(|t| t.to_string().into()),
+        }),
         ..tab(id, "full title")
     }
 }
 
-/// Draws `tabs` (the second active) in a strip `width` px wide; the frame's records.
+/// Draws `tabs` (the second active) in a strip `width` px wide; the frame's records once the
+/// strip has planned with its own width (the next frame).
 fn draw_strip(cx: &mut TestAppContext, width: f32, tabs: Vec<TabSpec>) -> Vec<RenderedText> {
     cx.update(|cx| {
         cx.set_global(TextRegistry {
@@ -1243,46 +1248,39 @@ fn draw_strip(cx: &mut TestAppContext, width: f32, tabs: Vec<TabSpec>) -> Vec<Re
             .into_any_element()
     });
     vcx.run_until_parked();
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
     vcx.cx.read(|cx| cx.global::<TextRegistry>().frame.clone())
+}
+
+const LONG: &str = " · orders-reporting-replica-eu-west-1-read-staging";
+const LONG_SHORT: &str = " · orders-reporting-rep…west-1-read-staging";
+
+fn conns(frame: &[RenderedText]) -> Vec<&RenderedText> {
+    frame
+        .iter()
+        .filter(|r| r.path.ends_with("#tab-title-conn"))
+        .collect()
 }
 
 /// Ruling (d): a script tab's connection never ellipsizes. In a strip too narrow for both
 /// tabs, the active tab's file name gives way, its connection stays whole, and the inactive
-/// tab clips its title whole: no cut connection is drawn anywhere.
+/// tab collapses: no cut connection is drawn anywhere.
 #[gpui::test]
 fn a_script_tabs_connection_never_ellipsizes(cx: &mut TestAppContext) {
-    let tail = " · orders-reporting-replica-eu-west-1-r…ad-staging";
     let tabs = vec![
-        script_tab(1, "orders_report.sql", " · orders-prod"),
-        script_tab(2, "orders_report.sql", tail),
+        script_tab(1, "orders_report.sql", " · orders-prod", None),
+        script_tab(2, "orders_report.sql", LONG, Some(LONG_SHORT)),
     ];
     let frame = draw_strip(cx, 420.0, tabs.clone());
-    let conn: Vec<&RenderedText> = frame
-        .iter()
-        .filter(|r| r.path.ends_with("#tab-title-conn"))
-        .collect();
-    // The active tab's connection: drawn whole.
-    let active = conn
-        .iter()
-        .find(|r| r.text.as_ref() == tail)
-        .expect("the active tab's connection");
-    assert!(
-        active.visible && !active.truncated && !active.clipped,
-        "{active:?}"
-    );
-    // The file name gave way first, and kept something of itself.
-    let head = frame
-        .iter()
-        .find(|r| r.path.ends_with("#tab-title") && r.visible)
-        .expect("the file name");
-    assert!(
-        head.truncated && !head.clipped && head.painted_px > 0.0,
-        "{head:?}"
-    );
-    // The inactive tab's connection is never drawn cut: whole, or not shown at all.
-    for r in &conn {
+    for r in conns(&frame) {
         assert!(!(r.visible && (r.truncated || r.clipped)), "{r:?}");
     }
+    let active = conns(&frame)
+        .into_iter()
+        .find(|r| r.visible && r.text.contains("orders-reporting"))
+        .expect("the active tab's connection");
+    assert!(!active.truncated && !active.clipped, "{active:?}");
     // With room, both tabs draw both parts whole.
     let frame = draw_strip(cx, 1200.0, tabs);
     let whole = frame
@@ -1290,4 +1288,57 @@ fn a_script_tabs_connection_never_ellipsizes(cx: &mut TestAppContext) {
         .filter(|r| r.path.contains("#tab-title") && r.visible && !r.truncated && !r.clipped)
         .count();
     assert_eq!(whole, 4, "{frame:?}");
+}
+
+/// R-T21-1: the 47-character connection is whole while the active tab fits (1280), and shown
+/// in its short form (both ends kept) only in a strip where it would overflow.
+#[gpui::test]
+fn the_connection_is_shortened_only_where_the_tab_would_overflow(cx: &mut TestAppContext) {
+    let tabs = vec![
+        script_tab(1, "orders_report.sql", " · orders-prod", None),
+        script_tab(2, "orders_report.sql", LONG, Some(LONG_SHORT)),
+    ];
+    let shown = |frame: &[RenderedText]| -> Vec<String> {
+        conns(frame)
+            .into_iter()
+            .filter(|r| r.visible && r.text.contains("orders-reporting"))
+            .map(|r| r.text.to_string())
+            .collect()
+    };
+    let wide = draw_strip(cx, 1280.0, tabs.clone());
+    assert_eq!(shown(&wide), [LONG], "whole at 1280");
+    let narrow = draw_strip(cx, 330.0, tabs);
+    assert_eq!(
+        shown(&narrow),
+        [LONG_SHORT],
+        "short where it would overflow"
+    );
+    let r = conns(&narrow)
+        .into_iter()
+        .find(|r| r.visible && r.text.contains("orders-reporting"))
+        .unwrap();
+    assert!(!r.truncated && !r.clipped, "{r:?}");
+}
+
+/// R-T21-1: two connections that differ only in the middle read apart on their tabs at 1280.
+#[gpui::test]
+fn names_that_differ_in_the_middle_read_apart(cx: &mut TestAppContext) {
+    let us = " · orders-reporting-replica-us-west-1-read-staging";
+    let tabs = vec![
+        script_tab(1, "a.sql", LONG, Some(LONG_SHORT)),
+        script_tab(
+            2,
+            "a.sql",
+            us,
+            Some(" · orders-reporting-rep…west-1-read-staging"),
+        ),
+    ];
+    let frame = draw_strip(cx, 1280.0, tabs);
+    let texts: Vec<String> = conns(&frame)
+        .into_iter()
+        .filter(|r| r.visible && !r.truncated && !r.clipped)
+        .map(|r| r.text.to_string())
+        .collect();
+    assert!(texts.contains(&LONG.to_string()), "{texts:?}");
+    assert!(texts.contains(&us.to_string()), "{texts:?}");
 }

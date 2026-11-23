@@ -278,17 +278,19 @@ impl Dialog {
     // ## m4-t33b-carries (named exception)
     /// A line under the title (12 px `text-2`; NOTES M4 surface 13: the cache's size). An
     /// empty text draws nothing (a size still being measured).
-    // ## m4b-t21-shots fix round 1 (named item; m4, controller ruling (e))
+    pub fn set_subtitle(&mut self, subtitle: TextFn) {
+        self.subtitle = Some(subtitle);
+    }
+
+    // ## m4b-t21-shots fix round 1 (named item; m4, controller ruling (e); moved out of M4's
+    // block in fix round 2, m-c)
     /// Isolates a first Danger button (DESIGN's isolation): alone at the footer's far left,
     /// 28 px and the free space before the other buttons. Without a Danger first button the
     /// footer is unchanged.
     pub fn isolate_danger(&mut self) {
         self.isolate_danger = true;
     }
-
-    pub fn set_subtitle(&mut self, subtitle: TextFn) {
-        self.subtitle = Some(subtitle);
-    }
+    // ## m4b-t21-shots
 
     // ## m4-t33b-carries (named exception)
     /// The tab stops of the content (a checkbox the answer needs), in order: Tab visits them

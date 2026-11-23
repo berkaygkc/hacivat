@@ -1547,24 +1547,60 @@ fn shot_root_path(name: &str) -> PathBuf {
     base.join(format!("hv-{:08x}", h.finish() as u32))
 }
 
-/// A shot's temp root: made empty (a crashed run's leftover goes), removed when dropped.
+/// A shot's temp root, held under its lock (`<root>.lock`), removed (then unlocked) when
+/// dropped.
 struct ShotRoot(PathBuf);
 
 impl ShotRoot {
     fn path(&self) -> &Path {
         &self.0
     }
+
+    fn lock_of(root: &Path) -> PathBuf {
+        root.with_extension("lock")
+    }
 }
 
 impl Drop for ShotRoot {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(Self::lock_of(&self.0));
     }
 }
 
-/// The temp root of shot `name` ([`shot_root_path`]), fresh.
+// ## m4b-t21-shots fix round 2 (m-e): two runs on one machine (two worktrees, two agents)
+// that render the same shot share its stable path; the root's lock (an atomic `mkdir`) makes
+// the second wait for the first instead of deleting its live root. A lock older than
+// `STALE_LOCK` is a crashed run's and is taken over.
+/// How old a shot root's lock is before it counts as a crashed run's.
+const STALE_LOCK: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The temp root of shot `name` ([`shot_root_path`]): locked, then made empty (a crashed
+/// run's leftover goes).
 fn shot_root(name: &str) -> ShotRoot {
     let path = shot_root_path(name);
+    let lock = ShotRoot::lock_of(&path);
+    if let Some(parent) = lock.parent() {
+        std::fs::create_dir_all(parent).expect("the shots' temp folder");
+    }
+    let deadline = std::time::Instant::now() + 2 * STALE_LOCK;
+    while std::fs::create_dir(&lock).is_err() {
+        let stale = std::fs::metadata(&lock)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_LOCK);
+        if stale {
+            let _ = std::fs::remove_dir_all(&lock);
+            continue;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{name}: another run holds {}",
+            lock.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).expect("temp dir");
     CURRENT_ROOT.with(|c| *c.borrow_mut() = Some(path.clone()));
@@ -1996,8 +2032,9 @@ fn render_all_surfaces(names: &[String], all: bool) {
         failures.extend(render(shot, &dir));
         // ## m4b-t21-shots (R-M4b-44): the shot's root is gone with its app (fix round 1, m10:
         // its stable path); reported once, then removed.
+        // Fix round 2 (m-e): a root another run holds now (its lock) is not ours to judge.
         let root = shot_root_path(&shot.file_name(2.0));
-        if root.exists() {
+        if root.exists() && !ShotRoot::lock_of(&root).exists() {
             failures.push(format!(
                 "{}: (r) left the temp root {} behind",
                 shot.file_name(2.0),
