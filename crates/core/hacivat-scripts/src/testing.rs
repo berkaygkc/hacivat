@@ -24,11 +24,22 @@ fn next_source() -> u64 {
 }
 
 /// An event source that delivers only what its [`FakeHandle`] emits.
-#[derive(Default)]
 pub struct FakeEventSource {
     sinks: Sinks,
     refuse: Option<WatchError>,
     id: u64,
+}
+
+// ## m4b-t20-adversarial fix round 3 (named lines, re-review nit): every instance, a default
+// one included, has its own id.
+impl Default for FakeEventSource {
+    fn default() -> Self {
+        FakeEventSource {
+            sinks: Sinks::default(),
+            refuse: None,
+            id: next_source(),
+        }
+    }
 }
 
 /// The test's side of a [`FakeEventSource`].

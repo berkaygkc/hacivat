@@ -10,7 +10,9 @@
 //!   worktree's git dir (`<common>/worktrees/<name>`, whose `commondir` leads back to
 //!   `<common>`), to a submodule's git dir under an enclosing repository's `.git/modules/`, or
 //!   inside the worktree. A plain `.git` directory with a `commondir`, and alternates that
-//!   name anything but an existing directory the user owns (or nest deeper than four), are
+//!   name anything but an existing directory the user owns (since m4b-t20 fix round 3,
+//!   R-T20-2: anything but at most 16 trimmed absolute entries with no alternates of their
+//!   own), are
 //!   refused: `Unavailable(Redirected)`. Linked worktrees and `clone --shared` repositories
 //!   are read under the same isolated, reduced-trust open (n2).
 //!
@@ -55,24 +57,10 @@ pub(crate) fn current_user_owns(p: &Path) -> std::io::Result<bool> {
 
 /// The most bytes read from a gitfile, a `commondir` file or an alternates file.
 const SMALL_FILE_MAX: u64 = 64 * 1024;
-/// How deep alternates may chain (an alternate's own alternates).
-const ALTERNATES_DEPTH_MAX: usize = 4;
-// ## m4b-t20-adversarial (named exception)
-/// The most distinct alternate object folders one repository may name, its chain included
-/// (`git clone --shared` or `--reference` make one; a few is generous).
-const ALTERNATES_MAX: usize = 8;
-/// ## m4b-t20-adversarial fix round 1 (review I1): the most distinct alternates lines (raw
-/// text, comments and blanks left out) the whole chain may hold, counted **before** any line
-/// is resolved: a line's resolution (`canonicalize`, up to `MAXSYMLINKS` hops of any length)
-/// is the expensive step, so a file of many cheap lines is refused at once. Real clones have
-/// one or two.
-const ALTERNATE_LINES_MAX: usize = 4 * ALTERNATES_MAX;
-/// ## m4b-t20-adversarial fix round 2 (re-review I1-fr1): the most raw entries (duplicates
-/// included, as `gix-odb` parses them) one alternates file may hold, and the whole chain.
-/// gix resolves each one when it opens the object store, uninterruptibly; a real clone has one
-/// or two.
-const ALTERNATE_RAW_PER_FILE: usize = 16;
-const ALTERNATE_RAW_PER_CHAIN: usize = 32;
+// ## m4b-t20-adversarial fix round 3 (named exception, ruling R-T20-2)
+/// The most entries the repository's `objects/info/alternates` may hold (duplicates
+/// included, as `gix-odb` parses them); a real `clone --shared` or `--reference` has one.
+const ALTERNATE_ENTRIES_MAX: usize = 16;
 /// ## m4b-t20-adversarial fix round 1 (review I1): the most entries an object folder's `pack`
 /// folder may hold for the placeholder check (three files per pack; `git gc` keeps one pack).
 /// Past it the status answers `TooLarge(LooseObjects)` ("run git gc"), which repacks them.
@@ -720,117 +708,76 @@ fn gitfile_layout(
     }
 }
 
-/// Every alternate object directory (`objects/info/alternates`, one path per line, relative
-/// to `objects`) is an existing directory the user owns; chains are followed to
-/// [`ALTERNATES_DEPTH_MAX`].
+/// The repository's alternates (`objects/info/alternates`), each an existing object folder
+/// the user owns.
 ///
-/// ## m4b-t20-adversarial (named exception, Task 20's probe from the T7 review's q2): each
-/// alternate folder is checked once (`seen`, by canonical path), and more than
-/// [`ALTERNATES_MAX`] distinct ones refuse the repository. The depth bound alone let a file of
-/// many lines fan out to `lines^depth` folder checks, a worker that outlived every budget.
+/// ## m4b-t20-adversarial fix round 3 (named exception, ruling R-T20-2): a structural rule
+/// under which git's reading and gix's cannot differ. The fix rounds before it mirrored gix's
+/// parser and were beaten twice by places where gix reads another graph than git (re-review
+/// fr2: H3, gix resolves an entry with its trailing whitespace where git trims; H4, gix joins
+/// a nested relative entry to the **root** objects folder where git joins it to the
+/// alternate's). Alternates are read only when all of these hold, else `Redirected` before gix
+/// opens anything:
+/// - the file holds at most [`ALTERNATE_ENTRIES_MAX`] entries, counted as gix parses them
+///   (every non-empty line not starting with `#`, untrimmed, duplicates included);
+/// - each entry is an absolute path, identical to its trimmed form (no leading or trailing
+///   whitespace, no CR), and not C-quoted;
+/// - each names an existing object folder the user owns;
+/// - none of those folders has an `info/alternates` of its own (any kind, by `lstat`: no chain
+///   at all, so no nested file is ever read, by us or by gix).
 ///
-/// ## m4b-t20-adversarial fix round 1 (review I1): the work is bounded before any line is
-/// resolved. Each file's lines are first de-duplicated by their raw text, and the distinct
-/// lines of the whole chain are counted: more than [`ALTERNATE_LINES_MAX`] refuse the
-/// repository at once, before a single `canonicalize`. The worker's interrupt flag is read
-/// before each resolution and inside every folder walk, so a worker whose caller answered
-/// `Timeout` stops instead of finishing.
+/// Badges are cosmetic, so this fails closed; `clone --shared` and `--reference` write one
+/// absolute entry and still read. The worker's interrupt flag is read before each resolution.
 fn check_alternates(
     objects: &Path,
     owned: Owner<'_>,
     placeholder: Placeholder<'_>,
     interrupt: &AtomicBool,
 ) -> Result<(), GitState> {
-    let mut walk = AltWalk {
-        owned,
-        placeholder,
-        interrupt,
-        seen: Vec::new(),
-        lines: 0,
-        raw_entries: 0,
+    let file = objects.join("info").join("alternates");
+    if placeholder(&file) {
+        return dataless();
+    }
+    if !exists(&file) {
+        return Ok(());
+    }
+    let Some(text) = small_text(&file) else {
+        return redirected();
     };
-    walk.visit(objects, 0)
-}
-
-/// One repository's alternates chain, with what it has spent so far.
-struct AltWalk<'a> {
-    owned: Owner<'a>,
-    placeholder: Placeholder<'a>,
-    interrupt: &'a AtomicBool,
-    /// The alternate folders checked (canonical): each once.
-    seen: Vec<PathBuf>,
-    /// The distinct lines of the chain met so far.
-    lines: usize,
-    /// ## m4b-t20-adversarial fix round 2: the raw entries of the chain met so far.
-    raw_entries: usize,
-}
-
-// (A named lifetime: `check-deps`' `BackendInPublicApi` reads `'_` as a `_` import.)
-impl<'a> AltWalk<'a> {
-    fn visit(&mut self, objects: &Path, depth: usize) -> Result<(), GitState> {
-        let file = objects.join("info").join("alternates");
-        if (self.placeholder)(&file) {
-            return dataless();
+    // Bounded text work first, over gix's own reading of the file.
+    let mut entries: Vec<&str> = Vec::new();
+    for raw in text.split('\n') {
+        if raw.is_empty() || raw.starts_with('#') {
+            continue;
         }
-        if !exists(&file) {
-            return Ok(());
+        if entries.len() == ALTERNATE_ENTRIES_MAX
+            || raw.trim() != raw
+            || raw.starts_with('"')
+            || !Path::new(raw).is_absolute()
+        {
+            return redirected();
         }
-        let Some(text) = small_text(&file) else {
+        entries.push(raw);
+    }
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for raw in entries {
+        interrupted(interrupt)?;
+        let Some(alt) = resolve(objects, raw) else {
             return redirected();
         };
-        // ## m4b-t20-adversarial fix round 2 (re-review I1-fr1): gix's own store open reads this
-        // same file and resolves every raw entry, duplicates included, and cannot be
-        // interrupted. So the raw entries are capped first, counted as `gix-odb`'s
-        // `alternate::parse` reads them (every non-empty line that does not start with `#`,
-        // untrimmed): more than `ALTERNATE_RAW_PER_FILE` in one file, or
-        // `ALTERNATE_RAW_PER_CHAIN` in the chain, answer `Redirected` before gix sees them.
-        let entries = text
-            .split('\n')
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .count();
-        self.raw_entries += entries;
-        if entries > ALTERNATE_RAW_PER_FILE || self.raw_entries > ALTERNATE_RAW_PER_CHAIN {
+        if seen.contains(&alt) {
+            continue;
+        }
+        // No chain: an alternate with alternates of its own is refused, its file unread.
+        if std::fs::symlink_metadata(alt.join("info").join("alternates")).is_ok() {
             return redirected();
         }
-        // Bounded text work first: no line is resolved before every line was counted.
-        let mut raw: Vec<&str> = Vec::new();
-        for line in text.lines().map(str::trim) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            // The C-quoted form is not followed.
-            if line.starts_with('"') || depth >= ALTERNATES_DEPTH_MAX {
-                return redirected();
-            }
-            if raw.contains(&line) {
-                continue;
-            }
-            self.lines += 1;
-            if self.lines > ALTERNATE_LINES_MAX {
-                return redirected();
-            }
-            raw.push(line);
-        }
-        for line in raw {
-            interrupted(self.interrupt)?;
-            let Some(alt) = resolve(objects, line) else {
-                return redirected();
-            };
-            // ## m4b-t20-adversarial: once each, and a bounded number of them.
-            if self.seen.contains(&alt) {
-                continue;
-            }
-            if self.seen.len() >= ALTERNATES_MAX {
-                return redirected();
-            }
-            self.seen.push(alt.clone());
-            require_owned(&alt, self.owned)?;
-            // p1: an alternate's objects are read like ours (same caps, per folder).
-            check_objects_dataless(&alt, self.placeholder, self.interrupt)?;
-            self.visit(&alt, depth + 1)?;
-        }
-        Ok(())
+        require_owned(&alt, owned)?;
+        // p1: an alternate's objects are read like ours (same caps).
+        check_objects_dataless(&alt, placeholder, interrupt)?;
+        seen.push(alt);
     }
+    Ok(())
 }
 
 /// The trust invariants after the open (C1, I1).

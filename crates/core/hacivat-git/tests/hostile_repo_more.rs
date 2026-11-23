@@ -355,7 +355,9 @@ fn a_fan_out_of_alternates_is_refused_at_once() {
     );
     // One alternate, as `git clone --shared` makes, is still read.
     write(&r.join(".git/objects/info/alternates"), line.as_bytes());
-    write(&other.join(".git/objects/info/alternates"), b"");
+    // R-T20-2 (fix round 3): an alternate with an alternates file of its own (even empty) is
+    // refused; with none, one absolute alternate reads.
+    std::fs::remove_file(other.join(".git/objects/info/alternates")).unwrap();
     let st = status(&r, &GitLimits::default());
     assert!(matches!(st, GitState::Ready(_)), "{st:?}");
 }
@@ -475,8 +477,14 @@ fn a_repeated_short_alternates_line_never_reaches_gix() {
             "{pass}: {st:?}"
         );
     }
-    // Within the caps: 16 copies of the line, read as before (never `Timeout` or `Paused`).
-    write(&alternates, "l0\n".repeat(16).as_bytes());
+    // Within R-T20-2: 16 copies of the absolute path of that link, read (never `Timeout` or
+    // `Paused`, never `Redirected`).
+    write(
+        &alternates,
+        format!("{}\n", objects.join("l0").display())
+            .repeat(16)
+            .as_bytes(),
+    );
     for pass in ["first", "refresh"] {
         let st = status(&r, &GitLimits::default());
         assert!(
@@ -489,6 +497,151 @@ fn a_repeated_short_alternates_line_never_reaches_gix() {
     }
 }
 
+// ## m4b-t20-adversarial fix round 3 (ruling R-T20-2; the re-review's H3 and H4)
+
+/// A folder `deep` 400 levels down, and in the root objects folder a link `name` that reaches
+/// `target` in `hops` hops, each an absolute path through `deep` (the reviewer's expensive
+/// shape: every resolution walks hundreds of components per hop).
+#[cfg(unix)]
+fn expensive_link(top: &Path, objects: &Path, name: &str, target: &Path, hops: usize) {
+    let mut deep = top.join(format!("deep-{name}"));
+    for _ in 0..400 {
+        deep.push("d");
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    let mut next = target.to_path_buf();
+    for i in (1..hops).rev() {
+        let link = deep.join(format!("h{i}"));
+        std::os::unix::fs::symlink(&next, &link).unwrap();
+        next = link;
+    }
+    std::os::unix::fs::symlink(&next, objects.join(name)).unwrap();
+}
+
+/// An object folder whose alternates file is 64 KiB of `line`.
+#[cfg(unix)]
+fn folder_with_64_kib_alternates(top: &Path, name: &str, line: &str) -> PathBuf {
+    let r = repo(top, name);
+    let objects = r.join(".git/objects");
+    let mut text = String::new();
+    while text.len() + line.len() + 1 < 64 * 1024 {
+        text.push_str(line);
+        text.push('\n');
+    }
+    write(&objects.join("info/alternates"), text.as_bytes());
+    objects
+}
+
+/// Two passes at the default budget: `Redirected` each time, never `Timeout` or `Paused`.
+fn refused_twice(r: &Path, what: &str) {
+    for pass in ["first", "refresh"] {
+        let st = status(r, &GitLimits::default());
+        fact(&format!(
+            "t20 r_t20_2 case={what} pass={pass} state={}",
+            format!("{st:?}").replace(' ', "")
+        ));
+        assert!(
+            matches!(st, GitState::Unavailable(GitError::Redirected)),
+            "{what} {pass}: {st:?}"
+        );
+    }
+}
+
+/// H3: the root file holds one entry with a trailing space, `l0 `. Git (and the old walk)
+/// resolve `l0`, a harmless alternate; gix resolves `l0 ` itself, a second link, to a folder
+/// whose alternates file is 64 KiB of `k0` (each a 2-hop chain through 400-deep folders). Before
+/// R-T20-2: `Timeout`, then `Paused`. Now an entry that is not its own trimmed form is refused.
+#[cfg(unix)]
+#[test]
+fn h3_an_entry_with_trailing_whitespace_is_refused() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let r = repo(&top, "repo");
+    let objects = r.join(".git/objects");
+    let harmless = repo(&top, "harmless").join(".git/objects");
+    let expensive = folder_with_64_kib_alternates(&top, "expensive", "k0");
+    // gix joins the nested `k0` to the root objects folder (H4's finding), so `k0` lives there.
+    expensive_link(&top, &objects, "k0", &harmless, 2);
+    std::os::unix::fs::symlink(&harmless, objects.join("l0")).unwrap();
+    std::os::unix::fs::symlink(&expensive, objects.join("l0 ")).unwrap();
+    write(&objects.join("info/alternates"), b"l0 \n");
+    refused_twice(&r, "h3");
+    // The absolute, trimmed form of the harmless alternate (and no chain) reads.
+    write(
+        &objects.join("info/alternates"),
+        format!("{}\n", harmless.display()).as_bytes(),
+    );
+    assert!(matches!(
+        status(&r, &GitLimits::default()),
+        GitState::Ready(_)
+    ));
+}
+
+/// H4: the root lists alternate `a` (absolute). `a`'s own file says `k0`, which git joins to
+/// `a`'s objects folder (an empty one) but gix joins to the **root** objects folder, where
+/// `k0` links to a folder whose alternates file is 64 KiB of `k1` (`k1` a 2-hop chain through
+/// 400-deep folders). Before R-T20-2: `Timeout`, then `Paused` for over a minute. Now an
+/// alternate with alternates of its own is refused, its file unread.
+#[cfg(unix)]
+#[test]
+fn h4_a_nested_alternates_file_is_refused() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let r = repo(&top, "repo");
+    let objects = r.join(".git/objects");
+    let a = repo(&top, "a").join(".git/objects");
+    std::fs::create_dir_all(a.join("k0")).unwrap();
+    write(&a.join("info/alternates"), b"k0\n");
+    let harmless = repo(&top, "harmless").join(".git/objects");
+    let expensive = folder_with_64_kib_alternates(&top, "expensive", "k1");
+    std::os::unix::fs::symlink(&expensive, objects.join("k0")).unwrap();
+    expensive_link(&top, &objects, "k1", &harmless, 2);
+    write(
+        &objects.join("info/alternates"),
+        format!("{}\n", a.display()).as_bytes(),
+    );
+    refused_twice(&r, "h4");
+}
+
+/// R-T20-2: a nested alternates file of any size is refused (an empty one, one absolute line,
+/// 64 KiB); a relative entry in the root file is refused; one absolute alternate with no chain,
+/// as `git clone --shared` makes, reads (`Ready`).
+#[test]
+fn only_single_level_absolute_alternates_are_read() {
+    let top = tempfile::tempdir().unwrap();
+    let top = canonical(top.path());
+    let r = repo(&top, "repo");
+    let objects = r.join(".git/objects");
+    let a = repo(&top, "a").join(".git/objects");
+    let b = repo(&top, "b").join(".git/objects");
+    write(
+        &objects.join("info/alternates"),
+        format!("{}\n", a.display()).as_bytes(),
+    );
+    assert!(
+        matches!(status(&r, &GitLimits::default()), GitState::Ready(_)),
+        "a single absolute alternate reads"
+    );
+    for (what, nested) in [
+        ("empty", String::new()),
+        ("one", format!("{}\n", b.display())),
+        ("large", format!("{}\n", b.display()).repeat(1_000)),
+    ] {
+        write(&a.join("info/alternates"), nested.as_bytes());
+        refused_twice(&r, &format!("nested-{what}"));
+    }
+    std::fs::remove_file(a.join("info/alternates")).unwrap();
+    // A relative entry (git and gix may join it to different folders) is refused.
+    write(&objects.join("info/alternates"), b"../../a/.git/objects\n");
+    refused_twice(&r, "relative");
+    // CR line ends (an entry that is not its own trimmed form).
+    write(
+        &objects.join("info/alternates"),
+        format!("{}\r\n", a.display()).as_bytes(),
+    );
+    refused_twice(&r, "crlf");
+}
+
 /// Re-review I1-fr1 (b), defence in depth: a worker abandoned at its deadline (a stall here,
 /// as an uninterruptible read would) leaves the library `Paused` only while it runs. Once it
 /// ends, the library answers `Timeout` at once for its backoff, starting no worker, and then
@@ -499,7 +652,8 @@ fn an_overrun_backs_off_then_retries() {
     let r = repo(&canonical(top.path()), "repo");
     let limits = GitLimits {
         timeout: std::time::Duration::from_millis(300),
-        retry_after: std::time::Duration::from_millis(400),
+        // Fix round 3 (m-fr2-1): seconds, so a loaded runner still lands inside it.
+        retry_after: std::time::Duration::from_secs(3),
         ..GitLimits::default()
     };
     let (release, released) = std::sync::mpsc::channel::<()>();
