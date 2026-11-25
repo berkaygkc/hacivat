@@ -7,9 +7,9 @@
 //! (`NoGitSubprocess`, `cargo xtask check-deps`). No `gix` type is public.
 //!
 //! ## m4b-t01a-seams
-//! Task 1a: the types and a fail-closed [`status`] stub that answers
-//! [`GitState::Unavailable`] with [`GitError::NotImplemented`] and opens nothing. Task 7 writes
-//! the body (`discover`, `status`, `trust`, `map`).
+//! Task 1a: the types and a fail-closed [`status`] stub that answered
+//! [`GitState::Unavailable`] and opened nothing. Task 7 wrote the body (`discover`, `status`,
+//! `trust`, `map`); ## m4b-gatefix-1 (E9) removed the stub-only error variant.
 //!
 //! ## m4b-t07-git
 //! Task 7: the body. [`status`] runs the whole pipeline on one timed worker thread
@@ -56,8 +56,7 @@ pub enum UntrustReason {
 /// Why no status is available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitError {
-    /// Task 1a's stub: nothing is read until Task 7.
-    NotImplemented,
+    // ## m4b-gatefix-1 (E9): Task 1a's stub-only variant is removed; nothing constructed it.
     /// The 5 s budget ran out; the caller answers without waiting for the worker.
     Timeout,
     /// After the open, the repository or a repository config section had full trust (C1).

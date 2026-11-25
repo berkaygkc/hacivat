@@ -247,7 +247,7 @@ fn read_error(e: ReadError) -> hacivat_exec::ChunkError {
         | ReadError::UnknownEncoding
         | ReadError::Lossy
         | ReadError::Undecodable => hacivat_exec::ChunkError::Decode,
-        ReadError::NotImplemented | ReadError::PathRefused | ReadError::OutOfScope => {
+        ReadError::PathRefused | ReadError::OutOfScope => {
             hacivat_exec::ChunkError::Io(std::io::ErrorKind::PermissionDenied)
         }
     }

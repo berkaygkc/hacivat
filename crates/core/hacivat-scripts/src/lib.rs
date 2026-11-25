@@ -13,18 +13,20 @@
 //!
 //! ## m4b-t01a-seams
 //! Task 1a: every module and the types later tasks code against, with fail-closed stubs (F31;
-//! none is wired into a user path until its task merges):
-//! - [`LibraryService::open`] publishes an empty snapshot in
-//!   `LibraryState::Unavailable(NotImplemented)` and scans nothing; every other service call
-//!   answers `NotImplemented` and touches no file;
-//! - [`binding::resolve`] binds nothing; [`envscope::visible`] answers `false`;
+//! none was wired into a user path until its task merged). ## m4b-gatefix-1 (E9): every stub
+//! below has been filled, and the stub-only error variants are gone; the list says what each
+//! stub did:
+//! - [`LibraryService::open`] published an empty snapshot of unavailable libraries and scanned
+//!   nothing; every other service call refused and touched no file (Task 10);
+//! - [`binding::resolve`] bound nothing (Task 3); [`envscope::visible`] answered `false`
+//!   (Task 4);
 //! - [`scan_secrets`] answered one finding over the whole text (a save asks, never passes);
 //!   Task 6 filled it (`## m4b-t06-secrets`, named exception for this line);
-//! - [`fileio::read`] and [`fileio::save`] answer `NotImplemented` and read or write nothing;
-//! - [`manifest::read`] reads nothing and binds nothing; [`pathsafe::component`] and
-//!   [`pathsafe::join`] refuse every name;
-//! - [`watch::OsEventSource`] is built only as `new_debouncer_opt::<_, RecommendedWatcher,
-//!   NoCache>` with `follow_symlinks(false)` (R-T0-2) and watches nothing.
+//! - [`fileio::read`] and [`fileio::save`] refused and read or wrote nothing (Task 5);
+//! - [`manifest::read`] read nothing and bound nothing (Task 3); [`pathsafe::component`] and
+//!   [`pathsafe::join`] refused every name (Task 4);
+//! - [`watch::OsEventSource`] was built only with `follow_symlinks(false)` (R-T0-2) and watched
+//!   nothing (Task 9; gatefix-1 replaced its debouncer, still only with that configuration).
 //!
 //! ## m4b-t04-scanner (named exception, fix round 1 m9)
 //! Task 4 replaced three of those stubs: [`envscope::visible`], [`pathsafe::component`] and

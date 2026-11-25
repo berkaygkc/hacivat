@@ -217,7 +217,6 @@ pub fn read_error(e: ReadError) -> ChunkError {
         ReadError::PathRefused | ReadError::OutOfScope => {
             ChunkError::Io(std::io::ErrorKind::PermissionDenied)
         }
-        ReadError::NotImplemented => ChunkError::Io(std::io::ErrorKind::Unsupported),
         ReadError::Io(kind) => ChunkError::Io(kind),
     }
 }
@@ -1436,10 +1435,6 @@ mod tests {
             (
                 ReadError::OutOfScope,
                 ChunkError::Io(ErrorKind::PermissionDenied),
-            ),
-            (
-                ReadError::NotImplemented,
-                ChunkError::Io(ErrorKind::Unsupported),
             ),
             (
                 ReadError::Io(ErrorKind::NotFound),

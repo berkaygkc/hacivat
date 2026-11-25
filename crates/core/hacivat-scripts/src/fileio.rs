@@ -2,9 +2,9 @@
 //! line endings (HV-SCRIPT-07; UI-EDIT-02, R-M4b-20 tiers).
 //!
 //! ## m4b-t01a-seams
-//! Task 1a: the types and fail-closed stubs: [`read`] answers `Err(ReadError::NotImplemented)`
-//! and opens nothing; [`save`] answers `Err(SaveError::NotImplemented)` and writes nothing.
-//! Task 5 writes them (fd-relative temp + rename, hard-link-safe, recovery copies).
+//! Task 1a: the types and fail-closed stubs: [`read`] refused and opened nothing; [`save`]
+//! refused and wrote nothing. Task 5 wrote them (fd-relative temp + rename, hard-link-safe,
+//! recovery copies); ## m4b-gatefix-1 (E9) removed the stub-only variants.
 //!
 //! ## m4b-t05-fileio
 //! Task 5: the reader, the saver and the "Run as script" stream (HV-SCRIPT-07, -12 step 4).
@@ -192,8 +192,7 @@ impl fmt::Debug for SaveText {
 /// Why a read failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadError {
-    /// A stub that reads nothing (the service's, until Task 10).
-    NotImplemented,
+    // ## m4b-gatefix-1 (E9): the stub-only variant is removed; nothing constructed it.
     /// The path failed the re-validation (HV-SCRIPT-03 step 8, [`pathsafe::join`]): a name the
     /// scan never lists, a link or junction on the way, a link out of the library, a folder or
     /// other non-file, a root that moved.
@@ -226,8 +225,7 @@ pub enum ReadError {
 /// and [`SaveError::SavedButPathChanged`] (which is a completed save).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SaveError {
-    /// A stub that writes nothing (the service's, until Task 10).
-    NotImplemented,
+    // ## m4b-gatefix-1 (E9): the stub-only variant is removed; nothing constructed it.
     /// The file is not what the editor last read (HV-SCRIPT-08); carries the stamp on disk.
     ChangedOnDisk(DiskStamp),
     /// The path became a link or another kind of file since it was validated, or resolves out
