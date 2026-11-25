@@ -1867,3 +1867,38 @@ The T21 re-review residuals r1–r4 and the m12 flake, before the gate.
 - **m1.** The head is condensed only while it does not fit whole. Condensed, its explanation stays before its buttons in the element tree: they are drawn in a reversed column.
 - **m3.** A dead or stale shot lock is taken over by renaming it to a tomb of the taker's own; the loser retries. The tomb is checked to be the lock that was judged, and a newer lock is put back.
 - **m5.** `profile_data::timings` records in debug builds only; a release build reads zeros.
+
+## m4b-gatefix-1 — an idle watcher wakes nothing; Go to script cost; stub names gone
+
+- **Watcher idle CPU (gate E12).** The gate measured 130–240 ms of CPU per minute with three idle libraries, against 10–20 ms with none. Each library's `notify-debouncer-full` 0.7 loop slept a fixed tick (150 ms / 4) and woke about 27 times a second, forever. `OsEventSource` no longer uses that debouncer. It builds the platform's recommended watcher itself, at one reviewed site and only with `watcher_config()` (`follow_symlinks(false)`, R-T0-2), and hands every event to a debounce thread of its own (`hv-watch-debounce`).
+  - That thread blocks on its channel while nothing is pending, so an idle library costs no wake-up.
+  - An event is delivered 150 ms after it arrived, at most once per 37.5 ms (`FLUSH_GAP`) during a burst. A path is named once while it waits, and errors go out at the next delivery.
+  - The thread delivers paths, the rescan flag and the watch-limit error, never kinds, so nothing is cancelled. cifix-2's `NoCancel` wrapper existed only to stop the old debouncer dropping a delete whose FSEvents flags still said "created". It is gone, and its test now runs through the new thread.
+  - What the idle change leaves as it was: the reconciler, settle, echo, rename pairing, bursts, the poll fallback, rescans and the per-folder Linux watches. (The late item below then changes the burst rule after a repository operation.) `notify-debouncer-full` stays a dependency for `file_id` (Windows identity, `fileio/windows_id.rs`), and the manifest is unchanged.
+  - Tests: `an_idle_debounce_thread_never_wakes` (0 wakes in an idle window; a ticking loop gives 14) and `watch_real::an_idle_os_source_wakes_nothing` on the real backend.
+- **Go to script (gate E12).** `query_over_10k_entries_under_5ms` took 4.97–5.64 ms in release. Most of the time went to the subsequence table's allocations for keys that cannot match.
+  - `hacivat-l10n`'s `fuzzy` now refuses a query that is not a subsequence of the key before it allocates, and its tables are flat. The answers are the same: a reference copy of the old body is compared on a generated corpus.
+  - The index works out each entry's path scope once at build, instead of once per environment per query.
+  - The ranking is unchanged, compared against the pre-change ranking on a generated corpus. The query now takes 0.77–0.80 ms.
+- **Stub names (gate E9).** The stub-only variants that nothing constructed are removed: `RegistryError::NotImplemented`, `GitError::NotImplemented`, `UnavailableReason::NotImplemented`, `ReadError::NotImplemented` and `SaveError::NotImplemented`. A stopped watch source answers `WatchError::Stopped`, which is not user-visible. The Task 1a module docs now say what the stubs did. The Task 1a and Task 5 sections above describe the code as it was.
+- **E8 test isolation.** The two memory perf tests of `hacivat-exec`'s `script_run` take one process-wide lock (`RSS_PERF`), because RSS is process-wide. The budget is unchanged.
+- **`git_checkout_2000_is_one_rescan` (the gate CI on macOS, run 45202154953; locally 7 of 10 suite runs failed on the old code).** Traces of failing runs show FSEvents delivering a 2,000-file checkout late and in chunks: 700 files by the time git let go of `index.lock`, the rest in chunks up to 220 ms apart for 1.9 s. Three parts fix it, none of them a longer test wait:
+  - The OS source hands `.git/index.lock` over without the debounce wait, so the reconciler looks at the lock while git still holds it.
+  - After a repository operation ends, its burst goes on until the hints have been quiet for `OP_QUIET` (1 s; one window before), at most `REPO_OP_MAX` after the end, so late chunks count toward the operation's one `Rescan`. A small operation's files settle once that quiet passes.
+  - After a burst rescan, a late hint folds into it (`RescanTail`, up to `TAIL` = 2 s after the last folded hint, at most 30 s). Its file must be unopened, have the stamp learned at or after the rescan's start, and be dated more than `TICK_MARGIN` (100 ms, or the file system's granularity) before the rescan began. A write after that stamp was learned would carry a later time, so R-T9-3's "racily clean" doubt cannot apply. Every other hint is looked at as before.
+  - Result: `watch_real` passed 20 of 20 runs unloaded, 20 of 20 with 12 CPU hogs, and 20 of 20 with 16 test threads.
+- **Fix round 1 (review C1, I1, I2, m2, m3, m6; ruling R-GF-1).**
+  - **C1.** The post-operation phase (`OP_QUIET`) now lasts at most `OP_LATE_MAX` (4 s) after the lock went.
+    - An overflowed burst's rescan is due at most `max_wait` after the overflow in every phase.
+    - The rescan of an operation's burst clears the phase and the overflow.
+    - A rescan is never due again before a window after the last one (`last_rescan`; `debug_assert`), so `due()` cannot answer the same past instant twice.
+    - The review's probes are tests: a steady writer after an overflowed checkout gives one rescan, 2.0 s after the lock went; a small operation and then a generator give 5 rescans in 40 s.
+  - **I1 (R-GF-1).** An open file's hint (`Debouncer::push_open`) is handed on at the next flush whatever the burst does. It is never swallowed by an overflow and never held by a repository operation, so E2's budget holds for open files: 150–250 ms at the reconciler in the tests. Only unopened files wait for the burst's rescan.
+  - **m3.** A tab's read stamp that the watcher has not learned yet makes the file open (`Reconciler::opened`). The hash is attached once the watcher learns that stamp. The rescan tail never folds an open file.
+  - **m2.** A sink that panics is caught (`catch_unwind`) and handed `RawHint::Lost`, so the watcher falls back and rescans. The debounce thread lives on.
+  - **I2.** The thread publishes how many items wait (`DebounceCounts::pending`). The real-backend idle test starts its window only once nothing waits, and requires at most two wakes per event in it.
+- **Fix round 2 (re-review I-fr1-1, m-fr1-1, m-fr1-2; R-GF-1 as amended).**
+  - **I-fr1-1.** The bypass reports early only an open file that is still there (an edit). An open file found gone while a burst or an operation holds the rest waits for the burst's rescan, or for the hold's end (`settles_while_held`), as it did before R-GF-1. The rescan then pairs it with the new name the burst held, so a move inside a checkout is `FileRenamed`, never `FileDeleted` (a service test, 5 rounds).
+  - **m-fr1-1.** A sink that panics on `Lost` too is detached and never called again. A watcher's own sink carries a `DetachGuard`: dropped by a detach, it tells its queue the backend is lost, so the watcher falls back to polling and the service shows it. Any other drop says nothing.
+  - **m-fr1-2.** A tab's unlearned read stamp (`opened`) keeps the file open until the watcher learns the stamp (then the hash moves over) or `OPENED_TTL` (30 s) passes. A file not listed yet stays open too.
+  - **m-fr1-3 (carried, no change).** A tick already makes at most one library scan however many new-file hints it took. Batching across ticks would delay `Created`; it is carried to T20's list.

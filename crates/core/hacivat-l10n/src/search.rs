@@ -421,6 +421,13 @@ fn word_prefix(key: &SearchKey, q: &str) -> Option<Match> {
 /// +32 when consecutive, -1 per skipped character between matches. Consecutive runs outweigh
 /// scattered word starts (`e10` prefers `events_2026_10` to `e_x_y_1_z_0`).
 fn fuzzy(key: &SearchKey, q: &str) -> Option<Match> {
+    // ## m4b-gatefix-1 (E12 Go to script): the table below finds a match exactly when the
+    // query is a subsequence of the key, so a key that is not one is refused before anything
+    // is allocated (most keys of a list). Same answers, fewer allocations.
+    if !is_subsequence(&key.folded, q) {
+        return None;
+    }
+    // ## m4b-gatefix-1
     let t: Vec<(usize, char)> = key.folded.char_indices().collect();
     let qc: Vec<char> = q.chars().collect();
     let (n, m) = (t.len(), qc.len());
@@ -431,13 +438,14 @@ fn fuzzy(key: &SearchKey, q: &str) -> Option<Match> {
     let gain = |j: usize| -> i64 {
         16 + if key.is_word_start(t[j].0) { 16 } else { 0 } + if j == 0 { 8 } else { 0 }
     };
-    // score[i][j]: best with query[..=i] matched and query[i] at t[j]; from[i][j]: where
-    // query[i-1] was matched.
-    let mut score = vec![vec![NONE; n]; m];
-    let mut from = vec![vec![usize::MAX; n]; m];
+    // score[i][j] (at `i * n + j`): best with query[..=i] matched and query[i] at t[j];
+    // from[i][j]: where query[i-1] was matched. ## m4b-gatefix-1: one flat table each.
+    let at = |i: usize, j: usize| i * n + j;
+    let mut score = vec![NONE; m * n];
+    let mut from = vec![usize::MAX; m * n];
     for j in 0..n {
         if t[j].1 == qc[0] {
-            score[0][j] = gain(j);
+            score[at(0, j)] = gain(j);
         }
     }
     for i in 1..m {
@@ -445,7 +453,7 @@ fn fuzzy(key: &SearchKey, q: &str) -> Option<Match> {
         let mut run: (i64, usize) = (NONE, usize::MAX);
         for j in 1..n {
             if j >= 2 {
-                let cand = score[i - 1][j - 2];
+                let cand = score[at(i - 1, j - 2)];
                 run.0 -= 1;
                 if cand > NONE && cand - 1 > run.0 {
                     run = (cand - 1, j - 2);
@@ -454,19 +462,19 @@ fn fuzzy(key: &SearchKey, q: &str) -> Option<Match> {
             if t[j].1 != qc[i] {
                 continue;
             }
-            let consecutive = score[i - 1][j - 1];
+            let consecutive = score[at(i - 1, j - 1)];
             let (prev, k) = if consecutive > NONE && consecutive + 32 >= run.0 {
                 (consecutive + 32, j - 1)
             } else {
                 run
             };
             if prev > NONE {
-                score[i][j] = prev + gain(j);
-                from[i][j] = k;
+                score[at(i, j)] = prev + gain(j);
+                from[at(i, j)] = k;
             }
         }
     }
-    let (mut j, best) = score[m - 1]
+    let (mut j, best) = score[at(m - 1, 0)..]
         .iter()
         .copied()
         .enumerate()
@@ -475,7 +483,7 @@ fn fuzzy(key: &SearchKey, q: &str) -> Option<Match> {
     let mut picked = vec![0; m];
     for i in (0..m).rev() {
         picked[i] = j;
-        j = from[i][j];
+        j = from[at(i, j)];
     }
     let ranges = picked
         .iter()
@@ -487,6 +495,14 @@ fn fuzzy(key: &SearchKey, q: &str) -> Option<Match> {
         kind: MatchKind::Fuzzy,
     })
 }
+
+// ## m4b-gatefix-1
+/// Whether the characters of `q` appear in `text` in order (a greedy walk, no allocation).
+fn is_subsequence(text: &str, q: &str) -> bool {
+    let mut rest = text.chars();
+    q.chars().all(|c| rest.any(|t| t == c))
+}
+// ## m4b-gatefix-1
 
 /// A raw subsequence score scaled into `1..=FUZZY_MAX - 100`, below every acronym and substring
 /// score. The best raw score for `m` query characters is `64 m + 8` (each at a word start,
@@ -563,3 +579,165 @@ mod tests {
         assert_eq!(k.folded, "ab c");
     }
 }
+
+// ## m4b-gatefix-1
+#[cfg(test)]
+mod gatefix_tests {
+    use super::*;
+
+    /// `fuzzy` as it was before the subsequence pre-check and the flat tables (E12 Go to
+    /// script), kept verbatim as the reference the new one must equal.
+    fn fuzzy_reference(key: &SearchKey, q: &str) -> Option<Match> {
+        let t: Vec<(usize, char)> = key.folded.char_indices().collect();
+        let qc: Vec<char> = q.chars().collect();
+        let (n, m) = (t.len(), qc.len());
+        if m > n || n > FUZZY_MAX_TEXT || m > FUZZY_MAX_QUERY {
+            return None;
+        }
+        const NONE: i64 = i64::MIN / 4;
+        let gain = |j: usize| -> i64 {
+            16 + if key.is_word_start(t[j].0) { 16 } else { 0 } + if j == 0 { 8 } else { 0 }
+        };
+        let mut score = vec![vec![NONE; n]; m];
+        let mut from = vec![vec![usize::MAX; n]; m];
+        for j in 0..n {
+            if t[j].1 == qc[0] {
+                score[0][j] = gain(j);
+            }
+        }
+        for i in 1..m {
+            let mut run: (i64, usize) = (NONE, usize::MAX);
+            for j in 1..n {
+                if j >= 2 {
+                    let cand = score[i - 1][j - 2];
+                    run.0 -= 1;
+                    if cand > NONE && cand - 1 > run.0 {
+                        run = (cand - 1, j - 2);
+                    }
+                }
+                if t[j].1 != qc[i] {
+                    continue;
+                }
+                let consecutive = score[i - 1][j - 1];
+                let (prev, k) = if consecutive > NONE && consecutive + 32 >= run.0 {
+                    (consecutive + 32, j - 1)
+                } else {
+                    run
+                };
+                if prev > NONE {
+                    score[i][j] = prev + gain(j);
+                    from[i][j] = k;
+                }
+            }
+        }
+        let (mut j, best) = score[m - 1]
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, s)| *s > NONE)
+            .max_by_key(|(_, s)| *s)?;
+        let mut picked = vec![0; m];
+        for i in (0..m).rev() {
+            picked[i] = j;
+            j = from[i][j];
+        }
+        let ranges = picked
+            .iter()
+            .map(|&j| t[j].0..t[j].0 + t[j].1.len_utf8())
+            .collect::<Vec<_>>();
+        Some(Match {
+            ranges: key.ranges(ranges),
+            score: fuzzy_score(best, m),
+            kind: MatchKind::Fuzzy,
+        })
+    }
+
+    /// A small deterministic generator (no extra dependency).
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(self.0 >> 33).unwrap_or(0) % n
+        }
+    }
+
+    // ## m4b-gatefix-1 fix round 1 (m6): combining marks (NFD), `/` and `\\` too.
+    const ALPHABET: [&str; 26] = [
+        "a", "e", "r", "p", "o", "t", "4", "2", "0", "_", ".", "-", " ", "ş", "ü", "İ", "ı", "I",
+        "ß", "R", "É", "\u{200B}", "u\u{308}", "\u{327}", "/", "\\",
+    ];
+
+    fn word(g: &mut Lcg, max: usize) -> String {
+        (0..g.below(max) + 1)
+            .map(|_| ALPHABET[g.below(ALPHABET.len())])
+            .collect()
+    }
+
+    /// The new `fuzzy` gives exactly the old answers (kind, score and ranges) on a generated
+    /// corpus of keys and queries, both tolerances, including every non-match.
+    #[test]
+    fn fuzzy_equals_the_reference_on_a_generated_corpus() {
+        let mut g = Lcg(0x4d34_6267_6174_6531);
+        let (mut hits, mut misses) = (0, 0);
+        for tolerant in [false, true] {
+            let o = SearchOpts {
+                turkish_tolerant: tolerant,
+                mode: MatchMode::Fuzzy,
+            };
+            let folder = Folder::new(tolerant);
+            for _ in 0..400 {
+                let key = build_key(&word(&mut g, 40), &o);
+                for _ in 0..12 {
+                    let q = folder.query(&word(&mut g, 6));
+                    if q.is_empty() {
+                        continue;
+                    }
+                    let (new, old) = (fuzzy(&key, &q), fuzzy_reference(&key, &q));
+                    if new.is_some() {
+                        hits += 1;
+                    } else {
+                        misses += 1;
+                    }
+                    assert_eq!(new, old, "key {:?} query {q:?}", key.text);
+                }
+            }
+        }
+        // The corpus exercises both branches.
+        assert!(hits > 500 && misses > 500, "hits {hits} misses {misses}");
+        // ## m4b-gatefix-1 fix round 1 (m6): keys past `FUZZY_MAX_TEXT` (both answer `None`
+        // past the size bound, a subsequence or not).
+        for tolerant in [false, true] {
+            let o = SearchOpts {
+                turkish_tolerant: tolerant,
+                mode: MatchMode::Fuzzy,
+            };
+            let folder = Folder::new(tolerant);
+            for len in [FUZZY_MAX_TEXT - 1, FUZZY_MAX_TEXT, FUZZY_MAX_TEXT + 7] {
+                let text: String = (0..len).map(|i| ALPHABET[i % 9]).collect();
+                let key = build_key(&text, &o);
+                for q in ["rep42", "a0", "zz", "ap"] {
+                    let q = folder.query(q);
+                    assert_eq!(
+                        fuzzy(&key, &q),
+                        fuzzy_reference(&key, &q),
+                        "len {len} {q:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn is_subsequence_is_ordered_and_whole() {
+        assert!(is_subsequence("report_42", "rep42"));
+        assert!(is_subsequence("abc", ""));
+        assert!(!is_subsequence("report_24", "rep42"));
+        assert!(!is_subsequence("ab", "abc"));
+        assert!(is_subsequence("müşteri", "üş"));
+    }
+}
+// ## m4b-gatefix-1

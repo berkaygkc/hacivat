@@ -302,7 +302,8 @@ impl EventSource for PollEventSource {
         let manifest = manifest_stamp(root);
         let mut st = self.shared.lock();
         if st.stopped {
-            return Err(WatchError::NotImplemented);
+            // ## m4b-gatefix-1 (E9): a stopped source says so (the variant had a stub name).
+            return Err(WatchError::Stopped);
         }
         st.roots.retain(|r| r.path != root);
         let now = Instant::now();

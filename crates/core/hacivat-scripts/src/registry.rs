@@ -112,8 +112,7 @@ pub struct LocalMapping {
 /// Why a registry change was refused; the registry is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
-    /// Task 1a's service stub (Task 10 replaces it); the registry itself never answers it.
-    NotImplemented,
+    // ## m4b-gatefix-1 (E9): Task 1a's service-stub variant is removed; nothing constructed it.
     /// The file is newer than this build, or could not be read or set aside: nothing is
     /// written.
     ReadOnly,

@@ -5,9 +5,9 @@
 //!
 //! ## m4b-t01a-seams
 //! Task 1a: the signatures every later task codes against, as fail-closed stubs (F31):
-//! [`LibraryService::open`] publishes an empty snapshot in
-//! `LibraryState::Unavailable(NotImplemented)`, starts no task and scans nothing; every other
-//! call answers `NotImplemented` and touches no file. Task 10 writes the actor.
+//! [`LibraryService::open`] published an empty snapshot of unavailable libraries, started no
+//! task and scanned nothing; every other call refused and touched no file. Task 10 wrote the
+//! actor (## m4b-gatefix-1, E9: and the stub's reason is gone).
 //!
 //! Two deviations from the plan's sketch (ADR 0009 `m4b-t01a`): `open` takes the core
 //! runtime's `tokio::runtime::Handle` (the app passes `CoreRuntime::handle()`), because
@@ -263,8 +263,7 @@ pub enum PollReason {
 /// Why a library shows nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnavailableReason {
-    /// Task 1a's stub serves nothing.
-    NotImplemented,
+    // ## m4b-gatefix-1 (E9): Task 1a's stub-only reason is removed; nothing constructed it.
     /// The folder is gone or unmounted (it stays registered).
     Missing,
     /// The root's canonical path changed (it became a link).
@@ -339,7 +338,7 @@ pub enum RootRefusal {
 /// Why attaching a folder was refused; nothing was registered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachError {
-    // ## m4b-t10-service (Task 1a's `NotImplemented` is gone)
+    // ## m4b-t10-service (Task 1a's stub variant is gone)
     /// The registry refused (read-only, already registered, nested, the home or an app folder,
     /// too many, or the folder cannot be resolved).
     Registry(RegistryError),
@@ -457,7 +456,7 @@ type Listing = (LibraryRoot, Arc<[ScriptEntry]>, Arc<[LibraryDiag]>);
 
 /// Why creating, renaming or trashing a file was refused; the library is unchanged.
 ///
-/// ## m4b-t13-explorer (named exception): the Task 1a stub's `NotImplemented` is gone; these are
+/// ## m4b-t13-explorer (named exception): the Task 1a stub's variant is gone; these are
 /// the refusals of the filled operations (`crate::fileops`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOpError {

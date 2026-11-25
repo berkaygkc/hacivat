@@ -15,7 +15,8 @@ use hacivat_scripts::fileio::{self, ReadLimits};
 #[cfg(any(unix, windows))] // ## m4b-t20-adversarial (named line)
 use hacivat_scripts::scan::{Fs, Meta, RealFs};
 use hacivat_scripts::watch::{
-    Backend, OsEventSource, PollEventSource, PollReason, WatchBatch, WatchEvent, WatchOpts, Watcher,
+    Backend, EventSource, OsEventSource, PollEventSource, PollReason, WatchBatch, WatchEvent,
+    WatchOpts, Watcher,
 };
 use hacivat_scripts::{LibraryId, LibraryRoot, RelPath, SaveText};
 use tokio::sync::mpsc;
@@ -871,40 +872,47 @@ fn short_name_event_is_reconciled() {
     assert_eq!(out, vec![WatchEvent::Changed(rel("longname_script.sql"))]);
 }
 
-/// Fix round 2 (m-fr1-3, recorded residual): the cost of `notify-debouncer-full`'s own root
-/// list for 5,000 per-folder watches, isolated with notify's `NullWatcher` (no OS work).
+// ## m4b-gatefix-1-idle (E12 watcher idle CPU)
+// T9 fr2's `debouncer_root_bookkeeping_for_5000_folders_is_recorded` measured
+// `notify-debouncer-full`'s own root list (m-fr1-3); the source no longer uses that debouncer,
+// so the residual and its record are gone.
+
+/// The real OS source wakes nothing while nothing happens. Fix round 1 (review I2): the
+/// thread is first drained (a condition: nothing waiting for delivery), then one second is
+/// measured; every wake in it must be explained by an event the OS sent in it (a message, and
+/// the delivery a window later: at most two wakes per event). An event from before the window
+/// cannot leak in, since the thread had nothing waiting when the window began. The old
+/// `notify-debouncer-full` loop woke every 37.5 ms (about 27 times in the window) with no
+/// event at all.
 #[test]
-#[ignore = "perf"]
-fn debouncer_root_bookkeeping_for_5000_folders_is_recorded() {
-    if std::env::var("HACIVAT_PERF").as_deref() != Ok("1") {
-        return;
+fn an_idle_os_source_wakes_nothing() {
+    use hacivat_scripts::watch::DebounceCounts;
+    let lib = Lib::new(&[("a.sql", "SELECT 1"), ("d/b.sql", "SELECT 2")]);
+    let mut src = OsEventSource::new().unwrap();
+    src.watch(&lib.root.canonical, Box::new(|_| {})).unwrap();
+    let drained = |src: &OsEventSource| -> DebounceCounts {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let c = src.debounce_counts().unwrap();
+            if c.pending == 0 {
+                return c;
+            }
+            assert!(Instant::now() < deadline, "never drained: {c:?}");
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    };
+    let before = drained(&src);
+    let window = Duration::from_secs(1);
+    let started = Instant::now();
+    while started.elapsed() < window {
+        std::thread::park_timeout(window.saturating_sub(started.elapsed()));
     }
-    use notify::RecursiveMode;
-    use notify_debouncer_full::{DebounceEventResult, NoCache, new_debouncer_opt};
-    let dirs: Vec<PathBuf> = (0..5_000)
-        .map(|i| PathBuf::from(format!("/lib/d{:02}/f{i:04}", i % 50)))
-        .collect();
-    let mut d = new_debouncer_opt::<_, notify::NullWatcher, NoCache>(
-        Duration::from_millis(150),
-        None,
-        |_: DebounceEventResult| {},
-        NoCache,
-        notify::Config::default().with_follow_symlinks(false),
-    )
-    .unwrap();
-    let t = Instant::now();
-    for p in &dirs {
-        d.watch(p, RecursiveMode::NonRecursive).unwrap();
-    }
-    let add = t.elapsed();
-    let t = Instant::now();
-    for p in &dirs {
-        let _ = d.unwatch(p);
-    }
-    let remove = t.elapsed();
-    println!(
-        "HV-FACT t09 debouncer_roots=5000 add_ms={} unwatch_each_ms={}",
-        add.as_millis(),
-        remove.as_millis()
+    let after = src.debounce_counts().unwrap();
+    let (wakes, events) = (after.wakes - before.wakes, after.events - before.events);
+    assert!(
+        wakes <= 2 * events,
+        "{wakes} wakes for {events} events: {before:?} -> {after:?}"
     );
+    println!("HV-FACT gatefix1 idle_os_source window_ms=1000 wakes={wakes} events={events}");
 }
+// ## m4b-gatefix-1-idle

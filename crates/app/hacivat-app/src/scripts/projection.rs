@@ -849,9 +849,8 @@ fn problems_row(count_n: usize, cx: &App) -> TreeRowData {
 /// What a library that shows nothing shows under its node.
 fn unavailable(reason: UnavailableReason, cx: &App) -> ChildState {
     let label = match reason {
-        UnavailableReason::Missing | UnavailableReason::NotImplemented => {
-            tr_id(cx, "hv-scripts-missing-row")
-        }
+        // ## m4b-gatefix-1 (E9): the stub-only reason that shared this row is gone.
+        UnavailableReason::Missing => tr_id(cx, "hv-scripts-missing-row"),
         UnavailableReason::NotResponding => text(
             cx,
             "hv-scripts-unavailable-row",

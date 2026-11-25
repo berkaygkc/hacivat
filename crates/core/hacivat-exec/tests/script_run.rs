@@ -688,6 +688,14 @@ async fn rename_replace_mid_run_keeps_old_inode() {
 
 // ---- memory ---------------------------------------------------------------------------------
 
+// ## m4b-gatefix-1 (E8 test defect)
+/// Held for the whole body of every test here that allocates tens of MiB or reads this
+/// process's resident set: RSS is process-wide, so a parallel test's allocations showed up in
+/// the 150 MB test's growth (254 MiB at the gate, 13 MiB alone). The lock serializes them
+/// whatever `--test-threads` is; the budget is unchanged.
+static RSS_PERF: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// ## m4b-gatefix-1
+
 #[tokio::test]
 #[ignore = "perf"]
 async fn one_line_pg_script_over_64_mib_is_refused() {
@@ -698,6 +706,8 @@ async fn one_line_pg_script_over_64_mib_is_refused() {
     if std::env::var("HACIVAT_PERF").as_deref() != Ok("1") {
         return;
     }
+    // ## m4b-gatefix-1: it holds over 64 MiB; never while another test reads RSS.
+    let _rss = RSS_PERF.lock().await;
     let stmt = format!("SELECT '{}';", "x".repeat(4000));
     let n = (64 << 20) / stmt.len() + 64;
     let text = stmt.repeat(n);
@@ -801,6 +811,8 @@ async fn mysql_dump_of_150_mb_runs_in_constant_memory() {
     if std::env::var("HACIVAT_PERF").as_deref() != Ok("1") {
         return;
     }
+    // ## m4b-gatefix-1: the growth below is this test's alone.
+    let _rss = RSS_PERF.lock().await;
     let units = 150 * 1024;
     let mut r = rig(mysql(), false).await;
     // The rig's pool records every text it classifies; pass 1 classifies every unit, so this

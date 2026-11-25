@@ -1,6 +1,7 @@
-//! The library watcher (HV-SCRIPT-08; R-M4b-14, -16): OS events through `notify` and
-//! `notify-debouncer-full`, or polling, reduced to dirty-path hints that are reconciled
-//! against the disk (`lstat`, `DiskStamp`, settle). No `notify` type is public.
+//! The library watcher (HV-SCRIPT-08; R-M4b-14, -16): OS events through `notify` and a
+//! debounce thread of Hacivat's own (gatefix-1, below), or polling, reduced to dirty-path hints
+//! that are reconciled against the disk (`lstat`, `DiskStamp`, settle). No `notify` type is
+//! public.
 //!
 //! ## m4b-t01a-seams
 //! Task 1a: the [`EventSource`] seam (`testing::FakeEventSource` drives the deterministic
@@ -44,7 +45,7 @@
 //!    [`MAX_OUTBOX`] collapse into one `Rescan` too.
 //!
 //! The watcher's own loop runs on a named thread (`hv-library-watch`, R-T9-5); the source is
-//! unwatched and dropped on that thread, and the `notify` debouncer thread is joined in the
+//! unwatched and dropped on that thread, and the source's debounce thread is joined in the
 //! source's `Drop`.
 //!
 //! ## m4b-t09-watcher fix round 1 (review I1-I8; rulings R-T9-2..R-T9-5)
@@ -79,22 +80,37 @@
 //! backend: a recursive OS watch sees it already; a per-folder source watches `.hacivat/`
 //! (non-recursively, a real folder only, [`Reconciler::watch_dirs`]); the poll source `lstat`s
 //! the file on each pass ([`poll`]). Nothing else under `.hacivat/` is reported.
+//!
+//! ## m4b-gatefix-1-idle (E12: the watcher's idle CPU ≈ 0)
+//! The gate measured 130–240 ms of CPU per minute with three idle libraries: each
+//! `notify-debouncer-full` 0.7 loop slept a fixed tick (`DEBOUNCE` / 4) and woke ~27 times a
+//! second forever. [`OsEventSource`] now builds the platform watcher itself (still only with
+//! [`watcher_config`], R-T0-2, at one reviewed site) and hands every event to its own debounce
+//! thread (`hv-watch-debounce`), which blocks on its channel while nothing is pending: an idle
+//! library wakes nothing. An event is delivered [`DEBOUNCE`] after it arrived (each path once
+//! while it waits), at most one delivery per [`FLUSH_GAP`] during a burst; errors go out at
+//! the next delivery. The thread delivers paths only, never kinds, so nothing is ever cancelled
+//! (cifix-2's `NoCancel` wrapper existed only to stop the old debouncer cancelling a delete whose
+//! FSEvents flags still said "created", and is gone with it). The Task 1a and Task 9 notes above
+//! that name `new_debouncer_opt` describe the code before this change.
 
 pub mod debounce;
 pub mod echo;
 pub mod limits;
 pub mod poll;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc as mpsc_std;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use icu_normalizer::ComposingNormalizerBorrowed;
 use notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{DebounceEventResult, NoCache, new_debouncer_opt};
 use tokio::sync::mpsc;
 
 pub use self::debounce::{
@@ -131,8 +147,9 @@ pub type HintSink = Box<dyn FnMut(Vec<RawHint>) + Send>;
 /// Why a watch did not start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchError {
-    /// Task 1a's stub watches nothing.
-    NotImplemented,
+    // ## m4b-gatefix-1 (E9): renamed from the name Task 1a's stub gave it.
+    /// The source was stopped (its backend dropped); it watches nothing more and is not reused.
+    Stopped,
     /// The backend refused (the text is the backend's, never file contents).
     Backend(String),
 }
@@ -176,43 +193,287 @@ pub(crate) fn watcher_config() -> notify::Config {
     notify::Config::default().with_follow_symlinks(false)
 }
 
-// ## m4b-cifix-2-create-history
-/// The platform watcher, whose `Create` events reach the debouncer as `Modify(Any)`, so that
-/// the debouncer never cancels a path.
-///
-/// `notify-debouncer-full` drops a path whose queue starts with a `Create` when a `Remove`
-/// follows (`push_remove_event`: "created, then removed: nothing happened"), and a removed
-/// folder takes its children's queues with it. FSEvents reports a path's recent history in each
-/// event's flags: deleting a folder made a few seconds earlier arrives as `ItemCreated |
-/// ItemRemoved` on the folder and on each file, which notify splits into `Create` then
-/// `Remove` (`fsevent.rs` `translate_flags`). The debouncer then hides the whole delete: on the
-/// macOS CI runner `folder_delete_is_seen` saw nothing in 10 s (CI 44990057141). A desktop Mac
-/// usually adds an extended-attribute flag (`Modify(Metadata)`) after the `Remove`, which is
-/// why the delete was seen locally.
-///
-/// The reconciler takes only paths from a hint, never kinds (alg/28 C3), so the rewrite loses
-/// nothing. It can only add hints: a file made and deleted within one window, which nothing
-/// ever listed, costs one look or scan.
-///
-/// Fix round (review m1): it forwards `watch` and `unwatch` only. `Watcher::configure` keeps
-/// the trait's default (`Ok(false)`, nothing changed), so no caller can reconfigure the inner
-/// watcher, link following included (R-T0-2); `paths_mut` keeps the default too (one `watch`
-/// per path). Nothing in this crate calls either.
-struct NoCancel<W>(W);
+// ## m4b-gatefix-1-idle (E12 watcher idle CPU; replaces the `notify-debouncer-full` loop and
+// cifix-2's `NoCancel` wrapper, which only existed to stop that debouncer cancelling paths)
+/// The gap the debounce thread keeps between two deliveries while events keep arriving, so a
+/// burst costs at most one delivery per gap (the old debouncer's tick, [`DEBOUNCE`] / 4).
+pub const FLUSH_GAP: Duration = Duration::from_micros(37_500);
 
-impl<W: notify::Watcher> notify::Watcher for NoCancel<W> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "R-T0-2: the wrapped watcher is built with watcher_config() (follow_symlinks(false)), whatever config the debouncer hands in"
-    )]
-    fn new<F: notify::EventHandler>(handler: F, _config: notify::Config) -> notify::Result<Self> {
-        let mut handler = handler;
-        let forward = move |e: notify::Result<notify::Event>| {
-            handler.handle_event(e.map(no_create));
-        };
-        W::new(forward, watcher_config()).map(NoCancel)
+/// One thing the OS backend reported, as the debounce thread keeps it: a path, never a kind
+/// (alg/28 C3). `None` stands for every watched root.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Item {
+    /// Something may have changed at this path.
+    Path(PathBuf),
+    /// Events were dropped or coalesced (FSEvents `MustScanSubDirs`, inotify `IN_Q_OVERFLOW`):
+    /// rescan the roots holding this path.
+    Rescan(Option<PathBuf>),
+    /// The backend stopped working (the watch limit) for the roots holding this path.
+    Lost(Option<PathBuf>),
+}
+
+/// The items of one backend event: one per path, or a rescan when the event is flagged so.
+fn items_of_event(ev: notify::Event) -> Vec<Item> {
+    if ev.need_rescan() {
+        if ev.paths.is_empty() {
+            return vec![Item::Rescan(None)];
+        }
+        return ev
+            .paths
+            .into_iter()
+            .map(|p| Item::Rescan(Some(p)))
+            .collect();
+    }
+    ev.paths.into_iter().map(Item::Path).collect()
+}
+
+/// The items of one backend error: the watch limit is [`Item::Lost`]; any other error is a
+/// look at its paths, or a rescan of every root when it names none.
+fn items_of_error(e: notify::Error) -> Vec<Item> {
+    let lost = matches!(e.kind, notify::ErrorKind::MaxFilesWatch);
+    if e.paths.is_empty() {
+        return vec![if lost {
+            Item::Lost(None)
+        } else {
+            Item::Rescan(None)
+        }];
+    }
+    e.paths
+        .into_iter()
+        .map(|p| {
+            if lost {
+                Item::Lost(Some(p))
+            } else {
+                Item::Path(p)
+            }
+        })
+        .collect()
+}
+
+// ## m4b-gatefix-1-tail
+/// Whether `p` names a repository's `.git/index.lock` (the reconciler decides whether it is
+/// the library's own; this only skips the wait).
+fn is_repository_lock(p: &Path) -> bool {
+    p.file_name().is_some_and(|n| n == REPOSITORY_LOCK)
+        && p.parent()
+            .and_then(Path::file_name)
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(".git"))
+}
+// ## m4b-gatefix-1-tail
+
+/// What the backend's handler hands the debounce thread.
+enum Raw {
+    Event(notify::Result<notify::Event>),
+    Stop,
+}
+
+/// How often the debounce thread woke, and how many backend messages it received (a test
+/// hook: idle means no wake at all).
+#[derive(Debug, Default)]
+struct Counts {
+    wakes: AtomicU64,
+    events: AtomicU64,
+    // ## m4b-gatefix-1 fix round 1 (review I2)
+    /// Items waiting for their delivery after the last wake (0: the thread is drained).
+    pending: AtomicU64,
+}
+
+/// The debounce thread's counts (`test-support`): the idle proof reads them.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebounceCounts {
+    /// Times the thread returned from waiting, for any reason.
+    pub wakes: u64,
+    /// Messages the backend sent it.
+    pub events: u64,
+    /// ## m4b-gatefix-1 fix round 1 (review I2): items waiting for delivery (0: drained, so
+    /// no wake is due without a new event).
+    pub pending: u64,
+}
+
+/// The pending items of the debounce thread, in arrival order (so their due times ascend),
+/// each path at most once until it is delivered.
+#[derive(Debug, Default)]
+struct Pending {
+    due: VecDeque<(Instant, Item)>,
+    queued: HashSet<Item>,
+    /// Errors go out on the next delivery, without the debounce wait.
+    urgent: Vec<Item>,
+}
+
+impl Pending {
+    fn absorb(&mut self, raw: notify::Result<notify::Event>, now: Instant) {
+        match raw {
+            Ok(ev) => {
+                for item in items_of_event(ev) {
+                    // ## m4b-gatefix-1-tail: git's index lock goes out without the debounce
+                    // wait, so the reconciler looks at it while git still holds it and the
+                    // whole operation is one burst (cifix-2's hold). A checkout shorter than
+                    // the wait was otherwise over before the lock was looked at.
+                    if matches!(&item, Item::Path(p) if is_repository_lock(p)) {
+                        if !self.urgent.contains(&item) {
+                            self.urgent.push(item);
+                        }
+                        continue;
+                    }
+                    // A path already waiting is delivered at its first due time, which is after
+                    // this event too; the reconciler then looks at the disk as it is.
+                    if self.queued.insert(item.clone()) {
+                        self.due.push_back((now + DEBOUNCE, item));
+                    }
+                }
+            }
+            Err(e) => self.urgent.extend(items_of_error(e)),
+        }
     }
 
+    /// When the thread must wake next (`None`: nothing is pending, so it waits for a message
+    /// and never wakes on its own).
+    fn next_wake(&self, not_before: Option<Instant>) -> Option<Instant> {
+        let first = if self.urgent.is_empty() {
+            self.due.front().map(|(at, _)| *at)?
+        } else {
+            Instant::now()
+        };
+        Some(not_before.map_or(first, |nb| first.max(nb)))
+    }
+
+    /// The items due at `now`, oldest first.
+    fn take_due(&mut self, now: Instant) -> Vec<Item> {
+        let mut out = Vec::new();
+        while self.due.front().is_some_and(|(at, _)| *at <= now) {
+            if let Some((_, item)) = self.due.pop_front() {
+                self.queued.remove(&item);
+                out.push(item);
+            }
+        }
+        out
+    }
+}
+
+/// The debounce thread of one OS source (`hv-watch-debounce`). It blocks on its channel while
+/// nothing is pending, so an idle library costs no wake-up at all; while events are pending it
+/// wakes at the first one's due time ([`DEBOUNCE`] after it arrived), at most once per
+/// [`FLUSH_GAP`].
+struct DebounceThread {
+    tx: mpsc_std::Sender<Raw>,
+    handle: Option<JoinHandle<()>>,
+    #[cfg(any(test, feature = "test-support"))]
+    counts: Arc<Counts>,
+}
+
+impl DebounceThread {
+    fn spawn(sinks: Sinks) -> std::io::Result<Self> {
+        let (tx, rx) = mpsc_std::channel();
+        let counts = Arc::new(Counts::default());
+        let c = counts.clone();
+        let handle = std::thread::Builder::new()
+            .name("hv-watch-debounce".into())
+            .spawn(move || debounce_loop(&rx, &sinks, &c))?;
+        Ok(DebounceThread {
+            tx,
+            handle: Some(handle),
+            #[cfg(any(test, feature = "test-support"))]
+            counts,
+        })
+    }
+
+    /// The backend's handler: every event or error goes to the thread.
+    fn handler(&self) -> impl FnMut(notify::Result<notify::Event>) + Send + 'static {
+        let tx = self.tx.clone();
+        move |e| {
+            // The thread is gone only after `stop`; a late event is moot then.
+            let _ = tx.send(Raw::Event(e));
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn counts(&self) -> DebounceCounts {
+        DebounceCounts {
+            wakes: self.counts.wakes.load(Ordering::Relaxed),
+            events: self.counts.events.load(Ordering::Relaxed),
+            pending: self.counts.pending.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Drop for DebounceThread {
+    /// Stops the thread and joins it (it holds the sinks); pending items are dropped.
+    fn drop(&mut self) {
+        let _ = self.tx.send(Raw::Stop);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn debounce_loop(rx: &mpsc_std::Receiver<Raw>, sinks: &Sinks, counts: &Counts) {
+    use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+    let mut pending = Pending::default();
+    let mut not_before: Option<Instant> = None;
+    loop {
+        let first = match pending.next_wake(not_before) {
+            // Nothing pending: sleep until the backend says something (no timer at all).
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
+        };
+        counts.wakes.fetch_add(1, Ordering::Relaxed);
+        let mut next = match first {
+            Ok(raw) => Some(raw),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        // Everything already queued joins this look (a burst is read in one go).
+        while let Some(raw) = next {
+            match raw {
+                Raw::Stop => return,
+                Raw::Event(e) => {
+                    counts.events.fetch_add(1, Ordering::Relaxed);
+                    pending.absorb(e, Instant::now());
+                }
+            }
+            next = match rx.try_recv() {
+                Ok(raw) => Some(raw),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => return,
+            };
+        }
+        let now = Instant::now();
+        if not_before.is_none_or(|nb| now >= nb) {
+            let due = pending.take_due(now);
+            let urgent = std::mem::take(&mut pending.urgent);
+            // Paths first, then errors, as the old debouncer delivered them.
+            if !due.is_empty() {
+                route(sinks, &due);
+            }
+            if !urgent.is_empty() {
+                route(sinks, &urgent);
+            }
+            if !due.is_empty() || !urgent.is_empty() {
+                not_before = Some(now + FLUSH_GAP);
+            }
+        }
+        // ## m4b-gatefix-1 fix round 1 (I2)
+        let waiting = pending.due.len() + pending.urgent.len();
+        counts.pending.store(
+            u64::try_from(waiting).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+/// The backend's watch calls, without its constructor (so a source can hold any backend).
+trait RawWatch: Send {
+    fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()>;
+    fn unwatch(&mut self, path: &Path) -> notify::Result<()>;
+}
+
+/// A backend behind [`RawWatch`] (a private wrapper, so no `notify` bound reaches an `impl`
+/// for a public or generic type: `BackendInPublicApi`).
+struct Native<W>(W);
+
+impl<W: notify::Watcher + Send> RawWatch for Native<W> {
     fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
         self.0.watch(path, mode)
     }
@@ -220,26 +481,30 @@ impl<W: notify::Watcher> notify::Watcher for NoCancel<W> {
     fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
         self.0.unwatch(path)
     }
-
-    fn kind() -> notify::WatcherKind {
-        W::kind()
-    }
 }
 
-/// `e` with a `Create` kind turned into `Modify(Any)`; its paths, flags and attributes kept.
-fn no_create(mut e: notify::Event) -> notify::Event {
-    if matches!(e.kind, notify::EventKind::Create(_)) {
-        e.kind = notify::EventKind::Modify(notify::event::ModifyKind::Any);
-    }
-    e
+/// The backend and its debounce thread; dropped together (the backend first, so nothing new
+/// arrives, then the thread is stopped and joined).
+struct OsBackend {
+    watcher: Option<Box<dyn RawWatch>>,
+    thread: Option<DebounceThread>,
 }
-// ## m4b-cifix-2-create-history
 
-/// The OS event source: one debouncer over the platform's recommended watcher.
+impl Drop for OsBackend {
+    fn drop(&mut self) {
+        // The backend first: once it is gone nothing new reaches the thread.
+        drop(self.watcher.take());
+        drop(self.thread.take());
+    }
+}
+// ## m4b-gatefix-1-idle
+
+/// The OS event source: the platform's recommended watcher and one debounce thread.
 pub struct OsEventSource {
     // ## m4b-t09-watcher: `Option` so that `Drop` can stop it (joining its thread), and the
     // per-root sinks its handler routes to.
-    debouncer: Option<notify_debouncer_full::Debouncer<NoCancel<RecommendedWatcher>, NoCache>>,
+    // ## m4b-gatefix-1-idle: Hacivat's own debounce thread instead of `notify-debouncer-full`.
+    backend: Option<OsBackend>,
     sinks: Sinks,
     // ## m4b-t09-watcher fix round 1 (I5, R-T9-4): with `per_dir`, every folder is its own
     // non-recursive watch, added only for folders the watcher's walk verified.
@@ -248,12 +513,13 @@ pub struct OsEventSource {
 }
 
 impl OsEventSource {
-    /// Builds the debouncer the only allowed way (R-T0-2). It watches nothing yet.
+    /// Builds the source the only allowed way (R-T0-2: [`watcher_config`], so no directory
+    /// link is followed and nothing walks the tree). It watches nothing yet.
     ///
     /// ## m4b-t09-watcher fix round 1 (I5, R-T9-4): on Linux it watches folder by folder
     /// ([`per_directory`](Self::per_directory)); elsewhere it watches each root recursively.
     pub fn new() -> Result<Self, WatchError> {
-        Self::build(cfg!(target_os = "linux"))
+        Self::build::<RecommendedWatcher>(cfg!(target_os = "linux"))
     }
 
     /// A source that never asks the backend for a recursive watch: the root and every folder
@@ -261,30 +527,48 @@ impl OsEventSource {
     /// (notify's recursive inotify walk follows a folder swapped for a link before it is
     /// watched, `walkdir`'s `follow_root_links`); on other systems for tests.
     pub fn per_directory() -> Result<Self, WatchError> {
-        Self::build(true)
+        Self::build::<RecommendedWatcher>(true)
     }
 
-    fn build(per_dir: bool) -> Result<Self, WatchError> {
+    // ## m4b-gatefix-1-idle
+    /// The debounce thread's counts so far (`test-support`; `None` once stopped).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn debounce_counts(&self) -> Option<DebounceCounts> {
+        self.backend
+            .as_ref()
+            .and_then(|b| b.thread.as_ref())
+            .map(DebounceThread::counts)
+    }
+
+    fn build<W: notify::Watcher + Send + 'static>(per_dir: bool) -> Result<Self, WatchError> {
         // ## m4b-t09-watcher: the handler routes each debounced batch to its root's sink.
-        // ## m4b-cifix-2-create-history: the watcher is wrapped in `NoCancel`, so a delete whose
-        // FSEvents flags still say "created" is never cancelled by the debouncer.
         let sinks = Sinks::default();
-        let debouncer = new_debouncer_opt::<_, NoCancel<RecommendedWatcher>, NoCache>(
-            DEBOUNCE,
-            None,
-            handler(sinks.clone()),
-            NoCache,
-            watcher_config(),
-        )
-        .map_err(|e| WatchError::Backend(e.to_string()))?;
+        let thread =
+            DebounceThread::spawn(sinks.clone()).map_err(|e| WatchError::Backend(e.to_string()))?;
+        let watcher = new_watcher::<W>(thread.handler())?;
         Ok(OsEventSource {
-            debouncer: Some(debouncer),
+            backend: Some(OsBackend {
+                watcher: Some(Box::new(Native(watcher))),
+                thread: Some(thread),
+            }),
             sinks,
             per_dir,
             dirs: HashMap::new(),
         })
     }
 }
+
+/// The one place a backend is constructed, always with [`watcher_config`] (R-T0-2).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "R-T0-2: the one reviewed site; the backend is built with watcher_config() (follow_symlinks(false))"
+)]
+fn new_watcher<W: notify::Watcher>(
+    handler: impl FnMut(notify::Result<notify::Event>) + Send + 'static,
+) -> Result<W, WatchError> {
+    W::new(handler, watcher_config()).map_err(|e| WatchError::Backend(e.to_string()))
+}
+// ## m4b-gatefix-1-idle
 
 impl fmt::Debug for OsEventSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -295,8 +579,9 @@ impl fmt::Debug for OsEventSource {
 impl EventSource for OsEventSource {
     // ## m4b-t09-watcher: Task 1a's fail-closed stub replaced (named exception in this file).
     fn watch(&mut self, root: &Path, sink: HintSink) -> Result<(), WatchError> {
-        let Some(debouncer) = self.debouncer.as_mut() else {
-            return Err(WatchError::NotImplemented);
+        // ## m4b-gatefix-1 (E9): a stopped source says so.
+        let Some(watcher) = self.backend.as_mut().and_then(|b| b.watcher.as_mut()) else {
+            return Err(WatchError::Stopped);
         };
         lock(&self.sinks).push((root.to_path_buf(), sink));
         let mode = if self.per_dir {
@@ -304,7 +589,7 @@ impl EventSource for OsEventSource {
         } else {
             RecursiveMode::Recursive
         };
-        if let Err(e) = debouncer.watch(root, mode) {
+        if let Err(e) = watcher.watch(root, mode) {
             lock(&self.sinks).retain(|(r, _)| r != root);
             return Err(WatchError::Backend(e.to_string()));
         }
@@ -316,25 +601,23 @@ impl EventSource for OsEventSource {
     }
 
     fn unwatch(&mut self, root: &Path) {
-        // Fix round 2 (m-fr1-3): the debouncer's root list is a `Vec` scanned per watch and
-        // per unwatch, so unwatching thousands of folders one by one is quadratic; for the
-        // last root the whole debouncer is stopped instead (the source is not reused).
+        // Fix round 2 (m-fr1-3): for the last root of a per-folder source the whole backend is
+        // stopped instead of unwatching thousands of folders one by one (the source is not
+        // reused).
         let sole = lock(&self.sinks).iter().all(|(r, _)| r == root);
         if self.per_dir && sole {
             self.dirs.clear();
-            if let Some(debouncer) = self.debouncer.take() {
-                debouncer.stop();
-            }
+            drop(self.backend.take());
             lock(&self.sinks).clear();
             return;
         }
-        if let Some(debouncer) = self.debouncer.as_mut() {
+        if let Some(watcher) = self.backend.as_mut().and_then(|b| b.watcher.as_mut()) {
             for d in self.dirs.remove(root).unwrap_or_default() {
                 if d != root {
-                    let _ = debouncer.unwatch(&d);
+                    let _ = watcher.unwatch(&d);
                 }
             }
-            let _ = debouncer.unwatch(root);
+            let _ = watcher.unwatch(root);
         }
         lock(&self.sinks).retain(|(r, _)| r != root);
     }
@@ -347,8 +630,10 @@ impl EventSource for OsEventSource {
         if !self.per_dir {
             return Ok(0);
         }
-        let (Some(debouncer), Some(have)) = (self.debouncer.as_mut(), self.dirs.get_mut(root))
-        else {
+        let (Some(watcher), Some(have)) = (
+            self.backend.as_mut().and_then(|b| b.watcher.as_mut()),
+            self.dirs.get_mut(root),
+        ) else {
             return Ok(0);
         };
         let mut added = 0;
@@ -359,14 +644,14 @@ impl EventSource for OsEventSource {
             .collect();
         for d in gone {
             // A folder that vanished is unwatched by the kernel already; errors are moot.
-            let _ = debouncer.unwatch(&d);
+            let _ = watcher.unwatch(&d);
             have.remove(&d);
         }
         for d in dirs {
             if have.contains(d) || !d.starts_with(root) {
                 continue;
             }
-            match debouncer.watch(d, RecursiveMode::NonRecursive) {
+            match watcher.watch(d, RecursiveMode::NonRecursive) {
                 Ok(()) => {
                     have.insert(d.clone());
                     added += 1;
@@ -392,26 +677,19 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Drop for OsEventSource {
-    /// Stops the debouncer and joins its thread (the handler, and the sinks it holds, go with
-    /// it); the platform watcher stops in its own `Drop`.
+    /// Stops the backend, then the debounce thread, and joins it (the sinks it holds go with
+    /// it).
     fn drop(&mut self) {
-        if let Some(debouncer) = self.debouncer.take() {
-            debouncer.stop();
-        }
+        drop(self.backend.take());
         lock(&self.sinks).clear();
     }
 }
 
-/// The debouncer's handler: every debounced batch becomes hints for the roots it touches.
-fn handler(sinks: Sinks) -> impl FnMut(DebounceEventResult) + Send + 'static {
-    move |result| route(&sinks, result)
-}
-
-/// Splits one debounced batch into hints per watched root and hands each root its hints.
+/// Splits one delivery into hints per watched root and hands each root its hints.
 ///
 /// ## m4b-t09-watcher fix round 1 (m10): a path goes to every root that holds it, so nested
 /// libraries sharing one source each see their own subtree.
-fn route(sinks: &Sinks, result: DebounceEventResult) {
+fn route(sinks: &Sinks, items: &[Item]) {
     let mut sinks = lock(sinks);
     let roots: Vec<PathBuf> = sinks.iter().map(|(r, _)| r.clone()).collect();
     let owners = |p: &Path| -> Vec<usize> {
@@ -423,62 +701,82 @@ fn route(sinks: &Sinks, result: DebounceEventResult) {
             .collect()
     };
     let mut per: Vec<Vec<RawHint>> = vec![Vec::new(); roots.len()];
-    let to_all = |per: &mut Vec<Vec<RawHint>>, make: &dyn Fn(&Path) -> RawHint| {
-        for (i, r) in roots.iter().enumerate() {
-            per[i].push(make(r));
-        }
-    };
-    match result {
-        Ok(events) => {
-            for ev in events {
-                if ev.need_rescan() {
-                    if ev.paths.is_empty() {
-                        to_all(&mut per, &|r| RawHint::Rescan(r.to_path_buf()));
-                    }
-                    for p in &ev.paths {
-                        for i in owners(p) {
-                            per[i].push(RawHint::Rescan(roots[i].clone()));
-                        }
-                    }
-                    continue;
-                }
-                for p in &ev.paths {
-                    for i in owners(p) {
-                        per[i].push(RawHint::Path(p.clone()));
-                    }
+    for item in items {
+        match item {
+            Item::Path(p) => {
+                for i in owners(p) {
+                    per[i].push(RawHint::Path(p.clone()));
                 }
             }
-        }
-        Err(errors) => {
-            for e in errors {
-                let lost = matches!(e.kind, notify::ErrorKind::MaxFilesWatch);
-                if e.paths.is_empty() {
-                    to_all(&mut per, &|r| {
-                        if lost {
-                            RawHint::Lost
-                        } else {
-                            RawHint::Rescan(r.to_path_buf())
-                        }
-                    });
+            Item::Rescan(None) => {
+                for (i, r) in roots.iter().enumerate() {
+                    per[i].push(RawHint::Rescan(r.clone()));
                 }
-                for p in &e.paths {
-                    for i in owners(p) {
-                        per[i].push(if lost {
-                            RawHint::Lost
-                        } else {
-                            RawHint::Path(p.clone())
-                        });
-                    }
+            }
+            Item::Rescan(Some(p)) => {
+                for i in owners(p) {
+                    per[i].push(RawHint::Rescan(roots[i].clone()));
+                }
+            }
+            Item::Lost(None) => {
+                for hints in &mut per {
+                    hints.push(RawHint::Lost);
+                }
+            }
+            Item::Lost(Some(p)) => {
+                for i in owners(p) {
+                    per[i].push(RawHint::Lost);
                 }
             }
         }
     }
-    for ((_, sink), hints) in sinks.iter_mut().zip(per) {
-        if !hints.is_empty() {
-            sink(hints);
+    let mut dead = Vec::new();
+    for (i, ((_, sink), hints)) in sinks.iter_mut().zip(per).enumerate() {
+        if hints.is_empty() {
+            continue;
+        }
+        // ## m4b-gatefix-1 fix round 1 (review m2): a sink that panics would kill the debounce
+        // thread and leave the library deaf. Its hints may be lost, so it is told the backend
+        // is: the watcher falls back (and rescans), and the thread keeps serving every root.
+        let sink = &mut **sink;
+        if catch_unwind(AssertUnwindSafe(|| sink(hints))).is_err()
+            && catch_unwind(AssertUnwindSafe(|| sink(vec![RawHint::Lost]))).is_err()
+        {
+            dead.push(i);
+        }
+    }
+    // ## m4b-gatefix-1 fix round 2 (m-fr1-1): a sink that panics on `Lost` too is detached:
+    // never called again, and dropped while `DETACHING` is set, so a watcher's own sink
+    // ([`hint_sink`]) tells its watcher through its queue that the backend is lost.
+    for i in dead.into_iter().rev() {
+        let (_, sink) = sinks.remove(i);
+        DETACHING.with(|d| d.set(true));
+        drop(catch_unwind(AssertUnwindSafe(move || drop(sink))));
+        DETACHING.with(|d| d.set(false));
+    }
+}
+
+// ## m4b-gatefix-1 fix round 2 (m-fr1-1)
+thread_local! {
+    /// Set while [`route`] drops a sink it detached because it kept panicking.
+    static DETACHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Held by a watcher's own sink: when a source detaches that sink because it kept panicking,
+/// the queue is told the backend is lost, so the watcher falls back to polling (and rescans)
+/// and the service shows it. Dropped any other way (unwatch, a source replaced), it says
+/// nothing.
+struct DetachGuard(Arc<HintQueue>);
+
+impl Drop for DetachGuard {
+    fn drop(&mut self) {
+        if DETACHING.with(std::cell::Cell::get) {
+            let queue = &self.0;
+            let _ = catch_unwind(AssertUnwindSafe(|| queue.push(vec![RawHint::Lost])));
         }
     }
 }
+// ## m4b-gatefix-1 fix round 2
 
 /// How a library is watched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -747,6 +1045,74 @@ fn racy(mtime: SystemTime, seen_at: SystemTime) -> bool {
     }
 }
 
+// ## m4b-gatefix-1-tail (CI 45202154953 macOS, `git_checkout_2000_is_one_rescan`)
+/// How long after a rescan a late hint can still fold into it ([`RescanTail`]); each folded
+/// hint extends it this far again, up to [`TAIL_MAX`] after the rescan.
+pub const TAIL: Duration = RACY_WINDOW;
+/// The longest a rescan's tail lasts.
+pub const TAIL_MAX: Duration = Duration::from_secs(30);
+/// A file counts as written before a scan began only when its time is at least this much (or
+/// its file system's granularity) earlier: a clock tick (Windows, ext4) never makes a write
+/// after the scan look older than it.
+pub const TICK_MARGIN: Duration = Duration::from_millis(100);
+
+/// After a rescan, the backend may still deliver events the scan already saw. FSEvents under
+/// load hands a `git checkout`'s per-file events over for a second or more; the burst rule had
+/// ended at the rescan, so each late hint found a racily clean stamp (R-T9-3) and became a
+/// `PossiblyChanged` (803 of them on the CI runner).
+///
+/// A late hint folds into the rescan when its file is one nobody has open (no hash), still has
+/// exactly the stamp the watcher learned at or after the rescan's start (the rescan itself, or
+/// a later scan of a folder hint), and its time is before the rescan began by more than
+/// [`TICK_MARGIN`]: any write after that stamp was learned would carry a later time, so the
+/// stamp cannot hide one. Anything else is looked at as before.
+#[derive(Debug, Clone, Copy)]
+struct RescanTail {
+    /// When the rescan's scan began (the `seen_at` of what it learned).
+    started: SystemTime,
+    /// Folding stops after this.
+    until: Instant,
+    /// And never after this.
+    cap: Instant,
+}
+
+impl RescanTail {
+    fn new(started: SystemTime, now: Instant) -> Self {
+        RescanTail {
+            started,
+            until: now + TAIL,
+            cap: now + TAIL_MAX,
+        }
+    }
+
+    /// Whether a look at `now` that found `obs`, for a file known as `known`, is the late
+    /// delivery of an event the rescan already saw.
+    fn folds(&self, obs: &Seen, known: &Known, now: Instant) -> bool {
+        let before_scan = obs
+            .mtime
+            .checked_add(TICK_MARGIN.max(granularity(obs.mtime)))
+            .is_some_and(|t| t <= self.started);
+        now <= self.until
+            && known.hash.is_none()
+            && known.seen_at >= self.started
+            && *obs == known.seen
+            && before_scan
+    }
+
+    fn extend(&mut self, now: Instant) {
+        self.until = (now + TAIL).min(self.cap);
+    }
+}
+// ## m4b-gatefix-1-tail
+
+// ## m4b-gatefix-1 fix round 1 (review m3)
+/// Tabs' read stamps waiting for the watcher to learn them, at most.
+const MAX_OPENED: usize = 1_024;
+/// ## m4b-gatefix-1 fix round 2 (m-fr1-2): how long a tab's read stamp the watcher has not
+/// learned keeps the file open. The watcher learns it within a settle or two; past this the
+/// file is open only if a tab remembers it again (each read and save does).
+pub const OPENED_TTL: Duration = Duration::from_secs(30);
+
 /// At most this many open files are kept back from one rescan to be settled and reported on
 /// their own (fix round 2, N1).
 const MAX_OPEN_KEPT: usize = 256;
@@ -803,6 +1169,16 @@ pub struct Reconciler {
     /// hint last made the reconciler look at it.
     outer_lock: Option<PathBuf>,
     outer_looked: Option<Instant>,
+    // ## m4b-gatefix-1-tail
+    /// The last burst rescan's tail, while late hints may still fold into it.
+    tail: Option<RescanTail>,
+    /// When the last scan that learned the library began.
+    learned_at: SystemTime,
+    // ## m4b-gatefix-1 fix round 1 (review m3)
+    /// Files a tab read at a stamp the watcher had not learned yet, with that stamp.
+    /// ## m4b-gatefix-1 fix round 2 (m-fr1-2): with when the tab read it (wall clock); an
+    /// entry goes once the watcher learns the stamp, or after [`OPENED_TTL`].
+    opened: HashMap<RelPath, (DiskStamp, SystemTime)>,
 }
 
 impl fmt::Debug for Reconciler {
@@ -839,6 +1215,11 @@ impl Reconciler {
             // ## m4b-t20-adversarial (named lines, N3)
             outer_lock: None,
             outer_looked: None,
+            // ## m4b-gatefix-1-tail
+            tail: None,
+            learned_at: SystemTime::now(),
+            // ## m4b-gatefix-1 fix round 1
+            opened: HashMap::new(),
         };
         let started = SystemTime::now();
         let s = r.scan();
@@ -864,6 +1245,8 @@ impl Reconciler {
             self.debouncer.push(hint, at);
             return;
         };
+        // ## m4b-gatefix-1 fix round 1 (R-GF-1): whether a tab has this file open.
+        let mut open = false;
         let counted = match self.name_filter(&path) {
             Named::Drop => return,
             // ## m4b-cifix-2-repo-op (review I1)
@@ -874,9 +1257,9 @@ impl Reconciler {
             Named::Root | Named::Repository | Named::Manifest | Named::ManifestFolder => true,
             Named::Rel(rel) => {
                 let name = rel.name();
-                scan::script_kind(name).is_some()
-                    || !name.contains('.')
-                    || self.lookup(&rel).is_some()
+                let known = self.lookup(&rel);
+                open = known.as_ref().is_some_and(|k| self.is_open(k));
+                scan::script_kind(name).is_some() || !name.contains('.') || known.is_some()
             }
         };
         // ## m4b-t20-adversarial (named lines, N3): no hint ever names the lock of a
@@ -889,6 +1272,12 @@ impl Reconciler {
         {
             self.outer_looked = Some(at);
             self.check_repository_lock(at);
+        }
+        // ## m4b-gatefix-1 fix round 1 (R-GF-1): an open file's hint is never swallowed by an
+        // overflowed burst nor held by a repository operation's quiet.
+        if open {
+            self.debouncer.push_open(path, at);
+            return;
         }
         self.debouncer.push_path(path, at, counted);
     }
@@ -964,8 +1353,46 @@ impl Reconciler {
             && k.seen.mtime == stamp.mtime
         {
             k.hash = Some(stamp.hash);
+            self.opened.remove(rel);
+            return;
         }
+        // ## m4b-gatefix-1 fix round 1 (review m3): a tab read a stamp the watcher has not
+        // learned yet (it opened the file within a settle of an external write). The file is
+        // open from now on, and the hash is attached once the watcher learns that stamp.
+        if self.opened.len() >= MAX_OPENED && !self.opened.contains_key(rel) {
+            return;
+        }
+        self.opened.insert(rel.clone(), (*stamp, SystemTime::now()));
     }
+
+    // ## m4b-gatefix-1 fix round 1 (review m3)
+    /// Attaches a remembered hash once the watcher knows the stamp the tab read.
+    fn adopt_opened(&mut self) {
+        self.adopt_opened_at(SystemTime::now());
+    }
+
+    /// [`adopt_opened`](Self::adopt_opened) at wall time `wall`. ## m4b-gatefix-1 fix round 2
+    /// (m-fr1-2): an entry whose stamp the watcher has not learned (the file changed again, or
+    /// is not listed yet) stays open until [`OPENED_TTL`] after the read, then expires.
+    fn adopt_opened_at(&mut self, wall: SystemTime) {
+        if self.opened.is_empty() {
+            return;
+        }
+        let known = &mut self.known;
+        self.opened.retain(|rel, (stamp, read_at)| {
+            if let Some(k) = known.get_mut(rel)
+                && k.seen.len == stamp.len
+                && k.seen.mtime == stamp.mtime
+            {
+                k.hash = Some(stamp.hash);
+                return false;
+            }
+            wall.duration_since(*read_at)
+                .is_ok_and(|age| age < OPENED_TTL)
+                || wall < *read_at
+        });
+    }
+    // ## m4b-gatefix-1 fix round 1
 
     /// ## m4b-t09-watcher fix round 1 (I8, R-T9-2): from `from` on, a root hint every
     /// [`WatchOpts::backstop`] (nothing when it is `None`).
@@ -983,7 +1410,8 @@ impl Reconciler {
             .settle
             .iter()
             .map(|(rel, t)| {
-                if self.is_open(rel) {
+                // ## m4b-gatefix-1 fix round 2 (I-fr1-1): a present open file only.
+                if self.settles_while_held(rel) {
                     *t
                 } else {
                     hold.map_or(*t, |h| (*t).max(h))
@@ -1006,8 +1434,20 @@ impl Reconciler {
 
     /// Whether a tab has `rel` open (its content hash is known: R-T9-6).
     fn is_open(&self, rel: &RelPath) -> bool {
-        self.known.get(rel).is_some_and(|k| k.hash.is_some())
+        // ## m4b-gatefix-1 fix round 1 (m3): or one whose read stamp is not learned yet.
+        self.known.get(rel).is_some_and(|k| k.hash.is_some()) || self.opened.contains_key(rel)
     }
+
+    // ## m4b-gatefix-1 fix round 2 (re-review I-fr1-1; R-GF-1 as amended)
+    /// Whether `rel`'s look settles while a burst or a repository operation holds the rest:
+    /// an open file that is still there (an edit, R-T9-6 and R-GF-1). An open file found gone
+    /// waits like any other, for the burst's rescan or the hold's end, so a move inside a
+    /// checkout is paired with its new name (which the burst held) and never reported deleted
+    /// first.
+    fn settles_while_held(&self, rel: &RelPath) -> bool {
+        self.is_open(rel) && self.candidates.get(rel).is_none_or(|c| c.last.is_some())
+    }
+    // ## m4b-gatefix-1 fix round 2
 
     /// The files known now (for tests and diagnostics).
     pub fn known_files(&self) -> usize {
@@ -1021,6 +1461,13 @@ impl Reconciler {
 
     /// Looks at what arrived and at what is due at `now`; answers the settled events.
     pub fn tick(&mut self, now: Instant) -> Vec<WatchEvent> {
+        let out = self.tick_inner(now);
+        // ## m4b-gatefix-1 fix round 1 (m3): a tab's read stamp the tick just learned.
+        self.adopt_opened();
+        out
+    }
+
+    fn tick_inner(&mut self, now: Instant) -> Vec<WatchEvent> {
         self.wall = SystemTime::now();
         self.now = now;
         self.info = TickInfo::default();
@@ -1048,7 +1495,12 @@ impl Reconciler {
             match flushed {
                 // The watcher switches the source; nothing to reconcile.
                 Flushed::Lost => {}
-                Flushed::Rescan => return self.rescan(),
+                // ## m4b-gatefix-1-tail: late copies of what this rescan saw fold into it.
+                Flushed::Rescan => {
+                    let out = self.rescan();
+                    self.tail = Some(RescanTail::new(self.learned_at, now));
+                    return out;
+                }
                 Flushed::Paths(paths) => {
                     self.info.saw_hints = true;
                     self.hinted_since_backstop = true;
@@ -1084,8 +1536,9 @@ impl Reconciler {
             // Fix round 3 (R-T9-6): an open file settles even while a burst holds the rest;
             // the others wait for the hold's end (or the rescan, which drops them).
             let hold = self.debouncer.hold_until().unwrap_or(now);
-            let (open, wait): (Vec<RelPath>, Vec<RelPath>) =
-                due.into_iter().partition(|rel| self.is_open(rel));
+            let (open, wait): (Vec<RelPath>, Vec<RelPath>) = due
+                .into_iter()
+                .partition(|rel| self.settles_while_held(rel));
             for rel in wait {
                 self.settle.schedule(rel, hold);
             }
@@ -1195,6 +1648,9 @@ impl Reconciler {
     /// and it becomes a candidate, so it settles and is reported on its own (`Changed`,
     /// `Removed`), however many rescans a burst causes; at most [`MAX_OPEN_KEPT`] per rescan.
     fn learn_state(&mut self, s: &ScanResult, started: SystemTime) {
+        // ## m4b-gatefix-1-tail: a new scan ends the last rescan's tail.
+        self.learned_at = started;
+        self.tail = None;
         self.candidates.clear();
         self.settle.clear();
         self.scan_due = None;
@@ -1320,7 +1776,18 @@ impl Reconciler {
 
     /// The first look at a known file after a hint.
     fn first_look(&mut self, rel: RelPath, obs: Option<Seen>, now: Instant) {
+        // ## m4b-gatefix-1-tail (fix round 1, m3: an open file is never folded)
+        let open = self.is_open(&rel);
         let known = self.known.get(&rel);
+        if let (Some(tail), Some(s), Some(k)) = (self.tail.as_mut(), &obs, known)
+            && !open
+            && !self.candidates.contains_key(&rel)
+            && tail.folds(s, k, now)
+        {
+            tail.extend(now);
+            return;
+        }
+        // ## m4b-gatefix-1-tail
         let unchanged = match (&obs, known) {
             (Some(s), Some(k)) => *s == k.seen,
             (None, None) => true,
@@ -1865,8 +2332,9 @@ struct Running {
 }
 
 fn hint_sink(queue: &Arc<HintQueue>) -> HintSink {
-    let queue = queue.clone();
-    Box::new(move |batch| queue.push(batch))
+    // ## m4b-gatefix-1 fix round 2 (m-fr1-1): the guard speaks only if a source detaches it.
+    let guard = DetachGuard(queue.clone());
+    Box::new(move |batch| guard.0.push(batch))
 }
 
 /// The folders a per-folder source must watch now, synced; `Err` when it cannot (too many
@@ -2211,7 +2679,6 @@ mod tests {
     use super::*;
 
     use notify::event::{Event, EventKind, Flag};
-    use notify_debouncer_full::DebouncedEvent;
 
     #[test]
     fn follow_symlinks_is_off() {
@@ -2219,15 +2686,10 @@ mod tests {
         assert_eq!(DEBOUNCE, Duration::from_millis(150));
     }
 
-    /// m1 hardening (carries-w1 T9): the cache named in the source is the crate's own
-    /// `NoCache`, never a local stand-in of the same name.
+    /// m1 hardening (carries-w1 T9), as it stands after gatefix-1: the backend is notify's own
+    /// recommended watcher (no cache exists any more to walk anything).
     #[test]
-    fn debouncer_cache_is_nocache_or_never_leaves_root() {
-        let name = std::any::type_name::<NoCache>();
-        assert!(
-            name.starts_with("notify_debouncer_full::") && name.ends_with("::NoCache"),
-            "{name}"
-        );
+    fn the_backend_is_notifys_recommended_watcher() {
         let watcher = std::any::type_name::<RecommendedWatcher>();
         assert!(watcher.starts_with("notify::"), "{watcher}");
     }
@@ -2247,7 +2709,7 @@ mod tests {
         let root = Path::new("/lib");
         let (sinks, got) = sinks_for(root);
         let ev = Event::new(EventKind::Other).set_flag(Flag::Rescan);
-        route(&sinks, Ok(vec![DebouncedEvent::new(ev, Instant::now())]));
+        route(&sinks, &items_of_event(ev));
         assert_eq!(*lock(&got), vec![vec![RawHint::Rescan(root.into())]]);
     }
 
@@ -2258,7 +2720,11 @@ mod tests {
         let limit = notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path("/lib/d".into());
         let other = notify::Error::generic("boom");
         let pathed = notify::Error::generic("denied").add_path("/lib/x".into());
-        route(&sinks, Err(vec![limit, other, pathed]));
+        let items: Vec<Item> = [limit, other, pathed]
+            .into_iter()
+            .flat_map(items_of_error)
+            .collect();
+        route(&sinks, &items);
         assert_eq!(
             *lock(&got),
             vec![vec![
@@ -2283,7 +2749,7 @@ mod tests {
             "/lib/inner/b.sql".into(),
             "/elsewhere/c.sql".into(),
         ];
-        route(&sinks, Ok(vec![DebouncedEvent::new(ev, Instant::now())]));
+        route(&sinks, &items_of_event(ev));
         assert_eq!(
             *lock(&outer_got),
             vec![vec![
@@ -2297,107 +2763,283 @@ mod tests {
         );
     }
 
-    // ## m4b-cifix-2-create-history
-    /// The scripted backend's handler, which the debouncer handed to `Scripted::new`.
-    type ScriptedHandler = Box<dyn FnMut(notify::Result<Event>) + Send>;
-    static SCRIPTED: Mutex<Option<ScriptedHandler>> = Mutex::new(None);
-
-    /// A watcher whose events the test sends by hand through [`SCRIPTED`].
-    struct Scripted;
-
-    impl notify::Watcher for Scripted {
-        fn new<F: notify::EventHandler>(handler: F, _: notify::Config) -> notify::Result<Self> {
-            let mut handler = handler;
-            *lock(&SCRIPTED) = Some(Box::new(move |e| handler.handle_event(e)));
-            Ok(Scripted)
-        }
-        fn watch(&mut self, _: &Path, _: RecursiveMode) -> notify::Result<()> {
-            Ok(())
-        }
-        fn unwatch(&mut self, _: &Path) -> notify::Result<()> {
-            Ok(())
-        }
-        fn kind() -> notify::WatcherKind {
-            notify::WatcherKind::NullWatcher
-        }
+    // ## m4b-gatefix-1-idle
+    /// A debounce thread with one root, `/lib`, and what it delivered.
+    fn debounce_for_lib() -> (DebounceThread, Arc<Mutex<Vec<Vec<RawHint>>>>) {
+        let (sinks, got) = sinks_for(Path::new("/lib"));
+        (DebounceThread::spawn(sinks).unwrap(), got)
     }
 
-    /// The hints the real debouncer, over backend `W`, routes to `/lib` for `events`, up to the
-    /// sentinel `/lib/zz.sql` sent after them (events settle in order, so anything still
-    /// missing then was dropped).
-    fn routed_through<W: notify::Watcher>(events: Vec<Event>) -> Vec<RawHint> {
-        let root = Path::new("/lib");
-        let (sinks, got) = sinks_for(root);
-        let debouncer = new_debouncer_opt::<_, W, NoCache>(
-            DEBOUNCE,
-            None,
-            handler(sinks),
-            NoCache,
-            watcher_config(),
-        )
-        .unwrap();
-        let sentinel = RawHint::Path("/lib/zz.sql".into());
-        {
-            let mut send = lock(&SCRIPTED);
-            let send = send.as_mut().unwrap();
-            for e in events {
-                send(Ok(e));
-            }
-            send(Ok(Event::new(EventKind::Modify(
-                notify::event::ModifyKind::Data(notify::event::DataChange::Content),
-            ))
-            .add_path("/lib/zz.sql".into())));
-        }
+    fn modified(path: &str) -> Event {
+        Event::new(EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(path.into())
+    }
+
+    /// Waits (10 s ceiling) until `hint` was delivered; answers every delivery so far.
+    fn delivered_until(got: &Mutex<Vec<Vec<RawHint>>>, hint: &RawHint) -> Vec<Vec<RawHint>> {
         let deadline = Instant::now() + Duration::from_secs(10);
-        let hints = loop {
-            let hints: Vec<RawHint> = lock(&got).iter().flatten().cloned().collect();
-            if hints.contains(&sentinel) {
-                break hints;
+        loop {
+            let batches = lock(got).clone();
+            if batches.iter().flatten().any(|h| h == hint) {
+                return batches;
             }
             assert!(
                 Instant::now() < deadline,
-                "the sentinel never came: {hints:?}"
+                "{hint:?} never came: {batches:?}"
             );
             std::thread::sleep(Duration::from_millis(5));
-        };
-        debouncer.stop();
-        hints.into_iter().filter(|h| *h != sentinel).collect()
+        }
     }
 
-    /// CI 44990057141 (macOS): `rm -r reports` seconds after `reports/c.sql` was written, as
-    /// FSEvents reports it on the runner (flags `ItemCreated | ItemRemoved`, which notify
-    /// splits into `Create` then `Remove`). The plain debouncer cancels every path (the
-    /// control); through `NoCancel` the folder still reaches the root, and the reconciler's
-    /// scan then finds what went.
+    // ## m4b-gatefix-1 fix round 1 (I2)
+    /// Waits (10 s ceiling) until the thread has nothing waiting; answers its counts then.
+    fn drained(thread: &DebounceThread) -> DebounceCounts {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let c = thread.counts();
+            if c.pending == 0 {
+                return c;
+            }
+            assert!(Instant::now() < deadline, "never drained: {c:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// m2 (gatefix-1 fix round 1): a sink that panics is told the backend is lost, and the
+    /// thread lives on: a later event still reaches every root.
+    #[test]
+    fn a_panicking_sink_is_told_lost_and_the_thread_lives_on() {
+        let got: Arc<Mutex<Vec<Vec<RawHint>>>> = Arc::default();
+        let seen = got.clone();
+        let mut calls = 0u32;
+        let sinks = Sinks::default();
+        lock(&sinks).push((
+            "/lib".into(),
+            Box::new(move |b: Vec<RawHint>| {
+                calls += 1;
+                assert!(calls != 1, "the first delivery panics (test sink)");
+                lock(&seen).push(b);
+            }),
+        ));
+        let thread = DebounceThread::spawn(sinks).unwrap();
+        let mut send = thread.handler();
+        send(Ok(modified("/lib/a.sql")));
+        delivered_until(&got, &RawHint::Lost);
+        send(Ok(modified("/lib/b.sql")));
+        let batches = delivered_until(&got, &RawHint::Path("/lib/b.sql".into()));
+        assert_eq!(batches[0], [RawHint::Lost]);
+    }
+    // ## m4b-gatefix-1 fix round 1
+
+    // ## m4b-gatefix-1 fix round 2
+    /// m-fr1-1: a sink that panics on `Lost` too is detached (never called again), and a
+    /// watcher's own sink tells its queue the backend is lost, so the watcher falls back and
+    /// the library is never silently deaf. Another root on the same source is unaffected, and
+    /// a sink dropped the ordinary way (unwatch) says nothing.
+    #[test]
+    fn a_sink_that_panics_on_lost_too_is_detached_and_its_watcher_told() {
+        let queue = Arc::new(HintQueue::default());
+        let guard = DetachGuard(queue.clone());
+        let (sinks, other) = sinks_for(Path::new("/other"));
+        lock(&sinks).push((
+            "/lib".into(),
+            Box::new(move |_b: Vec<RawHint>| {
+                let _ = &guard;
+                panic!("this test sink always panics");
+            }),
+        ));
+        let items = [
+            Item::Path("/lib/a.sql".into()),
+            Item::Path("/other/b.sql".into()),
+        ];
+        route(&sinks, &items);
+        assert_eq!(lock(&sinks).len(), 1, "the panicking sink is detached");
+        let taken = queue.take(Some(Instant::now())).unwrap();
+        assert_eq!(taken.hints, [RawHint::Lost]);
+        route(&sinks, &items);
+        assert_eq!(
+            *lock(&other),
+            vec![
+                vec![RawHint::Path("/other/b.sql".into())],
+                vec![RawHint::Path("/other/b.sql".into())]
+            ]
+        );
+        // The ordinary drop of a watcher's sink (an unwatch) tells the queue nothing.
+        let quiet = Arc::new(HintQueue::default());
+        drop(hint_sink(&quiet));
+        assert_eq!(quiet.take(Some(Instant::now())), Some(Taken::default()));
+    }
+
+    /// A reconciler over a temp library with `a.sql` (`AAAA`).
+    fn rec_over(dir: &Path) -> Reconciler {
+        std::fs::write(dir.join("a.sql"), "AAAA").unwrap();
+        let canonical = dir.canonicalize().unwrap();
+        Reconciler::new(
+            LibraryRoot {
+                id: crate::registry::LibraryId::new(),
+                path: canonical.clone(),
+                canonical,
+            },
+            WatchOpts::default(),
+        )
+    }
+
+    fn stamp_of(len: u64, mtime: SystemTime) -> DiskStamp {
+        DiskStamp {
+            len,
+            mtime,
+            hash: 7,
+        }
+    }
+
+    /// m-fr1-2: a tab's read stamp the watcher has not learned keeps the file open until the
+    /// watcher learns it (the hash is attached, the entry goes) or `OPENED_TTL` passes. A file
+    /// not listed yet stays open too (fr1 dropped it at once).
+    #[test]
+    fn a_tabs_unlearned_stamp_keeps_the_file_open_until_learned_or_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = rec_over(dir.path());
+        let a = RelPath::parse("a.sql").unwrap();
+        let new = RelPath::parse("new.sql").unwrap();
+        let later = SystemTime::now() + Duration::from_secs(5);
+        // A stamp the watcher never learned (another length), and a file it does not list.
+        r.remember(&a, &stamp_of(9, later));
+        r.remember(&new, &stamp_of(3, later));
+        r.adopt_opened();
+        assert!(r.is_open(&a) && r.is_open(&new));
+        r.adopt_opened_at(SystemTime::now() + OPENED_TTL - Duration::from_secs(1));
+        assert!(r.is_open(&a) && r.is_open(&new));
+        r.adopt_opened_at(SystemTime::now() + OPENED_TTL + Duration::from_secs(1));
+        assert!(!r.is_open(&a) && !r.is_open(&new), "expired");
+        // Learned: the watcher's stamp matches what the tab read, so the hash moves over.
+        let seen = r.known.get(&a).unwrap().seen.clone();
+        r.remember(&a, &stamp_of(seen.len + 1, seen.mtime));
+        r.known.get_mut(&a).unwrap().seen.len += 1;
+        r.adopt_opened();
+        assert!(r.opened.is_empty());
+        assert_eq!(r.known.get(&a).unwrap().hash, Some(7));
+        assert!(r.is_open(&a));
+    }
+    // ## m4b-gatefix-1 fix round 2
+
+    /// The hints the debounce thread delivers to `/lib` for `events`, up to the sentinel
+    /// `/lib/zz.sql` sent after them (items are delivered in arrival order, so anything still
+    /// missing then was dropped).
+    fn debounced(events: Vec<Event>) -> Vec<RawHint> {
+        let (thread, got) = debounce_for_lib();
+        let mut send = thread.handler();
+        for e in events {
+            send(Ok(e));
+        }
+        send(Ok(modified("/lib/zz.sql")));
+        let sentinel = RawHint::Path("/lib/zz.sql".into());
+        let hints = delivered_until(&got, &sentinel);
+        drop(thread);
+        hints
+            .into_iter()
+            .flatten()
+            .filter(|h| *h != sentinel)
+            .collect()
+    }
+
+    /// E12 (gatefix-1): with nothing pending the debounce thread never wakes. The old
+    /// `notify-debouncer-full` loop woke every 37.5 ms forever (16 times in this window).
+    ///
+    /// The windows below observe an absence; they are not waits for a condition: a loaded
+    /// machine can only make the thread wake later, never more often.
+    #[test]
+    fn an_idle_debounce_thread_never_wakes() {
+        let (thread, got) = debounce_for_lib();
+        let window = DEBOUNCE * 4;
+        std::thread::sleep(window);
+        assert_eq!(
+            thread.counts(),
+            DebounceCounts {
+                wakes: 0,
+                events: 0,
+                pending: 0,
+            }
+        );
+        // One event: one wake to take it, one when it is due, then idle again.
+        let sent = Instant::now();
+        (thread.handler())(Ok(modified("/lib/a.sql")));
+        let a = RawHint::Path("/lib/a.sql".into());
+        assert_eq!(delivered_until(&got, &a), vec![vec![a]]);
+        assert!(sent.elapsed() >= DEBOUNCE, "delivered before the window");
+        let after = drained(&thread);
+        assert_eq!(after.events, 1);
+        assert!(after.wakes <= 2, "{after:?}");
+        std::thread::sleep(window);
+        assert_eq!(thread.counts(), after, "woke while idle");
+    }
+
+    /// A burst is read in one go: no delivery names a path twice, every path arrives, and an
+    /// error arrives too.
+    #[test]
+    fn a_burst_names_each_path_once_per_delivery_and_errors_still_arrive() {
+        let (thread, got) = debounce_for_lib();
+        let mut send = thread.handler();
+        for n in 0..2_000 {
+            send(Ok(modified(&format!("/lib/f{}.sql", n % 10))));
+        }
+        send(Err(
+            notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path("/lib/d".into())
+        ));
+        delivered_until(&got, &RawHint::Lost);
+        let batches = delivered_until(&got, &RawHint::Path("/lib/f9.sql".into()));
+        for b in &batches {
+            let twice = b.iter().enumerate().any(|(i, h)| b[..i].contains(h));
+            assert!(!twice, "a path twice in one delivery: {b:?}");
+        }
+        let all: Vec<RawHint> = batches.into_iter().flatten().collect();
+        for n in 0..10 {
+            assert!(all.contains(&RawHint::Path(format!("/lib/f{n}.sql").into())));
+        }
+        assert_eq!(thread.counts().events, 2_001);
+    }
+
+    /// gatefix-1 tail: git's index lock skips the debounce wait (the reconciler must look at
+    /// it while git holds it); the files beside it wait as before.
+    #[test]
+    fn the_index_lock_goes_out_before_the_window() {
+        let (thread, got) = debounce_for_lib();
+        let mut send = thread.handler();
+        send(Ok(modified("/lib/.git/index.lock")));
+        send(Ok(modified("/lib/a.sql")));
+        let a = RawHint::Path("/lib/a.sql".into());
+        let batches = delivered_until(&got, &a);
+        assert_eq!(batches[0], [RawHint::Path("/lib/.git/index.lock".into())]);
+        assert!(is_repository_lock(Path::new("/x/.GIT/index.lock")));
+        assert!(!is_repository_lock(Path::new("/x/git/index.lock")));
+        assert!(!is_repository_lock(Path::new("/x/.git/index")));
+    }
+
+    /// cifix-2 (CI 44990057141, macOS): `rm -r reports` seconds after `reports/c.sql` was
+    /// written, as FSEvents reports it on the runner (flags `ItemCreated | ItemRemoved`, which
+    /// notify splits into `Create` then `Remove`). `notify-debouncer-full` cancelled every path
+    /// (a create followed by a remove "is nothing"); Hacivat's debounce thread never looks at a
+    /// kind, so the folder and the file both reach the root, and the reconciler's scan then
+    /// finds what went.
     #[test]
     fn a_delete_whose_flags_still_say_created_reaches_the_root() {
         use notify::event::{CreateKind, RemoveKind};
-        let rm_r = || {
-            vec![
-                Event::new(EventKind::Create(CreateKind::File))
-                    .add_path("/lib/reports/c.sql".into()),
-                Event::new(EventKind::Remove(RemoveKind::File))
-                    .add_path("/lib/reports/c.sql".into()),
-                Event::new(EventKind::Create(CreateKind::Folder)).add_path("/lib/reports".into()),
-                Event::new(EventKind::Remove(RemoveKind::Folder)).add_path("/lib/reports".into()),
-            ]
-        };
-        // The control: the bare backend loses the whole delete.
-        assert_eq!(routed_through::<Scripted>(rm_r()), []);
+        let hints = debounced(vec![
+            Event::new(EventKind::Create(CreateKind::File)).add_path("/lib/reports/c.sql".into()),
+            Event::new(EventKind::Remove(RemoveKind::File)).add_path("/lib/reports/c.sql".into()),
+            Event::new(EventKind::Create(CreateKind::Folder)).add_path("/lib/reports".into()),
+            Event::new(EventKind::Remove(RemoveKind::Folder)).add_path("/lib/reports".into()),
+        ]);
         assert_eq!(
-            routed_through::<NoCancel<Scripted>>(rm_r()),
-            [RawHint::Path("/lib/reports".into())]
+            hints,
+            [
+                RawHint::Path("/lib/reports/c.sql".into()),
+                RawHint::Path("/lib/reports".into())
+            ]
         );
-        // A `Create` with nothing after it still names its path; flags and paths are kept.
-        let made = Event::new(EventKind::Create(CreateKind::File))
-            .add_path("/lib/new.sql".into())
-            .set_flag(Flag::Rescan);
-        let kept = no_create(made);
-        assert_eq!(kept.kind, EventKind::Modify(notify::event::ModifyKind::Any));
-        assert_eq!(kept.paths, [PathBuf::from("/lib/new.sql")]);
-        assert!(kept.need_rescan());
     }
-    // ## m4b-cifix-2-create-history
+    // ## m4b-gatefix-1-idle
 
     // ## m4b-cifix-2-root-birth
     /// A per-folder inotify watch reports its own folder's removal and move
@@ -2409,19 +3051,24 @@ mod tests {
         use notify::event::{ModifyKind, RemoveKind, RenameMode};
         let root = Path::new("/lib");
         let (sinks, got) = sinks_for(root);
-        let deleted = Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(root.into());
-        let moved =
-            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From))).add_path(root.into());
-        route(
-            &sinks,
-            Ok(vec![
-                DebouncedEvent::new(deleted, Instant::now()),
-                DebouncedEvent::new(moved, Instant::now()),
-            ]),
-        );
+        let deleted = || Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(root.into());
+        let moved = || {
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From))).add_path(root.into())
+        };
+        let items: Vec<Item> = [deleted(), moved()]
+            .into_iter()
+            .flat_map(items_of_event)
+            .collect();
+        route(&sinks, &items);
         assert_eq!(
             *lock(&got),
             vec![vec![RawHint::Path(root.into()), RawHint::Path(root.into())]]
+        );
+        // ## m4b-gatefix-1-idle: through the debounce thread the root is named once (each path
+        // once while it waits).
+        assert_eq!(
+            debounced(vec![deleted(), moved()]),
+            [RawHint::Path(root.into())]
         );
     }
     // ## m4b-cifix-2-root-birth

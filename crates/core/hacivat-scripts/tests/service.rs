@@ -2801,3 +2801,62 @@ async fn h16_a_stale_watchers_batch_is_ignored() {
         "positive control: {current:?}"
     );
 }
+
+// ## m4b-gatefix-1 fix round 2 (re-review I-fr1-1; R-GF-1 as amended)
+/// An open file renamed while an overflowed checkout holds `index.lock` (a branch switch that
+/// moves it, a Finder rename during a pull) is `FileRenamed`, and the listing follows the new
+/// name. fr1's bypass reported the vanished old name at once while the new name waited for the
+/// rescan, so the service announced `FileDeleted` (5 of 5 rounds in the review). Only a present
+/// open file is reported early; a vanished one waits for the burst's rescan, which pairs it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_file_moved_inside_an_overflowed_checkout_is_renamed() {
+    for round in 0..5 {
+        let app = tempfile::tempdir().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let many: Vec<String> = (0..1_200).map(|i| format!("many/f{i:04}.sql")).collect();
+        let many_refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        write_files(d.path(), &many_refs);
+        std::fs::write(d.path().join("a.sql"), "SELECT 'the open one';").unwrap();
+        std::fs::create_dir_all(d.path().join(".git")).unwrap();
+        let mut r = rig_with(app.path(), opts());
+        ready(&r).await;
+        let id = attach(&r, d.path()).await;
+        let root = canonical(d.path());
+        r.svc.read(id, &rel("a.sql"), None).await.unwrap();
+        // git takes the lock and rewrites every file: the burst overflows.
+        std::fs::write(d.path().join(".git/index.lock"), "").unwrap();
+        r.hint(&root, &[".git/index.lock"]);
+        for f in &many {
+            std::fs::write(d.path().join(f), "SELECT 2; -- topic").unwrap();
+        }
+        r.hint(&root, &many_refs);
+        // The open file moves while the lock is held.
+        std::fs::rename(d.path().join("a.sql"), d.path().join("b.sql")).unwrap();
+        r.hint(&root, &["a.sql", "b.sql"]);
+        std::fs::remove_file(d.path().join(".git/index.lock")).unwrap();
+        r.hint(&root, &[".git/index.lock"]);
+        let mut seen = Vec::new();
+        let e = wait_event(&mut r.rx, &mut seen, "the move", |e| {
+            matches!(
+                e,
+                LibraryEvent::FileRenamed { .. } | LibraryEvent::FileDeleted { .. }
+            )
+        })
+        .await;
+        assert_eq!(
+            e,
+            LibraryEvent::FileRenamed {
+                id,
+                from: rel("a.sql"),
+                to: rel("b.sql")
+            },
+            "round {round}"
+        );
+        wait_until("the listing to follow b.sql", || {
+            let rels = r.rels(id);
+            rels.iter().any(|x| x == "b.sql") && !rels.iter().any(|x| x == "a.sql")
+        })
+        .await;
+    }
+}
+// ## m4b-gatefix-1 fix round 2
