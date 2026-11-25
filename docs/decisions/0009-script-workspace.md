@@ -1867,3 +1867,18 @@ The T21 re-review residuals r1–r4 and the m12 flake, before the gate.
 - **m1.** The head is condensed only while it does not fit whole. Condensed, its explanation stays before its buttons in the element tree: they are drawn in a reversed column.
 - **m3.** A dead or stale shot lock is taken over by renaming it to a tomb of the taker's own; the loser retries. The tomb is checked to be the lock that was judged, and a newer lock is put back.
 - **m5.** `profile_data::timings` records in debug builds only; a release build reads zeros.
+
+## m4b-gatefix-1 — an idle watcher wakes nothing; Go to script cost; stub names gone
+
+- **Watcher idle CPU (gate E12).** The gate measured 130–240 ms of CPU per minute with three idle libraries, against 10–20 ms with none. Each library's `notify-debouncer-full` 0.7 loop slept a fixed tick (150 ms / 4) and woke about 27 times a second, forever. `OsEventSource` no longer uses that debouncer. It builds the platform's recommended watcher itself, at one reviewed site and only with `watcher_config()` (`follow_symlinks(false)`, R-T0-2), and hands every event to a debounce thread of its own (`hv-watch-debounce`).
+  - That thread blocks on its channel while nothing is pending, so an idle library costs no wake-up.
+  - An event is delivered 150 ms after it arrived, at most once per 37.5 ms (`FLUSH_GAP`) during a burst. A path is named once while it waits, and errors go out at the next delivery.
+  - The thread delivers paths, the rescan flag and the watch-limit error, never kinds, so nothing is cancelled. cifix-2's `NoCancel` wrapper existed only to stop the old debouncer dropping a delete whose FSEvents flags still said "created". It is gone, and its test now runs through the new thread.
+  - What stays the same: the reconciler, settle, echo, rename pairing, bursts, the poll fallback, rescans and the per-folder Linux watches are untouched. `notify-debouncer-full` stays a dependency for `file_id` (Windows identity, `fileio/windows_id.rs`), and the manifest is unchanged.
+  - Tests: `an_idle_debounce_thread_never_wakes` (0 wakes in an idle window; a ticking loop gives 14) and `watch_real::an_idle_os_source_wakes_nothing` on the real backend.
+- **Go to script (gate E12).** `query_over_10k_entries_under_5ms` took 4.97–5.64 ms in release. Most of the time went to the subsequence table's allocations for keys that cannot match.
+  - `hacivat-l10n`'s `fuzzy` now refuses a query that is not a subsequence of the key before it allocates, and its tables are flat. The answers are the same: a reference copy of the old body is compared on a generated corpus.
+  - The index works out each entry's path scope once at build, instead of once per environment per query.
+  - The ranking is unchanged, compared against the pre-change ranking on a generated corpus. The query now takes 0.77–0.80 ms.
+- **Stub names (gate E9).** The stub-only variants that nothing constructed are removed: `RegistryError::NotImplemented`, `GitError::NotImplemented`, `UnavailableReason::NotImplemented`, `ReadError::NotImplemented` and `SaveError::NotImplemented`. A stopped watch source answers `WatchError::Stopped`, which is not user-visible. The Task 1a module docs now say what the stubs did. The Task 1a and Task 5 sections above describe the code as it was.
+- **E8 test isolation.** The two memory perf tests of `hacivat-exec`'s `script_run` take one process-wide lock (`RSS_PERF`), because RSS is process-wide. The budget is unchanged.
