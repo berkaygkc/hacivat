@@ -458,3 +458,331 @@ fn scoped_query_filters_each_library_by_its_own_connections() {
     assert_eq!(billing, ["b.sql"]);
 }
 // ## m4b-t15-goto
+
+// ## m4b-gatefix-1 (E12 Go to script)
+
+/// The ranking as `ScriptIndex` did it before gatefix-1 (`query_where` and its `Matcher`,
+/// copied, over the public search API and `envscope::visible`), kept as the reference the
+/// faster index must equal: same hits, order, ranks and highlights.
+mod reference {
+    use std::ops::Range;
+
+    use hacivat_l10n::search::{
+        MatchKind, MatchMode, PreparedQuery, SearchKey, SearchOpts, build_key,
+    };
+    use hacivat_proto::EnvTag;
+    use hacivat_scripts::envscope;
+    use hacivat_scripts::index::Rank;
+    use hacivat_scripts::pathsafe::display_name;
+    use hacivat_scripts::{EntryKind, LibraryId, LinkState, ScriptEntry};
+
+    /// A library as the reference sees it: its id, its root and its scanned entries.
+    pub type Lib = (LibraryId, std::path::PathBuf, Vec<ScriptEntry>);
+
+    /// `(library, rel, display_name, display_folder, library_name, rank, ranges)`.
+    pub type Row = (
+        LibraryId,
+        String,
+        String,
+        String,
+        String,
+        Rank,
+        Vec<Range<usize>>,
+    );
+
+    fn offered(e: &ScriptEntry) -> bool {
+        let file = matches!(e.kind, EntryKind::Sql | EntryKind::Markdown);
+        let opens = matches!(e.link, LinkState::Plain | LinkState::InsideLink);
+        let hidden = |s: &envscope::EnvScope| matches!(s, envscope::EnvScope::Hidden(_));
+        file && opens && !hidden(&e.scope) && !hidden(&envscope::entry_scope(&e.rel, e.kind))
+    }
+
+    struct Keys {
+        name: SearchKey,
+        stem: Option<SearchKey>,
+        path: SearchKey,
+    }
+
+    fn cap(q: &str) -> &str {
+        q.char_indices().nth(256).map_or(q, |(i, _)| &q[..i])
+    }
+
+    fn is_exact(keys: &Keys, name_q: &PreparedQuery, key_q: &SearchKey, opts: SearchOpts) -> bool {
+        let whole = |key: &SearchKey, query: &PreparedQuery| {
+            query.matches(key).is_some_and(|m| {
+                matches!(m.kind, MatchKind::ExactWord)
+                    && m.ranges.len() == 1
+                    && m.ranges[0] == (0..key.text().len())
+            })
+        };
+        [Some(&keys.name), keys.stem.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|t| whole(t, name_q) && whole(key_q, &PreparedQuery::new(t.text(), &opts)))
+    }
+
+    pub fn query(
+        libs: &[Lib],
+        q: &str,
+        opts: SearchOpts,
+        limit: usize,
+        envs: &[Option<EnvTag>],
+    ) -> Vec<Row> {
+        let q = cap(q.trim());
+        let path_opts = SearchOpts {
+            mode: match opts.mode {
+                MatchMode::Fuzzy => MatchMode::Contains,
+                other => other,
+            },
+            ..opts
+        };
+        let name_q = PreparedQuery::new(q, &opts);
+        let path_q = PreparedQuery::new(q, &path_opts);
+        let key_q = build_key(q, &opts);
+        let rank = |keys: &Keys| -> Option<(Rank, Vec<Range<usize>>)> {
+            if q.is_empty() {
+                return Some((Rank::Path, Vec::new()));
+            }
+            if let Some(m) = name_q.matches(&keys.name) {
+                let at_start = m.ranges.first().is_some_and(|r| r.start == 0);
+                let rank = match m.kind {
+                    MatchKind::ExactWord | MatchKind::Prefix if at_start => {
+                        if is_exact(keys, &name_q, &key_q, opts) {
+                            Rank::Exact
+                        } else {
+                            Rank::Prefix
+                        }
+                    }
+                    MatchKind::ExactWord | MatchKind::Prefix => Rank::WordPrefix,
+                    MatchKind::Substring => Rank::Substring,
+                    MatchKind::Fuzzy => Rank::Subsequence,
+                };
+                return Some((rank, m.ranges));
+            }
+            path_q.matches(&keys.path).map(|_| (Rank::Path, Vec::new()))
+        };
+        let mut found: Vec<((Rank, usize, usize), Row)> = Vec::new();
+        for (order, (id, root, entries)) in libs.iter().enumerate() {
+            let folder = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let lib_name = display_name(&folder);
+            for e in entries.iter().filter(|e| offered(e)) {
+                if !envs.iter().any(|env| envscope::visible(e, *env)) {
+                    continue;
+                }
+                let name = display_name(e.rel.name());
+                let dir = e
+                    .rel
+                    .as_str()
+                    .rsplit_once('/')
+                    .map(|(f, _)| display_name(f))
+                    .unwrap_or_default();
+                let path = if dir.is_empty() {
+                    lib_name.clone()
+                } else {
+                    format!("{lib_name}/{dir}")
+                };
+                let keys = Keys {
+                    stem: name
+                        .rsplit_once('.')
+                        .map(|(s, _)| s)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| build_key(s, &opts)),
+                    name: build_key(&name, &opts),
+                    path: build_key(&path, &opts),
+                };
+                let Some((rank, ranges)) = rank(&keys) else {
+                    continue;
+                };
+                let sort = (rank, e.rel.as_str().chars().count(), order);
+                let row = (
+                    *id,
+                    e.rel.as_str().to_owned(),
+                    name,
+                    dir,
+                    lib_name.clone(),
+                    rank,
+                    ranges,
+                );
+                found.push((sort, row));
+            }
+        }
+        found.sort_by(|(a, ra), (b, rb)| {
+            a.cmp(b)
+                .then_with(|| ra.1.as_bytes().cmp(rb.1.as_bytes()))
+        });
+        found.truncate(limit);
+        found.into_iter().map(|(_, row)| row).collect()
+    }
+}
+
+fn rows(hits: &[Hit]) -> Vec<reference::Row> {
+    hits.iter()
+        .map(|h| {
+            (
+                h.library,
+                h.rel.as_str().to_owned(),
+                h.display_name.clone(),
+                h.display_folder.clone(),
+                h.library_name.clone(),
+                h.rank,
+                h.ranges.clone(),
+            )
+        })
+        .collect()
+}
+
+/// A generated corpus: three libraries, environment folders (known, unknown and
+/// contradictory), Turkish and accented names, an invisible character, links that do not
+/// open, another extension and many ties on length.
+fn generated_corpus() -> (WorkspaceSnapshot, Vec<reference::Lib>) {
+    let folders = [
+        "",
+        "reports",
+        "@production",
+        "@staging/müşteri",
+        "@production/@staging",
+        "@nowhere",
+        "İstanbul/q4",
+        "a_b",
+    ];
+    let stems = [
+        "report_42",
+        "rep_4_2",
+        "müşteri_segment",
+        "MUSTERI",
+        "orders",
+        "big_orders",
+        "o_r_d",
+        "reorder",
+        "ISTANBUL_ıi",
+        "straße",
+        "x\u{200B}y",
+        "e10",
+        "events_2026_10",
+        "report",
+    ];
+    let exts = [".sql", ".md", ".txt"];
+    let (mut libs, mut plain) = (Vec::new(), Vec::new());
+    for (l, lib) in ["orders", "müşteri_ops", "Reports"].into_iter().enumerate() {
+        let mut entries = Vec::new();
+        for (f, folder) in folders.iter().enumerate() {
+            for (s, stem) in stems.iter().enumerate() {
+                let ext = exts[(l + f + s) % exts.len()];
+                let rel = if folder.is_empty() {
+                    format!("{stem}{ext}")
+                } else {
+                    format!("{folder}/{stem}{ext}")
+                };
+                let link = match (l * 7 + f * 3 + s) % 11 {
+                    0 => LinkState::InsideLink,
+                    1 => LinkState::OutsideLink,
+                    _ => LinkState::Plain,
+                };
+                entries.push(entry(&rel, link));
+            }
+        }
+        let snap = library(lib, entries.clone());
+        plain.push((snap.id, snap.root.path.clone(), entries));
+        libs.push(snap);
+    }
+    (snapshot(libs), plain)
+}
+
+#[test]
+fn ranking_equals_the_pre_gatefix_reference_on_a_generated_corpus() {
+    let (snap, libs) = generated_corpus();
+    let i = ScriptIndex::build(&snap);
+    let queries = [
+        "",
+        " ",
+        "rep42",
+        "report",
+        "report_42",
+        "report_42.sql",
+        "musteri",
+        "MÜŞTERİ",
+        "müş",
+        "istanbul",
+        "ISTANBUL",
+        "ı",
+        "i",
+        "ord",
+        "orders",
+        "e10",
+        "strasse",
+        "xy",
+        "q4",
+        "@prod",
+        "reports/",
+        "zzz",
+        "r",
+        "s",
+        "md",
+        ".sql",
+        "o_r",
+        "big ord",
+    ];
+    let envs: Vec<Vec<Option<EnvTag>>> = std::iter::once(every_env())
+        .chain(every_env().into_iter().map(|e| vec![e]))
+        .collect();
+    let (mut compared, mut nonempty) = (0, 0);
+    for tolerant in [false, true] {
+        for mode in [MatchMode::Contains, MatchMode::WordPrefix, MatchMode::Fuzzy] {
+            let o = SearchOpts {
+                turkish_tolerant: tolerant,
+                mode,
+            };
+            for q in queries {
+                for env in &envs {
+                    // The reference sorts everything, so each limit is a prefix of the whole.
+                    let all = reference::query(&libs, q, o, usize::MAX, env);
+                    for limit in [0, 1, 3, 50, 10_000] {
+                        let want = all[..limit.min(all.len())].to_vec();
+                        let got = rows(&i.query_for_any(q, o, limit, env));
+                        assert_eq!(got, want, "{q:?} {o:?} limit {limit} envs {env:?}");
+                        if let [one] = env.as_slice() {
+                            let got = rows(&i.query_for(q, o, limit, *one));
+                            assert_eq!(got, want, "{q:?} {o:?} limit {limit} env {one:?}");
+                        }
+                        compared += 1;
+                        nonempty += usize::from(!want.is_empty());
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 5_000 && nonempty > 2_000, "{compared} {nonempty}");
+}
+
+/// Go to script on 10,000 entries for query shapes beyond `rep42`: one every entry matches as
+/// a prefix (the most hits), a Turkish-tolerant one, a single letter, a folder-only one, a
+/// miss and the empty query (best of five each, after a warm-up).
+#[test]
+#[ignore = "perf"]
+fn query_shapes_over_10k_entries_under_5ms() {
+    if !std::env::var_os("HACIVAT_PERF").is_some_and(|v| v == "1") {
+        return;
+    }
+    let paths: Vec<String> = (0..10_000)
+        .map(|n| format!("folder_{}/report_{n}_müşteri.sql", n % 97))
+        .collect();
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let i = idx(&refs);
+    let _ = query(&i, "warm", opts_tr(), 50);
+    let mut worst = 0;
+    for q in ["rep42", "report", "musteri", "r", "folder_42", "zzz", ""] {
+        let mut best = u128::MAX;
+        for _ in 0..5 {
+            let t = Instant::now();
+            let _ = query(&i, q, opts_tr(), 50);
+            best = best.min(t.elapsed().as_micros());
+        }
+        println!("HV-FACT gatefix1 query_10k q={q:?} us={best}");
+        worst = worst.max(best);
+    }
+    assert!(worst < 5_000, "worst {worst} µs");
+}
+// ## m4b-gatefix-1

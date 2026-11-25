@@ -71,7 +71,21 @@ pub struct IndexEntry {
     pub display_folder: String,
     /// The path's length in characters (the first tie-break).
     path_len: usize,
+    // ## m4b-gatefix-1 (E12 Go to script)
+    /// The scope the path gives the entry (`envscope::entry_scope`), worked out once at build
+    /// instead of once per environment per query.
+    path_scope: EnvScope,
+    // ## m4b-gatefix-1
 }
+
+// ## m4b-gatefix-1
+impl IndexEntry {
+    /// `envscope::visible(&self.entry, env)`, with the path's scope from the build.
+    fn visible(&self, env: Option<EnvTag>) -> bool {
+        envscope::admits(&self.path_scope, env) && envscope::admits(&self.entry.scope, env)
+    }
+}
+// ## m4b-gatefix-1
 
 /// One result of a query.
 #[derive(Debug, Clone)]
@@ -147,6 +161,8 @@ impl ScriptIndex {
                             .map(|(folder, _)| display_name(folder))
                             .unwrap_or_default(),
                         path_len: e.rel.as_str().chars().count(),
+                        // ## m4b-gatefix-1
+                        path_scope: envscope::entry_scope(&e.rel, e.kind),
                         entry: e.clone(),
                     })
                     .collect();
@@ -166,7 +182,7 @@ impl ScriptIndex {
         self.libs
             .iter()
             .flat_map(|l| &l.entries)
-            .filter(|e| envscope::visible(&e.entry, env))
+            .filter(|e| e.visible(env))
             .count()
     }
 
@@ -186,7 +202,7 @@ impl ScriptIndex {
         limit: usize,
         env: Option<EnvTag>,
     ) -> Vec<Hit> {
-        self.query_where(q, opts, limit, &|e| envscope::visible(&e.entry, env))
+        self.query_where(q, opts, limit, &|e| e.visible(env))
     }
 
     /// [`query_for`](Self::query_for) over the scripts shown under at least one of `envs` (Task 15:
@@ -198,9 +214,7 @@ impl ScriptIndex {
         limit: usize,
         envs: &[Option<EnvTag>],
     ) -> Vec<Hit> {
-        self.query_where(q, opts, limit, &|e| {
-            envs.iter().any(|env| envscope::visible(&e.entry, *env))
-        })
+        self.query_where(q, opts, limit, &|e| envs.iter().any(|env| e.visible(*env)))
     }
 
     // ## m4b-t15-goto (named exception: Task 15)
@@ -223,7 +237,7 @@ impl ScriptIndex {
                 .get(&e.library)
                 .filter(|v| !v.is_empty())
                 .map_or(&UNBOUND[..], Vec::as_slice);
-            envs.iter().any(|env| envscope::visible(&e.entry, *env))
+            envs.iter().any(|env| e.visible(*env))
         })
     }
 
