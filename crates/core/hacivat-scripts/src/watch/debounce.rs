@@ -9,7 +9,8 @@
 //! - [`HintQueue`] carries hint batches from the event source's thread to the watcher's, holds
 //!   at most [`HINT_CAPACITY`] hints, and turns an overflow into one rescan.
 //!
-//! The OS and poll sources already deliver one batch per `notify-debouncer-full` window, so
+//! The OS and poll sources already deliver one batch per debounce window (gatefix-1: the OS
+//! source's own debounce thread, `watch::FLUSH_GAP`), so
 //! the watcher looks at a hint as soon as it arrives; the window here is the one the burst
 //! rule and the settle rule count in.
 
@@ -71,7 +72,22 @@ pub struct Debouncer {
     /// An operation outlived its bound and its lock has not been seen gone since.
     op_stale: bool,
     // ## m4b-cifix-2-repo-op
+    // ## m4b-gatefix-1-tail
+    /// When the last repository operation ended, while its burst is still taking the events
+    /// the backend delivers late (see [`OP_QUIET`]).
+    after_op: Option<Instant>,
+    // ## m4b-gatefix-1-tail
 }
+
+// ## m4b-gatefix-1-tail (CI 45202154953 macOS `git_checkout_2000_is_one_rescan`)
+/// After a repository operation ends, its burst goes on until the hints have been quiet this
+/// long (instead of one window), at most [`REPO_OP_MAX`] after the end. FSEvents hands a
+/// checkout's per-file events over in chunks for a second or more after git let go of the lock
+/// (a trace: 700 of 2,000 files delivered by then, the rest in chunks up to 220 ms apart for
+/// 1.9 s). With a one-window gap the operation's burst ended at the first pause, so neither
+/// part reached [`MAX_HINTS_PER_WINDOW`] and each file was reported on its own.
+pub const OP_QUIET: Duration = Duration::from_secs(1);
+// ## m4b-gatefix-1-tail
 
 /// How long an overflowed burst that keeps going waits for its rescan at most.
 const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(2);
@@ -107,6 +123,8 @@ impl Debouncer {
             pending_at: None,
             op_until: None,
             op_stale: false,
+            // ## m4b-gatefix-1-tail
+            after_op: None,
         }
     }
 
@@ -143,6 +161,8 @@ impl Debouncer {
         if self.op_until.take().is_none() {
             return;
         }
+        // ## m4b-gatefix-1-tail: the operation's burst takes what is still delivered.
+        self.after_op = Some(at);
         // An overflowed operation falls back to the ordinary rule from its end: its rescan is
         // handed on once the hints have been quiet for a window (at most `max_wait` later), so
         // the events FSEvents still delivers after the lock went are swallowed too, and the
@@ -158,6 +178,23 @@ impl Debouncer {
     pub fn in_operation(&self) -> bool {
         self.op_until.is_some()
     }
+
+    // ## m4b-gatefix-1-tail
+    /// The pause that ends the current burst: [`OP_QUIET`] right after a repository
+    /// operation, one window otherwise.
+    fn gap(&self) -> Duration {
+        if self.after_op.is_some() {
+            OP_QUIET
+        } else {
+            self.window
+        }
+    }
+
+    /// Whether the burst of the operation that ended is still taking late events.
+    pub fn after_operation(&self) -> bool {
+        self.after_op.is_some()
+    }
+    // ## m4b-gatefix-1-tail
     // ## m4b-cifix-2-repo-op
 
     /// Takes one hint that arrived at `at` (a path counts toward a burst).
@@ -191,7 +228,10 @@ impl Debouncer {
             return;
         }
         // ## m4b-cifix-2-repo-op: a repository operation is one burst, pauses and all.
-        if self.op_until.is_none() && self.last_at.is_none_or(|l| at >= l + self.window) {
+        // ## m4b-gatefix-1-tail: right after an operation the pause that ends it is longer.
+        let gap = self.gap();
+        if self.op_until.is_none() && self.last_at.is_none_or(|l| at >= l + gap) {
+            self.after_op = None;
             // A new burst; an overflowed one that was not flushed yet is due now.
             if self.overflowed.take().is_some() {
                 self.rescan = true;
@@ -238,6 +278,10 @@ impl Debouncer {
         let last = self.last_at?;
         let began = self.began.unwrap_or(last);
         let hold = (last + self.window).min(began + self.max_wait);
+        // ## m4b-gatefix-1-tail: after an operation, until its late events have stopped.
+        let hold = self
+            .after_op
+            .map_or(hold, |end| (last + OP_QUIET).min(end + REPO_OP_MAX).max(hold));
         // ## m4b-cifix-2-repo-op: a repository operation holds until it ends, at most its
         // bound.
         let hold = self.op_until.map_or(hold, |until| hold.max(until));
@@ -258,6 +302,11 @@ impl Debouncer {
         // ## m4b-cifix-2-repo-op: an operation's rescan waits for its end, at most its bound.
         if let Some(until) = self.op_until {
             return Some(until);
+        }
+        // ## m4b-gatefix-1-tail: an overflowed operation's rescan waits for its late events.
+        if let Some(end) = self.after_op {
+            let quiet = self.last_at.map_or(since, |l| l + OP_QUIET);
+            return Some(quiet.min(end + REPO_OP_MAX));
         }
         let quiet = self.last_at.map_or(since, |l| l + self.window);
         Some(quiet.min(since + self.max_wait))
@@ -282,7 +331,7 @@ impl Debouncer {
             // overflowed (swallowing, one rescan per `max_wait`); the count starts afresh only
             // once the burst has been quiet for a window (a new burst, in `push_path`). Noise
             // never counts (the watcher's name filter), so this cannot starve a real edit.
-            let going = self.last_at.is_some_and(|l| now < l + self.window);
+            let going = self.last_at.is_some_and(|l| now < l + self.gap());
             self.overflowed = going.then_some(now);
             self.burst.clear();
         }
@@ -295,6 +344,14 @@ impl Debouncer {
             ));
         }
         self.pending_at = None;
+        // ## m4b-gatefix-1-tail: the operation's burst is over once it has been quiet (or at
+        // its bound).
+        if let Some(end) = self.after_op
+            && self.overflowed.is_none()
+            && (self.last_at.is_none_or(|l| now >= l + OP_QUIET) || now >= end + REPO_OP_MAX)
+        {
+            self.after_op = None;
+        }
         out
     }
 

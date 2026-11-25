@@ -239,6 +239,18 @@ fn items_of_error(e: notify::Error) -> Vec<Item> {
         .collect()
 }
 
+// ## m4b-gatefix-1-tail
+/// Whether `p` names a repository's `.git/index.lock` (the reconciler decides whether it is
+/// the library's own; this only skips the wait).
+fn is_repository_lock(p: &Path) -> bool {
+    p.file_name().is_some_and(|n| n == REPOSITORY_LOCK)
+        && p.parent()
+            .and_then(Path::file_name)
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(".git"))
+}
+// ## m4b-gatefix-1-tail
+
 /// What the backend's handler hands the debounce thread.
 enum Raw {
     Event(notify::Result<notify::Event>),
@@ -278,6 +290,16 @@ impl Pending {
         match raw {
             Ok(ev) => {
                 for item in items_of_event(ev) {
+                    // ## m4b-gatefix-1-tail: git's index lock goes out without the debounce
+                    // wait, so the reconciler looks at it while git still holds it and the
+                    // whole operation is one burst (cifix-2's hold). A checkout shorter than
+                    // the wait was otherwise over before the lock was looked at.
+                    if matches!(&item, Item::Path(p) if is_repository_lock(p)) {
+                        if !self.urgent.contains(&item) {
+                            self.urgent.push(item);
+                        }
+                        continue;
+                    }
                     // A path already waiting is delivered at its first due time, which is after
                     // this event too; the reconciler then looks at the disk as it is.
                     if self.queued.insert(item.clone()) {
@@ -961,6 +983,66 @@ fn racy(mtime: SystemTime, seen_at: SystemTime) -> bool {
     }
 }
 
+// ## m4b-gatefix-1-tail (CI 45202154953 macOS, `git_checkout_2000_is_one_rescan`)
+/// How long after a rescan a late hint can still fold into it ([`RescanTail`]); each folded
+/// hint extends it this far again, up to [`TAIL_MAX`] after the rescan.
+pub const TAIL: Duration = RACY_WINDOW;
+/// The longest a rescan's tail lasts.
+pub const TAIL_MAX: Duration = Duration::from_secs(30);
+/// A file counts as written before a scan began only when its time is at least this much (or
+/// its file system's granularity) earlier: a clock tick (Windows, ext4) never makes a write
+/// after the scan look older than it.
+pub const TICK_MARGIN: Duration = Duration::from_millis(100);
+
+/// After a rescan, the backend may still deliver events the scan already saw. FSEvents under
+/// load hands a `git checkout`'s per-file events over for a second or more; the burst rule had
+/// ended at the rescan, so each late hint found a racily clean stamp (R-T9-3) and became a
+/// `PossiblyChanged` (803 of them on the CI runner).
+///
+/// A late hint folds into the rescan when its file is one nobody has open (no hash), still has
+/// exactly the stamp the watcher learned at or after the rescan's start (the rescan itself, or
+/// a later scan of a folder hint), and its time is before the rescan began by more than
+/// [`TICK_MARGIN`]: any write after that stamp was learned would carry a later time, so the
+/// stamp cannot hide one. Anything else is looked at as before.
+#[derive(Debug, Clone, Copy)]
+struct RescanTail {
+    /// When the rescan's scan began (the `seen_at` of what it learned).
+    started: SystemTime,
+    /// Folding stops after this.
+    until: Instant,
+    /// And never after this.
+    cap: Instant,
+}
+
+impl RescanTail {
+    fn new(started: SystemTime, now: Instant) -> Self {
+        RescanTail {
+            started,
+            until: now + TAIL,
+            cap: now + TAIL_MAX,
+        }
+    }
+
+    /// Whether a look at `now` that found `obs`, for a file known as `known`, is the late
+    /// delivery of an event the rescan already saw.
+    fn folds(&self, obs: &Seen, known: &Known, now: Instant) -> bool {
+        let before_scan = obs
+            .mtime
+            .checked_add(TICK_MARGIN.max(granularity(obs.mtime)))
+            .is_some_and(|t| t <= self.started);
+        now <= self.until
+            && known.hash.is_none()
+            && known.seen_at >= self.started
+            && *obs == known.seen
+            && before_scan
+    }
+
+    fn extend(&mut self, now: Instant) {
+        self.until = (now + TAIL).min(self.cap);
+    }
+}
+// ## m4b-gatefix-1-tail
+
 /// At most this many open files are kept back from one rescan to be settled and reported on
 /// their own (fix round 2, N1).
 const MAX_OPEN_KEPT: usize = 256;
@@ -1017,6 +1099,11 @@ pub struct Reconciler {
     /// hint last made the reconciler look at it.
     outer_lock: Option<PathBuf>,
     outer_looked: Option<Instant>,
+    // ## m4b-gatefix-1-tail
+    /// The last burst rescan's tail, while late hints may still fold into it.
+    tail: Option<RescanTail>,
+    /// When the last scan that learned the library began.
+    learned_at: SystemTime,
 }
 
 impl fmt::Debug for Reconciler {
@@ -1053,6 +1140,9 @@ impl Reconciler {
             // ## m4b-t20-adversarial (named lines, N3)
             outer_lock: None,
             outer_looked: None,
+            // ## m4b-gatefix-1-tail
+            tail: None,
+            learned_at: SystemTime::now(),
         };
         let started = SystemTime::now();
         let s = r.scan();
@@ -1262,7 +1352,12 @@ impl Reconciler {
             match flushed {
                 // The watcher switches the source; nothing to reconcile.
                 Flushed::Lost => {}
-                Flushed::Rescan => return self.rescan(),
+                // ## m4b-gatefix-1-tail: late copies of what this rescan saw fold into it.
+                Flushed::Rescan => {
+                    let out = self.rescan();
+                    self.tail = Some(RescanTail::new(self.learned_at, now));
+                    return out;
+                }
                 Flushed::Paths(paths) => {
                     self.info.saw_hints = true;
                     self.hinted_since_backstop = true;
@@ -1409,6 +1504,9 @@ impl Reconciler {
     /// and it becomes a candidate, so it settles and is reported on its own (`Changed`,
     /// `Removed`), however many rescans a burst causes; at most [`MAX_OPEN_KEPT`] per rescan.
     fn learn_state(&mut self, s: &ScanResult, started: SystemTime) {
+        // ## m4b-gatefix-1-tail: a new scan ends the last rescan's tail.
+        self.learned_at = started;
+        self.tail = None;
         self.candidates.clear();
         self.settle.clear();
         self.scan_due = None;
@@ -1535,6 +1633,15 @@ impl Reconciler {
     /// The first look at a known file after a hint.
     fn first_look(&mut self, rel: RelPath, obs: Option<Seen>, now: Instant) {
         let known = self.known.get(&rel);
+        // ## m4b-gatefix-1-tail
+        if let (Some(tail), Some(s), Some(k)) = (self.tail.as_mut(), &obs, known)
+            && !self.candidates.contains_key(&rel)
+            && tail.folds(s, k, now)
+        {
+            tail.extend(now);
+            return;
+        }
+        // ## m4b-gatefix-1-tail
         let unchanged = match (&obs, known) {
             (Some(s), Some(k)) => *s == k.seen,
             (None, None) => true,
@@ -2612,6 +2719,22 @@ mod tests {
             assert!(all.contains(&RawHint::Path(format!("/lib/f{n}.sql").into())));
         }
         assert_eq!(thread.counts().events, 2_001);
+    }
+
+    /// gatefix-1 tail: git's index lock skips the debounce wait (the reconciler must look at
+    /// it while git holds it); the files beside it wait as before.
+    #[test]
+    fn the_index_lock_goes_out_before_the_window() {
+        let (thread, got) = debounce_for_lib();
+        let mut send = thread.handler();
+        send(Ok(modified("/lib/.git/index.lock")));
+        send(Ok(modified("/lib/a.sql")));
+        let a = RawHint::Path("/lib/a.sql".into());
+        let batches = delivered_until(&got, &a);
+        assert_eq!(batches[0], [RawHint::Path("/lib/.git/index.lock".into())]);
+        assert!(is_repository_lock(Path::new("/x/.GIT/index.lock")));
+        assert!(!is_repository_lock(Path::new("/x/git/index.lock")));
+        assert!(!is_repository_lock(Path::new("/x/.git/index")));
     }
 
     /// cifix-2 (CI 44990057141, macOS): `rm -r reports` seconds after `reports/c.sql` was

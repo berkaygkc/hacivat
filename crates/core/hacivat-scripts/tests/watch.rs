@@ -2886,3 +2886,124 @@ fn edits_under_a_bigger_repository_settle_as_usual() {
     assert_eq!(*fs_seen.lock_looks.lock().unwrap(), 1);
 }
 // ## m4b-t20-adversarial
+
+// ## m4b-gatefix-1-tail (CI 45202154953 macOS `git_checkout_2000_is_one_rescan`)
+/// A library of `n` scripts `f0000.sql`…, written half a second before now: recent enough to
+/// be racily clean (R-T9-3) for a scan made now, but written before that scan began.
+fn freshly_written(n: usize) -> Lib {
+    let lib = Lib::new(&[]);
+    let before = SystemTime::now() - ms(500);
+    for i in 0..n {
+        let name = format!("f{i:04}.sql");
+        lib.write(&name, "SELECT 1;");
+        set_mtime(&lib.path(&name), before);
+    }
+    lib
+}
+
+fn hints_for(lib: &Lib, range: std::ops::Range<usize>) -> Vec<RawHint> {
+    range.map(|i| lib.hint(&format!("f{i:04}.sql"))).collect()
+}
+
+/// After a burst's rescan the backend may still deliver the events that scan already saw
+/// (FSEvents under load). A late hint whose file still has the stamp the rescan learned, and
+/// was written before the rescan began, folds into the rescan: no `PossiblyChanged` per file.
+/// A file changed since, and one whose stamp is dated after the scan began, are still reported.
+#[test]
+fn late_hints_the_rescan_already_saw_fold_into_it() {
+    let lib = freshly_written(1_200);
+    let mut r = lib.rec();
+    assert_eq!(
+        run(&mut r, hints_for(&lib, 0..1_200), t0()),
+        vec![WatchEvent::Rescan]
+    );
+    // Late copies of the same events, half a second after the rescan.
+    assert_eq!(run(&mut r, hints_for(&lib, 400..1_200), t0() + ms(650)), vec![]);
+    // Controls: a real change after the rescan, and a stamp dated after the scan began.
+    lib.write("f0001.sql", "SELECT 22;");
+    set_mtime(&lib.path("f0002.sql"), SystemTime::now() + ms(900));
+    let out = run(
+        &mut r,
+        vec![lib.hint("f0001.sql"), lib.hint("f0002.sql")],
+        t0() + ms(900),
+    );
+    assert_eq!(
+        out,
+        vec![
+            WatchEvent::Changed(rel("f0001.sql")),
+            WatchEvent::Changed(rel("f0002.sql")),
+        ]
+    );
+}
+
+/// The traced shape of the same flake (gatefix-1): when git lets go of the lock, FSEvents has
+/// delivered only 700 of the 2,000 files; the rest come in chunks up to 220 ms apart. The
+/// operation's burst takes them all (it ends only after `OP_QUIET` with nothing new) and is
+/// one `Rescan`. A small operation's files are still reported one by one once that quiet
+/// passes.
+#[test]
+fn late_chunks_after_the_lock_goes_stay_in_the_operations_burst() {
+    use hacivat_scripts::watch::debounce::OP_QUIET;
+    let lib = repo_lib(2_000);
+    let mut r = lib.rec();
+    let t = t0() + Duration::from_secs(300);
+    lib.write(".git/index.lock", "");
+    r.push(lib.hint(".git/index.lock"), t);
+    rewrite(&mut r, &lib, 0..700, t + ms(5));
+    let mut out = r.tick(t + ms(10));
+    fs::remove_file(lib.path(".git/index.lock")).unwrap();
+    r.push(lib.hint(".git/index.lock"), t + ms(100));
+    out.extend(r.tick(t + ms(100)));
+    // Chunks of 260 files, 220 ms apart (more than a window, less than OP_QUIET).
+    let mut at = t + ms(100);
+    for start in (700..2_000).step_by(260) {
+        at += ms(220);
+        out.extend(r.tick(at));
+        rewrite(&mut r, &lib, start..(start + 260).min(2_000), at);
+    }
+    out.extend(drain(&mut r, at));
+    assert_eq!(per_file(&out), 0, "{:?}", &out[..out.len().min(5)]);
+    assert_eq!(
+        out.iter().filter(|e| **e == WatchEvent::Rescan).count(),
+        1,
+        "{out:?}"
+    );
+
+    // A small operation: its 10 files settle once OP_QUIET has passed, never before.
+    let lib = repo_lib(10);
+    let mut r = lib.rec();
+    let t = t0() + Duration::from_secs(400);
+    lib.write(".git/index.lock", "");
+    r.push(lib.hint(".git/index.lock"), t);
+    rewrite(&mut r, &lib, 0..5, t + ms(5));
+    fs::remove_file(lib.path(".git/index.lock")).unwrap();
+    r.push(lib.hint(".git/index.lock"), t + ms(50));
+    rewrite(&mut r, &lib, 5..10, t + ms(300));
+    let mut out = r.tick(t + ms(300));
+    out.extend(r.tick(t + ms(300) + OP_QUIET - ms(1)));
+    assert_eq!(per_file(&out), 0, "{out:?}");
+    out.extend(drain(&mut r, t + ms(300) + OP_QUIET));
+    let changed = out
+        .iter()
+        .filter(|e| matches!(e, WatchEvent::Changed(_)))
+        .count();
+    assert_eq!(changed, 10, "{out:?}");
+}
+
+/// The tail ends: a late hint long after the rescan is looked at under the ordinary rule
+/// (still racily clean by the wall clock, so `PossiblyChanged`).
+#[test]
+fn the_rescan_tail_ends() {
+    let lib = freshly_written(1_200);
+    let mut r = lib.rec();
+    assert_eq!(
+        run(&mut r, hints_for(&lib, 0..1_200), t0()),
+        vec![WatchEvent::Rescan]
+    );
+    let at = t0() + Duration::from_secs(40);
+    assert_eq!(
+        run(&mut r, vec![lib.hint("f0003.sql")], at),
+        vec![WatchEvent::PossiblyChanged(rel("f0003.sql"))]
+    );
+}
+// ## m4b-gatefix-1-tail
