@@ -20,8 +20,10 @@ Status words:
 
 Facts:
 
-- **Gate tip `c8812c7d`** (`m4b`: T0–T21, cifix-1..6, T22-pre and R-C0-14/15). This record is
-  committed on top of it; it changes no code.
+- **Gate tip `6f9adcdb`** (`m4b`: T0–T21, cifix-1..6, T22-pre, R-C0-14/15, this record's first
+  version `7a9bff3c`, and **gatefix-1**). This record was first written at `c8812c7d`. It was
+  updated at `6f9adcdb` after gatefix-1 fixed the E9 and E12 failures found there ("Update at
+  `6f9adcdb`" below). It changes no code.
 - **SDD** = `.superpowers/sdd/2026-11-17-m4b-script-workspace/`. That folder holds the plan, the
   ledger `progress.md`, the task reports and reviews, `carries-w1.md` and
   `po-questions-m4b.md`. It also holds `shot-superseded-m4b.txt` and the 656 new PNGs in
@@ -38,98 +40,124 @@ Facts:
   - **45202154953** and **45202181119**: `workflow_dispatch` on `c8812c7d`;
   - **45202171406**: the `pull_request` run of PR #6 (`m4b` → `main`, draft, "gate evidence
     only").
-- **CI state at the time of writing.** No job of the three runs had failed. These were green
-  and quoted below: docker-full ×2, docker-pr, fuzz-scripts ×2, build-test ubuntu (dispatch 1)
-  and build-test windows (PR). Others were still running; those cells read "PENDING (CI)" with
-  the run id, and the controller fills them in.
+- **CI state.** The `c8812c7d` runs ended as follows: 45202181119 success; PR 45202171406
+  success; 45202154953 red only on macOS `git_checkout_2000_is_one_rescan`, which gatefix-1 fixed.
+  The Docker and fuzz facts below are quoted from those runs. The final runs on `6f9adcdb`
+  (dispatches 45626141405 and 45626158424, PR 45626153027) were in progress when the record was
+  updated; their cells read "pending: run <id>".
+
+## Update at `6f9adcdb` (gate agent, 2026-11-25)
+
+gatefix-1 (`m4b-gatefix-1`) passed a hostile review through two fix rounds and was approved.
+Ruling R-GF-1 (amended) comes from it. It is merged as `6f9adcdb` and fixes:
+
+- **E12 Go to script:** the l10n `fuzzy` matcher gets an allocation-free pre-check and flat
+  tables, and the path scope is computed once at build time.
+- **E12 watcher idle CPU:** `notify-debouncer-full` is replaced by Hacivat's own blocking debounce
+  thread over `notify`. An idle library now wakes nothing.
+- **E9:** the five stub-only `NotImplemented` variants are removed, `WatchError::Stopped` is new,
+  and the stale docs are fixed.
+- **E8:** the two RSS perf tests share a process lock.
+- The macOS CI failure `watch_real` `git_checkout_2000_is_one_rescan` of 45202154953: late
+  FSEvents hints now fold into the checkout's rescan, and R-GF-1 lets a present open file through.
+
+The gate agent re-ran on `6f9adcdb`:
+
+- the E9 check;
+- every E12 budget;
+- the E8 pair;
+- the release perf lines.
+
+They ran in `slot-ui-1`, after `cargo clean -p` of every member, on the same Mac (load 6–17).
 
 ## 0. Open before the gate closes, in order
 
-1. **E9 is FAIL** (section 1). The literal check finds `NotImplemented` outside tests: five
-   declared variants that nothing constructs, stale Task 1a module docs, and two live
-   `WatchError::NotImplemented` returns that mean "this source was stopped". No stub was found
-   unfilled. A small cleanup task is needed, then a re-run of the check:
-   - remove the dead variants;
-   - rename the watcher's variant, for example to `Stopped`;
-   - fix the docs.
-2. **E12 Go to script is FAIL on this machine.** `query_over_10k_entries_under_5ms` gave a best
-   of five of 4,971–5,587 µs, and failed 8 of 9 runs at load 6–16; lower load did not help. This is the first release run
-   of that line (T10 measured only debug). The paths:
-   - a speed-up of `ScriptIndex::query`. T10 found the time is mostly in `hacivat-l10n`'s
-     Turkish-tolerant subsequence matcher;
-   - a re-measure on a quiet machine (`po-demo-m4b.md` §2.4);
-   - a ruling. The query runs off the UI thread past 2,000 entries (T15), so typing never waits on
-     it.
-3. **E12 watcher idle CPU is FAIL.** With three libraries, the real app uses 130–240 ms of CPU
-   per minute at idle, against 10–20 ms with none. The cause is `notify-debouncer-full`'s fixed
-   37.5 ms tick, one thread per library (E12 table). The options:
-   - one shared debouncer for every library;
-   - our own debounce timer, armed only while events are pending (the source already re-checks
-     with `lstat`, R-T9-3);
-   - a larger `tick_rate` passed to `new_debouncer_opt`. Its signature takes one, and today it is
-     `None` (`watch/mod.rs:274`), which gives 150 / 4.
-
-   Alternatively, a PO ruling that ~0.25 % of a core is "≈ 0".
-4. **The CI cells.** The controller fills them from runs 45202154953, 45202181119 and 45202171406
-   (E2, E10, E11). Every job must be green.
-5. **PO at the Mac:**
+1. **E11, the final gate CI on `6f9adcdb`:** dispatches 45626141405 and 45626158424, and PR
+   45626153027. They were running when this update was written, with no job failed yet.
+   - **Pending:** run 45626141405, run 45626158424 and run 45626153027. The controller fills in
+     the job results.
+   - Every job must be green: build-test ×3, turkey-test, docker-pr, docker-full, fuzz-scripts,
+     fuzz-meta, fuzz-sql, pseudo-screens and nightly-package ×3.
+   - The previous gate tip `c8812c7d` ended as follows:
+     - 45202181119 **success**, after a macOS rerun;
+     - PR 45202171406 **success**;
+     - 45202154953 failed only on macOS `git_checkout_2000_is_one_rescan`, which gatefix-1 fixed.
+   - The Docker facts quoted in E1, E6 and E8 come from the `c8812c7d` runs. The gatefix-1 diff
+     touches no Docker-tested path except the watcher. The controller re-quotes them from the
+     final runs if it wants the tip covered.
+2. **PO at the Mac:**
    - `po-demo-m4b.md` §1, steps 1–12, with Docker up (`pg17` and `pg16`), real VS Code, Finder
      and Terminal;
-   - §2, the E12 rows marked PO;
+   - §2, the quiet-machine E12 re-runs;
    - the PNG and DESIGN.md sign-off (E10);
-   - the rulings in sections 5–6;
+   - the rulings in sections 5–6, R-GF-1 included;
    - the PO queue (`po-bekleyen.md` item 20), including the Roll back wording.
-6. **Merge to `main`:** only on the PO's word. PR #6 stays a draft until then.
+3. **Merge to `main`:** only on the PO's word. PR #6 stays a draft until then.
+
+**Closed by gatefix-1** (were items 1–3 at `c8812c7d`): E9 (now empty) and E12 Go to script and
+watcher idle CPU (now PASS, §1).
 
 ## 1. Exit criteria E1 to E12
 
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
 | E1 | The same library appears under orders-prod and orders-staging; a file opened from each runs on that connection with the right capsule | **PASS** (automated, local, and Docker on the gate runs); demo step 2 **PENDING (PO)** | **Local at `c8812c7d`, all green (§3a):** `scripts_projection` `same_library_under_prod_and_staging` and `rows_under_two_connections_have_different_keys` (T13); `scripts_tabs` `tab_runs_on_the_connection_it_was_opened_under`, `two_tabs_same_file_two_connections` and `restore_keeps_binding_and_reads_current_env` (T14, which also probes the server database before every Run, R-T14-2); `mysql_tab_reconnect_reapplies_its_database_before_run`, `unbound_script_tab_is_never_bound_by_a_connect`. **Docker (CI only):** `hacivat-scripts --test docker_m4b` `same_library_runs_on_each_connection` (pg17/pg16, mysql84/mysql80, sqlite), through the real ScriptRunner, the gate and T14's check (R-T19-1), plus `mysql_schema_is_the_database_level`, `mysql_tab_session_reopened_after_a_kill_is_switched_back` and `mysql_default_session_reconnect_replays_its_schema`. **Gate run 45202154953, docker-full (job 137788196716, green, 202 result blocks, 0 failed)** logs six `HV-FACT t19 e1` lines, among them `HV-FACT t19 e1 profile=orders-prod target=pg17 database=orders server_version_num=170012 env=production asked=2 no_asked=1 units_run=2 marker_prod=1 marker_staging=0 production_file_listed=true` and `HV-FACT t19 e1 profile=orders-staging target=pg16 database=orders server_version_num=160016 env=staging asked=0 no_asked=- units_run=2 marker_prod=1 marker_staging=1 production_file_listed=false`. The same pairs follow for `mysql84` (8.4.13, production) and `mysql80` (8.0.46, staging), and for sqlite (3.54.1). Each run lands only on its own server: the staging run leaves the prod marker at 1. Production asks, and staging asks nothing. Also logged: `HV-FACT t19 mysql_switch target=mysql84 default=orders script_before=orders script=orders_archive`, `HV-FACT t19 mysql_reconnect … after_check=orders_archive new_connection=true` and `HV-FACT t19 mysql_reopen … killed_state=Broken(NetworkReset) … after_check=orders_archive`. Dispatch 2 (45202181119, job 137788282835) logs the same lines. |
-| E2 | External edits made in VS Code appear without a reload | **PASS** (automated and measured, local); real VS Code **PENDING (PO)**: demo step 4 | **Local:** `watch_real` (real FSEvents) green; `scripts_tabs` `external_edit_appears_without_reload`, `dirty_tab_is_never_reloaded` and `save_over_external_change_asks`; `reload` (T11) `reload_is_held_during_a_composition_and_applied_after` and `the_landing_never_edits_or_scans_the_change`. **Measured (E12):** an in-place write → `LibraryEvent::FileChanged` on the open file in 321–371 ms (p50 339) over 20 writes, through the real `LibraryService` with OS watch sources on the 10,000-file library. A real VS Code save was never automated (T0 U-08), so the PO's step 4 settles it. On the other OSes, `watch_real` is green on Linux (build-test ubuntu, 45202154953) and Windows (build-test windows, PR 45202171406). build-test macOS is **PENDING (CI)**. |
+| E2 | External edits made in VS Code appear without a reload | **PASS** (automated and measured, local); real VS Code **PENDING (PO)**: demo step 4 | **Local:** `watch_real` (real FSEvents) green; `scripts_tabs` `external_edit_appears_without_reload`, `dirty_tab_is_never_reloaded` and `save_over_external_change_asks`; `reload` (T11) `reload_is_held_during_a_composition_and_applied_after` and `the_landing_never_edits_or_scans_the_change`. **Measured (E12):** an in-place write → `LibraryEvent::FileChanged` on the open file in 321–371 ms (p50 339) over 20 writes, through the real `LibraryService` with OS watch sources on the 10,000-file library. A real VS Code save was never automated (T0 U-08), so the PO's step 4 settles it. On the other OSes, `watch_real` was green at `c8812c7d` on Linux (build-test ubuntu, 45202154953) and Windows (build-test windows, PR 45202171406). On macOS, 45202154953 failed `git_checkout_2000_is_one_rescan` (an unopened-file burst, not the open-file path). gatefix-1 fixed it under R-GF-1 (amended): a present open file's hint is never delayed by a git operation window or an overflowed burst. The service-level latency was re-measured at `6f9adcdb`: p50 324 ms. The final CI on `6f9adcdb` is **pending: run 45626141405, run 45626158424, run 45626153027**. |
 | E3 | An `@production/` file is hidden on staging | **PASS** (automated); demo step 3 **PENDING (PO)** | `envscope` `envscope_table` (18 rows) and `untagged_profile_sees_only_unscoped`; `scan` `symlinked_env_folder_is_not_followed` and the invisible-prefix rows (T4 fr1, 26 more forms probed in review); `scripts_projection` `production_file_hidden_on_staging`; `scripts_goto` `production_scoped_file_offers_only_production` and `chooser_never_preselects_production`. R-T13-2 refuses a rename that changes a file's scope. All green at `c8812c7d`. |
 | E4 | A secret-like literal triggers the warning | **PASS** (automated); demo step 6 **PENDING (PO)** | `secrets` `secret_table` and `allow_comment_silences_one_line` (T6, with the byte-identity proptests against M3's redactor); `scripts_secrets` `secret_literal_triggers_the_warning_on_save` and `warning_never_echoes_the_value` (T17, 15 tests). Release perf (§3a): a 2 MiB scan in 3 ms (budget 20). All green. |
 | E5 | Git status badges match `git status` on a fixture repository | **PASS** (automated on all three OSes); demo step 7 **PENDING (PO)** | **Local, this commit:** `status_differential` `status_matches_git_cli` green, logging `HV-FACT t07 git_version=2.50.1 fixtures=23 equal=23`. `hostile_repo_runs_no_program` logs `HV-FACT t07 hostile os=macos detector=sandbox_exec spawned=Some(0) markers=0`, with the control at `spawned=Some(1)`. `scripts_projection` `git_badges_match_git_status_on_fixture`. Two independent reviews of the no-spawn core (T7 rounds 1–3, T20 rounds 1–5). `foreign_owner_repo_is_untrusted` is skipped without root (`HV-FACT t07 foreign_owner_repo_is_untrusted skipped uid=501`); its unit tests cover the check. **Gate runs:** build-test ubuntu of 45202154953 (job 137788196190, 0 failed) logs `HV-FACT t07 git_version=2.56.1 fixtures=23 equal=23`, `HV-FACT t07 hostile os=linux detector=strace spawned=Some(0) markers=0`, and the control `detector=strace spawned=Some(1)`. build-test windows of the PR run 45202171406 (job 137788236883, 0 failed) logs `HV-FACT t07 git_version=2.56.1.windows.1 fixtures=23 equal=23`, `HV-FACT t07 hostile os=windows detector=job_object spawned=Some(0) markers=0`, and the control `spawned=Some(1)`. |
 | E6 | No credentials are ever written into a library folder | **PASS** (automated, local, and Docker on the gate runs); demo step 11 **PENDING (PO)** | **Local:** `manifest` `manifest_type_has_only_three_fields` (T3); `recovery` `recovery_lives_outside_the_library_and_is_private` (T5); the app test `scripts_no_credentials` `no_credentials_are_ever_written_into_a_library_folder` (T19); `docker_m4b` `no_credentials_reach_the_library_with_a_fake` and `mapping_lifecycle_writes_no_profile_id_near_the_library` (these need no server). The E6 surfaces are attach, map, share, save, recover and run. "Save as… into a library" and "Move console to library…" were struck by R-C0-12. **Docker:** `no_credentials_reach_the_library_on_real_servers` (pg17, mysql84). Gate runs: docker-full of 45202154953 and 45202181119, and docker-pr of 45202171406 (job 137788238050, green). Each logs `HV-FACT t19 e6 connections=2 paths=9 trash=1 needles=25 found=0 git_unchanged=true manifest_keys=aliases,database,format recovered=1` twice, with `HV-FACT t19 e6 target=pg17 audited=true` and `target=mysql84 audited=true`. |
 | E7 | Security: path traversal, symlinks, untrusted `workspace.toml`, watcher limits, git never runs a program; fuzz targets clean for one nightly | **PASS** (automated, and one nightly fuzz-scripts on each gate dispatch) | **Tests, green at `c8812c7d`:** `pathsafe` `pathsafe_component_table`; `scan` `symlink_outside_is_listed_disabled_and_never_opened` and `scan_limits_stop_with_a_notice`; `fileio` `save_refuses_a_path_that_became_a_link`; `manifest` and `registry` (nesting guard, no replace); `watch_real` `dir_symlink_created_after_watch_is_not_walked`; `hostile_library` (15), `hostile_repo` and `hostile_repo_more` (6), `scripts_adversarial` (4). T20 found and fixed the alternates timeout (R-T20-2) and UNC/NTLM routes (fr4/fr5); 6 mutations go red. Three check-deps token rules are new, and `check-deps` is ok. **Fuzz:** T20 ran `workspace_toml` and `pathsafe` locally for 10 min each, with 0 crashes (7.4M and 10.5M runs; `pathsafe` again at 12.5M after fr1). **Gate fuzz-scripts, green on both dispatches, 600 s per target:** 45202154953 (job 137788196720) logs `workspace_toml` "Done 5858894 runs in 601 second(s)" and `pathsafe` "Done 10255046 runs"; 45202181119 (job 137788283448) logs 5,890,889 and 10,445,287 runs. The recorded residuals are in §9. |
-| E8 | Carried M3 items: files and encodings (UI-EDIT-02), T2 preview, 20–100 MB paste confirmation, Run as script in constant memory, `StreamSplitter` MySQL hold fixed | **PASS** (automated, local, and Docker on the gate runs); the local 150 MB perf test has a test-isolation defect (carried) | **Local:** `fileio` `fileio_round_trip_table`, `save_keeps_mode_and_link_target` and `failed_save_leaves_original` (T5); the editor `t2_preview` and paste tests, with R-T11-2 (no editable paste above 20 MB); `sql-split` with `a_misread_block_is_a_stop_or_the_whole_split` (R-M4b-47) and `eager_is_exact_off_mysql` (R-T8-4); exec `script_run` with `run_as_script_stops_when_file_changes_mid_run` and `rename_replace_mid_run_keeps_old_inode` (T12, two passes on every dialect, R-T12-1/2); `scripts_run_as_script` (T18, 17 tests). **Release perf, this commit:** `mysql_dump_of_150_mb_runs_in_constant_memory` run on its own (`--exact`, one test thread), twice: `HV-FACT t12 target=fake-mysql bytes=159744000 units=153600 pass1_rss_growth_mib=13 peak_held=132456 secs=23` (budget < 64 MiB growth), and 13 MiB / 25 s the second time. Run together with the other ignored test of `script_run` (the plan's `-- --ignored` form), it **failed** with `pass1_rss_growth_mib=254`. The cause is a test-isolation defect, not the runner: `one_line_pg_script_over_64_mib_is_refused` runs on a parallel thread of the same process, and the assertion reads process-wide RSS. Carried (§9) as a test fix: serialize the two RSS perf tests. **Docker:** `hacivat-exec --test docker_script_run`: `mysql_dump_of_150_mb_runs_in_constant_memory_on_a_real_server`, `stray_end_file_executes_nothing_on_a_real_server` and `a_denied_statement_late_in_a_file_executes_nothing_on_a_real_server`. **Gate run 45202154953, docker-full:** `HV-FACT t19 e8 target=mysql84 bytes=157298639 units=10613 units_run=10613 rows=1698080 rss_before_mib=31 rss_peak_mib=51 rss_growth_mib=20 pass1_peak_growth_mib=13 peak_held=110176 secs=195` (bound < 64 MiB). `stray_end … refused=Uncertain(UnknownBlock) units_run=0` on mysql80, mysql84, mariadb106, mariadb1011 and mariadb114, each with `statements=…Questions:1` equal to `one_read`. `late_denial … at_unit=Some(8001) units_run=0 rows=0 asked=0` on pg14–18 (`pg_state_change_unmoved=true`) and the five MySQL-family lines. Dispatch 2 (45202181119): `rss_growth_mib=7 pass1_peak_growth_mib=0`. PR run docker-pr: `rss_growth_mib=8`. |
-| E9 | No silent weakening: every M4b stub filled; `rg 'NotImplemented' crates/core/hacivat-scripts crates/core/hacivat-git crates/app/hacivat-app/src/scripts` empty outside tests | **FAIL** (the literal check). No unfilled stub was found. | The check prints 21 lines outside `tests/`. **Live code** (two lines): `watch/mod.rs:299` (the OS source after its debouncer is gone) and `watch/poll.rs:305` (the poll source after `stop`) return `Err(WatchError::NotImplemented)`. That is a stopped source, not a stub; both sources are filled (T9). **Declared variants that no product code constructs** (five): `RegistryError::NotImplemented` (`registry.rs:116`), `GitError::NotImplemented` (`hacivat-git/src/lib.rs:60`), `UnavailableReason::NotImplemented` (`service.rs:267`), `ReadError::NotImplemented` and `SaveError::NotImplemented` (`fileio.rs:196`, `:230`), `WatchError::NotImplemented` (`watch/mod.rs:135`). **Matches of those variants:** `projection.rs:852`, and `run_as_script.rs:220` (the exhaustive `ReadError` map) and `:1441` (in its `#[cfg(test)]` module). **Stale Task 1a docs:** `hacivat-scripts/src/lib.rs:18-23`, `service.rs:9-10`, `fileio.rs:5-6`, `hacivat-git/src/lib.rs:11`. No `todo!`/`unimplemented!` in the three paths. **Fix:** a small cleanup task, then a re-run of the check (section 0 item 1). |
-| E10 | Shots: 0 violations; every M4 shot unchanged against `render-m4-gate-e7323aa/`; `pseudo-screens` green | **PASS** (harness, T22-pre on `c8812c7d`'s code); `pseudo-screens` **PENDING (CI)**; PNG sign-off **PENDING (PO)** | T22-pre fr1, on the code merged as `c8812c7d`, did not re-render (no UI code changed since): a full render of **5,772** PNGs in 4 shards with **0 violations**. Against `render-m4-gate-e7323aa`: 5,116 compared, **36 breached**, which is exactly `shot-superseded-m4b.txt` (the T16 "Script libraries" Settings nav entry: 9 states × dark/light × en-XA/tr-XT at 960); **656 new** M4b PNGs in `render-m4b-new/`; 0 other changes. The T22-pre review approved them, checking real frames. DESIGN.md "Script Workspace (M4b)" (T21, re-derived from the code in fr1). **Needed:** `pseudo-screens` (ubuntu 1/2, 2/2, macos 1/1) green on 45202154953 and 45202181119; the PO's sign-off of the 36 + 656 PNGs and DESIGN.md. |
-| E11 | Gates green: clippy, the full test set and the perf lines, check-deps, l10n, tokens, `cargo deny`, `aws-lc-rs` absent; CI on the gate tip, every job green | Local lines **PASS** at `c8812c7d` (§3a), except the one perf line under E12; CI **PENDING (CI)**: 45202154953, 45202181119, 45202171406 | **Local (§3a):** clippy clean on every line; the full test set batched by crate is **8,038 passed, 0 failed**, 417 ignored, plus every feature line green; `check-deps` ok, including the three arms and `NoGitSubprocess`; `l10n check` 0 errors (96 L025 warnings); `tokens --check`, the generator `--check`s, `minicat --check` and `docker check-pins` ok; `cargo deny` bans, licenses and sources ok; `aws-lc-rs` matches no package. Perf lines: scan, status, secrets, reload and idle are green; `query_over_10k_entries_under_5ms` FAILS (E12). **CI at the time of writing: no job had failed.**
-- **45202154953 green (23):** l10n-check, release-tests, turkey-test, tokens, switch ubuntu, build-test ubuntu, check-deps, fuzz-meta, launch-smoke ubuntu/windows, fuzz-sql, vault-linux, nightly-package ×3, minicat-verify, bench, cargo-deny, keyring-windows/linux, docker-full, fuzz-scripts, sql-differential.
-- **45202181119 green (17):** docker-full, fuzz-scripts, sql-differential, launch-smoke ×3, keyring ×2, release-tests, l10n-check, minicat-verify, nightly-package windows/ubuntu, tokens, vault-linux, check-deps, cargo-deny.
-- **PR 45202171406 green (11):** build-test windows, turkey-test, docker-pr, check-deps, cargo-deny, l10n-check, tokens, launch-smoke ubuntu/windows, switch ubuntu, minicat-verify. launch-smoke macos and switch macos show **cancelled**; the controller should check why, and rerun.
-- **Still running:** build-test macOS ×3, build-test windows ×2, build-test ubuntu (dispatch 2 and PR), turkey-test (dispatch 2), pseudo-screens ×6, nightly-package macOS (dispatch 2), fuzz-meta, fuzz-sql and bench (dispatch 2), switch macOS ×2. **Needed:** every job green, namely build-test ×3, turkey-test, docker-pr (PR run), docker-full, fuzz-scripts, fuzz-meta, fuzz-sql, pseudo-screens and nightly-package ×3. A Windows build-test that times out in the post-job cache save after green tests is rerun with `--failed` (M4 lesson). |
-| E12 | Budgets on the PO's Mac | **FAIL** as measured. 6 of 8 sub-budgets PASS (not a quiet machine); Go to script **FAIL** (marginal); watcher idle CPU **FAIL** (a steady debouncer tick). Quiet re-runs **PENDING (PO)** | See the table below. |
+| E8 | Carried M3 items: files and encodings (UI-EDIT-02), T2 preview, 20–100 MB paste confirmation, Run as script in constant memory, `StreamSplitter` MySQL hold fixed | **PASS** (automated, local, and Docker on the gate runs) | **Local:** `fileio` `fileio_round_trip_table`, `save_keeps_mode_and_link_target` and `failed_save_leaves_original` (T5); the editor `t2_preview` and paste tests, with R-T11-2 (no editable paste above 20 MB); `sql-split` with `a_misread_block_is_a_stop_or_the_whole_split` (R-M4b-47) and `eager_is_exact_off_mysql` (R-T8-4); exec `script_run` with `run_as_script_stops_when_file_changes_mid_run` and `rename_replace_mid_run_keeps_old_inode` (T12, two passes on every dialect, R-T12-1/2); `scripts_run_as_script` (T18, 17 tests). **Release perf at `6f9adcdb`:** both ignored `script_run` tests together, in the plan's `-- --ignored` form: 2 passed / 0 failed, with `HV-FACT t12 target=fake-mysql bytes=159744000 units=153600 pass1_rss_growth_mib=12 peak_held=132456 secs=23` (budget < 64 MiB). The test-isolation defect found at `c8812c7d` is fixed: there, run together, they failed at 254 MiB (13 MiB alone), because both tests read process-wide RSS. gatefix-1 now serializes them with a process lock. **Docker:** `hacivat-exec --test docker_script_run`: `mysql_dump_of_150_mb_runs_in_constant_memory_on_a_real_server`, `stray_end_file_executes_nothing_on_a_real_server` and `a_denied_statement_late_in_a_file_executes_nothing_on_a_real_server`. **Gate run 45202154953, docker-full:** `HV-FACT t19 e8 target=mysql84 bytes=157298639 units=10613 units_run=10613 rows=1698080 rss_before_mib=31 rss_peak_mib=51 rss_growth_mib=20 pass1_peak_growth_mib=13 peak_held=110176 secs=195` (bound < 64 MiB). `stray_end … refused=Uncertain(UnknownBlock) units_run=0` on mysql80, mysql84, mariadb106, mariadb1011 and mariadb114, each with `statements=…Questions:1` equal to `one_read`. `late_denial … at_unit=Some(8001) units_run=0 rows=0 asked=0` on pg14–18 (`pg_state_change_unmoved=true`) and the five MySQL-family lines. Dispatch 2 (45202181119): `rss_growth_mib=7 pass1_peak_growth_mib=0`. PR run docker-pr: `rss_growth_mib=8`. |
+| E9 | No silent weakening: every M4b stub filled; `rg 'NotImplemented' crates/core/hacivat-scripts crates/core/hacivat-git crates/app/hacivat-app/src/scripts` empty outside tests | **PASS** at `6f9adcdb` | At `6f9adcdb` the check prints **nothing**: `rg` exit 1, no match at all, tests included. No `todo!` or `unimplemented!` appears in the three paths. At `c8812c7d` it printed 21 lines and was **FAIL**: five declared variants that nothing constructed, two `WatchError::NotImplemented` returns meaning "source stopped", and stale Task 1a docs. No stub was unfilled. gatefix-1 (`2c074167`) removed the variants, renamed the watcher's to `WatchError::Stopped` and fixed the docs. |
+| E10 | Shots: 0 violations; every M4 shot unchanged against `render-m4-gate-e7323aa/`; `pseudo-screens` green | **PASS** (harness, T22-pre on `c8812c7d`'s code; pseudo-screens green on 45202181119); final-run pseudo-screens **pending**; PNG sign-off **PENDING (PO)** | T22-pre fr1, on the code merged as `c8812c7d`, did not re-render (no UI code changed since): a full render of **5,772** PNGs in 4 shards with **0 violations**. Against `render-m4-gate-e7323aa`: 5,116 compared, **36 breached**, which is exactly `shot-superseded-m4b.txt` (the T16 "Script libraries" Settings nav entry: 9 states × dark/light × en-XA/tr-XT at 960); **656 new** M4b PNGs in `render-m4b-new/`; 0 other changes. The T22-pre review approved them, checking real frames. DESIGN.md "Script Workspace (M4b)" (T21, re-derived from the code in fr1). pseudo-screens was green in 45202181119 (`c8812c7d`, run success). gatefix-1 changed no `crates/ui` file, and only five lines of `hacivat-app` (`run_as_script.rs`, the `NotImplemented` arm), so the render stands. **Needed:** pseudo-screens green on the final runs (**pending: run 45626141405, run 45626158424**), and the PO's sign-off of the 36 + 656 PNGs and DESIGN.md. |
+| E11 | Gates green: clippy, the full test set and the perf lines, check-deps, l10n, tokens, `cargo deny`, `aws-lc-rs` absent; CI on the gate tip, every job green | Local lines **PASS** (§3a at `c8812c7d`; perf lines and E9 re-run at `6f9adcdb`, §3b); CI on `6f9adcdb` **pending: run 45626141405, run 45626158424, run 45626153027** | **Local:** at `c8812c7d` (§3a), clippy is clean on every line, and the full test set batched by crate is **8,038 passed, 0 failed**, 417 ignored, plus every feature line. `check-deps` is ok, including the three arms and `NoGitSubprocess`. `l10n check` gives 0 errors (96 L025 warnings). `tokens --check`, the generator `--check`s, `minicat --check` and `docker check-pins` are ok. `cargo deny` bans, licenses and sources are ok, and `aws-lc-rs` matches no package. At `6f9adcdb`, the controller's merge check gave check-deps ok, clippy 0/0, core 791/0, app 1442/0 and l10n 0 errors (ledger). The gate agent re-ran every perf line (§3b): all green, except one reload sample under load (E12). **CI on the previous tip `c8812c7d`:** 45202181119 success after a macOS rerun; PR 45202171406 success; 45202154953 red only on macOS `git_checkout_2000_is_one_rescan` (fixed by gatefix-1). Two jobs of the PR run (launch-smoke macOS and switch macOS) were cancelled, then rerun to success. **CI on `6f9adcdb`:** when this was written, 16 jobs of 45626141405 were green, 1 of 45626158424 and 4 of 45626153027, with none failed. **Needed:** every job green on the three final runs. A Windows build-test that times out in the post-job cache save after green tests is rerun with `--failed` (M4 lesson). |
+| E12 | Budgets on the PO's Mac | **PASS** at `6f9adcdb`: all 8 sub-budgets met as measured here (not a quiet machine; one reload sample over under load 15). Quiet re-runs **PENDING (PO)**. At `c8812c7d` it was **FAIL** (Go to script, watcher idle CPU) | See the table below. |
 
-**Summary at `c8812c7d`.**
+**Summary at `6f9adcdb`.**
 
-- **PASS on their automated evidence:** E1, E3, E4, E5, E6, E7 and E8, Docker facts from the gate
-  runs included; and E2. Each still has its PO demo step.
-- **FAIL:**
-  - E9: the literal `NotImplemented` check. No unfilled stub was found.
-  - E12: Go to script is 5–12 % over its 5 ms budget, and the watcher's idle CPU is a steady
-    debouncer tick per library.
-- **PENDING (CI):** E10's pseudo-screens and E11's remaining jobs.
+- **PASS on their automated evidence:** E1–E9 and E12. The Docker facts of E1, E6 and E8 come
+  from the `c8812c7d` gate runs, and E2–E8 each keep their PO demo step.
+- **E10:** the harness PASSes; the PNG sign-off is the PO's, and pseudo-screens is pending on
+  the final runs.
+- **E11:** local PASS; CI pending (runs 45626141405, 45626158424 and 45626153027).
+- **No criterion FAILS.**
 
-**The gate does not close until section 0 items 1–4 are settled.**
+The gate closes when the final CI is green; the PO's items (section 0 item 2) follow.
 
-### E12 budgets (measured by the gate agent on this Mac, build `c8812c7d`, release)
+### E12 budgets (measured by the gate agent on this Mac, release builds)
 
-The fixture is a generated library of 10,000 `.sql` files, 100 folders of 100. It is a git
-repository with one commit, packed with `git gc`, plus 100 modified files. The fixtures were
-built under the slot's `tmp/` and deleted afterwards.
+- **Fixture:** a generated library of 10,000 `.sql` files, 100 folders of 100. It is a git
+  repository with one commit, packed with `git gc` (the 3-library runs skip `gc`), plus 100
+  modified files.
+- **Setups:**
+  - **At `6f9adcdb`:** the fixtures are under `$TMPDIR`, **outside any git repository**
+    (`git rev-parse` fails there). The 100-file libraries have no repository.
+  - **At `c8812c7d`:** the fixtures were under the slot's `tmp/`, which is **inside the hacivat
+    checkout**. So the libraries without their own repository, and the enclosing folder of the
+    others, belonged to the hacivat repository. gatefix-1 showed that such libraries pay the
+    service's 60 s git backstop on the whole hacivat repository.
+  - At `6f9adcdb` the service idle run was also repeated inside the checkout, to show that
+    effect.
+- All fixtures were deleted afterwards.
 
-| Budget | Method | Result | Status |
-|---|---|---|---|
-| Scan of 10,000 files ≤ 500 ms, off the UI thread | `HACIVAT_PERF=1 cargo test --release -p hacivat-scripts --test scan -- --ignored` (`scan_of_10k_files_under_500ms`; real APFS tree) | `HV-FACT t04 scan_files=10000 took_ms=27`; 20,000 in 43 ms (budget 300). Through the real `LibraryService` (attach on the service's workers, never the caller's thread): attach → 10,000 entries listed and `Watching` in **136 ms** (the attach call itself returned in 53 ms). Load average 11. | **PASS** |
-| External edit visible ≤ 1 s after the write | A scratch test (not committed) through `LibraryService::open` with the OS watch sources: open a file (`read`), wait 2.5 s (past R-T9-3's racy-clean window), write it in place, and time until `LibraryEvent::FileChanged` for that file. 20 files. | min 321, **p50 339**, p95 369, max **371 ms**. The tab's reload then adds a background diff and a UI landing ≤ 1 ms (next row). | **PASS** (service level; the visible tab with real VS Code is demo step 4) |
-| Git status of 10,000 files ≤ 1 s | `HACIVAT_PERF=1 cargo test --release -p hacivat-git --test status_differential -- --ignored` (`status_of_10k_files_under_1s`) | `HV-FACT t07 perf status_10k_ms=75 changed=100`; 20,000 dataless excludes in 89 ms. Through the service: attach → git summary `Ready` in 236 ms (from the attach call, the first status included). This settles T0 U-05 (no gix `parallel` feature needed). | **PASS** |
-| Go to script query ≤ 5 ms on 10,000 entries | `HACIVAT_PERF=1 cargo test --release -p hacivat-scripts --test index -- --ignored` (`query_over_10k_entries_under_5ms`: Turkish-tolerant `rep42` over 10,000 paths, best of 5 after a warm-up) | 9 runs: 5,011, 4,971, 5,013, 5,126, 5,063 and 5,069 µs at load 11–16, then 5,233, 5,369 and 5,587 µs at load 6. 1 of 9 under the budget. Lower load did not help, so the miss is not explained by load. This is the first release run (T10 reported debug only, 31 ms). | **FAIL** (5–12 % over; the PO re-measures or rules) |
-| Reload UI share ≤ 1 ms on 2 MB | `HACIVAT_PERF=1 cargo test --release -p hacivat-ui-editor --lib -- --ignored reload_ui_share` | `HV-FACT m4b-t11 reload_ui_share_2mb case=middle worst_us=917`; `case=both_ends worst_us=386` (worst of 20 rounds; load 14). | **PASS** (close to the limit under load) |
-| Idle CPU of the watcher ≈ 0, one sample per minute for 10 min | (a) The scratch service test: three libraries watched (10,000 + 100 + 100 files), process CPU from `ps` once a minute for 10 min. (b) The real release app (`hacivat`, isolated `HOME` with the same three libraries in `libraries.toml`), window open and idle, CPU from `ps` once a minute for 10 min. (c) `watch_real` `idle_cpu_is_recorded` (10 watchers, 5 s). | (a) Service only, 3 libraries: 210, 100, 150, 110, 130, 140, 160, 130, 170 and 160 ms of CPU per minute. (b) The real app with 3 libraries: 130, 240, 130, 170, 150, 160, 170, 170, 149 and 161 ms per minute, RSS 104–135 MiB. The **same app with no library**: 10, 140, 1,230 (one burst), 20 and 10 ms per minute over 5 minutes. (c) `HV-FACT t09 idle_watchers=10 wall_ms=5063 cpu_ms=20`. A 3-minute repeat of (a) without a git repository gave 220/200/190 ms, so git status is not the cause. **Cause, found by `sample`:** each library's `notify-debouncer-full` 0.7.0 thread ("notify-rs debouncer loop") wakes every `tick` = 150 ms / 4 = 37.5 ms forever, even with no event (`std::thread::sleep(tick)`, `notify-debouncer-full/src/lib.rs:674`). That is about 27 wakes per second per library, a steady ~0.25 % of one core for three libraries. It grows with the number of libraries (32 allowed) and keeps the process from idling. | **FAIL** (not ≈ 0: steady, about 10× the no-library baseline). Fix options in §0. |
-| First frame ≤ 500 ms and idle RSS ≤ 200 MB, no library (`--smoke` ×3) | `target/release/hacivat --smoke` ×3 with an empty, isolated `HOME` (so the PO's own settings were not touched) | first frame **271 / 180 / 159 ms**; idle RSS **121 / 121 / 122 MiB** | **PASS** |
-| First frame ≤ 500 ms and idle RSS ≤ 200 MB with 3 libraries attached (spec §3.3) | `--smoke` ×3 with an isolated `HOME` whose `libraries.toml` lists the three libraries (10,000 + 100 + 100 files, the large one a git repository). The library service opens at launch when the registry exists; it resolved and wrote back each library's canonical path and inode, so all three were opened. | first frame **146 / 162 / 162 ms**; idle RSS (5 s after the first frame) **138 / 139 / 138 MiB** | **PASS** (the PO repeats it on a quiet machine with real libraries, `po-demo-m4b.md` §2.2) |
+| Budget | Method | At `6f9adcdb` | Status | At `c8812c7d` (before gatefix-1) |
+|---|---|---|---|---|
+| Scan of 10,000 files ≤ 500 ms, off the UI thread | `HACIVAT_PERF=1 cargo test --release -p hacivat-scripts --test scan -- --ignored` (`scan_of_10k_files_under_500ms`; real APFS tree); and attach → listed through the real `LibraryService` | `HV-FACT t04 scan_files=10000 took_ms=26`; 20,000 in 45 ms (budget 300). Service: attach → 10,000 listed and `Watching` in **95 ms** outside git and 105 ms inside the checkout. The attach call returned in 31–39 ms. Load 17. | **PASS** | 27 ms; attach → listed 136 ms |
+| External edit visible ≤ 1 s after the write | A scratch test (not committed) through `LibraryService::open` with the OS watch sources. It opens a file (`read`) and waits 2.5 s (past R-T9-3's racy-clean window). Then it writes the file in place and times the wait for `LibraryEvent::FileChanged` on it. 20 files. | Outside git: min 319, **p50 324**, p95 329, max **330 ms**. Inside the checkout: 318 / 324 / 327 / 328 ms. The tab's reload then adds a background diff and a UI landing ≤ 1 ms. | **PASS** (service level; the visible tab with real VS Code is demo step 4) | 321 / 339 / 369 / 371 ms |
+| Git status of 10,000 files ≤ 1 s | `HACIVAT_PERF=1 cargo test --release -p hacivat-git --test status_differential -- --ignored` (`status_of_10k_files_under_1s`) | `HV-FACT t07 perf status_10k_ms=85 changed=100`; 20,000 dataless excludes in 83 ms. Service: attach → git summary ready in 159 ms (outside) and 192 ms (inside). No gix `parallel` feature is needed (T0 U-05). | **PASS** | 75 ms; 236 ms |
+| Go to script query ≤ 5 ms on 10,000 entries | `HACIVAT_PERF=1 cargo test --release -p hacivat-scripts --test index -- --ignored` (`query_over_10k_entries_under_5ms`: Turkish-tolerant `rep42` over 10,000 paths, best of 5 after a warm-up; plus gatefix-1's `query_shapes_over_10k_entries_under_5ms`) | 6 runs: **862, 781, 800, 755, 791 and 775 µs**, at load 17. Other shapes: `report` 2,291, `musteri` 936, `r` (the worst) 3,348, `folder_42` 820, `zzz` 397, empty 106 µs. All under 5 ms. | **PASS** | 4,971–5,587 µs, 8 of 9 over: FAIL |
+| Reload UI share ≤ 1 ms on 2 MB | `HACIVAT_PERF=1 cargo test --release -p hacivat-ui-editor --lib -- --ignored reload_ui_share` (worst of 20 rounds per case) | First run at load 15: `case=middle worst_us=1158`, **over**. Then 5 runs at load 8: middle 478 / 368 / 381 / 318 / 330 µs, both ends 316 / 304 / 416 / 331 / 297 µs. The editor is unchanged since `c8812c7d` (gatefix-1 touched no `crates/ui` file). | **PASS** (5 of 6 runs; load-sensitive; the PO re-runs it quietly) | 917 / 386 µs at load 14 |
+| Idle CPU of the watcher ≈ 0, one sample per minute for 10 min | Three libraries (10,000 + 100 + 100 files); CPU from `LC_ALL=C ps -o time=` once a minute (10 ms resolution). (a) The scratch service test. (b) The real release app with an isolated `HOME` whose `libraries.toml` lists the three; window open and idle. (c) `watch_real` `idle_cpu_is_recorded` (10 watchers, 5 s). | (a) Outside git: **10, 0, 0, 10, 0, 10, 10, 0, 10, 0** ms per minute. Inside the checkout: 50, 60, 60, 100, 100, 110, 100, 100, 100 and 100. That cost is the service's 60 s git backstop on the enclosing hacivat repository (gatefix-1's finding), not the watcher. (b) The real app, outside git: 150 in the first minute (start-up settling, like the no-library app's own first-minutes burst), then **10, 0, 10, 0, 10, 0, 0, 10, 0**; RSS 135 → 90 MiB. (c) `HV-FACT t09 idle_watchers=10 wall_ms=5043 cpu_ms=0`. | **PASS** | (a) 100–210 and (b) 130–240 ms per minute, inside the checkout, with `notify-debouncer-full`'s 37.5 ms tick per library: FAIL. The no-library app gave 10–20. |
+| First frame ≤ 500 ms and idle RSS ≤ 200 MB, no library (`--smoke` ×3) | `target/release/hacivat --smoke` ×3 with an empty, isolated `HOME` (the PO's own settings are never touched) | first frame **207 / 197 / 164 ms**; idle RSS **121 / 122 / 121 MiB** | **PASS** | 271 / 180 / 159 ms; 121–122 MiB |
+| First frame ≤ 500 ms and idle RSS ≤ 200 MB with 3 libraries attached (spec §3.3) | `--smoke` ×3 with an isolated `HOME` whose `libraries.toml` lists the three libraries (outside git). The service opens at launch when the registry exists. It wrote back all three canonical paths, so all three were opened. | first frame **159 / 158 / 169 ms**; idle RSS (5 s after the first frame) **138 / 136 / 138 MiB** | **PASS** (the PO repeats it quietly with real libraries, `po-demo-m4b.md` §2.2) | 146–162 ms; 138–139 MiB |
+
+**Correction to the `c8812c7d` text.** That version said: "a 3-minute repeat without a git
+repository gave 220/200/190 ms, so git status is not the cause". That repeat still ran inside the
+hacivat checkout, so its library was inside the hacivat repository. The old idle cost was the
+debouncer tick **plus** the 60 s backstop on the enclosing repository. gatefix-1 removed the
+tick. The backstop remains for a library inside a large repository (inside-checkout row above:
+about 100 ms per minute).
 
 ## 2. Gate steps (Task 22)
 
@@ -140,7 +168,7 @@ built under the slot's `tmp/` and deleted afterwards.
 | 3 | E12 on the PO's Mac; `--smoke` ×3; machine, build hash | **Done headlessly** (E12 table; build `c8812c7d`). The quiet-machine and real-library re-runs are **PENDING (PO)**: `po-demo-m4b.md` §2. |
 | 4 | `po-demo-m4b.md` | Written. Every step was pre-run through its automated tests. Real VS Code, Finder and Docker are the PO's. |
 | 5 | `m4b.md` | This file |
-| 6 | Commit `docs(m4b): gate record and PO demo checklist` | This commit (not pushed; the controller pushes) |
+| 6 | Commit `docs(m4b): gate record and PO demo checklist` | `7a9bff3c`; updated at `6f9adcdb` by `docs(m4b): gate record at 6f9adcdb` (not pushed) |
 
 ## 3a. Step 2 local gate lines at `c8812c7d` (gate agent)
 
@@ -195,6 +223,23 @@ The `linker_messages` warning (`ld: __eh_frame section too large`) shows when th
 binaries link. It is environmental and pre-existing (T13, T15 and T22-pre reviews), and it is
 carried (§9).
 
+## 3b. Re-run at `6f9adcdb` (gate agent, 2026-11-25)
+
+Slot `slot-ui-1`, after `cargo clean -p` of every member (4,501 files, 2.4 GiB), with the same
+environment as §3a. Release builds.
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `rg 'NotImplemented' crates/core/hacivat-scripts crates/core/hacivat-git crates/app/hacivat-app/src/scripts` | **empty** (exit 1), tests included |
+| 2 | `HACIVAT_PERF=1 cargo test --release --no-fail-fast -p hacivat-scripts --test scan --test index --test secrets -- --ignored` | **5/0**: scan 26 ms / 45 ms, Go to script 862 µs plus the shape line, secrets 3 ms |
+| 3 | the index line alone ×5 | 781, 800, 755, 791 and 775 µs (all ok) |
+| 4 | `HACIVAT_PERF=1 cargo test --release -p hacivat-git --test status_differential -- --ignored` | 2/0 (85 ms; 83 ms) |
+| 5 | `HACIVAT_PERF=1 cargo test --release -p hacivat-scripts --test watch_real -- --ignored idle_cpu_is_recorded` | 1/0, `cpu_ms=0` |
+| 6 | `HACIVAT_PERF=1 cargo test --release -p hacivat-ui-editor --lib -- --ignored reload_ui_share` | 0/1 at load 15 (1,158 µs), then 5 × 1/0 at load 8 (≤ 478 µs) |
+| 7 | `HACIVAT_PERF=1 cargo test --release -p hacivat-exec --test script_run -- --ignored` (both tests together) | **2/0**, `pass1_rss_growth_mib=12` |
+| 8 | The scratch service test, ×2 in parallel (outside git, inside the checkout), with a 10-minute idle phase | E12 |
+| 9 | `cargo build --release -p hacivat`, `--smoke` ×3 twice, and the real app idle for 10 minutes | E12 |
+
 ## 4. CI runs cited
 
 | Run | Ref | What it shows |
@@ -205,9 +250,12 @@ carried (§9).
 | 45146579446 | `m4b-cifix-6` | build-test macOS/ubuntu, turkey and docker-full green; the Windows timeout → R-C0-15 |
 | 45155213467 | `m4b-t20-adversarial` | Windows git suites green (`hostile_repo_more` 8/0, `status_differential` 25/0) |
 | 45169394359, 45169529481 | `m4b` `d5a4fd95` | The previous gate tip: PR run 45169529481 all green (docker-pr included); superseded by T22-pre |
-| **45202154953** | `m4b` `c8812c7d` | **Gate dispatch 1**: 23 jobs green (docker-full, fuzz-scripts, build-test ubuntu, turkey, nightly-package ×3 …), none failed; build-test macOS/windows, pseudo-screens ×3 and switch/launch-smoke macOS still running: PENDING (CI) |
-| **45202181119** | `m4b` `c8812c7d` | **Gate dispatch 2**: 17 green (docker-full, fuzz-scripts …), none failed; build-test ×3, turkey, pseudo-screens ×3 and others running: PENDING (CI) |
-| **45202171406** | PR #6, `c8812c7d` | **Gate PR run** (`pull_request`): docker-pr, build-test windows and turkey-test green; build-test ubuntu/macOS running; launch-smoke macOS and switch macOS **cancelled**: PENDING (CI) |
+| **45202154953** | `m4b` `c8812c7d` | **Gate dispatch 1**: docker-full, fuzz-scripts, build-test ubuntu, turkey and nightly-package ×3 green; it ended red only on macOS `git_checkout_2000_is_one_rescan` (fixed by gatefix-1) |
+| **45202181119** | `m4b` `c8812c7d` | **Gate dispatch 2**: **success** after a macOS rerun (ledger), pseudo-screens included |
+| **45202171406** | PR #6, `c8812c7d` | **Gate PR run** (`pull_request`): docker-pr, build-test windows and turkey-test green; launch-smoke macOS and switch macOS were cancelled, then the run ended **success** (ledger) |
+| **45626141405** | `m4b` `6f9adcdb` | **Final gate dispatch 1**: pending: run 45626141405 |
+| **45626158424** | `m4b` `6f9adcdb` | **Final gate dispatch 2**: pending: run 45626158424 |
+| **45626153027** | PR #6, `6f9adcdb` | **Final gate PR run** (docker-pr): pending: run 45626153027 |
 
 ## 5. Rulings R-M4b-1 to R-M4b-47 for PO confirmation
 
@@ -310,7 +358,8 @@ Short form; the full text and reason of each is in `progress.md`.
 | R-T20-1/2 | `Untrusted(GitdirOutside)` superseded by `Unavailable(Redirected)`; alternates allowed only as a root file of ≤ 16 absolute byte-exact entries, else Redirected | |
 | R-T21-1 | The script tab title shortens by width; the full connection name shows while the active tab fits | |
 | R-T22-1/2 | In a console tile during a run: toolbar and trust, then strip and Stop, then the most severe notice, then two code lines; a focused control is never obscured | |
-| R-T22-3 | ρ1/ρ2 recorded as M4b residuals; the fix carried to the M5 pre-flight (§9) | |
+| R-T22-3 | ρ1/ρ2 recorded as M4b residuals. In a 120 px console tile during a run, a focused lower notice pushes the strip out, or the most severe notice's focused button cannot show; the toolbar Stop stays visible. The fix is carried to the M5 pre-flight (§9) | |
+| R-GF-1 (amended) | An open file's hint is never delayed by a git operation window or an overflowed burst; only unopened files wait for the rescan. Amended in fr2: the bypass reports early only an open file that is **still present**; a gone open file waits for the rescan, so a rename pairs | |
 | R-CI2-1..4 | btime is an identity part on Linux only; index heads validated before any fs call; `index.lock` bounds a checkout burst; host-only name rules | |
 
 **PO queue items** (`po-bekleyen.md` item 20), all open:
@@ -394,10 +443,11 @@ Every default is in force as a ruling (R-C0-1); none was overturned.
 | T5 residuals: xattrs and ACLs lost on rename-replace; in-place writes for hard-linked files not atomic (restore on error, R-T5-1); the R-T3-1 macOS check-then-act window | recorded (ADR 0009) | T3, T5 |
 | `introspect_live_choice_persists` (M4 flake, `metadata_settings`): instrumented with an `HV-FACT m4b-t22-pre … failed_in=…` line on failure; not reproduced in 824 local runs. If CI fails it, the fact names the step | watch on CI; root-cause on first failure | T21 m12, T22-pre |
 | The `linker_messages` warning (`ld: __eh_frame section too large (max 16MB)`) on the big app test binaries | M5 or later (split the big test binaries, or accept) | T13/T15/T22-pre reviews |
-| Test isolation: `script_run`'s two ignored RSS perf tests run in parallel in one process, so the 150 MB test's process-wide RSS assertion fails when both run (`-- --ignored`). Serialize them (a static lock, as cifix-6 did) or move one to its own target | before the next perf run (small test fix) | this gate (E8) |
-| E9 cleanup: dead `NotImplemented` variants, `WatchError::NotImplemented` meaning "stopped", stale Task 1a docs | **before the gate closes** (§0) | this gate |
-| Watcher idle CPU: `notify-debouncer-full`'s 37.5 ms tick per library (E12), with the fix options in §0 item 3 | **before the gate closes**, or a PO ruling | this gate |
-| Go to script release budget (5 ms at 10,000 entries) at the limit on this Mac | **before the gate closes** (§0): quiet re-run or ruling | this gate |
+| gatefix-1 r-fr2-1: a gone open file kept as a candidate by a rescan should settle even while a non-git burst holds (today it waits for the burst to end: 2.3 s / 9.3 s for 3 s / 10 s bursts) | **M5 pre-flight** (M4b residual) | gatefix-1 re-review fr2 |
+| gatefix-1 r-fr2-2: `OPENED_TTL` equals `MAX_POLL_INTERVAL`; make it about 2×, or expire an entry only once the watcher learns a stamp dated after the read | **M5 pre-flight** (M4b residual) | gatefix-1 re-review fr2 |
+| gatefix-1 m-fr1-3: per-tick library scans for new-file hints from generators (197 scans in 14 s, bounded) | **M5 pre-flight** | gatefix-1 review (T20 list) |
+| A library inside a large repository (no repository of its own) pays the service's 60 s git backstop on the enclosing repository: about 100 ms of CPU per minute with the hacivat repository (E12) | M5 or later (observation; a design question, not a defect) | this gate, gatefix-1 report |
+| Closed at `6f9adcdb` by gatefix-1: the E9 residue, the Go to script budget, the watcher idle tick, and the `script_run` RSS-test isolation | — (closed) | this gate |
 | notify 9.x (needs a ruling on BSL-1.0 `xxhash-rust`) | after M4b | T0 U-11 |
 | Windows `build-test` post-job cache-save timeout (M4 carry) | watch; R-C0-15 raised the cap | M4, R-C0-15 |
 
@@ -415,6 +465,7 @@ Its pre-flight starts from this gate's tip and takes, besides its own items:
 
 - HV-EXEC-13 (explain plan; R-M4b-35);
 - the R-T22-3 split-floor fix;
+- gatefix-1's residuals r-fr2-1, r-fr2-2 and m-fr1-3;
 - the redaction pass for the M3 history gaps;
 - T12 n2/n4 (the splitter context and the MariaDB bound);
 - SQLite attached-database scripts;
@@ -427,7 +478,8 @@ policy, which differs from `Exact` only on MySQL/MariaDB (R-T8-4), and its doc-h
 ## 11. Notes found while writing this record
 
 1. **The Go to script perf line had never run in release before the gate.** T10 measured debug
-   only and left the release run to the gate; the first release run is at the budget (E12).
+   only and left the release run to the gate. The first release run was at the budget, and
+   gatefix-1 made it about 6× faster (E12).
 2. **E9's literal check was never run by a task.** Every filling task removed its own stub's
    behaviour, but not the variant or the module doc that named it. The live
    `WatchError::NotImplemented` returns are T9's choice for a stopped source.
@@ -436,4 +488,8 @@ policy, which differs from `Exact` only on MySQL/MariaDB (R-T8-4), and its doc-h
 4. **The E12 "external edit" figure is a service-level number.** It is measured from the write to
    the `FileChanged` event the tab reloads from. The visible tab adds a background diff and a UI
    landing ≤ 1 ms. The end-to-end check with real VS Code is demo step 4.
-5. **The watcher's idle cost was never measured past 5 s.** T9's `idle_cpu_is_recorded` (10 watchers, 5 s, 20 ms) records the figure but asserts nothing. At this tick rate, the per-minute figure is what shows the steady cost.
+5. **The watcher's idle cost was never measured past 5 s** (fixed by gatefix-1, E12). T9's `idle_cpu_is_recorded` (10 watchers, 5 s, 20 ms) records the figure but asserts nothing. At this tick rate, the per-minute figure is what shows the steady cost.
+6. **The first E12 fixtures sat inside the hacivat checkout.** That mixed a design cost of
+   nested libraries (the 60 s git backstop on the enclosing repository) into the watcher
+   measurement. The `6f9adcdb` re-run uses fixtures outside any repository, and repeats the
+   service run inside the checkout for contrast.

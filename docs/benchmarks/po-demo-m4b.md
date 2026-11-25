@@ -17,7 +17,7 @@ Each step gives:
 Write each result in the tables of section 4.
 
 - Gate record: `docs/benchmarks/m4b.md`. Its section 0 orders everything the PO does.
-- **Pre-run by the gate agent (Task 22, at `c8812c7d`).** The agent had no Docker, no VS Code
+- **Pre-run by the gate agent (Task 22, at `c8812c7d`; E12 re-measured at `6f9adcdb`).** The agent had no Docker, no VS Code
   session and no hands on the window. "Pre-run: tests" means the step's behaviour was re-run
   through the named automated tests on this commit, all green (`m4b.md` section 3a), except where
   a step says otherwise. "PO" means
@@ -203,8 +203,8 @@ Create these profiles (⌘N, "Save and connect"):
   - Tests: `watch_real` (T9, real FSEvents), `external_edit_appears_without_reload`,
     `dirty_tab_is_never_reloaded`, `save_over_external_change_asks` (T14);
     `reload_is_held_during_a_composition_and_applied_after` (T11).
-  - Measured: an in-place write → `FileChanged` on the open file in 321–371 ms (p50 339) over 20 writes on
-    this Mac (`m4b.md` E12).
+  - Measured: an in-place write → `FileChanged` on the open file in 319–330 ms (p50 324) over 20 writes on
+    this Mac, at `6f9adcdb` (`m4b.md` E12).
   - **PO:** real VS Code.
 
 ### Step 5: Finder rename and delete
@@ -306,8 +306,8 @@ Create these profiles (⌘N, "Save and connect"):
   - Decide which one to keep.
 - **Pre-run: tests.**
   - `run_as_script_stops_when_file_changes_mid_run` (T12, exec);
-  - `mysql_dump_of_150_mb_runs_in_constant_memory`: 13 MiB growth when run alone. It fails beside
-    its sibling perf test (a test-isolation defect, `m4b.md` E8);
+  - `mysql_dump_of_150_mb_runs_in_constant_memory`: 12 MiB growth, run with its sibling at
+    `6f9adcdb` (`m4b.md` E8);
   - the `scripts_run_as_script` set (T18, 17 tests), `cross_surface_m4b`, `the_landing_never_edits_or_scans_the_change`.
   - Docker, CI only: the 150 MiB dump on mysql84 (`m4b.md` E8).
 
@@ -417,8 +417,9 @@ for m in $(seq 1 10); do sleep 60; now=$(cpu); echo "minute $m cpu_ms=$((now - p
 ```
 
 - Budget: ≈ 0. Compare with the same loop and no library attached.
-- The gate agent measured 130–240 ms per minute with three libraries, against 10–20 ms with none
-  (`m4b.md` E12: FAIL, a debouncer tick per library). Re-run this after the fix, or rule on it.
+- The gate agent's numbers at `6f9adcdb`, with the libraries outside any git repository: 0–10 ms
+  per minute after the first minute (`m4b.md` E12). Keep your test libraries outside a large
+  repository: a library nested in one pays a status refresh of that repository every 60 s.
 
 ### 2.4 The headless budgets, on a quiet machine (optional re-run)
 
