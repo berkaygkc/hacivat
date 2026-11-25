@@ -610,8 +610,7 @@ mod reference {
             }
         }
         found.sort_by(|(a, ra), (b, rb)| {
-            a.cmp(b)
-                .then_with(|| ra.1.as_bytes().cmp(rb.1.as_bytes()))
+            a.cmp(b).then_with(|| ra.1.as_bytes().cmp(rb.1.as_bytes()))
         });
         found.truncate(limit);
         found.into_iter().map(|(_, row)| row).collect()
@@ -647,6 +646,8 @@ fn generated_corpus() -> (WorkspaceSnapshot, Vec<reference::Lib>) {
         "@nowhere",
         "İstanbul/q4",
         "a_b",
+        // ## m4b-gatefix-1 fix round 1 (m6): an NFD folder (as macOS hands it out).
+        "mu\u{308}s\u{327}teri/nfd",
     ];
     let stems = [
         "report_42",
@@ -663,6 +664,9 @@ fn generated_corpus() -> (WorkspaceSnapshot, Vec<reference::Lib>) {
         "e10",
         "events_2026_10",
         "report",
+        // ## m4b-gatefix-1 fix round 1 (m6): NFD and a long name.
+        "mu\u{308}s\u{327}teri_nfd",
+        "report_with_a_very_long_name_that_goes_on_and_on_for_well_over_one_hundred_characters_of_text_in_one_single_file_name_x",
     ];
     let exts = [".sql", ".md", ".txt"];
     let (mut libs, mut plain) = (Vec::new(), Vec::new());
@@ -754,7 +758,10 @@ fn ranking_equals_the_pre_gatefix_reference_on_a_generated_corpus() {
             }
         }
     }
-    assert!(compared > 5_000 && nonempty > 2_000, "{compared} {nonempty}");
+    assert!(
+        compared > 5_000 && nonempty > 2_000,
+        "{compared} {nonempty}"
+    );
 }
 
 /// Go to script on 10,000 entries for query shapes beyond `rep42`: one every entry matches as

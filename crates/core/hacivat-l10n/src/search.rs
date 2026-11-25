@@ -665,9 +665,10 @@ mod gatefix_tests {
         }
     }
 
-    const ALPHABET: [&str; 22] = [
+    // ## m4b-gatefix-1 fix round 1 (m6): combining marks (NFD), `/` and `\\` too.
+    const ALPHABET: [&str; 26] = [
         "a", "e", "r", "p", "o", "t", "4", "2", "0", "_", ".", "-", " ", "ş", "ü", "İ", "ı", "I",
-        "ß", "R", "É", "\u{200B}",
+        "ß", "R", "É", "\u{200B}", "u\u{308}", "\u{327}", "/", "\\",
     ];
 
     fn word(g: &mut Lcg, max: usize) -> String {
@@ -707,6 +708,27 @@ mod gatefix_tests {
         }
         // The corpus exercises both branches.
         assert!(hits > 500 && misses > 500, "hits {hits} misses {misses}");
+        // ## m4b-gatefix-1 fix round 1 (m6): keys past `FUZZY_MAX_TEXT` (both answer `None`
+        // past the size bound, a subsequence or not).
+        for tolerant in [false, true] {
+            let o = SearchOpts {
+                turkish_tolerant: tolerant,
+                mode: MatchMode::Fuzzy,
+            };
+            let folder = Folder::new(tolerant);
+            for len in [FUZZY_MAX_TEXT - 1, FUZZY_MAX_TEXT, FUZZY_MAX_TEXT + 7] {
+                let text: String = (0..len).map(|i| ALPHABET[i % 9]).collect();
+                let key = build_key(&text, &o);
+                for q in ["rep42", "a0", "zz", "ap"] {
+                    let q = folder.query(q);
+                    assert_eq!(
+                        fuzzy(&key, &q),
+                        fuzzy_reference(&key, &q),
+                        "len {len} {q:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

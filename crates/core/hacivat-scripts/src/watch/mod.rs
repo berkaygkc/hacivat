@@ -101,6 +101,7 @@ pub mod poll;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as mpsc_std;
@@ -217,7 +218,11 @@ fn items_of_event(ev: notify::Event) -> Vec<Item> {
         if ev.paths.is_empty() {
             return vec![Item::Rescan(None)];
         }
-        return ev.paths.into_iter().map(|p| Item::Rescan(Some(p))).collect();
+        return ev
+            .paths
+            .into_iter()
+            .map(|p| Item::Rescan(Some(p)))
+            .collect();
     }
     ev.paths.into_iter().map(Item::Path).collect()
 }
@@ -235,7 +240,13 @@ fn items_of_error(e: notify::Error) -> Vec<Item> {
     }
     e.paths
         .into_iter()
-        .map(|p| if lost { Item::Lost(Some(p)) } else { Item::Path(p) })
+        .map(|p| {
+            if lost {
+                Item::Lost(Some(p))
+            } else {
+                Item::Path(p)
+            }
+        })
         .collect()
 }
 
@@ -263,6 +274,9 @@ enum Raw {
 struct Counts {
     wakes: AtomicU64,
     events: AtomicU64,
+    // ## m4b-gatefix-1 fix round 1 (review I2)
+    /// Items waiting for their delivery after the last wake (0: the thread is drained).
+    pending: AtomicU64,
 }
 
 /// The debounce thread's counts (`test-support`): the idle proof reads them.
@@ -273,6 +287,9 @@ pub struct DebounceCounts {
     pub wakes: u64,
     /// Messages the backend sent it.
     pub events: u64,
+    /// ## m4b-gatefix-1 fix round 1 (review I2): items waiting for delivery (0: drained, so
+    /// no wake is due without a new event).
+    pub pending: u64,
 }
 
 /// The pending items of the debounce thread, in arrival order (so their due times ascend),
@@ -376,9 +393,9 @@ impl DebounceThread {
         DebounceCounts {
             wakes: self.counts.wakes.load(Ordering::Relaxed),
             events: self.counts.events.load(Ordering::Relaxed),
+            pending: self.counts.pending.load(Ordering::Relaxed),
         }
     }
-
 }
 
 impl Drop for DebounceThread {
@@ -423,22 +440,26 @@ fn debounce_loop(rx: &mpsc_std::Receiver<Raw>, sinks: &Sinks, counts: &Counts) {
             };
         }
         let now = Instant::now();
-        if not_before.is_some_and(|nb| now < nb) {
-            continue;
+        if not_before.is_none_or(|nb| now >= nb) {
+            let due = pending.take_due(now);
+            let urgent = std::mem::take(&mut pending.urgent);
+            // Paths first, then errors, as the old debouncer delivered them.
+            if !due.is_empty() {
+                route(sinks, &due);
+            }
+            if !urgent.is_empty() {
+                route(sinks, &urgent);
+            }
+            if !due.is_empty() || !urgent.is_empty() {
+                not_before = Some(now + FLUSH_GAP);
+            }
         }
-        let due = pending.take_due(now);
-        let urgent = std::mem::take(&mut pending.urgent);
-        if due.is_empty() && urgent.is_empty() {
-            continue;
-        }
-        // Paths first, then errors, as the old debouncer delivered them.
-        if !due.is_empty() {
-            route(sinks, &due);
-        }
-        if !urgent.is_empty() {
-            route(sinks, &urgent);
-        }
-        not_before = Some(now + FLUSH_GAP);
+        // ## m4b-gatefix-1 fix round 1 (I2)
+        let waiting = pending.due.len() + pending.urgent.len();
+        counts.pending.store(
+            u64::try_from(waiting).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -710,8 +731,15 @@ fn route(sinks: &Sinks, items: &[Item]) {
         }
     }
     for ((_, sink), hints) in sinks.iter_mut().zip(per) {
-        if !hints.is_empty() {
-            sink(hints);
+        if hints.is_empty() {
+            continue;
+        }
+        // ## m4b-gatefix-1 fix round 1 (review m2): a sink that panics would kill the debounce
+        // thread and leave the library deaf. Its hints may be lost, so it is told the backend
+        // is: the watcher falls back (and rescans), and the thread keeps serving every root.
+        let sink = &mut **sink;
+        if catch_unwind(AssertUnwindSafe(|| sink(hints))).is_err() {
+            let _ = catch_unwind(AssertUnwindSafe(|| sink(vec![RawHint::Lost])));
         }
     }
 }
@@ -1043,6 +1071,10 @@ impl RescanTail {
 }
 // ## m4b-gatefix-1-tail
 
+// ## m4b-gatefix-1 fix round 1 (review m3)
+/// Tabs' read stamps waiting for the watcher to learn them, at most.
+const MAX_OPENED: usize = 1_024;
+
 /// At most this many open files are kept back from one rescan to be settled and reported on
 /// their own (fix round 2, N1).
 const MAX_OPEN_KEPT: usize = 256;
@@ -1104,6 +1136,9 @@ pub struct Reconciler {
     tail: Option<RescanTail>,
     /// When the last scan that learned the library began.
     learned_at: SystemTime,
+    // ## m4b-gatefix-1 fix round 1 (review m3)
+    /// Files a tab read at a stamp the watcher had not learned yet, with that stamp.
+    opened: HashMap<RelPath, DiskStamp>,
 }
 
 impl fmt::Debug for Reconciler {
@@ -1143,6 +1178,8 @@ impl Reconciler {
             // ## m4b-gatefix-1-tail
             tail: None,
             learned_at: SystemTime::now(),
+            // ## m4b-gatefix-1 fix round 1
+            opened: HashMap::new(),
         };
         let started = SystemTime::now();
         let s = r.scan();
@@ -1168,6 +1205,8 @@ impl Reconciler {
             self.debouncer.push(hint, at);
             return;
         };
+        // ## m4b-gatefix-1 fix round 1 (R-GF-1): whether a tab has this file open.
+        let mut open = false;
         let counted = match self.name_filter(&path) {
             Named::Drop => return,
             // ## m4b-cifix-2-repo-op (review I1)
@@ -1178,9 +1217,9 @@ impl Reconciler {
             Named::Root | Named::Repository | Named::Manifest | Named::ManifestFolder => true,
             Named::Rel(rel) => {
                 let name = rel.name();
-                scan::script_kind(name).is_some()
-                    || !name.contains('.')
-                    || self.lookup(&rel).is_some()
+                let known = self.lookup(&rel);
+                open = known.as_ref().is_some_and(|k| self.is_open(k));
+                scan::script_kind(name).is_some() || !name.contains('.') || known.is_some()
             }
         };
         // ## m4b-t20-adversarial (named lines, N3): no hint ever names the lock of a
@@ -1193,6 +1232,12 @@ impl Reconciler {
         {
             self.outer_looked = Some(at);
             self.check_repository_lock(at);
+        }
+        // ## m4b-gatefix-1 fix round 1 (R-GF-1): an open file's hint is never swallowed by an
+        // overflowed burst nor held by a repository operation's quiet.
+        if open {
+            self.debouncer.push_open(path, at);
+            return;
         }
         self.debouncer.push_path(path, at, counted);
     }
@@ -1268,8 +1313,35 @@ impl Reconciler {
             && k.seen.mtime == stamp.mtime
         {
             k.hash = Some(stamp.hash);
+            self.opened.remove(rel);
+            return;
         }
+        // ## m4b-gatefix-1 fix round 1 (review m3): a tab read a stamp the watcher has not
+        // learned yet (it opened the file within a settle of an external write). The file is
+        // open from now on, and the hash is attached once the watcher learns that stamp.
+        if self.opened.len() >= MAX_OPENED && !self.opened.contains_key(rel) {
+            return;
+        }
+        self.opened.insert(rel.clone(), *stamp);
     }
+
+    // ## m4b-gatefix-1 fix round 1 (review m3)
+    /// Attaches a remembered hash once the watcher knows the stamp the tab read.
+    fn adopt_opened(&mut self) {
+        if self.opened.is_empty() {
+            return;
+        }
+        let known = &mut self.known;
+        self.opened.retain(|rel, stamp| match known.get_mut(rel) {
+            Some(k) if k.seen.len == stamp.len && k.seen.mtime == stamp.mtime => {
+                k.hash = Some(stamp.hash);
+                false
+            }
+            Some(_) => true,
+            None => false,
+        });
+    }
+    // ## m4b-gatefix-1 fix round 1
 
     /// ## m4b-t09-watcher fix round 1 (I8, R-T9-2): from `from` on, a root hint every
     /// [`WatchOpts::backstop`] (nothing when it is `None`).
@@ -1310,7 +1382,8 @@ impl Reconciler {
 
     /// Whether a tab has `rel` open (its content hash is known: R-T9-6).
     fn is_open(&self, rel: &RelPath) -> bool {
-        self.known.get(rel).is_some_and(|k| k.hash.is_some())
+        // ## m4b-gatefix-1 fix round 1 (m3): or one whose read stamp is not learned yet.
+        self.known.get(rel).is_some_and(|k| k.hash.is_some()) || self.opened.contains_key(rel)
     }
 
     /// The files known now (for tests and diagnostics).
@@ -1325,6 +1398,13 @@ impl Reconciler {
 
     /// Looks at what arrived and at what is due at `now`; answers the settled events.
     pub fn tick(&mut self, now: Instant) -> Vec<WatchEvent> {
+        let out = self.tick_inner(now);
+        // ## m4b-gatefix-1 fix round 1 (m3): a tab's read stamp the tick just learned.
+        self.adopt_opened();
+        out
+    }
+
+    fn tick_inner(&mut self, now: Instant) -> Vec<WatchEvent> {
         self.wall = SystemTime::now();
         self.now = now;
         self.info = TickInfo::default();
@@ -1632,9 +1712,11 @@ impl Reconciler {
 
     /// The first look at a known file after a hint.
     fn first_look(&mut self, rel: RelPath, obs: Option<Seen>, now: Instant) {
+        // ## m4b-gatefix-1-tail (fix round 1, m3: an open file is never folded)
+        let open = self.is_open(&rel);
         let known = self.known.get(&rel);
-        // ## m4b-gatefix-1-tail
         if let (Some(tail), Some(s), Some(k)) = (self.tail.as_mut(), &obs, known)
+            && !open
             && !self.candidates.contains_key(&rel)
             && tail.folds(s, k, now)
         {
@@ -2646,6 +2728,46 @@ mod tests {
         }
     }
 
+    // ## m4b-gatefix-1 fix round 1 (I2)
+    /// Waits (10 s ceiling) until the thread has nothing waiting; answers its counts then.
+    fn drained(thread: &DebounceThread) -> DebounceCounts {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let c = thread.counts();
+            if c.pending == 0 {
+                return c;
+            }
+            assert!(Instant::now() < deadline, "never drained: {c:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// m2 (gatefix-1 fix round 1): a sink that panics is told the backend is lost, and the
+    /// thread lives on: a later event still reaches every root.
+    #[test]
+    fn a_panicking_sink_is_told_lost_and_the_thread_lives_on() {
+        let got: Arc<Mutex<Vec<Vec<RawHint>>>> = Arc::default();
+        let seen = got.clone();
+        let mut calls = 0u32;
+        let sinks = Sinks::default();
+        lock(&sinks).push((
+            "/lib".into(),
+            Box::new(move |b: Vec<RawHint>| {
+                calls += 1;
+                assert!(calls != 1, "the first delivery panics (test sink)");
+                lock(&seen).push(b);
+            }),
+        ));
+        let thread = DebounceThread::spawn(sinks).unwrap();
+        let mut send = thread.handler();
+        send(Ok(modified("/lib/a.sql")));
+        delivered_until(&got, &RawHint::Lost);
+        send(Ok(modified("/lib/b.sql")));
+        let batches = delivered_until(&got, &RawHint::Path("/lib/b.sql".into()));
+        assert_eq!(batches[0], [RawHint::Lost]);
+    }
+    // ## m4b-gatefix-1 fix round 1
+
     /// The hints the debounce thread delivers to `/lib` for `events`, up to the sentinel
     /// `/lib/zz.sql` sent after them (items are delivered in arrival order, so anything still
     /// missing then was dropped).
@@ -2680,7 +2802,8 @@ mod tests {
             thread.counts(),
             DebounceCounts {
                 wakes: 0,
-                events: 0
+                events: 0,
+                pending: 0,
             }
         );
         // One event: one wake to take it, one when it is due, then idle again.
@@ -2689,7 +2812,7 @@ mod tests {
         let a = RawHint::Path("/lib/a.sql".into());
         assert_eq!(delivered_until(&got, &a), vec![vec![a]]);
         assert!(sent.elapsed() >= DEBOUNCE, "delivered before the window");
-        let after = thread.counts();
+        let after = drained(&thread);
         assert_eq!(after.events, 1);
         assert!(after.wakes <= 2, "{after:?}");
         std::thread::sleep(window);
@@ -2787,7 +2910,10 @@ mod tests {
         );
         // ## m4b-gatefix-1-idle: through the debounce thread the root is named once (each path
         // once while it waits).
-        assert_eq!(debounced(vec![deleted(), moved()]), [RawHint::Path(root.into())]);
+        assert_eq!(
+            debounced(vec![deleted(), moved()]),
+            [RawHint::Path(root.into())]
+        );
     }
     // ## m4b-cifix-2-root-birth
 

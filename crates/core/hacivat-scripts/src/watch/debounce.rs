@@ -77,6 +77,14 @@ pub struct Debouncer {
     /// the backend delivers late (see [`OP_QUIET`]).
     after_op: Option<Instant>,
     // ## m4b-gatefix-1-tail
+    // ## m4b-gatefix-1 fix round 1 (review C1, I1; ruling R-GF-1)
+    /// When the last rescan was handed on: the next one is never due before a window later,
+    /// so [`due`](Self::due) can never answer the same past instant twice.
+    last_rescan: Option<Instant>,
+    /// Paths of files a tab has open: handed on at the next flush whatever a burst does
+    /// (R-GF-1), never swallowed by an overflow nor held by a repository operation.
+    open: BTreeSet<PathBuf>,
+    // ## m4b-gatefix-1 fix round 1
 }
 
 // ## m4b-gatefix-1-tail (CI 45202154953 macOS `git_checkout_2000_is_one_rescan`)
@@ -88,6 +96,13 @@ pub struct Debouncer {
 /// part reached [`MAX_HINTS_PER_WINDOW`] and each file was reported on its own.
 pub const OP_QUIET: Duration = Duration::from_secs(1);
 // ## m4b-gatefix-1-tail
+
+// ## m4b-gatefix-1 fix round 1 (review C1)
+/// The longest the post-operation phase ([`OP_QUIET`]) lasts after the lock went (the traced
+/// late chunks lasted 1.9 s). After it the ordinary one-window rule is back, and an
+/// overflowed burst's rescan is due at most `max_wait` after the overflow in either phase.
+pub const OP_LATE_MAX: Duration = Duration::from_secs(4);
+// ## m4b-gatefix-1 fix round 1
 
 /// How long an overflowed burst that keeps going waits for its rescan at most.
 const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(2);
@@ -125,6 +140,9 @@ impl Debouncer {
             op_stale: false,
             // ## m4b-gatefix-1-tail
             after_op: None,
+            // ## m4b-gatefix-1 fix round 1
+            last_rescan: None,
+            open: BTreeSet::new(),
         }
     }
 
@@ -180,15 +198,32 @@ impl Debouncer {
     }
 
     // ## m4b-gatefix-1-tail
-    /// The pause that ends the current burst: [`OP_QUIET`] right after a repository
-    /// operation, one window otherwise.
-    fn gap(&self) -> Duration {
-        if self.after_op.is_some() {
+    /// The pause that ends the current burst at `at`: [`OP_QUIET`] in the post-operation
+    /// phase (at most [`OP_LATE_MAX`] after the lock went), one window otherwise.
+    fn gap(&self, at: Instant) -> Duration {
+        if self.in_late_phase(at) {
             OP_QUIET
         } else {
             self.window
         }
     }
+
+    // ## m4b-gatefix-1 fix round 1 (review C1)
+    /// Whether `at` is in the post-operation phase.
+    fn in_late_phase(&self, at: Instant) -> bool {
+        self.after_op.is_some_and(|end| at < end + OP_LATE_MAX)
+    }
+
+    /// Takes the hint of a file a tab has open (R-GF-1): it counts toward the burst like any
+    /// other, and is handed on at the next flush even while the burst is overflowed or a
+    /// repository operation holds it, so an open file's edit is reported within the normal
+    /// debounce (E2).
+    pub fn push_open(&mut self, path: PathBuf, at: Instant) {
+        self.push_path(path.clone(), at, true);
+        self.open.insert(path);
+        self.mark(at);
+    }
+    // ## m4b-gatefix-1 fix round 1
 
     /// Whether the burst of the operation that ended is still taking late events.
     pub fn after_operation(&self) -> bool {
@@ -229,7 +264,7 @@ impl Debouncer {
         }
         // ## m4b-cifix-2-repo-op: a repository operation is one burst, pauses and all.
         // ## m4b-gatefix-1-tail: right after an operation the pause that ends it is longer.
-        let gap = self.gap();
+        let gap = self.gap(at);
         if self.op_until.is_none() && self.last_at.is_none_or(|l| at >= l + gap) {
             self.after_op = None;
             // A new burst; an overflowed one that was not flushed yet is due now.
@@ -279,9 +314,10 @@ impl Debouncer {
         let began = self.began.unwrap_or(last);
         let hold = (last + self.window).min(began + self.max_wait);
         // ## m4b-gatefix-1-tail: after an operation, until its late events have stopped.
-        let hold = self
-            .after_op
-            .map_or(hold, |end| (last + OP_QUIET).min(end + REPO_OP_MAX).max(hold));
+        // ## m4b-gatefix-1 fix round 1 (C1): at most OP_LATE_MAX after the lock went.
+        let hold = self.after_op.map_or(hold, |end| {
+            (last + OP_QUIET).min(end + OP_LATE_MAX).max(hold)
+        });
         // ## m4b-cifix-2-repo-op: a repository operation holds until it ends, at most its
         // bound.
         let hold = self.op_until.map_or(hold, |until| hold.max(until));
@@ -303,13 +339,16 @@ impl Debouncer {
         if let Some(until) = self.op_until {
             return Some(until);
         }
-        // ## m4b-gatefix-1-tail: an overflowed operation's rescan waits for its late events.
-        if let Some(end) = self.after_op {
-            let quiet = self.last_at.map_or(since, |l| l + OP_QUIET);
-            return Some(quiet.min(end + REPO_OP_MAX));
-        }
-        let quiet = self.last_at.map_or(since, |l| l + self.window);
-        Some(quiet.min(since + self.max_wait))
+        // ## m4b-gatefix-1-tail: an overflowed operation's rescan waits for its late events,
+        // ## m4b-gatefix-1 fix round 1 (C1): but never past `max_wait` after the overflow,
+        // whatever the traffic, and never before a window after the last rescan.
+        let gap = match self.after_op {
+            Some(end) if since < end + OP_LATE_MAX => OP_QUIET,
+            _ => self.window,
+        };
+        let quiet = self.last_at.map_or(since, |l| l + gap);
+        let due = quiet.min(since + self.max_wait);
+        Some(self.last_rescan.map_or(due, |r| due.max(r + self.window)))
     }
 
     /// Everything pending at `now`: `Lost` first, then either `Rescan` or the paths.
@@ -331,24 +370,41 @@ impl Debouncer {
             // overflowed (swallowing, one rescan per `max_wait`); the count starts afresh only
             // once the burst has been quiet for a window (a new burst, in `push_path`). Noise
             // never counts (the watcher's name filter), so this cannot starve a real edit.
-            let going = self.last_at.is_some_and(|l| now < l + self.gap());
+            // ## m4b-gatefix-1 fix round 1 (C1): the rescan of an operation's burst ends the
+            // post-operation phase and its overflow; what still comes is a new count (and
+            // late copies of what the rescan saw fold into it, the watcher's `RescanTail`).
+            let going =
+                self.after_op.is_none() && self.last_at.is_some_and(|l| now < l + self.window);
             self.overflowed = going.then_some(now);
+            self.after_op = None;
             self.burst.clear();
+            debug_assert!(
+                self.last_rescan.is_none_or(|r| now > r),
+                "a rescan due twice at one instant"
+            );
+            self.last_rescan = Some(now);
         }
+        // ## m4b-gatefix-1 fix round 1 (R-GF-1): open files first, whatever the burst does.
+        let open = std::mem::take(&mut self.open);
         if std::mem::take(&mut self.rescan) {
             self.paths.clear();
+            if !open.is_empty() {
+                out.push(Flushed::Paths(open.into_iter().collect()));
+            }
             out.push(Flushed::Rescan);
-        } else if !self.paths.is_empty() {
-            out.push(Flushed::Paths(
-                std::mem::take(&mut self.paths).into_iter().collect(),
-            ));
+        } else {
+            let mut paths = std::mem::take(&mut self.paths);
+            paths.extend(open);
+            if !paths.is_empty() {
+                out.push(Flushed::Paths(paths.into_iter().collect()));
+            }
         }
         self.pending_at = None;
         // ## m4b-gatefix-1-tail: the operation's burst is over once it has been quiet (or at
-        // its bound).
+        // its bound, fix round 1: OP_LATE_MAX).
         if let Some(end) = self.after_op
             && self.overflowed.is_none()
-            && (self.last_at.is_none_or(|l| now >= l + OP_QUIET) || now >= end + REPO_OP_MAX)
+            && (self.last_at.is_none_or(|l| now >= l + OP_QUIET) || now >= end + OP_LATE_MAX)
         {
             self.after_op = None;
         }

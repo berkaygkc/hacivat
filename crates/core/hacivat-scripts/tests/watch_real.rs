@@ -877,29 +877,42 @@ fn short_name_event_is_reconciled() {
 // `notify-debouncer-full`'s own root list (m-fr1-3); the source no longer uses that debouncer,
 // so the residual and its record are gone.
 
-/// The real OS source wakes nothing while nothing happens: over a quiet window (one in which
-/// the backend sent nothing) its debounce thread did not wake once. The old
-/// `notify-debouncer-full` loop woke every 37.5 ms (16 times per window). A window in which the
-/// OS reported something (Spotlight, a late initial event) proves nothing and is retried, up to
-/// 10 windows; then the test fails.
+/// The real OS source wakes nothing while nothing happens. Fix round 1 (review I2): the
+/// thread is first drained (a condition: nothing waiting for delivery), then one second is
+/// measured; every wake in it must be explained by an event the OS sent in it (a message, and
+/// the delivery a window later: at most two wakes per event). An event from before the window
+/// cannot leak in, since the thread had nothing waiting when the window began. The old
+/// `notify-debouncer-full` loop woke every 37.5 ms (about 27 times in the window) with no
+/// event at all.
 #[test]
 fn an_idle_os_source_wakes_nothing() {
+    use hacivat_scripts::watch::DebounceCounts;
     let lib = Lib::new(&[("a.sql", "SELECT 1"), ("d/b.sql", "SELECT 2")]);
     let mut src = OsEventSource::new().unwrap();
     src.watch(&lib.root.canonical, Box::new(|_| {})).unwrap();
-    let window = Duration::from_millis(600);
-    for _ in 0..10 {
-        let before = src.debounce_counts().unwrap();
-        // An observation of absence, not a wait for a condition: load only delays wakes.
-        std::thread::sleep(window);
-        let after = src.debounce_counts().unwrap();
-        if after.events != before.events {
-            continue;
+    let drained = |src: &OsEventSource| -> DebounceCounts {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let c = src.debounce_counts().unwrap();
+            if c.pending == 0 {
+                return c;
+            }
+            assert!(Instant::now() < deadline, "never drained: {c:?}");
+            std::thread::park_timeout(Duration::from_millis(5));
         }
-        assert_eq!(after.wakes, before.wakes, "woke while idle: {before:?} -> {after:?}");
-        println!("HV-FACT gatefix1 idle_os_source window_ms=600 wakes=0");
-        return;
+    };
+    let before = drained(&src);
+    let window = Duration::from_secs(1);
+    let started = Instant::now();
+    while started.elapsed() < window {
+        std::thread::park_timeout(window.saturating_sub(started.elapsed()));
     }
-    panic!("no quiet window in 10: the OS kept reporting events");
+    let after = src.debounce_counts().unwrap();
+    let (wakes, events) = (after.wakes - before.wakes, after.events - before.events);
+    assert!(
+        wakes <= 2 * events,
+        "{wakes} wakes for {events} events: {before:?} -> {after:?}"
+    );
+    println!("HV-FACT gatefix1 idle_os_source window_ms=1000 wakes={wakes} events={events}");
 }
 // ## m4b-gatefix-1-idle

@@ -2918,7 +2918,10 @@ fn late_hints_the_rescan_already_saw_fold_into_it() {
         vec![WatchEvent::Rescan]
     );
     // Late copies of the same events, half a second after the rescan.
-    assert_eq!(run(&mut r, hints_for(&lib, 400..1_200), t0() + ms(650)), vec![]);
+    assert_eq!(
+        run(&mut r, hints_for(&lib, 400..1_200), t0() + ms(650)),
+        vec![]
+    );
     // Controls: a real change after the rescan, and a stamp dated after the scan began.
     lib.write("f0001.sql", "SELECT 22;");
     set_mtime(&lib.path("f0002.sql"), SystemTime::now() + ms(900));
@@ -3007,3 +3010,296 @@ fn the_rescan_tail_ends() {
     );
 }
 // ## m4b-gatefix-1-tail
+
+// ## m4b-gatefix-1 fix round 1 (review C1, I1; ruling R-GF-1)
+
+/// The burst rule's bound on an overflowed burst's rescan (`DEFAULT_MAX_WAIT`).
+const MAX_WAIT: Duration = Duration::from_secs(2);
+
+/// E2's budget at the reconciler: an open file's edit is reported within this of its hint.
+const OPEN_BUDGET: Duration = Duration::from_secs(1);
+
+/// Drives `r` from `start` to `end` in 10 ms steps. `act` may write files and push hints
+/// (answering whether it pushed); the reconciler is ticked whenever something was pushed or
+/// is due. After every tick `next_due` must be later than the tick (never a past instant
+/// again: no busy loop). Answers every event with when it was reported.
+fn simulate(
+    r: &mut Reconciler,
+    start: Instant,
+    end: Instant,
+    mut act: impl FnMut(&mut Reconciler, Instant) -> bool,
+) -> Vec<(Instant, WatchEvent)> {
+    let mut out = Vec::new();
+    let mut now = start;
+    while now <= end {
+        let pushed = act(r, now);
+        if pushed || r.next_due().is_some_and(|d| d <= now) {
+            out.extend(r.tick(now).into_iter().map(|e| (now, e)));
+            let next = r.next_due();
+            assert!(
+                next.is_none_or(|d| d > now),
+                "due again at or before {:?}: {next:?}",
+                now - start
+            );
+        }
+        now += ms(10);
+    }
+    out
+}
+
+fn rescans(events: &[(Instant, WatchEvent)]) -> Vec<Instant> {
+    events
+        .iter()
+        .filter(|(_, e)| *e == WatchEvent::Rescan)
+        .map(|(t, _)| *t)
+        .collect()
+}
+
+/// When `rel` was first reported `Changed` at or after `from`.
+fn changed_at(events: &[(Instant, WatchEvent)], rel_: &str, from: Instant) -> Option<Instant> {
+    events
+        .iter()
+        .find(|(t, e)| *t >= from && *e == WatchEvent::Changed(rel(rel_)))
+        .map(|(t, _)| *t)
+}
+
+/// An overflowed checkout under `index.lock` (1,200 files), then a writer adding a `.sql`
+/// every 500 ms for 40 s, and an edit of an open file 2 s in. The review's probe: no rescan
+/// for 30 s, then 2,104 back to back, and the open file's edit 38.75 s late. Now: exactly one
+/// rescan, within `max_wait` of the lock going; the open file within E2's budget.
+#[test]
+fn an_overflowed_operation_then_a_steady_writer_is_one_rescan() {
+    let lib = repo_lib(1_200);
+    fs::create_dir_all(lib.path("gen")).unwrap();
+    let mut r = lib.rec();
+    r.remember(&rel("open.sql"), &lib.read_stamp("open.sql"));
+    let t = t0() + Duration::from_secs(1_000);
+    let lock_gone = t + ms(100);
+    let edit = t + Duration::from_secs(2);
+    let mut n = 0;
+    let events = simulate(&mut r, t, t + Duration::from_secs(40), |r, now| {
+        let mut pushed = false;
+        if now == t {
+            lib.write(".git/index.lock", "");
+            r.push(lib.hint(".git/index.lock"), now);
+            rewrite(r, &lib, 0..1_200, now);
+            pushed = true;
+        }
+        if now == lock_gone {
+            fs::remove_file(lib.path(".git/index.lock")).unwrap();
+            r.push(lib.hint(".git/index.lock"), now);
+            pushed = true;
+        }
+        if now == edit {
+            lib.write("open.sql", "SELECT 'edited after the checkout';");
+            r.push(lib.hint("open.sql"), now);
+            pushed = true;
+        }
+        if now >= t + ms(200) && (now - t).as_millis().is_multiple_of(500) {
+            n += 1;
+            let name = format!("gen/g{n:03}.sql");
+            lib.write(&name, "SELECT 1;");
+            r.push(lib.hint(&name), now);
+            pushed = true;
+        }
+        pushed
+    });
+    let rescans = rescans(&events);
+    assert_eq!(rescans.len(), 1, "{rescans:?}");
+    assert!(
+        rescans[0] <= lock_gone + MAX_WAIT + W,
+        "rescan {:?} after the lock went",
+        rescans[0] - lock_gone
+    );
+    let seen = changed_at(&events, "open.sql", edit).expect("the open file's edit");
+    println!(
+        "HV-FACT gatefix1-fr1 steady_writer rescans={} rescan_after_lock_ms={} open_ms={}",
+        rescans.len(),
+        (rescans[0] - lock_gone).as_millis(),
+        (seen - edit).as_millis()
+    );
+    assert!(
+        seen - edit <= OPEN_BUDGET,
+        "open file after {:?}",
+        seen - edit
+    );
+    // The writer's files are reported one by one after the rescan, none lost.
+    let created = events
+        .iter()
+        .filter(|(_, e)| matches!(e, WatchEvent::Created(_)))
+        .count();
+    assert!(created >= 70, "{created} created");
+}
+
+/// A small operation (10 files, no overflow), then a generator writing a new `.sql` every
+/// 25 ms for 40 s, which overflows the burst on its own; an open file is edited at 28 s. The
+/// review's probe: 2,184 rescans after 30 s and the edit 13 s late. Now: a rescan at most
+/// every `max_wait` (the ordinary rule), and the open file within E2's budget.
+#[test]
+fn a_small_operation_then_a_generator_rescans_a_bounded_few_times() {
+    let lib = repo_lib(10);
+    fs::create_dir_all(lib.path("gen")).unwrap();
+    let mut r = lib.rec();
+    r.remember(&rel("open.sql"), &lib.read_stamp("open.sql"));
+    let t = t0() + Duration::from_secs(2_000);
+    let edit = t + Duration::from_secs(28);
+    let mut n = 0;
+    let events = simulate(&mut r, t, t + Duration::from_secs(40), |r, now| {
+        let mut pushed = false;
+        if now == t {
+            lib.write(".git/index.lock", "");
+            r.push(lib.hint(".git/index.lock"), now);
+            rewrite(r, &lib, 0..10, now);
+            pushed = true;
+        }
+        if now == t + ms(50) {
+            fs::remove_file(lib.path(".git/index.lock")).unwrap();
+            r.push(lib.hint(".git/index.lock"), now);
+            pushed = true;
+        }
+        if now == edit {
+            lib.write("open.sql", "SELECT 'edited under a generator';");
+            r.push(lib.hint("open.sql"), now);
+            pushed = true;
+        }
+        if now >= t + ms(100) && (now - t).as_millis() % 30 == 10 {
+            n += 1;
+            let name = format!("gen/g{n:04}.sql");
+            lib.write(&name, "SELECT 1;");
+            r.push(lib.hint(&name), now);
+            pushed = true;
+        }
+        pushed
+    });
+    let rescans = rescans(&events);
+    assert!(
+        !rescans.is_empty() && rescans.len() <= 10,
+        "{} rescans",
+        rescans.len()
+    );
+    for pair in rescans.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= W,
+            "rescans {:?} apart",
+            pair[1] - pair[0]
+        );
+    }
+    let seen = changed_at(&events, "open.sql", edit).expect("the open file's edit");
+    println!(
+        "HV-FACT gatefix1-fr1 generator rescans={} open_ms={}",
+        rescans.len(),
+        (seen - edit).as_millis()
+    );
+    assert!(
+        seen - edit <= OPEN_BUDGET,
+        "open file after {:?}",
+        seen - edit
+    );
+}
+
+/// R-GF-1: an open file edited while an overflowed checkout holds the lock, and again just
+/// after the lock went (while late events still arrive), is reported within E2's budget both
+/// times; only unopened files wait for the rescan.
+#[test]
+fn an_open_file_passes_an_overflowed_checkout() {
+    let lib = repo_lib(1_200);
+    let mut r = lib.rec();
+    r.remember(&rel("open.sql"), &lib.read_stamp("open.sql"));
+    let t = t0() + Duration::from_secs(3_000);
+    let during = t + ms(300);
+    let lock_gone = t + Duration::from_secs(1);
+    let after = lock_gone + ms(200);
+    let events = simulate(&mut r, t, t + Duration::from_secs(8), |r, now| {
+        let mut pushed = false;
+        if now == t {
+            lib.write(".git/index.lock", "");
+            r.push(lib.hint(".git/index.lock"), now);
+            rewrite(r, &lib, 0..1_100, now);
+            pushed = true;
+        }
+        if now == during {
+            lib.write("open.sql", "SELECT 'edited while git ran';");
+            r.push(lib.hint("open.sql"), now);
+            pushed = true;
+        }
+        if now == lock_gone {
+            fs::remove_file(lib.path(".git/index.lock")).unwrap();
+            r.push(lib.hint(".git/index.lock"), now);
+            pushed = true;
+        }
+        // Late chunks after the lock went, 200 ms apart for 1.5 s.
+        if now > lock_gone
+            && now <= lock_gone + ms(1_500)
+            && (now - lock_gone).as_millis().is_multiple_of(200)
+        {
+            let k = usize::try_from((now - lock_gone).as_millis() / 200).unwrap();
+            rewrite(r, &lib, (1_100 + 10 * k)..(1_110 + 10 * k).min(1_200), now);
+            pushed = true;
+        }
+        // The tab reloaded the first edit: it remembers what it read (as the service does).
+        if now == after - ms(100) {
+            r.remember(&rel("open.sql"), &lib.read_stamp("open.sql"));
+        }
+        if now == after {
+            lib.write("open.sql", "SELECT 'edited again, just after';");
+            r.push(lib.hint("open.sql"), now);
+            pushed = true;
+        }
+        pushed
+    });
+    let first = changed_at(&events, "open.sql", during).expect("the edit during the checkout");
+    assert!(
+        first - during <= OPEN_BUDGET,
+        "during: {:?}",
+        first - during
+    );
+    let second = changed_at(&events, "open.sql", after).expect("the edit just after");
+    println!(
+        "HV-FACT gatefix1-fr1 open_through_checkout during_ms={} after_ms={}",
+        (first - during).as_millis(),
+        (second - after).as_millis()
+    );
+    assert!(second - after <= OPEN_BUDGET, "after: {:?}", second - after);
+    assert_eq!(rescans(&events).len(), 1, "{:?}", rescans(&events));
+    let unopened = events
+        .iter()
+        .filter(|(_, e)| !matches!(e, WatchEvent::Rescan | WatchEvent::RepositoryChanged))
+        .filter(|(_, e)| *e != WatchEvent::Changed(rel("open.sql")))
+        .count();
+    assert_eq!(
+        unopened, 0,
+        "unopened files wait for the rescan: {events:?}"
+    );
+}
+
+/// m3: a tab that opens a file within a settle of an external write (the watcher has not
+/// learned the stamp it read yet) still makes the file open: once the watcher learns that
+/// stamp, an equal-stamp rewrite inside the clock tick is re-hashed and `Changed`, never
+/// `PossiblyChanged`.
+#[test]
+fn a_file_opened_before_the_watcher_learned_its_stamp_is_open() {
+    let lib = Lib::new(&[("a.sql", "AAAA")]);
+    let mut r = lib.rec();
+    lib.write("a.sql", "BBBB");
+    let tick = fs::metadata(lib.path("a.sql")).unwrap().modified().unwrap();
+    r.remember(&rel("a.sql"), &lib.read_stamp("a.sql"));
+    assert_eq!(
+        run(
+            &mut r,
+            vec![lib.hint("a.sql")],
+            t0() + Duration::from_secs(4_000)
+        ),
+        vec![WatchEvent::Changed(rel("a.sql"))]
+    );
+    lib.write("a.sql", "CCCC");
+    set_mtime(&lib.path("a.sql"), tick);
+    assert_eq!(
+        run(
+            &mut r,
+            vec![lib.hint("a.sql")],
+            t0() + Duration::from_secs(4_001)
+        ),
+        vec![WatchEvent::Changed(rel("a.sql"))]
+    );
+}
+// ## m4b-gatefix-1 fix round 1
