@@ -3279,10 +3279,22 @@ fn an_open_file_passes_an_overflowed_checkout() {
 #[test]
 fn a_file_opened_before_the_watcher_learned_its_stamp_is_open() {
     let lib = Lib::new(&[("a.sql", "AAAA")]);
+    // ## m4b-cifix-7-opened-test (CI 45626141405, Windows): the write below must move the
+    // stamp the watcher learned, or the watcher has learned the stamp the tab reads and this
+    // is the next test's case. Two writes inside one NTFS clock tick keep `(len, mtime)`, so
+    // the first file is dated a minute back and the precondition is asserted.
+    age(&lib.path("a.sql"), 60);
+    let learned = fs::metadata(lib.path("a.sql")).unwrap().modified().unwrap();
     let mut r = lib.rec();
     lib.write("a.sql", "BBBB");
     let tick = fs::metadata(lib.path("a.sql")).unwrap().modified().unwrap();
-    r.remember(&rel("a.sql"), &lib.read_stamp("a.sql"));
+    let read = lib.read_stamp("a.sql");
+    assert_ne!(
+        read.mtime, learned,
+        "the tab read a stamp the watcher has not learned"
+    );
+    r.remember(&rel("a.sql"), &read);
+    // ## m4b-cifix-7-opened-test
     assert_eq!(
         run(
             &mut r,
@@ -3361,3 +3373,51 @@ fn an_open_file_gone_inside_an_overflowed_checkout_waits_for_the_rescan() {
     );
 }
 // ## m4b-gatefix-1 fix round 2
+
+// ## m4b-cifix-7-opened-test (CI 45626141405, Windows)
+/// The same-tick shape of `a_file_opened_before_the_watcher_learned_its_stamp_is_open`: an
+/// external write inside the clock tick of the stamp the watcher learned (NTFS), same length,
+/// so the stamp the tab reads equals the learned `(len, mtime)` of other content. The tab's
+/// hash is attached at once and the file is open:
+/// - the tab read what is on disk: the hint reports nothing (nothing differs from the tab);
+///   a further rewrite inside the same tick is re-hashed and `Changed`, never dropped and never
+///   `PossiblyChanged`;
+/// - the tab read the old content and its stamp reached the watcher after the write: the hint
+///   is `Changed`.
+#[test]
+fn a_file_read_inside_the_learned_stamps_clock_tick_is_open() {
+    for current in [true, false] {
+        let lib = Lib::new(&[("a.sql", "AAAA")]);
+        let tick = fs::metadata(lib.path("a.sql")).unwrap().modified().unwrap();
+        let mut r = lib.rec();
+        let old = lib.read_stamp("a.sql");
+        lib.write("a.sql", "BBBB");
+        set_mtime(&lib.path("a.sql"), tick);
+        let read = if current {
+            lib.read_stamp("a.sql")
+        } else {
+            old
+        };
+        assert_eq!((read.len, read.mtime), (4, tick), "the learned stamp");
+        r.remember(&rel("a.sql"), &read);
+        let at = t0() + Duration::from_secs(if current { 4_010 } else { 4_020 });
+        let first = run(&mut r, vec![lib.hint("a.sql")], at);
+        if !current {
+            assert_eq!(
+                first,
+                vec![WatchEvent::Changed(rel("a.sql"))],
+                "the tab read the old content"
+            );
+            continue;
+        }
+        assert_eq!(first, vec![], "the tab read what is on disk");
+        lib.write("a.sql", "CCCC");
+        set_mtime(&lib.path("a.sql"), tick);
+        assert_eq!(
+            run(&mut r, vec![lib.hint("a.sql")], at + Duration::from_secs(1)),
+            vec![WatchEvent::Changed(rel("a.sql"))],
+            "a rewrite inside the same tick"
+        );
+    }
+}
+// ## end m4b-cifix-7-opened-test
