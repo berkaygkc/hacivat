@@ -730,7 +730,8 @@ fn route(sinks: &Sinks, items: &[Item]) {
             }
         }
     }
-    for ((_, sink), hints) in sinks.iter_mut().zip(per) {
+    let mut dead = Vec::new();
+    for (i, ((_, sink), hints)) in sinks.iter_mut().zip(per).enumerate() {
         if hints.is_empty() {
             continue;
         }
@@ -738,11 +739,44 @@ fn route(sinks: &Sinks, items: &[Item]) {
         // thread and leave the library deaf. Its hints may be lost, so it is told the backend
         // is: the watcher falls back (and rescans), and the thread keeps serving every root.
         let sink = &mut **sink;
-        if catch_unwind(AssertUnwindSafe(|| sink(hints))).is_err() {
-            let _ = catch_unwind(AssertUnwindSafe(|| sink(vec![RawHint::Lost])));
+        if catch_unwind(AssertUnwindSafe(|| sink(hints))).is_err()
+            && catch_unwind(AssertUnwindSafe(|| sink(vec![RawHint::Lost]))).is_err()
+        {
+            dead.push(i);
+        }
+    }
+    // ## m4b-gatefix-1 fix round 2 (m-fr1-1): a sink that panics on `Lost` too is detached:
+    // never called again, and dropped while `DETACHING` is set, so a watcher's own sink
+    // ([`hint_sink`]) tells its watcher through its queue that the backend is lost.
+    for i in dead.into_iter().rev() {
+        let (_, sink) = sinks.remove(i);
+        DETACHING.with(|d| d.set(true));
+        drop(catch_unwind(AssertUnwindSafe(move || drop(sink))));
+        DETACHING.with(|d| d.set(false));
+    }
+}
+
+// ## m4b-gatefix-1 fix round 2 (m-fr1-1)
+thread_local! {
+    /// Set while [`route`] drops a sink it detached because it kept panicking.
+    static DETACHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Held by a watcher's own sink: when a source detaches that sink because it kept panicking,
+/// the queue is told the backend is lost, so the watcher falls back to polling (and rescans)
+/// and the service shows it. Dropped any other way (unwatch, a source replaced), it says
+/// nothing.
+struct DetachGuard(Arc<HintQueue>);
+
+impl Drop for DetachGuard {
+    fn drop(&mut self) {
+        if DETACHING.with(std::cell::Cell::get) {
+            let queue = &self.0;
+            let _ = catch_unwind(AssertUnwindSafe(|| queue.push(vec![RawHint::Lost])));
         }
     }
 }
+// ## m4b-gatefix-1 fix round 2
 
 /// How a library is watched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1074,6 +1108,10 @@ impl RescanTail {
 // ## m4b-gatefix-1 fix round 1 (review m3)
 /// Tabs' read stamps waiting for the watcher to learn them, at most.
 const MAX_OPENED: usize = 1_024;
+/// ## m4b-gatefix-1 fix round 2 (m-fr1-2): how long a tab's read stamp the watcher has not
+/// learned keeps the file open. The watcher learns it within a settle or two; past this the
+/// file is open only if a tab remembers it again (each read and save does).
+pub const OPENED_TTL: Duration = Duration::from_secs(30);
 
 /// At most this many open files are kept back from one rescan to be settled and reported on
 /// their own (fix round 2, N1).
@@ -1138,7 +1176,9 @@ pub struct Reconciler {
     learned_at: SystemTime,
     // ## m4b-gatefix-1 fix round 1 (review m3)
     /// Files a tab read at a stamp the watcher had not learned yet, with that stamp.
-    opened: HashMap<RelPath, DiskStamp>,
+    /// ## m4b-gatefix-1 fix round 2 (m-fr1-2): with when the tab read it (wall clock); an
+    /// entry goes once the watcher learns the stamp, or after [`OPENED_TTL`].
+    opened: HashMap<RelPath, (DiskStamp, SystemTime)>,
 }
 
 impl fmt::Debug for Reconciler {
@@ -1322,23 +1362,34 @@ impl Reconciler {
         if self.opened.len() >= MAX_OPENED && !self.opened.contains_key(rel) {
             return;
         }
-        self.opened.insert(rel.clone(), *stamp);
+        self.opened.insert(rel.clone(), (*stamp, SystemTime::now()));
     }
 
     // ## m4b-gatefix-1 fix round 1 (review m3)
     /// Attaches a remembered hash once the watcher knows the stamp the tab read.
     fn adopt_opened(&mut self) {
+        self.adopt_opened_at(SystemTime::now());
+    }
+
+    /// [`adopt_opened`](Self::adopt_opened) at wall time `wall`. ## m4b-gatefix-1 fix round 2
+    /// (m-fr1-2): an entry whose stamp the watcher has not learned (the file changed again, or
+    /// is not listed yet) stays open until [`OPENED_TTL`] after the read, then expires.
+    fn adopt_opened_at(&mut self, wall: SystemTime) {
         if self.opened.is_empty() {
             return;
         }
         let known = &mut self.known;
-        self.opened.retain(|rel, stamp| match known.get_mut(rel) {
-            Some(k) if k.seen.len == stamp.len && k.seen.mtime == stamp.mtime => {
+        self.opened.retain(|rel, (stamp, read_at)| {
+            if let Some(k) = known.get_mut(rel)
+                && k.seen.len == stamp.len
+                && k.seen.mtime == stamp.mtime
+            {
                 k.hash = Some(stamp.hash);
-                false
+                return false;
             }
-            Some(_) => true,
-            None => false,
+            wall.duration_since(*read_at)
+                .is_ok_and(|age| age < OPENED_TTL)
+                || wall < *read_at
         });
     }
     // ## m4b-gatefix-1 fix round 1
@@ -1359,7 +1410,8 @@ impl Reconciler {
             .settle
             .iter()
             .map(|(rel, t)| {
-                if self.is_open(rel) {
+                // ## m4b-gatefix-1 fix round 2 (I-fr1-1): a present open file only.
+                if self.settles_while_held(rel) {
                     *t
                 } else {
                     hold.map_or(*t, |h| (*t).max(h))
@@ -1385,6 +1437,17 @@ impl Reconciler {
         // ## m4b-gatefix-1 fix round 1 (m3): or one whose read stamp is not learned yet.
         self.known.get(rel).is_some_and(|k| k.hash.is_some()) || self.opened.contains_key(rel)
     }
+
+    // ## m4b-gatefix-1 fix round 2 (re-review I-fr1-1; R-GF-1 as amended)
+    /// Whether `rel`'s look settles while a burst or a repository operation holds the rest:
+    /// an open file that is still there (an edit, R-T9-6 and R-GF-1). An open file found gone
+    /// waits like any other, for the burst's rescan or the hold's end, so a move inside a
+    /// checkout is paired with its new name (which the burst held) and never reported deleted
+    /// first.
+    fn settles_while_held(&self, rel: &RelPath) -> bool {
+        self.is_open(rel) && self.candidates.get(rel).is_none_or(|c| c.last.is_some())
+    }
+    // ## m4b-gatefix-1 fix round 2
 
     /// The files known now (for tests and diagnostics).
     pub fn known_files(&self) -> usize {
@@ -1473,8 +1536,9 @@ impl Reconciler {
             // Fix round 3 (R-T9-6): an open file settles even while a burst holds the rest;
             // the others wait for the hold's end (or the rescan, which drops them).
             let hold = self.debouncer.hold_until().unwrap_or(now);
-            let (open, wait): (Vec<RelPath>, Vec<RelPath>) =
-                due.into_iter().partition(|rel| self.is_open(rel));
+            let (open, wait): (Vec<RelPath>, Vec<RelPath>) = due
+                .into_iter()
+                .partition(|rel| self.settles_while_held(rel));
             for rel in wait {
                 self.settle.schedule(rel, hold);
             }
@@ -2268,8 +2332,9 @@ struct Running {
 }
 
 fn hint_sink(queue: &Arc<HintQueue>) -> HintSink {
-    let queue = queue.clone();
-    Box::new(move |batch| queue.push(batch))
+    // ## m4b-gatefix-1 fix round 2 (m-fr1-1): the guard speaks only if a source detaches it.
+    let guard = DetachGuard(queue.clone());
+    Box::new(move |batch| guard.0.push(batch))
 }
 
 /// The folders a per-folder source must watch now, synced; `Err` when it cannot (too many
@@ -2767,6 +2832,97 @@ mod tests {
         assert_eq!(batches[0], [RawHint::Lost]);
     }
     // ## m4b-gatefix-1 fix round 1
+
+    // ## m4b-gatefix-1 fix round 2
+    /// m-fr1-1: a sink that panics on `Lost` too is detached (never called again), and a
+    /// watcher's own sink tells its queue the backend is lost, so the watcher falls back and
+    /// the library is never silently deaf. Another root on the same source is unaffected, and
+    /// a sink dropped the ordinary way (unwatch) says nothing.
+    #[test]
+    fn a_sink_that_panics_on_lost_too_is_detached_and_its_watcher_told() {
+        let queue = Arc::new(HintQueue::default());
+        let guard = DetachGuard(queue.clone());
+        let (sinks, other) = sinks_for(Path::new("/other"));
+        lock(&sinks).push((
+            "/lib".into(),
+            Box::new(move |_b: Vec<RawHint>| {
+                let _ = &guard;
+                panic!("this test sink always panics");
+            }),
+        ));
+        let items = [
+            Item::Path("/lib/a.sql".into()),
+            Item::Path("/other/b.sql".into()),
+        ];
+        route(&sinks, &items);
+        assert_eq!(lock(&sinks).len(), 1, "the panicking sink is detached");
+        let taken = queue.take(Some(Instant::now())).unwrap();
+        assert_eq!(taken.hints, [RawHint::Lost]);
+        route(&sinks, &items);
+        assert_eq!(
+            *lock(&other),
+            vec![
+                vec![RawHint::Path("/other/b.sql".into())],
+                vec![RawHint::Path("/other/b.sql".into())]
+            ]
+        );
+        // The ordinary drop of a watcher's sink (an unwatch) tells the queue nothing.
+        let quiet = Arc::new(HintQueue::default());
+        drop(hint_sink(&quiet));
+        assert_eq!(quiet.take(Some(Instant::now())), Some(Taken::default()));
+    }
+
+    /// A reconciler over a temp library with `a.sql` (`AAAA`).
+    fn rec_over(dir: &Path) -> Reconciler {
+        std::fs::write(dir.join("a.sql"), "AAAA").unwrap();
+        let canonical = dir.canonicalize().unwrap();
+        Reconciler::new(
+            LibraryRoot {
+                id: crate::registry::LibraryId::new(),
+                path: canonical.clone(),
+                canonical,
+            },
+            WatchOpts::default(),
+        )
+    }
+
+    fn stamp_of(len: u64, mtime: SystemTime) -> DiskStamp {
+        DiskStamp {
+            len,
+            mtime,
+            hash: 7,
+        }
+    }
+
+    /// m-fr1-2: a tab's read stamp the watcher has not learned keeps the file open until the
+    /// watcher learns it (the hash is attached, the entry goes) or `OPENED_TTL` passes. A file
+    /// not listed yet stays open too (fr1 dropped it at once).
+    #[test]
+    fn a_tabs_unlearned_stamp_keeps_the_file_open_until_learned_or_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = rec_over(dir.path());
+        let a = RelPath::parse("a.sql").unwrap();
+        let new = RelPath::parse("new.sql").unwrap();
+        let later = SystemTime::now() + Duration::from_secs(5);
+        // A stamp the watcher never learned (another length), and a file it does not list.
+        r.remember(&a, &stamp_of(9, later));
+        r.remember(&new, &stamp_of(3, later));
+        r.adopt_opened();
+        assert!(r.is_open(&a) && r.is_open(&new));
+        r.adopt_opened_at(SystemTime::now() + OPENED_TTL - Duration::from_secs(1));
+        assert!(r.is_open(&a) && r.is_open(&new));
+        r.adopt_opened_at(SystemTime::now() + OPENED_TTL + Duration::from_secs(1));
+        assert!(!r.is_open(&a) && !r.is_open(&new), "expired");
+        // Learned: the watcher's stamp matches what the tab read, so the hash moves over.
+        let seen = r.known.get(&a).unwrap().seen.clone();
+        r.remember(&a, &stamp_of(seen.len + 1, seen.mtime));
+        r.known.get_mut(&a).unwrap().seen.len += 1;
+        r.adopt_opened();
+        assert!(r.opened.is_empty());
+        assert_eq!(r.known.get(&a).unwrap().hash, Some(7));
+        assert!(r.is_open(&a));
+    }
+    // ## m4b-gatefix-1 fix round 2
 
     /// The hints the debounce thread delivers to `/lib` for `events`, up to the sentinel
     /// `/lib/zz.sql` sent after them (items are delivered in arrival order, so anything still

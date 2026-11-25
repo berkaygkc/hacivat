@@ -3303,3 +3303,61 @@ fn a_file_opened_before_the_watcher_learned_its_stamp_is_open() {
     );
 }
 // ## m4b-gatefix-1 fix round 1
+
+// ## m4b-gatefix-1 fix round 2 (re-review I-fr1-1; R-GF-1 as amended)
+/// An open file found gone while an overflowed checkout holds the lock waits for the burst's
+/// rescan (which can pair it with a new name the burst held); it is never `Removed` before
+/// that rescan. An edit of a present open file still passes at once (R-GF-1).
+#[test]
+fn an_open_file_gone_inside_an_overflowed_checkout_waits_for_the_rescan() {
+    let lib = repo_lib(1_200);
+    lib.write("kept.sql", "SELECT 1;");
+    let mut r = lib.rec();
+    r.remember(&rel("open.sql"), &lib.read_stamp("open.sql"));
+    r.remember(&rel("kept.sql"), &lib.read_stamp("kept.sql"));
+    let t = t0() + Duration::from_secs(5_000);
+    let gone = t + ms(300);
+    let lock_gone = t + Duration::from_secs(1);
+    let events = simulate(&mut r, t, t + Duration::from_secs(6), |r, now| {
+        let mut pushed = false;
+        if now == t {
+            lib.write(".git/index.lock", "");
+            r.push(lib.hint(".git/index.lock"), now);
+            rewrite(r, &lib, 0..1_200, now);
+            pushed = true;
+        }
+        if now == gone {
+            fs::remove_file(lib.path("open.sql")).unwrap();
+            lib.write("kept.sql", "SELECT 'edited while git ran';");
+            r.push(lib.hint("open.sql"), now);
+            r.push(lib.hint("kept.sql"), now);
+            pushed = true;
+        }
+        if now == lock_gone {
+            fs::remove_file(lib.path(".git/index.lock")).unwrap();
+            r.push(lib.hint(".git/index.lock"), now);
+            pushed = true;
+        }
+        pushed
+    });
+    let rescan = rescans(&events);
+    assert_eq!(rescan.len(), 1, "{rescan:?}");
+    let removed = events
+        .iter()
+        .find(|(_, e)| *e == WatchEvent::Removed(rel("open.sql")))
+        .map(|(t, _)| *t)
+        .expect("the open file's removal");
+    assert!(removed >= rescan[0], "removed before the rescan");
+    let edited = changed_at(&events, "kept.sql", gone).expect("the present open file's edit");
+    assert!(
+        edited - gone <= OPEN_BUDGET,
+        "edit after {:?}",
+        edited - gone
+    );
+    println!(
+        "HV-FACT gatefix1-fr2 gone_open removed_after_rescan_ms={} edit_ms={}",
+        (removed - rescan[0]).as_millis(),
+        (edited - gone).as_millis()
+    );
+}
+// ## m4b-gatefix-1 fix round 2
