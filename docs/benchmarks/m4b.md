@@ -70,14 +70,42 @@ The gate agent re-ran on `6f9adcdb`:
 
 They ran in `slot-ui-1`, after `cargo clean -p` of every member, on the same Mac (load 6–17).
 
+## Update at `e0c0c31f` (controller, 2026-11-26)
+
+The final runs on `6f9adcdb` came back as follows.
+
+- **Windows `build-test`:** red in all three runs on one test only,
+  `watch.rs` `a_file_opened_before_the_watcher_learned_its_stamp_is_open` (gatefix-1's m3 test).
+- **Everything else:** green, apart from the macOS pseudo-screens of 45626158424, which was
+  cancelled before any runner picked it up. The same job is green in 45626141405.
+
+cifix-7 root-caused the Windows failure as a test defect, not a product miss. Two writes inside
+one NTFS clock tick give an identical `(len, mtime)`, so the stamp the tab read had already been
+learned, and "no event" is correct, because the tab and the disk hold the same bytes. A further
+same-tick rewrite still reports `Changed`. The fix is test-only: the first write is dated back,
+and a deterministic same-tick test is added. It is merged as `e0c0c31f`, together with this
+record.
+
+**Confirmation CI on `e0c0c31f`**, one dispatch plus the PR run (PO cost and speed note):
+
+- **45696234482** (`workflow_dispatch`): **success**, 31/31 jobs green, including build-test ×3,
+  turkey-test, docker-full, fuzz-scripts, fuzz-meta, fuzz-sql, pseudo-screens and
+  nightly-package ×3.
+- **45696249373** (PR #6, `pull_request`): **success**, 27/27 jobs green, including docker-pr and
+  build-test windows.
+
+This closes E10's CI part and E11. **Every criterion E1–E12 PASSes on its automated evidence.**
+The open items are the PO's (section 0 item 2).
+
 ## 0. Open before the gate closes, in order
 
-1. **E11, the final gate CI on `6f9adcdb`:** dispatches 45626141405 and 45626158424, and PR
+1. ~~**E11, the final gate CI on `6f9adcdb`:** dispatches 45626141405 and 45626158424, and PR
    45626153027. They were running when this update was written, with no job failed yet.
    - **Pending:** run 45626141405, run 45626158424 and run 45626153027. The controller fills in
      the job results.
    - Every job must be green: build-test ×3, turkey-test, docker-pr, docker-full, fuzz-scripts,
-     fuzz-meta, fuzz-sql, pseudo-screens and nightly-package ×3.
+     fuzz-meta, fuzz-sql, pseudo-screens and nightly-package ×3.~~ **Done:** green on
+     `e0c0c31f` (45696234482 and 45696249373; see "Update at `e0c0c31f`").
    - The previous gate tip `c8812c7d` ended as follows:
      - 45202181119 **success**, after a macOS rerun;
      - PR 45202171406 **success**;
@@ -110,17 +138,16 @@ watcher idle CPU (now PASS, §1).
 | E7 | Security: path traversal, symlinks, untrusted `workspace.toml`, watcher limits, git never runs a program; fuzz targets clean for one nightly | **PASS** (automated, and one nightly fuzz-scripts on each gate dispatch) | **Tests, green at `c8812c7d`:** `pathsafe` `pathsafe_component_table`; `scan` `symlink_outside_is_listed_disabled_and_never_opened` and `scan_limits_stop_with_a_notice`; `fileio` `save_refuses_a_path_that_became_a_link`; `manifest` and `registry` (nesting guard, no replace); `watch_real` `dir_symlink_created_after_watch_is_not_walked`; `hostile_library` (15), `hostile_repo` and `hostile_repo_more` (6), `scripts_adversarial` (4). T20 found and fixed the alternates timeout (R-T20-2) and UNC/NTLM routes (fr4/fr5); 6 mutations go red. Three check-deps token rules are new, and `check-deps` is ok. **Fuzz:** T20 ran `workspace_toml` and `pathsafe` locally for 10 min each, with 0 crashes (7.4M and 10.5M runs; `pathsafe` again at 12.5M after fr1). **Gate fuzz-scripts, green on both dispatches, 600 s per target:** 45202154953 (job 137788196720) logs `workspace_toml` "Done 5858894 runs in 601 second(s)" and `pathsafe` "Done 10255046 runs"; 45202181119 (job 137788283448) logs 5,890,889 and 10,445,287 runs. The recorded residuals are in §9. |
 | E8 | Carried M3 items: files and encodings (UI-EDIT-02), T2 preview, 20–100 MB paste confirmation, Run as script in constant memory, `StreamSplitter` MySQL hold fixed | **PASS** (automated, local, and Docker on the gate runs) | **Local:** `fileio` `fileio_round_trip_table`, `save_keeps_mode_and_link_target` and `failed_save_leaves_original` (T5); the editor `t2_preview` and paste tests, with R-T11-2 (no editable paste above 20 MB); `sql-split` with `a_misread_block_is_a_stop_or_the_whole_split` (R-M4b-47) and `eager_is_exact_off_mysql` (R-T8-4); exec `script_run` with `run_as_script_stops_when_file_changes_mid_run` and `rename_replace_mid_run_keeps_old_inode` (T12, two passes on every dialect, R-T12-1/2); `scripts_run_as_script` (T18, 17 tests). **Release perf at `6f9adcdb`:** both ignored `script_run` tests together, in the plan's `-- --ignored` form: 2 passed / 0 failed, with `HV-FACT t12 target=fake-mysql bytes=159744000 units=153600 pass1_rss_growth_mib=12 peak_held=132456 secs=23` (budget < 64 MiB). The test-isolation defect found at `c8812c7d` is fixed: there, run together, they failed at 254 MiB (13 MiB alone), because both tests read process-wide RSS. gatefix-1 now serializes them with a process lock. **Docker:** `hacivat-exec --test docker_script_run`: `mysql_dump_of_150_mb_runs_in_constant_memory_on_a_real_server`, `stray_end_file_executes_nothing_on_a_real_server` and `a_denied_statement_late_in_a_file_executes_nothing_on_a_real_server`. **Gate run 45202154953, docker-full:** `HV-FACT t19 e8 target=mysql84 bytes=157298639 units=10613 units_run=10613 rows=1698080 rss_before_mib=31 rss_peak_mib=51 rss_growth_mib=20 pass1_peak_growth_mib=13 peak_held=110176 secs=195` (bound < 64 MiB). `stray_end … refused=Uncertain(UnknownBlock) units_run=0` on mysql80, mysql84, mariadb106, mariadb1011 and mariadb114, each with `statements=…Questions:1` equal to `one_read`. `late_denial … at_unit=Some(8001) units_run=0 rows=0 asked=0` on pg14–18 (`pg_state_change_unmoved=true`) and the five MySQL-family lines. Dispatch 2 (45202181119): `rss_growth_mib=7 pass1_peak_growth_mib=0`. PR run docker-pr: `rss_growth_mib=8`. |
 | E9 | No silent weakening: every M4b stub filled; `rg 'NotImplemented' crates/core/hacivat-scripts crates/core/hacivat-git crates/app/hacivat-app/src/scripts` empty outside tests | **PASS** at `6f9adcdb` | At `6f9adcdb` the check prints **nothing**: `rg` exit 1, no match at all, tests included. No `todo!` or `unimplemented!` appears in the three paths. At `c8812c7d` it printed 21 lines and was **FAIL**: five declared variants that nothing constructed, two `WatchError::NotImplemented` returns meaning "source stopped", and stale Task 1a docs. No stub was unfilled. gatefix-1 (`2c074167`) removed the variants, renamed the watcher's to `WatchError::Stopped` and fixed the docs. |
-| E10 | Shots: 0 violations; every M4 shot unchanged against `render-m4-gate-e7323aa/`; `pseudo-screens` green | **PASS** (harness, T22-pre on `c8812c7d`'s code; pseudo-screens green on 45202181119); final-run pseudo-screens **pending**; PNG sign-off **PENDING (PO)** | T22-pre fr1, on the code merged as `c8812c7d`, did not re-render (no UI code changed since): a full render of **5,772** PNGs in 4 shards with **0 violations**. Against `render-m4-gate-e7323aa`: 5,116 compared, **36 breached**, which is exactly `shot-superseded-m4b.txt` (the T16 "Script libraries" Settings nav entry: 9 states × dark/light × en-XA/tr-XT at 960); **656 new** M4b PNGs in `render-m4b-new/`; 0 other changes. The T22-pre review approved them, checking real frames. DESIGN.md "Script Workspace (M4b)" (T21, re-derived from the code in fr1). pseudo-screens was green in 45202181119 (`c8812c7d`, run success). gatefix-1 changed no `crates/ui` file, and only five lines of `hacivat-app` (`run_as_script.rs`, the `NotImplemented` arm), so the render stands. **Needed:** pseudo-screens green on the final runs (**pending: run 45626141405, run 45626158424**), and the PO's sign-off of the 36 + 656 PNGs and DESIGN.md. |
-| E11 | Gates green: clippy, the full test set and the perf lines, check-deps, l10n, tokens, `cargo deny`, `aws-lc-rs` absent; CI on the gate tip, every job green | Local lines **PASS** (§3a at `c8812c7d`; perf lines and E9 re-run at `6f9adcdb`, §3b); CI on `6f9adcdb` **pending: run 45626141405, run 45626158424, run 45626153027** | **Local:** at `c8812c7d` (§3a), clippy is clean on every line, and the full test set batched by crate is **8,038 passed, 0 failed**, 417 ignored, plus every feature line. `check-deps` is ok, including the three arms and `NoGitSubprocess`. `l10n check` gives 0 errors (96 L025 warnings). `tokens --check`, the generator `--check`s, `minicat --check` and `docker check-pins` are ok. `cargo deny` bans, licenses and sources are ok, and `aws-lc-rs` matches no package. At `6f9adcdb`, the controller's merge check gave check-deps ok, clippy 0/0, core 791/0, app 1442/0 and l10n 0 errors (ledger). The gate agent re-ran every perf line (§3b): all green, except one reload sample under load (E12). **CI on the previous tip `c8812c7d`:** 45202181119 success after a macOS rerun; PR 45202171406 success; 45202154953 red only on macOS `git_checkout_2000_is_one_rescan` (fixed by gatefix-1). Two jobs of the PR run (launch-smoke macOS and switch macOS) were cancelled, then rerun to success. **CI on `6f9adcdb`:** when this was written, 16 jobs of 45626141405 were green, 1 of 45626158424 and 4 of 45626153027, with none failed. **Needed:** every job green on the three final runs. A Windows build-test that times out in the post-job cache save after green tests is rerun with `--failed` (M4 lesson). |
+| E10 | Shots: 0 violations; every M4 shot unchanged against `render-m4-gate-e7323aa/`; `pseudo-screens` green | **PASS** (harness, T22-pre on `c8812c7d`'s code; pseudo-screens green on 45202181119); final-run pseudo-screens **PASS** (45696234482, `e0c0c31f`); PNG sign-off **PENDING (PO)** | T22-pre fr1, on the code merged as `c8812c7d`, did not re-render (no UI code changed since): a full render of **5,772** PNGs in 4 shards with **0 violations**. Against `render-m4-gate-e7323aa`: 5,116 compared, **36 breached**, which is exactly `shot-superseded-m4b.txt` (the T16 "Script libraries" Settings nav entry: 9 states × dark/light × en-XA/tr-XT at 960); **656 new** M4b PNGs in `render-m4b-new/`; 0 other changes. The T22-pre review approved them, checking real frames. DESIGN.md "Script Workspace (M4b)" (T21, re-derived from the code in fr1). pseudo-screens was green in 45202181119 (`c8812c7d`, run success). gatefix-1 changed no `crates/ui` file, and only five lines of `hacivat-app` (`run_as_script.rs`, the `NotImplemented` arm), so the render stands. **Needed:** pseudo-screens green on the final runs (**pending: run 45626141405, run 45626158424**), and the PO's sign-off of the 36 + 656 PNGs and DESIGN.md. |
+| E11 | Gates green: clippy, the full test set and the perf lines, check-deps, l10n, tokens, `cargo deny`, `aws-lc-rs` absent; CI on the gate tip, every job green | Local lines **PASS** (§3a at `c8812c7d`; perf lines and E9 re-run at `6f9adcdb`, §3b); CI **PASS** on `e0c0c31f`: 45696234482 (31/31) and PR 45696249373 (27/27) | **Local:** at `c8812c7d` (§3a), clippy is clean on every line, and the full test set batched by crate is **8,038 passed, 0 failed**, 417 ignored, plus every feature line. `check-deps` is ok, including the three arms and `NoGitSubprocess`. `l10n check` gives 0 errors (96 L025 warnings). `tokens --check`, the generator `--check`s, `minicat --check` and `docker check-pins` are ok. `cargo deny` bans, licenses and sources are ok, and `aws-lc-rs` matches no package. At `6f9adcdb`, the controller's merge check gave check-deps ok, clippy 0/0, core 791/0, app 1442/0 and l10n 0 errors (ledger). The gate agent re-ran every perf line (§3b): all green, except one reload sample under load (E12). **CI on the previous tip `c8812c7d`:** 45202181119 success after a macOS rerun; PR 45202171406 success; 45202154953 red only on macOS `git_checkout_2000_is_one_rescan` (fixed by gatefix-1). Two jobs of the PR run (launch-smoke macOS and switch macOS) were cancelled, then rerun to success. **CI on `6f9adcdb`:** when this was written, 16 jobs of 45626141405 were green, 1 of 45626158424 and 4 of 45626153027, with none failed. **Needed:** every job green on the three final runs. A Windows build-test that times out in the post-job cache save after green tests is rerun with `--failed` (M4 lesson). |
 | E12 | Budgets on the PO's Mac | **PASS** at `6f9adcdb`: all 8 sub-budgets met as measured here (not a quiet machine; one reload sample over under load 15). Quiet re-runs **PENDING (PO)**. At `c8812c7d` it was **FAIL** (Go to script, watcher idle CPU) | See the table below. |
 
 **Summary at `6f9adcdb`.**
 
 - **PASS on their automated evidence:** E1–E9 and E12. The Docker facts of E1, E6 and E8 come
   from the `c8812c7d` gate runs, and E2–E8 each keep their PO demo step.
-- **E10:** the harness PASSes; the PNG sign-off is the PO's, and pseudo-screens is pending on
-  the final runs.
-- **E11:** local PASS; CI pending (runs 45626141405, 45626158424 and 45626153027).
+- **E10:** PASS, with pseudo-screens green on `e0c0c31f`. The PNG sign-off is the PO's.
+- **E11:** PASS, both locally and in CI on `e0c0c31f` (45696234482 and 45696249373).
 - **No criterion FAILS.**
 
 The gate closes when the final CI is green; the PO's items (section 0 item 2) follow.
@@ -253,9 +280,11 @@ environment as §3a. Release builds.
 | **45202154953** | `m4b` `c8812c7d` | **Gate dispatch 1**: docker-full, fuzz-scripts, build-test ubuntu, turkey and nightly-package ×3 green; it ended red only on macOS `git_checkout_2000_is_one_rescan` (fixed by gatefix-1) |
 | **45202181119** | `m4b` `c8812c7d` | **Gate dispatch 2**: **success** after a macOS rerun (ledger), pseudo-screens included |
 | **45202171406** | PR #6, `c8812c7d` | **Gate PR run** (`pull_request`): docker-pr, build-test windows and turkey-test green; launch-smoke macOS and switch macOS were cancelled, then the run ended **success** (ledger) |
-| **45626141405** | `m4b` `6f9adcdb` | **Final gate dispatch 1**: pending: run 45626141405 |
-| **45626158424** | `m4b` `6f9adcdb` | **Final gate dispatch 2**: pending: run 45626158424 |
-| **45626153027** | PR #6, `6f9adcdb` | **Final gate PR run** (docker-pr): pending: run 45626153027 |
+| 45626141405 | `m4b` `6f9adcdb` | Final dispatch 1: every job green except Windows build-test (cifix-7's test) |
+| 45626158424 | `m4b` `6f9adcdb` | Final dispatch 2: Windows build-test (same test); macOS pseudo-screens cancelled before a runner picked it up |
+| 45626153027 | PR #6, `6f9adcdb` | Final PR run: every job green except Windows build-test (same test) |
+| **45696234482** | `m4b` `e0c0c31f` | **Gate confirmation dispatch: success, 31/31** |
+| **45696249373** | PR #6, `e0c0c31f` | **Gate confirmation PR run** (docker-pr): **success, 27/27** |
 
 ## 5. Rulings R-M4b-1 to R-M4b-47 for PO confirmation
 
