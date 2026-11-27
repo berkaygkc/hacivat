@@ -140,6 +140,94 @@ mod tests {
         assert_eq!(DARK.colors.on_cp_fill.0, 0xFFFFFFFF);
     }
 
+    // ## demofix-1 (PO demo F5)
+    /// sRGB channel `c` (0–255) to linear light.
+    fn linear(c: u32) -> f64 {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// `fg` over `bg` (its alpha), as linear RGB.
+    fn composite(fg: Color, bg: Color) -> [f64; 3] {
+        let [r, g, b, a] = fg.0.to_be_bytes();
+        let [br, bgc, bb, _] = bg.0.to_be_bytes();
+        let a = f64::from(a) / 255.0;
+        let mix = |f: u8, b: u8| linear(u32::from(f)) * a + linear(u32::from(b)) * (1.0 - a);
+        [mix(r, br), mix(g, bgc), mix(b, bb)]
+    }
+
+    fn luminance(rgb: [f64; 3]) -> f64 {
+        0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+    }
+
+    fn contrast(a: [f64; 3], b: [f64; 3]) -> f64 {
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// OKLab, from linear RGB.
+    fn oklab(rgb: [f64; 3]) -> [f64; 3] {
+        let [r, g, b] = rgb;
+        let l = (0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b).cbrt();
+        let m = (0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b).cbrt();
+        let s = (0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b).cbrt();
+        [
+            0.210_454_255_3 * l + 0.793_617_785 * m - 0.004_072_046_8 * s,
+            1.977_998_495_1 * l - 2.428_592_205 * m + 0.450_593_709_9 * s,
+            0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766 * s,
+        ]
+    }
+
+    fn distance(a: Color, b: Color, bg: Color) -> f64 {
+        let (x, y) = (oklab(composite(a, bg)), oklab(composite(b, bg)));
+        ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt()
+    }
+
+    /// The git letters (M, N, D) are each readable (WCAG AA, 4.5:1, at 11 px) on every
+    /// surface a tree row has (side, hover, the selection tint over side), and visibly apart
+    /// from one another and from the trust and state hues: production red, the capsule fill,
+    /// pending amber, direct-path green.
+    #[test]
+    fn git_badge_inks_meet_aa_and_stay_apart() {
+        for t in [&DARK, &LIGHT] {
+            let c = &t.colors;
+            let side = c.side;
+            let selected = composite(c.blue_tint, side);
+            let inks = [c.git_modified, c.git_new, c.git_deleted];
+            for ink in inks {
+                let fg = composite(ink, side);
+                for (bg, name) in [
+                    (composite(side, side), "side"),
+                    (composite(c.hover, side), "hover"),
+                    (selected, "selection"),
+                ] {
+                    let ratio = contrast(fg, bg);
+                    assert!(ratio >= 4.5, "{ink:?} on {name}: {ratio:.2}");
+                }
+                for (other, name) in [
+                    (c.red, "red"),
+                    (c.cp_fill, "cp-fill"),
+                    (c.amber, "amber"),
+                    (c.green, "green"),
+                ] {
+                    let d = distance(ink, other, side);
+                    assert!(d >= 0.05, "{ink:?} too close to {name}: {d:.3}");
+                }
+            }
+            for (i, a) in inks.iter().enumerate() {
+                for b in &inks[i + 1..] {
+                    let d = distance(*a, *b, side);
+                    assert!(d >= 0.1, "{a:?} and {b:?} too close: {d:.3}");
+                }
+            }
+        }
+    }
+    // ## demofix-1
+
     #[test]
     fn color_to_hsla_round_trips_alpha_and_white() {
         let w = Color(0xFFFFFF80).to_hsla();

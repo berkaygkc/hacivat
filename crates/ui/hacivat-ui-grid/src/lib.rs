@@ -18,7 +18,7 @@ pub mod testing;
 mod view;
 
 pub use commands::{GRID_COMMANDS, grid_command};
-pub use list::{RowRenderer, VirtualList};
+pub use list::{ListEvent, RowRenderer, VirtualList};
 pub use source::{
     Align, CellContent, CellKind, ColId, ColumnKind, ColumnSpec, GRID_CONTEXT, GridCellFlags,
     GridDataSource, GridFrame, ModelCell, ModelRow, NULL_MARKER, RowCount, SourceCaps, ViewRow,

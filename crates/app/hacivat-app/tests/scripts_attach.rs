@@ -392,6 +392,15 @@ fn attach_over_existing_manifest_does_not_rewrite_it(cx: &mut TestAppContext) {
     r.open_attach(&dir, None);
     let d = r.dialog();
     assert!(r.vcx.cx.read(|cx| d.read(cx).found()));
+    // ## demofix-1 (PO demo F3): the notice's info glyph is the inline notice's 14 px one.
+    hacivat_ui::icon::icon_record();
+    redraw_full(r.vcx);
+    let info: Vec<f32> = hacivat_ui::icon::icon_take()
+        .iter()
+        .filter(|i| i.name == hacivat_ui::icon::IconName::Info)
+        .map(|i| i.size_px)
+        .collect();
+    assert!(!info.is_empty() && info.iter().all(|s| *s == 14.0), "{info:?}");
     let frame: Vec<String> = full_frame(r.vcx)
         .into_iter()
         .map(|t| t.text.to_string())

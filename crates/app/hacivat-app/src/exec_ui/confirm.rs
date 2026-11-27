@@ -1492,12 +1492,13 @@ fn info_line(theme: &Theme, text: SharedString) -> impl IntoElement {
         .flex_row()
         .items_start()
         .gap(px(t.spacing.sm))
+        // ## demofix-1 (PO demo F3): the inline notice's 14 px glyph (DESIGN.md), on whole
+        // pixels, centred on the first line (as the attach dialog's).
         .child(
-            div().flex_none().pt(px(2.0)).child(
-                Icon::new(IconName::Info)
-                    .size(IconSize::Chrome)
-                    .color(c.text_2.to_hsla()),
-            ),
+            Icon::new(IconName::Info)
+                .size(IconSize::Default)
+                .color(c.text_2.to_hsla())
+                .leading(t.type_ramp.body_sm.line_height),
         )
         .child(
             div().flex_1().min_w_0().child(

@@ -144,6 +144,8 @@ struct ConsoleTile {
     /// Where each result tab was painted (its menu opens under it).
     tab_bounds: TabBounds,
     _observe: Subscription,
+    // ## demofix-1 (PO demo F8): the log list's paused state.
+    _paused: Subscription,
     _events: Subscription,
     _log: Task<()>,
 }
@@ -412,6 +414,8 @@ impl ResultsHost {
         let mut changes = log.changes();
         let ran = *changes.borrow() > 0;
         let observe = cx.observe(results, |_, _, cx| cx.notify());
+        // ## demofix-1 (PO demo F8): "Scroll to end" shows prominently while the log is paused.
+        let paused = cx.subscribe(&list, |_, _, _: &hacivat_ui_grid::ListEvent, cx| cx.notify());
         // ## m3a-t30 fix round 1 (T33 merge obligation): what the tile asks of the run UI.
         let events = cx.subscribe_in(results, window, |_, _, event: &ResultsEvent, window, cx| {
             crate::exec_ui::handle_results_event(event, window, cx);
@@ -440,6 +444,7 @@ impl ResultsHost {
                 text_widths: Rc::default(),
                 tab_bounds: TabBounds::default(),
                 _observe: observe,
+                _paused: paused,
                 _events: events,
                 _log: task,
             },
@@ -456,7 +461,14 @@ impl ResultsHost {
         };
         tile.ran = true;
         let log = tile.log.clone();
-        let new = tile.list.update(cx, |l, cx| l.rows_mut(cx).take_new(&log));
+        let new = tile.list.update(cx, |l, cx| {
+            let new = l.rows_mut(cx).take_new(&log);
+            // ## demofix-1 (PO demo F8): a full ring dropped its oldest rows; a view the user
+            // scrolled up keeps its rows (sticky scroll), one at the bottom keeps following.
+            let shift = l.rows_mut(cx).take_shift();
+            l.shift_rows(shift, cx);
+            new
+        });
         let fresh: Vec<&LogLine> = new
             .iter()
             .filter(|l| !matches!(l.msg, LogMsg::Dropped { .. }))
@@ -885,6 +897,8 @@ impl ResultsHost {
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
                         }),
                         Rc::new(move |_, cx| ends.update(cx, |l, cx| l.scroll_to_end(cx))),
+                        // ## demofix-1 (PO demo F8)
+                        list.read(cx).paused(),
                         cx,
                     ))
                     .child(

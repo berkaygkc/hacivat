@@ -6,7 +6,7 @@ use hacivat_l10n::ids;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui_core::gpui_surface::{
-    App, Div, ParentElement, Pixels, Point, SharedString, Styled, div, px,
+    App, Div, InteractiveElement, ParentElement, Pixels, Point, SharedString, Styled, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 use serde::{Deserialize, Serialize};
@@ -48,8 +48,14 @@ pub const MIN_TILE_PX: f32 = 120.0;
 pub const MAX_EXPLORER_PX: f32 = 560.0;
 /// The widest the inspector gets.
 pub const MAX_INSPECTOR_PX: f32 = 560.0;
-/// The invisible grab area around a 1 px seam.
-const SEAM_GRAB_PX: f32 = 6.0;
+/// The grab area around a 1 px seam. ## demofix-1 (PO demo F7): 6 to 8 px.
+pub const SEAM_GRAB_PX: f32 = 8.0;
+/// ## demofix-1 (PO demo F7): the grip on a seam's middle, so the seam can be found: a
+/// `text-3` bar this long and this thick (square ends: marks under 8 px take no radius), on
+/// the seam's axis. Hovered or dragged, the seam shows as a `SEAM_HOT_PX` `blue` line.
+pub const GRIP_LONG_PX: f32 = 24.0;
+pub const GRIP_SHORT_PX: f32 = 3.0;
+pub const SEAM_HOT_PX: f32 = 2.0;
 /// DESIGN.md `components.tree-filter.height` (no spacing token carries it).
 const TREE_FILTER_HEIGHT_PX: f32 = 28.0;
 /// The action whose key hint the explorer filter shows (bound by a later task; no hint until
@@ -322,31 +328,47 @@ pub fn results(theme: &Theme, cx: &App) -> Div {
 }
 
 /// The grab areas of the visible seams, positioned inside the tiles row (which is `relative`).
-/// Each is a 6 px band centred on its 1 px seam; the caller adds the drag handlers.
-pub fn seam_grabs(l: &TileLayout) -> Vec<(Seam, Div)> {
+/// Each is an 8 px band centred on its 1 px seam; the caller adds the drag handlers.
+///
+/// ## demofix-1 (PO demo F7): a seam is visible and says it can be dragged. Each band draws a
+/// grip on its middle (`text-3`, [`GRIP_LONG_PX`] by [`GRIP_SHORT_PX`], 3:1 or more against
+/// the tiles as WCAG 1.4.11 asks of a control), and, while the pointer is on it or `active`
+/// (being dragged), a [`SEAM_HOT_PX`] `blue` line over the seam with the grip in `blue`. The
+/// pointer is the resize cursor on the whole band.
+pub fn seam_grabs(l: &TileLayout, active: Option<Seam>, theme: &Theme) -> Vec<(Seam, Div)> {
     let half = SEAM_GRAB_PX / 2.0;
     let mut grabs = Vec::new();
     let centre_left = if l.explorer_visible {
         // The vertical seam is the 1 px gap right of the explorer.
         grabs.push((
             Seam::Explorer,
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left(px(l.explorer_w + 0.5 - half))
-                .w(px(SEAM_GRAB_PX))
-                .cursor_col_resize(),
+            seam_marks(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(l.explorer_w + 0.5 - half))
+                    .w(px(SEAM_GRAB_PX))
+                    .cursor_col_resize(),
+                Seam::Explorer,
+                active,
+                theme,
+            ),
         ));
         grabs.push((
             Seam::Connection,
-            div()
-                .absolute()
-                .left_0()
-                .w(px(l.explorer_w))
-                .bottom(px(l.conn_panel_h + 0.5 - half))
-                .h(px(SEAM_GRAB_PX))
-                .cursor_row_resize(),
+            seam_marks(
+                div()
+                    .absolute()
+                    .left_0()
+                    .w(px(l.explorer_w))
+                    .bottom(px(l.conn_panel_h + 0.5 - half))
+                    .h(px(SEAM_GRAB_PX))
+                    .cursor_row_resize(),
+                Seam::Connection,
+                active,
+                theme,
+            ),
         ));
         l.explorer_w + 1.0
     } else {
@@ -354,15 +376,81 @@ pub fn seam_grabs(l: &TileLayout) -> Vec<(Seam, Div)> {
     };
     grabs.push((
         Seam::Editor,
-        div()
-            .absolute()
-            .left(px(centre_left))
-            .right_0()
-            .top(px(l.editor_h + 0.5 - half))
-            .h(px(SEAM_GRAB_PX))
-            .cursor_row_resize(),
+        seam_marks(
+            div()
+                .absolute()
+                .left(px(centre_left))
+                .right_0()
+                .top(px(l.editor_h + 0.5 - half))
+                .h(px(SEAM_GRAB_PX))
+                .cursor_row_resize(),
+            Seam::Editor,
+            active,
+            theme,
+        ),
     ));
     grabs
+}
+
+/// The name of `seam` in debug selectors and hover groups.
+pub fn seam_name(seam: Seam) -> &'static str {
+    match seam {
+        Seam::Explorer => "explorer",
+        Seam::Connection => "connection",
+        Seam::Editor => "editor",
+    }
+}
+
+// ## demofix-1 (PO demo F7)
+/// `band` with `seam`'s grip and its hover / drag line.
+fn seam_marks(band: Div, seam: Seam, active: Option<Seam>, theme: &Theme) -> Div {
+    let c = &theme.tokens.colors;
+    let name = seam_name(seam);
+    let group: SharedString = format!("seam-{name}").into();
+    let hot = active == Some(seam);
+    let (blue, grip_ink) = (c.blue.to_hsla(), c.text_3.to_hsla());
+    let vertical = seam == Seam::Explorer;
+    let off = (SEAM_GRAB_PX - SEAM_HOT_PX) / 2.0;
+    let grip_off = (SEAM_GRAB_PX - GRIP_SHORT_PX) / 2.0;
+    // The line over the seam, shown while hovered or dragged.
+    let mut line = div()
+        .debug_selector(move || format!("seam-line-{name}"))
+        .absolute();
+    line = if vertical {
+        line.top_0().bottom_0().left(px(off)).w(px(SEAM_HOT_PX))
+    } else {
+        line.left_0().right_0().top(px(off)).h(px(SEAM_HOT_PX))
+    };
+    line = if hot {
+        line.bg(blue)
+    } else {
+        line.group_hover(group.clone(), move |s| s.bg(blue))
+    };
+    // The grip on the band's middle.
+    let mut grip = div()
+        .debug_selector(move || format!("seam-grip-{name}"))
+        .flex_none();
+    grip = if vertical {
+        grip.w(px(GRIP_SHORT_PX)).h(px(GRIP_LONG_PX))
+    } else {
+        grip.w(px(GRIP_LONG_PX)).h(px(GRIP_SHORT_PX))
+    };
+    grip = if hot {
+        grip.bg(blue)
+    } else {
+        grip.bg(grip_ink)
+            .group_hover(group.clone(), move |s| s.bg(blue))
+    };
+    let mut centre = div().absolute().flex().items_center().justify_center();
+    centre = if vertical {
+        centre.top_0().bottom_0().left(px(grip_off)).w(px(GRIP_SHORT_PX))
+    } else {
+        centre.left_0().right_0().top(px(grip_off)).h(px(GRIP_SHORT_PX))
+    };
+    band.group(group)
+        .debug_selector(move || format!("seam-grab-{name}"))
+        .child(line)
+        .child(centre.child(grip))
 }
 
 #[cfg(test)]

@@ -1516,7 +1516,8 @@ impl Workspace {
                         None => tiles::results(theme, cx).into_any_element(),
                     }),
             );
-        let grabs: Vec<Div> = tiles::seam_grabs(&l)
+        // ## demofix-1 (PO demo F7): visible grips, the dragged seam highlighted.
+        let grabs: Vec<Div> = tiles::seam_grabs(&l, self.drag, theme)
             .into_iter()
             .map(|(seam, grab)| {
                 grab.on_mouse_down(
@@ -1524,6 +1525,8 @@ impl Workspace {
                     cx.listener(move |this, _, _, cx| {
                         this.drag = Some(seam);
                         cx.stop_propagation();
+                        // demofix-1 (F7): the dragged seam is drawn highlighted.
+                        cx.notify();
                     }),
                 )
             })

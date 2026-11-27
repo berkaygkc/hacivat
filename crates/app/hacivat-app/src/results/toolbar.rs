@@ -476,6 +476,20 @@ fn tool_button(
     action: Action,
     cx: &App,
 ) -> ToolbarItem {
+    tool_button_kind(id, icon, msg, priority, action, ButtonKind::Ghost, cx)
+}
+
+// ## demofix-1 (PO demo F8)
+/// [`tool_button`] drawn as `kind`.
+fn tool_button_kind(
+    id: &'static str,
+    icon: IconName,
+    msg: hacivat_l10n::MsgRef<NoArgs>,
+    priority: u8,
+    action: Action,
+    kind: ButtonKind,
+    cx: &App,
+) -> ToolbarItem {
     let text: SharedString = tr(cx, msg, NoArgs);
     let label: TextFn = {
         let text = text.clone();
@@ -487,7 +501,7 @@ fn tool_button(
         Rc::new(move |_, _| {
             let action = action.clone();
             Button::new(id, text.clone())
-                .kind(ButtonKind::Ghost)
+                .kind(kind)
                 .icon(icon)
                 .on_raised(true)
                 .on_click(move |_, window, cx| action(window, cx))
@@ -567,7 +581,25 @@ pub fn result_toolbar_with(
 }
 
 /// The Output tab's toolbar: Clear, Copy, Scroll to end.
-pub fn output_toolbar(clear: Action, copy: Action, end: Action, cx: &App) -> AnyElement {
+// ## demofix-1 (PO demo F8): `paused` (the user scrolled the log away from its newest line
+// while lines arrive) draws "Scroll to end" as a Default button, outlined and in ink, so the
+// way back to following is the toolbar's most visible item; following, it is Ghost.
+/// The kind of the Output toolbar's "Scroll to end" while the log is `paused` or following.
+pub fn log_end_kind(paused: bool) -> ButtonKind {
+    if paused {
+        ButtonKind::Default
+    } else {
+        ButtonKind::Ghost
+    }
+}
+
+pub fn output_toolbar(
+    clear: Action,
+    copy: Action,
+    end: Action,
+    paused: bool,
+    cx: &App,
+) -> AnyElement {
     Toolbar::new("results-output-toolbar")
         .item(tool_button(
             "results-log-clear",
@@ -585,12 +617,13 @@ pub fn output_toolbar(clear: Action, copy: Action, end: Action, cx: &App) -> Any
             copy,
             cx,
         ))
-        .item(tool_button(
+        .item(tool_button_kind(
             "results-log-end",
             IconName::ArrowDownToLine,
             ids::hv::RESULTS_LOG_END,
             2,
             end,
+            log_end_kind(paused),
             cx,
         ))
         .into_any_element()

@@ -1167,13 +1167,20 @@ impl ScriptDoc {
 
     /// The file changed on disk (not this tab's own write).
     pub(crate) fn changed_on_disk(&mut self, stamp: DiskStamp, cx: &mut Context<Self>) {
+        // ## demofix-1 (PO demo F4): a file is at the path again, so the tab is no longer
+        // "deleted on disk", whatever the file is; the same file back (Put Back from the
+        // Trash: the stamp the tab knows) needs nothing more.
+        let was_deleted = std::mem::take(&mut self.deleted);
+        if was_deleted {
+            self.hide(|n| matches!(n, Notice::Deleted), cx);
+        }
         if self.stamp == Some(stamp) || self.pending_reload == Some(stamp) {
             return;
         }
-        self.deleted = false;
-        self.hide(|n| matches!(n, Notice::Deleted), cx);
-        if self.is_dirty(cx) || self.keep_mine {
-            // A dirty tab is never reloaded (R-M4b-16).
+        // A dirty tab is never reloaded (R-M4b-16). demofix-1 (F4): nor a tab whose file was
+        // deleted: its text was the only copy of that file, so another file appearing at the
+        // path asks (Reload / Keep mine) instead of replacing it.
+        if self.is_dirty(cx) || self.keep_mine || was_deleted {
             self.show(Notice::Changed, cx);
             return;
         }
@@ -1286,6 +1293,13 @@ impl ScriptDoc {
         if !shown {
             self.show(Notice::Unlisted(Unlisted::Moved), cx);
             return;
+        }
+        // ## demofix-1 (PO demo F4): a file paired by its content moved away from the tab's
+        // path, so it exists (at `to`): a tab that thought it deleted (the move came after a
+        // Put Back) follows it and is no longer "deleted on disk". Two contradicting bars
+        // ("deleted" and "Moved to …") never show together.
+        if std::mem::take(&mut self.deleted) {
+            self.hide(|n| matches!(n, Notice::Deleted), cx);
         }
         // ## m4b-t14-tabs fix round 1 (minor 3): the copy kept under the old path goes; the
         // next quiet spell writes one under the new path.
@@ -2102,6 +2116,23 @@ pub mod fixtures {
             doc.update(cx, |d, cx| d.show(notice, cx));
         }
     }
+
+    // ## demofix-1 (PO demo F4)
+    /// Puts script tab `tab` in the "deleted on disk" state, as a `FileDeleted` would.
+    pub fn mark_deleted(tab: TabId, cx: &mut App) {
+        if let Some(doc) = doc_of_tab(tab, cx) {
+            doc.update(cx, |d, cx| {
+                d.deleted = true;
+                d.show(Notice::Deleted, cx);
+            });
+        }
+    }
+
+    /// Whether script tab `tab` is in the "deleted on disk" state.
+    pub fn is_deleted(tab: TabId, cx: &App) -> bool {
+        doc_of_tab(tab, cx).is_some_and(|d| d.read(cx).deleted)
+    }
+    // ## demofix-1
 }
 
 #[cfg(test)]

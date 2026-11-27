@@ -1226,6 +1226,75 @@ fn output_view_reads_only_new_lines(cx: &mut TestAppContext) {
     assert_eq!(rows(&t), (1, 1));
 }
 
+// ## demofix-1 (PO demo F8): sticky scroll.
+/// The Output follows new lines only while it is at the bottom. Scrolled up, it stays on the
+/// lines it shows, even while a full ring drops its oldest lines, and "Scroll to end" turns
+/// into a Default button; reaching the bottom, or pressing it, follows again.
+#[gpui::test]
+fn output_follows_new_lines_only_while_at_the_bottom(cx: &mut TestAppContext) {
+    use hacivat_app::results::toolbar::log_end_kind;
+    use hacivat_ui::button::ButtonKind;
+    let mut t = tile(cx);
+    for ms in 0..SessionLog::CAPACITY as u64 {
+        t.log.append(LogMsg::Completed { ms }, None, None);
+    }
+    t.redraw();
+    let list = t
+        .vcx
+        .read(|cx| t.host().read(cx).log_list(t.console))
+        .expect("the log list");
+    let paused = |t: &Tile| t.vcx.read(|cx| list.read(cx).paused());
+    let top_seq = |t: &Tile| {
+        t.vcx.read(|cx| {
+            let l = list.read(cx);
+            l.rows().row_seq(l.visible_rows().start)
+        })
+    };
+    let last_seq = |t: &Tile| {
+        t.vcx.read(|cx| {
+            let l = list.read(cx);
+            l.rows().row_seq(l.visible_rows().end - 1)
+        })
+    };
+    assert!(!paused(&t));
+    assert_eq!(last_seq(&t), Some(SessionLog::CAPACITY as u64 - 1));
+    assert_eq!(log_end_kind(false), ButtonKind::Ghost);
+    // The user scrolls up: following pauses, "Scroll to end" is prominent.
+    t.vcx
+        .update(|_, cx| list.update(cx, |l, cx| l.scroll_px(-21.0 * 200.0, cx)));
+    t.redraw();
+    assert!(paused(&t));
+    assert_eq!(log_end_kind(true), ButtonKind::Default);
+    let anchor = top_seq(&t).expect("a line at the top");
+    // 500 more lines: the ring drops 500 of its oldest; the view stays on its lines.
+    for ms in 0..500 {
+        t.log.append(LogMsg::Completed { ms }, None, None);
+    }
+    t.redraw();
+    assert_eq!(top_seq(&t), Some(anchor), "never moved by new lines");
+    assert!(paused(&t));
+    // Pressing "Scroll to end" follows again.
+    t.click("button-results-log-end");
+    assert!(!paused(&t));
+    t.log.append(LogMsg::Completed { ms: 1 }, None, None);
+    t.redraw();
+    let newest = SessionLog::CAPACITY as u64 + 500;
+    assert_eq!(last_seq(&t), Some(newest), "the newest line in view");
+    // Scrolled up and back down to the bottom by hand: following again too.
+    t.vcx
+        .update(|_, cx| list.update(cx, |l, cx| l.scroll_px(-21.0 * 50.0, cx)));
+    t.redraw();
+    assert!(paused(&t));
+    t.vcx
+        .update(|_, cx| list.update(cx, |l, cx| l.scroll_px(21.0 * 500.0, cx)));
+    t.redraw();
+    assert!(!paused(&t));
+    t.log.append(LogMsg::Completed { ms: 2 }, None, None);
+    t.redraw();
+    assert_eq!(last_seq(&t), Some(newest + 1));
+}
+// ## demofix-1
+
 /// ↑/↓ move the log's selected line while the log has the focus; Enter goes to its statement.
 #[gpui::test]
 fn log_lines_navigate_with_arrows(cx: &mut TestAppContext) {

@@ -1382,3 +1382,149 @@ fn a_paste_from_a_mysql_script_tab_never_runs_on_the_profiles_database(cx: &mut 
     );
     assert!(queries(&r.fakes[0]).is_empty(), "nothing ran on orders");
 }
+
+// ## demofix-1 (PO demo F6): a streamed run's Output stays a few rows long and its memory flat.
+
+/// `n` one-row statements, `pad` bytes of literal each (the PO's dump: about 1.9 KB).
+fn updates(n: u64, pad: usize) -> String {
+    let x = "x".repeat(pad);
+    (1..=n)
+        .map(|i| format!("UPDATE demo SET v = '{x}' WHERE id = {i};\n"))
+        .collect()
+}
+
+impl Rig {
+    /// The lines of console `tab`'s log, and the rows of its Output list (when the tile shows
+    /// it).
+    fn output_size(&self, tab: TabId) -> (usize, Option<usize>) {
+        let console = self.console(tab);
+        self.vcx.cx.read(|cx| {
+            let log = Consoles::get(cx, console).map_or(0, |s| s.log.lines().len());
+            let rows = hacivat_app::results::view::hosts(cx)
+                .into_iter()
+                .find_map(|h| h.read(cx).log_list(console))
+                .map(|l| l.read(cx).rows().line_count());
+            (log, rows)
+        })
+    }
+}
+
+#[gpui::test]
+fn a_streamed_runs_output_counts_quiet_statements_instead_of_listing_them(
+    cx: &mut TestAppContext,
+) {
+    use hacivat_exec::SCRIPT_TAIL_STATEMENTS;
+    let (mut r, tab) = dev_console(cx);
+    let n = 2_000;
+    r.pasted(tab, &updates(n, 8));
+    r.run_as_script();
+    let end = r.ended(tab);
+    assert!(end.starts_with("Ran 2,000 statements"), "{end}");
+    redraw_full(r.vcx);
+    let (log, rows) = r.output_size(tab);
+    // One counted line, the last 50 statements, the run's summary: never a line each.
+    assert!(log <= SCRIPT_TAIL_STATEMENTS + 3, "{log} log lines");
+    assert!(rows.is_none_or(|rows| rows <= SCRIPT_TAIL_STATEMENTS + 3), "{rows:?}");
+    assert!(r.log_ids(tab).contains(&"exec-script-quiet"));
+    let texts = r.texts();
+    assert!(
+        texts.iter().any(|t| t
+            == "Statements 1–1950 ran: 1,950 statements, 0 rows affected, not listed one by one."),
+        "{texts:?}"
+    );
+}
+
+/// The PO's F6 measurement, in the app: a streamed run of `HACIVAT_PERF_UNITS` (default
+/// 60,000) statements of about 1.9 KB each, from a library file, with a fake that keeps no log
+/// of its own. Resident size (`ps`) and `phys_footprint` (`footprint`) before the run, at the
+/// run's peak and after it; the Output's size at the end. Self-gated on `HACIVAT_PERF=1`.
+#[gpui::test]
+#[ignore = "perf"]
+fn streamed_run_memory_stays_flat(cx: &mut TestAppContext) {
+    if std::env::var("HACIVAT_PERF").as_deref() != Ok("1") {
+        return;
+    }
+    let units: u64 = std::env::var("HACIVAT_PERF_UNITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000);
+    let text = updates(units, 1_900);
+    let bytes = text.len();
+    let mut r = rig(
+        cx,
+        vec![(DbmsKind::Postgres, DEV, pg_fake("orders").unrecorded())],
+        &[("big.sql", text.as_str())],
+    );
+    drop(text);
+    let dev = add_profile(r.vcx, pg_profile("orders-dev", EnvTag::Dev, DEV, "orders"));
+    connected(&r, "orders-dev");
+    let tab = r.open("big.sql", dev);
+    r.wait_session(tab);
+    redraw_full(r.vcx);
+    let pid = std::process::id().to_string();
+    let rss_kib = || -> u64 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    };
+    let footprint = || -> String {
+        std::process::Command::new("footprint")
+            .args(["-p", &pid, "-f", "bytes"])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| l.contains("phys_footprint") || l.contains("Footprint"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .unwrap_or_default()
+    };
+    let before = (rss_kib(), footprint());
+    r.run_as_script();
+    let mut peak = before.0;
+    let mut peak_footprint = String::new();
+    let started = std::time::Instant::now();
+    let mut last_sample = started;
+    loop {
+        r.vcx.run_until_parked();
+        if last_sample.elapsed() >= Duration::from_secs(2) {
+            last_sample = std::time::Instant::now();
+            let now = rss_kib();
+            if now > peak {
+                peak = now;
+                peak_footprint = footprint();
+            }
+        }
+        redraw_full(r.vcx);
+        if !r.running(tab) && text_of(r.vcx, "script-run-end").is_some() {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(1_800), "the run ends");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let after = (rss_kib(), footprint());
+    let (log, rows) = r.output_size(tab);
+    println!(
+        "HV-FACT demofix-1 f6 units={units} bytes={bytes} secs={} rss_before_mib={} \
+         rss_peak_mib={} rss_after_mib={} growth_mib={} log_lines={log} output_rows={rows:?}",
+        started.elapsed().as_secs(),
+        before.0 / 1024,
+        peak / 1024,
+        after.0 / 1024,
+        peak.saturating_sub(before.0) / 1024
+    );
+    println!("HV-FACT demofix-1 f6 footprint_before: {}", before.1);
+    println!("HV-FACT demofix-1 f6 footprint_peak: {peak_footprint}");
+    println!("HV-FACT demofix-1 f6 footprint_after: {}", after.1);
+    assert!(log <= hacivat_exec::SCRIPT_TAIL_STATEMENTS + 12, "{log}");
+    assert!(
+        peak.saturating_sub(before.0) < 64 * 1024,
+        "the run grew the app by {} MiB",
+        peak.saturating_sub(before.0) / 1024
+    );
+}
+// ## demofix-1

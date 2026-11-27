@@ -814,6 +814,62 @@ fn status_slot_draws_glyph_and_exposes_its_text(cx: &mut TestAppContext) {
     assert_eq!(item.description.as_deref(), Some("Modified"));
 }
 
+// ## demofix-1 (PO demo F5)
+/// The git letters are painted in their own hues (M `git-modified`, N `git-new`), so the
+/// check fails if every badge shares one colour again; the letter is still drawn (colour is
+/// never the only cue).
+#[cfg(feature = "scene-check")]
+#[gpui::test]
+fn git_letters_are_painted_each_in_its_own_hue(cx: &mut TestAppContext) {
+    use hacivat_ui_core::theme::DARK;
+    let mut f = Fixture::parse("modified.sql\nnew.sql\nplain.sql\n");
+    for (label, kind, glyph, text) in [
+        ("modified.sql", StatusKind::Modified, "M", "Modified"),
+        ("new.sql", StatusKind::New, "N", "New"),
+    ] {
+        let k = f.key(label);
+        f.row_mut(k).status = Some(RowStatus {
+            kind,
+            glyph: glyph.into(),
+            text: text.into(),
+        });
+    }
+    let (m, n) = (f.key("modified.sql"), f.key("new.sql"));
+    let (tree, vcx, _) = open(cx, f, 400.0);
+    let drawn: Vec<_> = texts(vcx).into_iter().map(|t| t.text.to_string()).collect();
+    assert!(drawn.contains(&"M".to_string()) && drawn.contains(&"N".to_string()));
+    let same = |a: gpui::Rgba, b: gpui::Rgba| {
+        [(a.r, b.r), (a.g, b.g), (a.b, b.b)]
+            .iter()
+            .all(|(x, y)| (x - y).abs() <= 1.5 / 255.0)
+    };
+    // The glyph colours painted inside each row.
+    let mut inks = |key| {
+        let row = tree.read_with(vcx, |t, _| t.row_bounds(key)).unwrap();
+        vcx.update(|window, _| {
+            let s = window.scale_factor();
+            window
+                .rendered_scene()
+                .monochrome_sprites
+                .iter()
+                .filter(|sp| {
+                    let y = (sp.bounds.origin.y.0 + sp.bounds.size.height.0 / 2.0) / s;
+                    y >= f32::from(row.top()) && y < f32::from(row.bottom())
+                })
+                .map(|sp| gpui::Rgba::from(sp.color))
+                .collect::<Vec<_>>()
+        })
+    };
+    let (in_m, in_n) = (inks(m), inks(n));
+    let modified = gpui::Rgba::from(DARK.colors.git_modified.to_hsla());
+    let new = gpui::Rgba::from(DARK.colors.git_new.to_hsla());
+    assert!(!same(modified, new), "M and N share a colour");
+    assert!(in_m.iter().any(|c| same(*c, modified)), "M in git-modified: {in_m:?}");
+    assert!(in_n.iter().any(|c| same(*c, new)), "N in git-new: {in_n:?}");
+    assert!(!in_m.iter().any(|c| same(*c, new)) && !in_n.iter().any(|c| same(*c, modified)));
+}
+// ## demofix-1
+
 #[gpui::test]
 fn row_geometry_23px_and_11px_floor(cx: &mut TestAppContext) {
     let mut f = Fixture::parse(OUTLINE);

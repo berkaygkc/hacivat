@@ -3,7 +3,9 @@
 
 use std::cell::RefCell;
 
-use hacivat_ui_core::gpui_surface::{AnyElement, Hsla, IntoElement, Styled, px, svg};
+use hacivat_ui_core::gpui_surface::{
+    AnyElement, Div, Hsla, IntoElement, ParentElement, Styled, div, px, svg,
+};
 use hacivat_ui_core::theme::Theme;
 
 use crate::popover::lazy;
@@ -197,6 +199,25 @@ impl Icon {
         self.color = Some(color);
         self
     }
+
+    // ## demofix-1 (PO demo F3)
+    /// The glyph leading a line of text whose line box is `line_height` px tall (an inline
+    /// notice, an error line): its own square of whole pixels, pushed down by the whole pixels
+    /// ([`lead_pad`]) that centre it on the text's first line. Whole-pixel offsets keep the
+    /// glyph's box on the pixel grid the text is on, so GPUI's snap never moves it by a
+    /// different amount than its row.
+    pub fn leading(self, line_height: f32) -> Div {
+        div()
+            .flex_none()
+            .pt(px(lead_pad(self.size, line_height)))
+            .child(self)
+    }
+}
+
+// ## demofix-1 (PO demo F3)
+/// The whole-pixel top pad that centres a `size` glyph on a first line `line_height` px tall.
+pub fn lead_pad(size: IconSize, line_height: f32) -> f32 {
+    ((line_height - size.px()) / 2.0).max(0.0).round()
 }
 
 /// One icon a widget drew (recorded between [`icon_record`] and [`icon_take`]).
@@ -333,6 +354,20 @@ mod tests {
     fn sizes_are_the_design_sizes() {
         assert_eq!(IconSize::Chrome.px(), 12.0);
         assert_eq!(IconSize::Default.px(), 14.0);
+    }
+
+    // ## demofix-1 (PO demo F3)
+    #[test]
+    fn a_leading_glyph_sits_on_whole_pixels_centred_on_the_first_line() {
+        // body-sm (12.5 px, 16.88 px lines): the 14 px notice glyph 1 px down.
+        assert_eq!(lead_pad(IconSize::Default, 16.88), 1.0);
+        // caption (12 px, 16.2 px lines): the 12 px hint glyph 2 px down, as hint rows had it.
+        assert_eq!(lead_pad(IconSize::Chrome, 16.2), 2.0);
+        assert_eq!(lead_pad(IconSize::Brand, 12.0), 0.0, "never above the line");
+        for (size, line) in [(IconSize::Default, 17.55), (IconSize::Chrome, 18.23)] {
+            let pad = lead_pad(size, line);
+            assert_eq!(pad, pad.round(), "{pad}");
+        }
     }
 
     // ## m3b-t01b-seams (controller ruling RC-4)

@@ -840,12 +840,13 @@ impl AttachDialog {
                             .flex_row()
                             .items_start()
                             .gap(px(t.spacing.sm))
+                            // ## demofix-1 (PO demo F3): the inline notice's 14 px glyph
+                            // (DESIGN.md), on whole pixels, centred on the first line.
                             .child(
-                                div().flex_none().pt(px(2.0)).child(
-                                    Icon::new(IconName::Info)
-                                        .size(IconSize::Chrome)
-                                        .color(c.text_2.to_hsla()),
-                                ),
+                                Icon::new(IconName::Info)
+                                    .size(IconSize::Default)
+                                    .color(c.text_2.to_hsla())
+                                    .leading(t.type_ramp.body_sm.line_height),
                             )
                             .child(
                                 div().flex_1().min_w_0().child(
@@ -1108,12 +1109,12 @@ pub(crate) fn ink_line(message: SharedString, id: &'static str, theme: &Theme) -
         .flex_row()
         .items_start()
         .gap(px(t.spacing.sm))
+        // ## demofix-1 (PO demo F3): 14 px, as the notice glyph beside the same body text.
         .child(
-            div().flex_none().pt(px(2.0)).child(
-                Icon::new(IconName::CircleAlert)
-                    .size(IconSize::Chrome)
-                    .color(ink),
-            ),
+            Icon::new(IconName::CircleAlert)
+                .size(IconSize::Default)
+                .color(ink)
+                .leading(t.type_ramp.body_sm.line_height),
         )
         .child(
             div()

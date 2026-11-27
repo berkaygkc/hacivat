@@ -616,3 +616,37 @@ fn scroll_by_round_trips_away_from_the_bounds() {
         assert!(moved.abs() < 1e-3, "{start:?} {d} -> {:?}", pos(&s));
     }
 }
+
+// ## demofix-1 (PO demo F8): sticky scroll over a capped log.
+/// A paused view (scrolled away from the bottom) stays on its rows while a capped log drops
+/// its oldest rows and appends new ones; a following view stays at the bottom; a view whose
+/// own rows were dropped shows the first row; reaching the bottom follows again.
+#[test]
+fn a_paused_view_keeps_its_rows_when_rows_leave_the_front() {
+    let mut s = view(10_000, 210.0, 21.0);
+    s.scroll_to_end();
+    assert!(!s.paused());
+    // The user scrolls up 100 rows: paused.
+    s.scroll_by(-21.0 * 100.0);
+    assert!(s.paused() && !s.follow_tail);
+    let top = s.top_row;
+    // 500 rows leave the front and 500 arrive (the ring stays at 10,000).
+    s.on_rows_shifted(-500);
+    s.on_row_count(10_000);
+    assert_eq!(s.top_row, top - 500, "the same rows, 500 lower in index");
+    assert!(s.paused());
+    // Rows inserted before the first ("n events not shown" appears): one lower.
+    s.on_rows_shifted(1);
+    assert_eq!(s.top_row, top - 499);
+    // Its own rows dropped: the first row.
+    s.on_rows_shifted(-20_000);
+    assert_eq!(pos(&s), (0, 0.0));
+    // Back at the bottom: following again, and a shift leaves it there.
+    s.scroll_by(21.0 * 20_000.0);
+    assert!(s.follow_tail && !s.paused());
+    let end = s.top_row;
+    s.on_rows_shifted(-300);
+    s.on_row_count(10_000);
+    assert_eq!(s.top_row, end);
+}
+// ## demofix-1

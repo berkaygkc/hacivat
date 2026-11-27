@@ -376,3 +376,89 @@ fn the_explorer_filter_placeholder_ellipsizes_in_a_narrow_explorer(cx: &mut Test
     assert!(filter.truncated, "{filter:?}");
     assert!(!filter.clipped, "{filter:?}");
 }
+
+// ## demofix-1 (PO demo F7): a seam can be found and grabbed.
+/// Every tile seam is an 8 px band with a visible grip on its middle (`text-3`), and the seam
+/// the pointer is on shows a 2 px `blue` line; a drag from the band moves the seam.
+#[gpui::test]
+fn every_seam_has_a_visible_grip_and_a_hover_line(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+    use hacivat_app::shell::tiles::{GRIP_LONG_PX, GRIP_SHORT_PX, SEAM_GRAB_PX, SEAM_HOT_PX};
+    let vcx = shell(cx, "en");
+    vcx.run_until_parked();
+    for (name, vertical) in [("explorer", true), ("connection", false), ("editor", false)] {
+        let band = vcx
+            .debug_bounds(Box::leak(format!("seam-grab-{name}").into_boxed_str()))
+            .unwrap_or_else(|| panic!("the {name} seam's band"));
+        let grip = vcx
+            .debug_bounds(Box::leak(format!("seam-grip-{name}").into_boxed_str()))
+            .unwrap_or_else(|| panic!("the {name} seam's grip"));
+        let (across, along) = if vertical {
+            (band.size.width, (grip.size.width, grip.size.height))
+        } else {
+            (band.size.height, (grip.size.height, grip.size.width))
+        };
+        assert_eq!(f32::from(across), SEAM_GRAB_PX, "{name}");
+        assert_eq!(
+            (f32::from(along.0), f32::from(along.1)),
+            (GRIP_SHORT_PX, GRIP_LONG_PX),
+            "{name}"
+        );
+        assert!(band.contains(&grip.center()), "{name}: the grip on its band");
+    }
+    #[cfg(feature = "scene-check")]
+    {
+        let (text_3, blue) = vcx.update(|_, cx| {
+            let c = &hacivat_ui_core::theme::Theme::get(cx).tokens.colors;
+            (gpui::Rgba::from(c.text_3.to_hsla()), gpui::Rgba::from(c.blue.to_hsla()))
+        });
+        let fills = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, _| {
+                let s = window.scale_factor();
+                window
+                    .rendered_scene()
+                    .quads
+                    .iter()
+                    .filter_map(|q| {
+                        let fill = gpui::Rgba::from(q.background.as_solid()?);
+                        Some((fill, q.bounds.size.width.0 / s, q.bounds.size.height.0 / s))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let same = |a: gpui::Rgba, b: gpui::Rgba| {
+            [(a.r, b.r), (a.g, b.g), (a.b, b.b), (a.a, b.a)]
+                .iter()
+                .all(|(x, y)| (x - y).abs() <= 1.0 / 255.0)
+        };
+        let before = fills(vcx);
+        let grips = before
+            .iter()
+            .filter(|q| same(q.0, text_3) && (q.1 - GRIP_LONG_PX).abs().min((q.2 - GRIP_LONG_PX).abs()) < 0.5)
+            .count();
+        assert_eq!(grips, 3, "a text-3 grip per seam");
+        // The pointer on the editor seam: its line shows, blue and 2 px tall.
+        let band = vcx.debug_bounds("seam-grab-editor").unwrap();
+        vcx.simulate_mouse_move(band.center(), None::<MouseButton>, Modifiers::none());
+        vcx.run_until_parked();
+        let after = fills(vcx);
+        assert!(
+            after
+                .iter()
+                .any(|q| same(q.0, blue) && (q.2 - SEAM_HOT_PX).abs() < 0.5 && q.1 > 100.0),
+            "the hover line"
+        );
+    }
+    // A drag from the band (away from its centre line) moves the seam.
+    let band = vcx.debug_bounds("seam-grab-editor").unwrap();
+    let before = layout(vcx).1.editor_h;
+    let from = point(band.center().x, band.top() + px(1.0));
+    let to = point(from.x, from.y + px(60.0));
+    vcx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+    let after = layout(vcx).1.editor_h;
+    assert!((after - before - 60.0).abs() < 4.0, "{before} -> {after}");
+}
+// ## demofix-1

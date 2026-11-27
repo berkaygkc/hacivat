@@ -18,6 +18,10 @@
 //!   or saved; `ChangedOnDisk` asks "Overwrite?" (Overwrite / Cancel, Cancel focused) and only
 //!   then saves expecting what is on disk now. After "Deleted on disk" a save writes the file
 //!   again (no expectation).
+//!   ## demofix-1 (PO demo F4): never over a different file. A tab whose file was deleted (or
+//!   that never had one) saves with `SaveExpect::Recreate`: nothing at the path is created, the
+//!   tab's own file back is saved over, and any other file there asks "Overwrite?" exactly as a
+//!   change on disk does.
 //! - **The tab's environment goes to the save** (R-T5-6), read now.
 //! - `SavedButPathChanged` is a save, with a notice; every other error keeps the tab dirty and
 //!   says why; `Damaged` also keeps a recovery copy.
@@ -25,7 +29,7 @@
 use std::rc::Rc;
 
 use hacivat_l10n::ArgValue;
-use hacivat_scripts::fileio::{SaveError, SaveText, SizeTier};
+use hacivat_scripts::fileio::{SaveError, SaveExpect, SaveText, SizeTier};
 use hacivat_ui::actions::{ActionDef, ActionRegistry};
 use hacivat_ui::button::ButtonKind;
 use hacivat_ui::dialog::{DialogButton, DialogEvent, DialogSize, DialogSpec};
@@ -152,7 +156,11 @@ pub fn save(doc: &Entity<ScriptDoc>, window: &mut Window, cx: &mut App, then: Op
     let (text, version) = (snap.buffer.to_string(), snap.version);
     let expect = {
         let d = doc.read(cx);
-        if d.deleted { None } else { Some(d.stamp) }
+        // ## demofix-1 (F4): deleted, or no file yet: recreate, never over another file.
+        match d.stamp {
+            Some(stamp) if !d.deleted => SaveExpect::Stamp(stamp),
+            last => SaveExpect::Recreate { last },
+        }
     };
     // ## m4b-t17-secrets-ui: the secret check (R-M4b-17) reads the tab's scan of exactly this
     // text, or scans it now off the UI thread (`secret_marks::scan_off_ui`), then asks
@@ -185,7 +193,7 @@ fn checked(
     scan: crate::scripts::secret_marks::Scan,
     text: String,
     version: u64,
-    expect: Option<Option<hacivat_scripts::DiskStamp>>,
+    expect: SaveExpect,
     window: &mut Window,
     cx: &mut App,
     then: Option<Then>,
@@ -227,13 +235,13 @@ pub fn writes_started(cx: &App) -> u64 {
     cx.try_global::<WritesStarted>().map_or(0, |w| w.0)
 }
 
-/// Writes `text` (the editor at `version`) expecting the file at `expect` (`None`: whatever
-/// is there; `Some(None)`: no file; `Some(Some(s))`: the file at `s`).
+/// Writes `text` (the editor at `version`) expecting what `expect` says is at the path
+/// (demofix-1: a [`SaveExpect`], so "no file" is never flattened into "anything").
 fn write(
     doc: &Entity<ScriptDoc>,
     text: String,
     version: u64,
-    expect: Option<Option<hacivat_scripts::DiskStamp>>,
+    expect: SaveExpect,
     window: &mut Window,
     cx: &mut App,
     then: Option<Then>,
@@ -252,14 +260,13 @@ fn write(
     };
     let env = doc.read(cx).env(cx);
     let meta = doc.read(cx).meta;
-    let expect_stamp = expect.flatten();
     let (lib, rel) = (tab.library, tab.rel.clone());
     let body = SaveText {
         text: text.clone(),
         meta,
     };
     let saved = tabs::on_core(cx, async move {
-        service.save(lib, &rel, env, body, expect_stamp).await
+        service.save_expecting(lib, &rel, env, body, expect).await
     });
     let doc = doc.clone();
     cx.spawn(async move |cx| {
@@ -323,7 +330,7 @@ fn saved_done(
                     },
                     Box::new(move |yes, window, cx| {
                         if yes {
-                            write(&doc, text, version, Some(Some(on_disk)), window, cx, then);
+                            write(&doc, text, version, SaveExpect::Stamp(on_disk), window, cx, then);
                         } else if let Some(then) = then {
                             then(SaveOutcome::NotSaved, cx);
                         }
