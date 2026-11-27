@@ -101,6 +101,10 @@ const NOTICE_GAP: f32 = 6.0;
 /// The short layout's header and footer padding, and its gap above the well.
 const SHORT_PAD: f32 = 6.0;
 const SHORT_WELL_GAP: f32 = 4.0;
+// ## inputnav-1 (named exception, F2)
+/// At the bottom of the scrolling middle: the well's focus ring reaches this far below the
+/// well, and the middle's clip cut it there when the well came last.
+const WELL_RING_ROOM: f32 = hacivat_ui_core::theme::surfaces::FOCUS_RING_EXTENT_PX;
 
 /// The heights of the popover's rows in one layout (fix round 1, I1, m10).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -160,6 +164,8 @@ impl Rows {
             + if has_control { self.control } else { 0.0 }
             + self.well_min
             + if notice { self.notice } else { 0.0 }
+            // ## inputnav-1 (named exception, F2): the middle's room for the well's ring.
+            + WELL_RING_ROOM
             + self.footer
     }
 }
@@ -1465,64 +1471,63 @@ impl Render for ValueViewer {
         // inside the middle, in the nested order: ↓ scrolls the focused well to its end, then the
         // middle; ↑ scrolls the middle back to its top first, then the well.
         let e_keys = entity.clone();
-        // ## inputnav-1 (named exception, F2): room for the focused well's ring, which the
-        // middle's clip cut at its bottom; the minimum counts that room too.
-        let room_px = 2.0 * hacivat_ui_core::theme::surfaces::FOCUS_RING_EXTENT_PX;
-        let mut middle = hacivat_ui_core::theme::ring_room(
-            div()
-                .id("value-viewer-middle")
-                .debug_selector(|| "value-viewer-middle".to_string())
-                .flex()
-                .flex_col()
-                .flex_shrink(1.0)
-                .min_h(px(rows.well_min + room_px))
-                .overflow_y_scroll(),
-        )
-        .track_scroll(&self.middle_scroll)
-        .on_key_down(move |ev: &KeyDownEvent, window, cx| {
-            let k = &ev.keystroke;
-            if k.modifiers.modified() {
-                return;
-            }
-            let dy = match k.key.as_str() {
-                "up" => -LINE_PX,
-                "down" => LINE_PX,
-                "pageup" => -WELL_MAX_PX,
-                "pagedown" => WELL_MAX_PX,
-                _ => return,
-            };
-            let (well, mid, in_well) = {
-                let v = e_keys.read(cx);
-                (
-                    v.well.clone(),
-                    v.middle_scroll.clone(),
-                    v.focus.is_focused(window),
-                )
-            };
-            let s = well.read(cx).scroll_state();
-            let well_can = in_well
-                && if dy > 0.0 {
-                    s.row_top(s.row_count()) > f64::from(s.viewport().1) + 0.5
-                } else {
-                    s.row_top(0) < -0.5
+        let mut middle = div()
+            .id("value-viewer-middle")
+            .debug_selector(|| "value-viewer-middle".to_string())
+            .flex()
+            .flex_col()
+            .flex_shrink(1.0)
+            // ## inputnav-1 (named exception, F2): room at the middle's bottom for the well's
+            // focus ring, which the middle's clip cut there; the minimum and the rows'
+            // total count it.
+            .min_h(px(rows.well_min + WELL_RING_ROOM))
+            .pb(px(WELL_RING_ROOM))
+            .overflow_y_scroll()
+            .track_scroll(&self.middle_scroll)
+            .on_key_down(move |ev: &KeyDownEvent, window, cx| {
+                let k = &ev.keystroke;
+                if k.modifiers.modified() {
+                    return;
+                }
+                let dy = match k.key.as_str() {
+                    "up" => -LINE_PX,
+                    "down" => LINE_PX,
+                    "pageup" => -WELL_MAX_PX,
+                    "pagedown" => WELL_MAX_PX,
+                    _ => return,
                 };
-            let o = mid.offset();
-            let max = mid.max_offset().y.max(px(0.0));
-            let mid_can = if dy > 0.0 {
-                o.y > -max + px(0.5)
-            } else {
-                o.y < px(-0.5)
-            };
-            let middle_first = dy < 0.0 && mid_can;
-            if well_can && !middle_first {
-                well.update(cx, |w, cx| w.scroll_px(f64::from(dy), cx));
-            } else if mid_can {
-                mid.set_offset(point(o.x, (o.y - px(dy)).clamp(-max, px(0.0))));
-                e_keys.update(cx, |_, cx| cx.notify());
-            }
-            cx.stop_propagation();
-        })
-        .child(hacivat_ui::text::scroll_viewport());
+                let (well, mid, in_well) = {
+                    let v = e_keys.read(cx);
+                    (
+                        v.well.clone(),
+                        v.middle_scroll.clone(),
+                        v.focus.is_focused(window),
+                    )
+                };
+                let s = well.read(cx).scroll_state();
+                let well_can = in_well
+                    && if dy > 0.0 {
+                        s.row_top(s.row_count()) > f64::from(s.viewport().1) + 0.5
+                    } else {
+                        s.row_top(0) < -0.5
+                    };
+                let o = mid.offset();
+                let max = mid.max_offset().y.max(px(0.0));
+                let mid_can = if dy > 0.0 {
+                    o.y > -max + px(0.5)
+                } else {
+                    o.y < px(-0.5)
+                };
+                let middle_first = dy < 0.0 && mid_can;
+                if well_can && !middle_first {
+                    well.update(cx, |w, cx| w.scroll_px(f64::from(dy), cx));
+                } else if mid_can {
+                    mid.set_offset(point(o.x, (o.y - px(dy)).clamp(-max, px(0.0))));
+                    e_keys.update(cx, |_, cx| cx.notify());
+                }
+                cx.stop_propagation();
+            })
+            .child(hacivat_ui::text::scroll_viewport());
         // The middle's children, counted as they go in (`scroll_to_item`); the probe is 0.
         let mut count = 1;
         // In the short layout the well comes first (what is left of the control row, the "not
