@@ -765,3 +765,197 @@ context = "Workspace"
 chord = "f2"
 command = "scripts.rename"
 context = "ExplorerTree"
+
+## inputnav-1
+# Single-line text fields (context `TextInput`, PO demo finding F1): the keys of a native macOS
+# text field, including the Cocoa Control bindings (Control-A/E/B/F/H/D/K). The focused field
+# resolves them itself (`hacivat_ui::input::keys`), after the workspace dispatcher: a chord an
+# outer context binds would win, so CI keeps these chords out of every context that stays live
+# while a field has the focus (`keymap_collisions.rs`). ↑/↓ go to the start and end; a field
+# that filters a list (the palette, Go to script) takes them in the capture phase instead.
+# Enter and Escape stay the field's Submitted and Cancelled events.
+
+[[binding]]
+chord = "left"
+command = "input.move_left"
+context = "TextInput"
+
+[[binding]]
+chord = "right"
+command = "input.move_right"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-b"
+command = "input.move_left"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-f"
+command = "input.move_right"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-left"
+command = "input.select_left"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-right"
+command = "input.select_right"
+context = "TextInput"
+
+[[binding]]
+chord = "alt-left"
+command = "input.move_word_left"
+context = "TextInput"
+
+[[binding]]
+chord = "alt-right"
+command = "input.move_word_right"
+context = "TextInput"
+
+[[binding]]
+chord = "alt-shift-left"
+command = "input.select_word_left"
+context = "TextInput"
+
+[[binding]]
+chord = "alt-shift-right"
+command = "input.select_word_right"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-left"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-right"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "up"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "down"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "home"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "end"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-a"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-e"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-shift-left"
+command = "input.select_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-shift-right"
+command = "input.select_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-up"
+command = "input.select_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-down"
+command = "input.select_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-home"
+command = "input.select_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-end"
+command = "input.select_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "backspace"
+command = "input.delete_backward"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-backspace"
+command = "input.delete_backward"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-h"
+command = "input.delete_backward"
+context = "TextInput"
+
+[[binding]]
+chord = "delete"
+command = "input.delete_forward"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-d"
+command = "input.delete_forward"
+context = "TextInput"
+
+[[binding]]
+chord = "alt-backspace"
+command = "input.delete_word_backward"
+context = "TextInput"
+
+[[binding]]
+chord = "alt-delete"
+command = "input.delete_word_forward"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-backspace"
+command = "input.delete_to_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-k"
+command = "input.delete_to_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-a"
+command = "input.select_all"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-c"
+command = "input.copy"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-x"
+command = "input.cut"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-v"
+command = "input.paste"
+context = "TextInput"

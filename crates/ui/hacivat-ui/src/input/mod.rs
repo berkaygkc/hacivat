@@ -11,6 +11,8 @@
 //! only through [`TextInput::set_paste_filter`] (P16), which a masked input never calls.
 
 pub mod ime;
+// ## inputnav-1
+pub mod keys;
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -21,9 +23,10 @@ use hacivat_ui_core::gpui_surface::{
     App, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId, ElementInputHandler,
     Entity, EntityId, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Global,
     GlobalElementId, InspectorElementId, InteractiveElement as _, IntoElement, KeyDownEvent,
-    LayoutId, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, Role,
-    ShapedLine, SharedString, Style, Styled as _, Subscription, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window, div, fill, point, px, relative, size,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Point, Render, Role, ShapedLine, SharedString, Style, Styled as _, Subscription,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, point, px, relative,
+    size,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -31,6 +34,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use crate::popover::A11yNode;
 use crate::text::{RenderedText, TextFn, TextRegistry, TextSource, fitting_prefix};
 use ime::ImeState;
+use keys::InputCommand;
 
 /// Events a `TextInput` emits (F15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -142,6 +146,9 @@ pub struct TextInput {
     painted_family: SharedString,
     // ## m3c-t33-find (named exception): drawn inside another field's well (the find field).
     frameless: bool,
+    // ## inputnav-1
+    /// The left button went down on the field and is still held: a drag extends the selection.
+    dragging: bool,
 }
 
 /// Sees a paste's clipboard text before a non-masked input inserts it; returning `true`
@@ -190,6 +197,8 @@ impl TextInput {
             painted_family: SharedString::default(),
             // ## m3c-t33-find
             frameless: false,
+            // ## inputnav-1
+            dragging: false,
         }
     }
 
@@ -267,6 +276,13 @@ impl TextInput {
 
     pub fn value(&self) -> &str {
         self.ime.text()
+    }
+
+    // ## inputnav-1
+    /// The selection in bytes of the value (empty: the caret), and whether its head is its
+    /// start (it was extended leftwards).
+    pub fn selection(&self) -> (Range<usize>, bool) {
+        (self.ime.selection(), self.ime.is_reversed())
     }
 
     /// Replaces the value and puts the caret at its end; emits nothing. Call it inside an
@@ -350,45 +366,108 @@ impl TextInput {
             return;
         }
         let keystroke = &event.keystroke;
+        // ## inputnav-1: moves, selections, deletes and the clipboard come from the keymap's
+        // `TextInput` rows (`keys`), so a preset or a user keymap remaps them.
+        if let Some(command) = keys::command_for(keystroke, cx) {
+            cx.stop_propagation();
+            self.run_command(command, window, cx);
+            return;
+        }
         let m = &keystroke.modifiers;
-        let before = self.ime.text().to_string();
-        let clipboard_chord = m.secondary(cx) && !m.alt && !m.shift;
+        // Other chords are commands (or AltGr text, which arrives through the input handler).
+        if m.platform || m.control || m.function {
+            return;
+        }
         match keystroke.key.as_str() {
-            "a" if clipboard_chord => self.ime.select_all(),
+            "enter" => cx.emit(InputEvent::Submitted),
+            "escape" => cx.emit(InputEvent::Cancelled),
+            // Printable text is left to the platform, which delivers it (through the IME when
+            // one is active) to `replace_text_in_range`; other keys go on to the parents.
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    // ## inputnav-1
+    /// Runs a text-field command. A read-only field moves and selects but never edits; a masked
+    /// one treats its whole value as one word (as macOS secure fields do: a word move or delete
+    /// never reveals where the words are) and never copies or cuts.
+    pub fn run_command(
+        &mut self,
+        command: InputCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ime.is_composing() {
+            return;
+        }
+        if command.edits() && self.read_only {
+            return;
+        }
+        let before = self.ime.text().to_string();
+        let masked = self.masked;
+        let ime = &mut self.ime;
+        match command {
+            InputCommand::MoveLeft => ime.move_left(),
+            InputCommand::MoveRight => ime.move_right(),
+            InputCommand::SelectLeft => ime.select_left(),
+            InputCommand::SelectRight => ime.select_right(),
+            InputCommand::MoveWordLeft if masked => ime.move_line_start(),
+            InputCommand::MoveWordLeft => ime.move_word_left(),
+            InputCommand::MoveWordRight if masked => ime.move_line_end(),
+            InputCommand::MoveWordRight => ime.move_word_right(),
+            InputCommand::SelectWordLeft if masked => ime.select_line_start(),
+            InputCommand::SelectWordLeft => ime.select_word_left(),
+            InputCommand::SelectWordRight if masked => ime.select_line_end(),
+            InputCommand::SelectWordRight => ime.select_word_right(),
+            InputCommand::MoveLineStart => ime.move_line_start(),
+            InputCommand::MoveLineEnd => ime.move_line_end(),
+            InputCommand::SelectLineStart => ime.select_line_start(),
+            InputCommand::SelectLineEnd => ime.select_line_end(),
+            InputCommand::DeleteBackward => {
+                ime.backspace();
+            }
+            InputCommand::DeleteForward => {
+                ime.delete_forward();
+            }
+            InputCommand::DeleteWordBackward if masked => {
+                ime.delete_to_line_start();
+            }
+            InputCommand::DeleteWordBackward => {
+                ime.delete_word_backward();
+            }
+            InputCommand::DeleteWordForward if masked => {
+                ime.delete_to_line_end();
+            }
+            InputCommand::DeleteWordForward => {
+                ime.delete_word_forward();
+            }
+            InputCommand::DeleteToLineStart => {
+                ime.delete_to_line_start();
+            }
+            InputCommand::DeleteToLineEnd => {
+                ime.delete_to_line_end();
+            }
+            InputCommand::SelectAll => ime.select_all(),
             // A masked input never puts its value on the clipboard.
-            "c" | "x" if clipboard_chord && self.masked => {}
-            key @ ("c" | "x") if clipboard_chord => {
-                let selection = self.ime.selection();
+            InputCommand::Copy | InputCommand::Cut if masked => {}
+            InputCommand::Copy | InputCommand::Cut => {
+                let selection = ime.selection();
                 if !selection.is_empty() {
-                    let text = self.ime.text()[selection].to_string();
+                    let text = ime.text()[selection].to_string();
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    if key == "x" && !self.read_only {
+                    if command == InputCommand::Cut {
                         self.ime.backspace();
                     }
                 }
             }
-            "v" if clipboard_chord => {
-                cx.stop_propagation();
+            InputCommand::Paste => {
                 if let Some(item) = cx.read_from_clipboard() {
                     self.paste(item, window, cx);
                 }
                 return;
             }
-            // Other chords are commands (or AltGr text, which arrives through the input handler).
-            _ if m.platform || m.control || m.function => return,
-            "backspace" if self.read_only => {}
-            "backspace" => {
-                self.ime.backspace();
-            }
-            "left" => self.ime.move_left(),
-            "right" => self.ime.move_right(),
-            "enter" => cx.emit(InputEvent::Submitted),
-            "escape" => cx.emit(InputEvent::Cancelled),
-            // Printable text is left to the platform, which delivers it (through the IME when
-            // one is active) to `replace_text_in_range`.
-            _ => return,
         }
-        cx.stop_propagation();
         if before != self.ime.text() {
             self.edited(&before, window, cx);
         } else {
@@ -397,6 +476,35 @@ impl TextInput {
         }
     }
 
+    /// The value byte under window x `x` on the painted line (the closest grapheme edge).
+    fn byte_at_x(&self, x: Pixels) -> Option<usize> {
+        let layout = self.layout.as_ref()?;
+        let byte = layout.line.closest_index_for_x(x - layout.origin.x);
+        Some(layout.mask.as_ref().map_or(byte, |m| m.to_value(byte)))
+    }
+
+    /// The grapheme edge nearest `byte` (a hit inside a cluster, such as `i̇` or a ZWJ emoji,
+    /// lands on one of its edges).
+    fn grapheme_edge(&self, byte: usize) -> usize {
+        let text = self.ime.text();
+        let mut at = 0;
+        for (start, g) in text.grapheme_indices(true) {
+            let end = start + g.len();
+            if byte < end {
+                return if byte - start <= end - byte {
+                    start
+                } else {
+                    end
+                };
+            }
+            at = end;
+        }
+        at
+    }
+
+    /// A press places the caret at the clicked grapheme edge (with Shift: extends the
+    /// selection), a double click selects the word (a masked value: all of it), a triple click
+    /// selects all; a drag from the press extends the selection.
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -407,12 +515,44 @@ impl TextInput {
         if self.ime.is_composing() {
             return;
         }
-        if let Some(layout) = &self.layout {
-            let byte = layout
-                .line
-                .closest_index_for_x(event.position.x - layout.origin.x);
-            let byte = layout.mask.as_ref().map_or(byte, |m| m.to_value(byte));
-            self.ime.set_caret(byte);
+        let Some(byte) = self.byte_at_x(event.position.x) else {
+            return;
+        };
+        let byte = self.grapheme_edge(byte);
+        match event.click_count {
+            0 | 1 if event.modifiers.shift => self.ime.extend_to(byte),
+            0 | 1 => self.ime.set_caret(byte),
+            2 if !self.masked => {
+                let word = ime::word_at(self.ime.text(), byte);
+                self.ime.select_range(word);
+            }
+            _ => self.ime.select_all(),
+        }
+        self.dragging = event.click_count <= 1;
+        window.notify_text_selection_changed(&self.focus_handle);
+        cx.notify();
+    }
+
+    /// While the press that started on the field is held, the pointer drags the head.
+    fn on_drag_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.dragging || self.ime.is_composing() {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.dragging = false;
+            return;
+        }
+        let Some(byte) = self.byte_at_x(event.position.x) else {
+            return;
+        };
+        let byte = self.grapheme_edge(byte);
+        if byte != self.ime.head() {
+            self.ime.extend_to(byte);
             window.notify_text_selection_changed(&self.focus_handle);
             cx.notify();
         }
@@ -469,7 +609,8 @@ impl EntityInputHandler for TextInput {
     ) -> Option<UTF16Selection> {
         Some(UTF16Selection {
             range: self.ime.selection_utf16(),
-            reversed: false,
+            // ## inputnav-1: a Shift move leftwards leads with the selection's start.
+            reversed: self.ime.is_reversed(),
         })
     }
 
@@ -730,6 +871,8 @@ impl Element for InputText {
         let painted = |byte: usize| mask.as_ref().map_or(byte, |m| m.to_painted(byte));
         let selection = input.ime.selection();
         let selection = painted(selection.start)..painted(selection.end);
+        // ## inputnav-1: the head (the end a Shift move or a drag moves) stays in view.
+        let head = painted(input.ime.head());
         let marked = input.ime.marked().map(|m| painted(m.start)..painted(m.end));
         let focused = input.focus_handle.is_focused(window);
         // ## m2b-t24-shots (fix round 1, M2): an empty placeholder is no placeholder (nothing is
@@ -774,7 +917,7 @@ impl Element for InputText {
 
         // Keep the caret in view.
         let width = bounds.size.width;
-        let caret_x = line.x_for_index(selection.end);
+        let caret_x = line.x_for_index(head);
         if caret_x < scroll_x {
             scroll_x = caret_x;
         } else if caret_x + px(CARET_WIDTH_PX) > scroll_x + width {
@@ -897,6 +1040,22 @@ impl Element for InputText {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
+        // ## inputnav-1: a drag that started on the field follows the pointer anywhere in the
+        // window until the button comes up.
+        if self.input.read(cx).dragging {
+            let input = self.input.clone();
+            window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                if phase.bubble() {
+                    input.update(cx, |i, cx| i.on_drag_move(e, window, cx));
+                }
+            });
+            let input = self.input.clone();
+            window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+                if phase.capture() && e.button == MouseButton::Left {
+                    input.update(cx, |i, _| i.dragging = false);
+                }
+            });
+        }
         let t = Theme::get(cx).tokens;
         let line_height = px(t.type_ramp.body.line_height);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {

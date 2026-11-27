@@ -1,0 +1,662 @@
+//! inputnav-1 (PO demo finding F1): a single-line `TextInput` has the native keyboard and mouse
+//! set on every platform, through the keymap's `TextInput` rows.
+//!
+//! The chords a test presses are read from each platform's keymap data (`chords_of`), never
+//! spelled in the test: the field resolves them against the `InputKeymap` the test installs,
+//! so the macOS, Windows and Linux sets all run on any host.
+
+use std::ops::Range;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use gpui::{
+    AppContext as _, ClipboardItem, Context, Entity, EntityInputHandler as _, Focusable as _,
+    InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, Pixels, Point, Render, Role, Styled as _, TestAppContext,
+    VisualTestContext, Window, div, point, px,
+};
+use hacivat_ui::input::TextInput;
+use hacivat_ui::input::keys::{INPUT_COMMANDS, InputKeymap, TEXT_INPUT_CONTEXT, set_input_keymap};
+use hacivat_ui::keymaps::{PRESETS, load};
+use hacivat_ui::popover::{a11y_record, a11y_take};
+use hacivat_ui::text::TextFn;
+use hacivat_ui_core::keymap::{KeyboardLayoutId, KeymapPlatform, chord_string, parse_chord};
+use hacivat_ui_core::theme::{Theme, ThemeMode};
+
+const PLATFORMS: [KeymapPlatform; 3] = [
+    KeymapPlatform::MacOs,
+    KeymapPlatform::Windows,
+    KeymapPlatform::Linux,
+];
+
+struct Host {
+    input: Entity<TextInput>,
+}
+
+impl Render for Host {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(400.0)).child(self.input.clone())
+    }
+}
+
+fn placeholder() -> TextFn {
+    Rc::new(|_| "Search".into())
+}
+
+/// A focused field in a key window whose keys follow `platform`'s default keymap.
+fn field(
+    cx: &mut TestAppContext,
+    platform: KeymapPlatform,
+) -> (Entity<TextInput>, &mut VisualTestContext) {
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(InputKeymap::defaults(platform));
+    });
+    let (host, vcx) = cx.add_window_view(|_, cx| Host {
+        input: cx.new(|cx| TextInput::new(cx, placeholder())),
+    });
+    let input = host.read_with(vcx, |h, _| h.input.clone());
+    vcx.update(|w, cx| {
+        w.activate_window();
+        input.focus_handle(cx).focus(w, cx);
+    });
+    vcx.run_until_parked();
+    (input, vcx)
+}
+
+/// Every chord `platform`'s default keymap binds to `command` (the platform helper: tests
+/// press what the keymap says, never a spelled chord).
+fn chords_of(platform: KeymapPlatform, command: &str) -> Vec<String> {
+    load(platform, "hacivat", None)
+        .0
+        .bindings_for(command, &KeyboardLayoutId("us".into()))
+        .into_iter()
+        .map(|b| chord_string(&b.chord))
+        .collect()
+}
+
+/// Presses and releases `chord` on the focused element.
+fn press(vcx: &mut VisualTestContext, chord: &str) {
+    vcx.simulate_keystrokes(chord);
+    // `Keystroke::parse` wants a `'static` text.
+    let chord: &'static str = Box::leak(chord.to_string().into_boxed_str());
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse(chord).expect("a keystroke"),
+    });
+    vcx.run_until_parked();
+}
+
+/// Sets the value and the selection (bytes; the text is ASCII, so UTF-16 offsets match).
+fn reset(vcx: &mut VisualTestContext, input: &Entity<TextInput>, text: &str, sel: Range<usize>) {
+    input.update_in(vcx, |i, w, cx| {
+        i.set_value(text.to_string());
+        i.set_selected_text_range(sel, w, cx);
+    });
+    vcx.run_until_parked();
+}
+
+fn state(vcx: &mut VisualTestContext, input: &Entity<TextInput>) -> (String, Range<usize>, bool) {
+    input.read_with(vcx, |i, _| {
+        let (sel, reversed) = i.selection();
+        (i.value().to_string(), sel, reversed)
+    })
+}
+
+/// `(command, value after, selection after, reversed)` from "foo bar-baz" with the caret after
+/// "foo b" (byte 5).
+const FROM_FOO_B: [(&str, &str, Range<usize>, bool); 18] = [
+    ("input.move_left", "foo bar-baz", 4..4, false),
+    ("input.move_right", "foo bar-baz", 6..6, false),
+    ("input.select_left", "foo bar-baz", 4..5, true),
+    ("input.select_right", "foo bar-baz", 5..6, false),
+    ("input.move_word_left", "foo bar-baz", 4..4, false),
+    ("input.move_word_right", "foo bar-baz", 7..7, false),
+    ("input.select_word_left", "foo bar-baz", 4..5, true),
+    ("input.select_word_right", "foo bar-baz", 5..7, false),
+    ("input.move_line_start", "foo bar-baz", 0..0, false),
+    ("input.move_line_end", "foo bar-baz", 11..11, false),
+    ("input.select_line_start", "foo bar-baz", 0..5, true),
+    ("input.select_line_end", "foo bar-baz", 5..11, false),
+    ("input.delete_backward", "foo ar-baz", 4..4, false),
+    ("input.delete_forward", "foo br-baz", 5..5, false),
+    ("input.delete_word_backward", "foo ar-baz", 4..4, false),
+    ("input.delete_word_forward", "foo b-baz", 5..5, false),
+    ("input.delete_to_line_start", "ar-baz", 0..0, false),
+    ("input.delete_to_line_end", "foo b", 5..5, false),
+];
+
+fn every_chord_does_what_its_command_says(cx: &mut TestAppContext, platform: KeymapPlatform) {
+    let (input, vcx) = field(cx, platform);
+    let mut pressed = 0;
+    for (command, text, sel, reversed) in FROM_FOO_B {
+        let chords = chords_of(platform, command);
+        // Windows and Linux fields have no line-delete keys; every other command has one.
+        let line_delete = command.starts_with("input.delete_to_line");
+        assert_eq!(
+            chords.is_empty(),
+            line_delete && platform != KeymapPlatform::MacOs,
+            "{platform:?} binds {command}: {chords:?}"
+        );
+        for chord in chords {
+            reset(vcx, &input, "foo bar-baz", 5..5);
+            press(vcx, &chord);
+            assert_eq!(
+                state(vcx, &input),
+                (text.to_string(), sel.clone(), reversed),
+                "{platform:?} {chord} ({command})"
+            );
+            pressed += 1;
+        }
+    }
+    // Select all, from the caret.
+    for chord in chords_of(platform, "input.select_all") {
+        reset(vcx, &input, "foo bar-baz", 5..5);
+        press(vcx, &chord);
+        assert_eq!(state(vcx, &input).1, 0..11, "{platform:?} {chord}");
+        pressed += 1;
+    }
+    assert!(pressed >= 18, "{platform:?}: {pressed}");
+}
+
+#[gpui::test]
+fn macos_chords(cx: &mut TestAppContext) {
+    every_chord_does_what_its_command_says(cx, KeymapPlatform::MacOs);
+}
+
+#[gpui::test]
+fn windows_chords(cx: &mut TestAppContext) {
+    every_chord_does_what_its_command_says(cx, KeymapPlatform::Windows);
+}
+
+#[gpui::test]
+fn linux_chords(cx: &mut TestAppContext) {
+    every_chord_does_what_its_command_says(cx, KeymapPlatform::Linux);
+}
+
+/// The native sets of the brief, per platform (the data the chord tests read is pinned here).
+#[test]
+fn the_keymaps_carry_the_native_sets() {
+    let has = |p, command: &str, chord: &str| {
+        assert!(
+            chords_of(p, command)
+                .iter()
+                .any(|c| *c == chord_string(&parse_chord(chord).expect("a chord"))),
+            "{p:?}: {chord} → {command}: {:?}",
+            chords_of(p, command)
+        );
+    };
+    let mac = KeymapPlatform::MacOs;
+    for (command, chords) in [
+        ("input.move_left", &["left", "ctrl-b"][..]),
+        ("input.move_right", &["right", "ctrl-f"]),
+        ("input.select_left", &["shift-left"]),
+        ("input.select_right", &["shift-right"]),
+        ("input.move_word_left", &["alt-left"]),
+        ("input.move_word_right", &["alt-right"]),
+        ("input.select_word_left", &["alt-shift-left"]),
+        ("input.select_word_right", &["alt-shift-right"]),
+        (
+            "input.move_line_start",
+            &["cmd-left", "up", "home", "ctrl-a"],
+        ),
+        (
+            "input.move_line_end",
+            &["cmd-right", "down", "end", "ctrl-e"],
+        ),
+        (
+            "input.select_line_start",
+            &["cmd-shift-left", "shift-up", "shift-home"],
+        ),
+        (
+            "input.select_line_end",
+            &["cmd-shift-right", "shift-down", "shift-end"],
+        ),
+        ("input.delete_backward", &["backspace", "ctrl-h"]),
+        ("input.delete_forward", &["delete", "ctrl-d"]),
+        ("input.delete_word_backward", &["alt-backspace"]),
+        ("input.delete_word_forward", &["alt-delete"]),
+        ("input.delete_to_line_start", &["cmd-backspace"]),
+        ("input.delete_to_line_end", &["ctrl-k"]),
+        ("input.select_all", &["cmd-a"]),
+        ("input.copy", &["cmd-c"]),
+        ("input.cut", &["cmd-x"]),
+        ("input.paste", &["cmd-v"]),
+    ] {
+        for chord in chords {
+            has(mac, command, chord);
+        }
+    }
+    for p in [KeymapPlatform::Windows, KeymapPlatform::Linux] {
+        for (command, chord) in [
+            ("input.select_left", "shift-left"),
+            ("input.select_right", "shift-right"),
+            ("input.move_word_left", "ctrl-left"),
+            ("input.move_word_right", "ctrl-right"),
+            ("input.select_word_left", "ctrl-shift-left"),
+            ("input.select_word_right", "ctrl-shift-right"),
+            ("input.move_line_start", "home"),
+            ("input.move_line_end", "end"),
+            ("input.select_line_start", "shift-home"),
+            ("input.select_line_end", "shift-end"),
+            ("input.delete_forward", "delete"),
+            ("input.delete_word_backward", "ctrl-backspace"),
+            ("input.delete_word_forward", "ctrl-delete"),
+            ("input.select_all", "ctrl-a"),
+            ("input.copy", "ctrl-c"),
+            ("input.cut", "ctrl-x"),
+            ("input.paste", "ctrl-v"),
+        ] {
+            has(p, command, chord);
+        }
+        // ↑/↓ stay with the field's parents (a list it filters, a form).
+        assert!(
+            chords_of(p, "input.move_line_start")
+                .iter()
+                .all(|c| c != "up")
+        );
+    }
+}
+
+/// Every text-field row is in the `TextInput` context, in both presets.
+#[test]
+fn text_field_rows_live_in_their_own_context() {
+    for p in PLATFORMS {
+        for preset in PRESETS {
+            for b in load(p, preset, None).0.bindings() {
+                if b.command.starts_with("input.") {
+                    assert_eq!(
+                        b.context, TEXT_INPUT_CONTEXT,
+                        "{p:?} {preset} {}",
+                        b.command
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(INPUT_COMMANDS.len(), 22);
+}
+
+#[gpui::test]
+fn turkish_and_emoji_move_by_grapheme_and_word(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::MacOs);
+    let mac = |c: &str| chords_of(KeymapPlatform::MacOs, c)[0].clone();
+    let family = "👨\u{200d}👩\u{200d}👧";
+    let text = format!("İstanbul'da {family} ışığı");
+    vcx.simulate_input(&text);
+    press(vcx, &mac("input.select_word_left"));
+    assert_eq!(state(vcx, &input).1, text.len() - "ışığı".len()..text.len());
+    press(vcx, &mac("input.move_left"));
+    press(vcx, &mac("input.select_left"));
+    press(vcx, &mac("input.select_left"));
+    // The space, then the whole family (one grapheme).
+    let family_start = "İstanbul'da ".len();
+    assert_eq!(
+        state(vcx, &input).1,
+        family_start..family_start + family.len() + 1
+    );
+    press(vcx, &mac("input.move_word_left"));
+    press(vcx, &mac("input.move_word_left"));
+    assert_eq!(state(vcx, &input).1, 0..0);
+    press(vcx, &mac("input.delete_word_forward"));
+    assert_eq!(state(vcx, &input).0, format!(" {family} ışığı"));
+}
+
+// ---- clipboard, masked, read-only, IME ----------------------------------------------------------
+
+fn clipboard(vcx: &mut VisualTestContext) -> Option<String> {
+    vcx.update(|_, cx| cx.read_from_clipboard())
+        .and_then(|item| item.text())
+}
+
+fn set_clipboard(vcx: &mut VisualTestContext, text: &str) {
+    let item = ClipboardItem::new_string(text.to_string());
+    vcx.update(|_, cx| cx.write_to_clipboard(item));
+}
+
+#[gpui::test]
+fn clipboard_chords_follow_the_platform_keymap(cx: &mut TestAppContext) {
+    for platform in [KeymapPlatform::Windows, KeymapPlatform::MacOs] {
+        let (input, vcx) = field(cx, platform);
+        let key = |c: &str| chords_of(platform, c)[0].clone();
+        reset(vcx, &input, "şehir", 0..0);
+        press(vcx, &key("input.select_all"));
+        press(vcx, &key("input.copy"));
+        assert_eq!(clipboard(vcx).as_deref(), Some("şehir"));
+        press(vcx, &key("input.move_line_end"));
+        press(vcx, &key("input.paste"));
+        assert_eq!(state(vcx, &input).0, "şehirşehir");
+        press(vcx, &key("input.select_word_left"));
+        press(vcx, &key("input.cut"));
+        assert_eq!(state(vcx, &input).0, "");
+        assert_eq!(clipboard(vcx).as_deref(), Some("şehirşehir"));
+    }
+}
+
+#[gpui::test]
+fn masked_fields_treat_the_value_as_one_word_and_never_copy(cx: &mut TestAppContext) {
+    for platform in PLATFORMS {
+        let (input, vcx) = field(cx, platform);
+        input.update(vcx, |i, _| i.set_masked(true));
+        let key = |c: &str| chords_of(platform, c)[0].clone();
+        let value = "correct horse.battery";
+        reset(vcx, &input, value, 9..9);
+        press(vcx, &key("input.move_word_left"));
+        assert_eq!(state(vcx, &input).1, 0..0, "{platform:?}");
+        press(vcx, &key("input.move_word_right"));
+        assert_eq!(state(vcx, &input).1, value.len()..value.len());
+        press(vcx, &key("input.select_word_left"));
+        assert_eq!(state(vcx, &input).1, 0..value.len());
+        reset(vcx, &input, value, 9..9);
+        press(vcx, &key("input.select_word_right"));
+        assert_eq!(state(vcx, &input).1, 9..value.len());
+        // Copy and cut stay refused, with a selection.
+        set_clipboard(vcx, "sentinel");
+        press(vcx, &key("input.select_all"));
+        press(vcx, &key("input.copy"));
+        press(vcx, &key("input.cut"));
+        assert_eq!(clipboard(vcx).as_deref(), Some("sentinel"));
+        assert_eq!(state(vcx, &input).0, value);
+        // Word deletes go to the edge.
+        reset(vcx, &input, value, 9..9);
+        press(vcx, &key("input.delete_word_forward"));
+        assert_eq!(state(vcx, &input).0, "correct h");
+        press(vcx, &key("input.delete_word_backward"));
+        assert_eq!(state(vcx, &input).0, "");
+    }
+}
+
+#[gpui::test]
+fn read_only_fields_move_and_select_but_never_edit(cx: &mut TestAppContext) {
+    for platform in PLATFORMS {
+        let (input, vcx) = field(cx, platform);
+        input.update(vcx, |i, _| i.set_read_only(true));
+        reset(vcx, &input, "foo bar-baz", 5..5);
+        for (command, text, sel, reversed) in FROM_FOO_B {
+            for chord in chords_of(platform, command) {
+                reset(vcx, &input, "foo bar-baz", 5..5);
+                press(vcx, &chord);
+                let (now, now_sel, now_rev) = state(vcx, &input);
+                assert_eq!(now, "foo bar-baz", "{platform:?} {chord}");
+                if text == "foo bar-baz" {
+                    assert_eq!(
+                        (now_sel, now_rev),
+                        (sel.clone(), reversed),
+                        "{platform:?} {chord}"
+                    );
+                }
+            }
+        }
+        let key = |c: &str| chords_of(platform, c)[0].clone();
+        set_clipboard(vcx, "pasted");
+        press(vcx, &key("input.paste"));
+        press(vcx, &key("input.select_all"));
+        // Cut neither removes nor copies.
+        press(vcx, &key("input.cut"));
+        assert_eq!(state(vcx, &input).0, "foo bar-baz");
+        assert_eq!(clipboard(vcx).as_deref(), Some("pasted"));
+        // Copy still works.
+        press(vcx, &key("input.copy"));
+        assert_eq!(clipboard(vcx).as_deref(), Some("foo bar-baz"));
+    }
+}
+
+#[gpui::test]
+fn keys_stay_with_the_ime_while_composing(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::MacOs);
+    vcx.simulate_input("abc ");
+    input.update_in(vcx, |i, w, cx| {
+        i.replace_and_mark_text_in_range(None, "漢字", Some(2..2), w, cx)
+    });
+    for command in [
+        "input.move_word_left",
+        "input.select_line_start",
+        "input.delete_word_backward",
+        "input.select_all",
+    ] {
+        press(vcx, &chords_of(KeymapPlatform::MacOs, command)[0]);
+    }
+    input.update_in(vcx, |i, w, cx| {
+        assert!(i.is_composing());
+        assert_eq!(i.value(), "abc 漢字");
+        assert_eq!(i.marked_text_range(w, cx), Some(4..6));
+        assert_eq!(i.selected_text_range(false, w, cx).unwrap().range, 6..6);
+    });
+}
+
+#[gpui::test]
+fn the_platform_sees_the_selection_and_its_direction(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::Windows);
+    reset(vcx, &input, "ağaç", 6..6);
+    press(
+        vcx,
+        &chords_of(KeymapPlatform::Windows, "input.select_left")[0],
+    );
+    press(
+        vcx,
+        &chords_of(KeymapPlatform::Windows, "input.select_left")[0],
+    );
+    input.update_in(vcx, |i, w, cx| {
+        let sel = i.selected_text_range(false, w, cx).unwrap();
+        // UTF-16: "ağaç" is four units; the head leads at 2.
+        assert_eq!((sel.range, sel.reversed), (2..4, true));
+    });
+}
+
+#[gpui::test]
+fn the_accessible_value_follows_edits(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::Linux);
+    reset(vcx, &input, "foo bar-baz", 11..11);
+    press(
+        vcx,
+        &chords_of(KeymapPlatform::Linux, "input.delete_word_backward")[0],
+    );
+    a11y_record();
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let decl = a11y_take()
+        .into_iter()
+        .find(|d| d.role == Some(Role::TextInput))
+        .expect("the field declared itself");
+    assert_eq!(decl.value.as_deref(), Some("foo bar-"));
+    assert_eq!(state(vcx, &input).0, "foo bar-");
+}
+
+#[gpui::test]
+fn a_user_keymap_remaps_a_field_key(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::Windows);
+    let user = "[[binding]]\nchord = \"alt-up\"\ncommand = \"input.move_word_left\"\ncontext = \"TextInput\"\n";
+    let (km, diags) = load(KeymapPlatform::Windows, "hacivat", Some(user));
+    assert!(diags.is_empty(), "{diags:?}");
+    let remapped = km
+        .bindings_for("input.move_word_left", &KeyboardLayoutId("us".into()))
+        .iter()
+        .map(|b| chord_string(&b.chord))
+        .collect::<Vec<_>>();
+    assert_eq!(remapped, ["alt-up"]);
+    vcx.update(|_, cx| set_input_keymap(cx, Arc::new(km), KeyboardLayoutId("us".into())));
+    reset(vcx, &input, "foo bar", 7..7);
+    press(vcx, "alt-up");
+    assert_eq!(state(vcx, &input).1, 4..4);
+    // The old chord no longer moves by word (it is not bound in the field at all now).
+    press(
+        vcx,
+        &chords_of(KeymapPlatform::Windows, "input.move_word_left")[0],
+    );
+    assert_eq!(state(vcx, &input).1, 4..4);
+}
+
+/// Keys the field does not bind go on to its parents (↑/↓ on Windows and Linux, Tab).
+struct Parent {
+    input: Entity<TextInput>,
+    seen: Rc<std::cell::RefCell<Vec<String>>>,
+}
+
+impl Render for Parent {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let seen = self.seen.clone();
+        div()
+            .w(px(400.0))
+            .on_key_down(move |e: &gpui::KeyDownEvent, _, _| {
+                seen.borrow_mut().push(e.keystroke.key.clone())
+            })
+            .child(self.input.clone())
+    }
+}
+
+#[gpui::test]
+fn unbound_keys_reach_the_parent_and_bound_ones_do_not(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(InputKeymap::defaults(KeymapPlatform::Windows));
+    });
+    let seen: Rc<std::cell::RefCell<Vec<String>>> = Rc::default();
+    let sink = seen.clone();
+    let (host, vcx) = cx.add_window_view(move |_, cx| Parent {
+        input: cx.new(|cx| TextInput::new(cx, placeholder())),
+        seen: sink,
+    });
+    let input = host.read_with(vcx, |h, _| h.input.clone());
+    vcx.update(|w, cx| {
+        w.activate_window();
+        input.focus_handle(cx).focus(w, cx);
+    });
+    vcx.run_until_parked();
+    press(vcx, "up");
+    press(vcx, "tab");
+    press(vcx, "home");
+    press(
+        vcx,
+        &chords_of(KeymapPlatform::Windows, "input.move_word_left")[0],
+    );
+    assert_eq!(*seen.borrow(), ["up", "tab"]);
+}
+
+// ---- mouse ---------------------------------------------------------------------------------------
+
+/// The window point at the left edge of the value's UTF-16 offset `at`, mid-height.
+fn x_at(vcx: &mut VisualTestContext, input: &Entity<TextInput>, at: usize) -> Point<Pixels> {
+    vcx.run_until_parked();
+    let b = input
+        .update_in(vcx, |i, w, cx| {
+            i.bounds_for_range(at..at, gpui::Bounds::default(), w, cx)
+        })
+        .expect("the line is laid out");
+    point(b.origin.x, b.origin.y + b.size.height / 2.0)
+}
+
+fn mouse_down(vcx: &mut VisualTestContext, at: Point<Pixels>, clicks: usize, shift: bool) {
+    let modifiers = if shift {
+        Modifiers::shift()
+    } else {
+        Modifiers::none()
+    };
+    vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers,
+        click_count: clicks,
+        first_mouse: false,
+    });
+    vcx.run_until_parked();
+}
+
+fn mouse_up(vcx: &mut VisualTestContext, at: Point<Pixels>, clicks: usize) {
+    vcx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: clicks,
+    });
+    vcx.run_until_parked();
+}
+
+fn click(vcx: &mut VisualTestContext, at: Point<Pixels>, clicks: usize, shift: bool) {
+    mouse_down(vcx, at, clicks, shift);
+    mouse_up(vcx, at, clicks);
+}
+
+#[gpui::test]
+fn a_click_places_the_caret_and_shift_click_extends(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::MacOs);
+    reset(vcx, &input, "foo bar-baz", 11..11);
+    let at3 = x_at(vcx, &input, 3);
+    click(vcx, at3, 1, false);
+    assert_eq!(state(vcx, &input).1, 3..3);
+    let at9 = x_at(vcx, &input, 9);
+    click(vcx, at9, 1, true);
+    assert_eq!(state(vcx, &input).1, 3..9);
+    let at1 = x_at(vcx, &input, 1);
+    click(vcx, at1, 1, true);
+    assert_eq!((state(vcx, &input).1, state(vcx, &input).2), (1..3, true));
+}
+
+#[gpui::test]
+fn a_click_inside_a_cluster_lands_on_its_edge(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::MacOs);
+    let family = "👨\u{200d}👩\u{200d}👧";
+    vcx.simulate_input(&format!("a{family}b"));
+    // The family is 8 UTF-16 units from offset 1; aim between its first and last units.
+    let left = x_at(vcx, &input, 1);
+    let right = x_at(vcx, &input, 9);
+    let inside = point(left.x + (right.x - left.x) * 0.4, left.y);
+    click(vcx, inside, 1, false);
+    let caret = state(vcx, &input).1;
+    assert!(
+        caret == (1..1) || caret == (1 + family.len()..1 + family.len()),
+        "{caret:?}"
+    );
+}
+
+#[gpui::test]
+fn a_drag_selects_and_follows_past_the_field(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::MacOs);
+    reset(vcx, &input, "foo bar-baz", 0..0);
+    let from = x_at(vcx, &input, 2);
+    mouse_down(vcx, from, 1, false);
+    let to = x_at(vcx, &input, 6);
+    vcx.simulate_event(MouseMoveEvent {
+        position: to,
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::none(),
+    });
+    vcx.run_until_parked();
+    assert_eq!(state(vcx, &input).1, 2..6);
+    // Leftwards past the field's start: the head follows to 0.
+    vcx.simulate_event(MouseMoveEvent {
+        position: point(px(-50.0), to.y),
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::none(),
+    });
+    vcx.run_until_parked();
+    assert_eq!((state(vcx, &input).1, state(vcx, &input).2), (0..2, true));
+    mouse_up(vcx, point(px(-50.0), to.y), 1);
+    // Once released, moving changes nothing.
+    vcx.simulate_event(MouseMoveEvent {
+        position: to,
+        pressed_button: None,
+        modifiers: Modifiers::none(),
+    });
+    vcx.run_until_parked();
+    assert_eq!(state(vcx, &input).1, 0..2);
+}
+
+#[gpui::test]
+fn double_click_selects_a_word_and_triple_click_all(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::Linux);
+    let text = "select müşteri, ad";
+    vcx.simulate_input(text);
+    // UTF-16 offset 9 is inside "müşteri".
+    let at = x_at(vcx, &input, 9);
+    click(vcx, at, 1, false);
+    click(vcx, at, 2, false);
+    assert_eq!(state(vcx, &input).1, 7.."select müşteri".len());
+    click(vcx, at, 3, false);
+    assert_eq!(state(vcx, &input).1, 0..text.len());
+    // A masked value is one word: a double click selects it all.
+    input.update(vcx, |i, _| i.set_masked(true));
+    reset(vcx, &input, "correct horse", 0..0);
+    let at = x_at(vcx, &input, 3);
+    click(vcx, at, 1, false);
+    click(vcx, at, 2, false);
+    assert_eq!(state(vcx, &input).1, 0.."correct horse".len());
+}
