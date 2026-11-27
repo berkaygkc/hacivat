@@ -767,6 +767,23 @@ fn key_of(vcx: &VisualTestContext, label: &str) -> TreeKey {
         .key
 }
 
+// ## m4b-cifix-8-borrow-park
+/// Queues a GPUI task that updates the App when it runs: the stand-in for a core (Tokio)
+/// completion that wakes a UI task at any moment (P22). Returns whether it has run.
+///
+/// CI 46058787755 (Windows): `pg_shell`'s `add_profile` leaves the save task
+/// (`ConnectionsModel::save_checked`) waiting on its profile write. When the write landed
+/// late, `key_of` (which drives the executor) ran that task inside `cx.read`, and its
+/// `AsyncApp::update` panicked with "RefCell already borrowed". Drive first, then read.
+fn queue_late_wake(vcx: &VisualTestContext) -> Rc<Cell<bool>> {
+    let ran = Rc::new(Cell::new(false));
+    let flag = ran.clone();
+    vcx.cx
+        .spawn(|cx| async move { cx.update(|_| flag.set(true)) })
+        .detach();
+    ran
+}
+
 fn open_rows(vcx: &VisualTestContext, labels: &[&str]) {
     for l in labels {
         let k = key_of(vcx, l);
@@ -864,10 +881,12 @@ fn scripts_contributor_stub_adds_no_node_so_m4_shots_hold(cx: &mut TestAppContex
     assert_eq!(tab_count(vcx), tabs_before);
     // And the menu seam adds nothing of the contributor's.
     // ## m4b-t16-attach (named exception): only Task 16's two items, last.
-    let menu = vcx
-        .cx
-        .read(|cx| node_menu(key_of(vcx, "app"), cx))
-        .expect("a menu");
+    // ## m4b-cifix-8-borrow-park (named exception): `key_of` drives the executor, so it
+    // runs before the read, never inside it.
+    let woke = queue_late_wake(vcx);
+    let app = key_of(vcx, "app");
+    let menu = vcx.cx.read(|cx| node_menu(app, cx)).expect("a menu");
+    assert!(woke.get(), "the woken task ran before the menu was read");
     assert!(menu.last().is_some_and(|m| !m.separator));
     let scripts: Vec<String> = menu
         .iter()
