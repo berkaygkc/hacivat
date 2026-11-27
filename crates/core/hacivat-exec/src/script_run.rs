@@ -1224,40 +1224,83 @@ pub const SCRIPT_SLOW_MS: u64 = 1_000;
 /// Quiet: a row count or "Completed" under [`SCRIPT_SLOW_MS`], and (fix round 1, m3) a
 /// transaction-control line (`BEGIN`, `SET` and `SAVEPOINT` write "Completed"; `COMMIT` and
 /// `ROLLBACK` write their own), so a per-row `BEGIN; INSERT; COMMIT;` script stays bounded.
-fn quiet_rows(msg: &LogMsg) -> Option<u64> {
+///
+/// ## demofix-1 re-review (r1): "rolled back" is quiet only for the statement that asked for
+/// it (`rollback_stmt`: the unit is a `ROLLBACK` or `ABORT`). A `COMMIT` the server turned into
+/// a rollback (its transaction had already failed) keeps its own line.
+fn quiet_rows(msg: &LogMsg, rollback_stmt: bool) -> Option<u64> {
     match msg {
         LogMsg::RowsAffected { rows, ms } if *ms < SCRIPT_SLOW_MS => Some(*rows),
         LogMsg::Completed { ms } if *ms < SCRIPT_SLOW_MS => Some(0),
-        LogMsg::TxCommitted | LogMsg::TxRolledBack => Some(0),
+        LogMsg::TxCommitted => Some(0),
+        LogMsg::TxRolledBack if rollback_stmt => Some(0),
         _ => None,
     }
+}
+
+// ## demofix-1 re-review (r1)
+/// Whether a statement whose lines are `msgs` is quiet (counted, not listed); `rollback_stmt`:
+/// it is a `ROLLBACK` or `ABORT` ([`is_rollback_stmt`]).
+fn quiet_statement<'a>(rollback_stmt: bool, mut msgs: impl Iterator<Item = &'a LogMsg>) -> bool {
+    msgs.all(|m| quiet_rows(m, rollback_stmt).is_some())
+}
+
+/// Whether `sql` is a `ROLLBACK` or `ABORT` (its first word; leading comments make it `false`,
+/// which only keeps a line visible).
+fn is_rollback_stmt(sql: &str) -> bool {
+    let word = crate::sqlctx::first_word(sql.trim_start());
+    word.eq_ignore_ascii_case("ROLLBACK") || word.eq_ignore_ascii_case("ABORT")
 }
 
 // ## demofix-1 fix round 1 (m3, m4)
 #[cfg(test)]
 mod quiet_tests {
-    use super::{LogMsg, SCRIPT_SLOW_MS, quiet_rows};
+    use super::{LogMsg, SCRIPT_SLOW_MS, is_rollback_stmt, quiet_rows, quiet_statement};
 
     #[test]
     fn slow_statements_and_failures_keep_their_own_line() {
         assert_eq!(
-            quiet_rows(&LogMsg::RowsAffected { rows: 3, ms: 12 }),
+            quiet_rows(&LogMsg::RowsAffected { rows: 3, ms: 12 }, false),
             Some(3)
         );
-        assert_eq!(quiet_rows(&LogMsg::Completed { ms: 0 }), Some(0));
-        assert_eq!(quiet_rows(&LogMsg::TxCommitted), Some(0));
-        assert_eq!(quiet_rows(&LogMsg::TxRolledBack), Some(0));
+        assert_eq!(quiet_rows(&LogMsg::Completed { ms: 0 }, false), Some(0));
+        assert_eq!(quiet_rows(&LogMsg::TxCommitted, false), Some(0));
+        // ## demofix-1 re-review (r1): a ROLLBACK's own line is quiet; a COMMIT the server
+        // rolled back keeps its line.
+        assert_eq!(quiet_rows(&LogMsg::TxRolledBack, true), Some(0));
+        assert_eq!(quiet_rows(&LogMsg::TxRolledBack, false), None);
+        assert!(is_rollback_stmt("ROLLBACK"));
+        assert!(is_rollback_stmt("  abort;"));
+        assert!(is_rollback_stmt("rollback to savepoint a"));
+        assert!(!is_rollback_stmt("COMMIT"));
+        assert!(!is_rollback_stmt("END"));
+        // A whole statement: the user's ROLLBACK is counted; a COMMIT the server answered
+        // with a rollback keeps its lines; a plain COMMIT is counted.
+        let quiet =
+            |sql: &str, msgs: &[LogMsg]| quiet_statement(is_rollback_stmt(sql), msgs.iter());
+        let rolled = [LogMsg::Completed { ms: 0 }, LogMsg::TxRolledBack];
+        assert!(quiet("ROLLBACK", &rolled));
+        assert!(quiet("abort", &rolled));
+        assert!(!quiet("COMMIT", &rolled));
+        assert!(!quiet("END", &rolled));
+        assert!(quiet(
+            "COMMIT",
+            &[LogMsg::Completed { ms: 0 }, LogMsg::TxCommitted]
+        ));
         assert_eq!(
-            quiet_rows(&LogMsg::RowsAffected {
-                rows: 1,
-                ms: SCRIPT_SLOW_MS
-            }),
+            quiet_rows(
+                &LogMsg::RowsAffected {
+                    rows: 1,
+                    ms: SCRIPT_SLOW_MS
+                },
+                false
+            ),
             None,
             "a statement of a second or more keeps its line with its time"
         );
-        assert_eq!(quiet_rows(&LogMsg::Completed { ms: 40_000 }), None);
-        assert_eq!(quiet_rows(&LogMsg::ImplicitCommit), None);
-        assert_eq!(quiet_rows(&LogMsg::TxRolledBackByServer), None);
+        assert_eq!(quiet_rows(&LogMsg::Completed { ms: 40_000 }, false), None);
+        assert_eq!(quiet_rows(&LogMsg::ImplicitCommit, false), None);
+        assert_eq!(quiet_rows(&LogMsg::TxRolledBackByServer, false), None);
     }
 }
 
@@ -1813,6 +1856,8 @@ impl<'a> Run<'a> {
             reports: reports.iter().map(|r| Some(r.items.clone())).collect(),
         });
         let unit = prepared[0].unit.clone();
+        // ## demofix-1 re-review (r1)
+        let rollback_stmt = is_rollback_stmt(&unit.text);
         // ## m4b-t18-run-as-script fix round 1 (named exception; review I2)
         let masked: Arc<[Arc<str>]> = Arc::from(vec![prepared[0].masked.clone()]);
         // The service's lines go to the unit's own log, then to the console's numbered by the
@@ -1854,13 +1899,13 @@ impl<'a> Run<'a> {
                     Ok(_) => {}
                     Err(_) => self.summary.last_unit_unknown = true,
                 }
-                self.copy_log(&unit_log, at.unit);
+                self.copy_log(&unit_log, at.unit, rollback_stmt);
                 return UnitDone::Stop(StopReason::Cancelled);
             }
         };
         // The results are not kept: the ticket goes here.
         drop(ticket);
-        self.copy_log(&unit_log, at.unit);
+        self.copy_log(&unit_log, at.unit, rollback_stmt);
         match summary {
             Ok(s) if s.failed > 0 => UnitDone::Failed,
             Ok(s) if s.executed > 0 => UnitDone::Ran,
@@ -1876,7 +1921,7 @@ impl<'a> Run<'a> {
     /// waits in the run's [`QuietLog`]: the last [`SCRIPT_TAIL_STATEMENTS`] are written one by
     /// one before the next line that says more (a failure, a notice, a stop) and at the end,
     /// and earlier ones are counted in one `exec-script-quiet` line. The log keeps its order.
-    fn copy_log(&mut self, unit_log: &SessionLog, unit: u64) {
+    fn copy_log(&mut self, unit_log: &SessionLog, unit: u64, rollback_stmt: bool) {
         let n = u32::try_from(unit).unwrap_or(u32::MAX);
         let mut lines: Vec<UnitLine> = Vec::new();
         for line in unit_log.lines().iter() {
@@ -1897,7 +1942,7 @@ impl<'a> Run<'a> {
         if lines.is_empty() {
             return;
         }
-        if lines.iter().all(|l| quiet_rows(&l.0).is_some()) {
+        if quiet_statement(rollback_stmt, lines.iter().map(|l| &l.0)) {
             self.quiet.tail.push_back((unit, lines));
             if self.quiet.tail.len() > SCRIPT_TAIL_STATEMENTS
                 && let Some((at, old)) = self.quiet.tail.pop_front()
@@ -1910,7 +1955,7 @@ impl<'a> Run<'a> {
                 q.n += 1;
                 q.rows = old
                     .iter()
-                    .filter_map(|l| quiet_rows(&l.0))
+                    .filter_map(|l| quiet_rows(&l.0, rollback_stmt))
                     .fold(q.rows, u64::saturating_add);
                 if q.n >= SCRIPT_QUIET_EVERY {
                     self.write_counted();

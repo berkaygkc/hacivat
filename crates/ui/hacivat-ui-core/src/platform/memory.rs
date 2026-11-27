@@ -227,12 +227,17 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn phys_footprint_follows_touched_memory() {
+        // ## demofix-1 re-review (r5): 256 MiB touched and kept alive (`black_box`), and a
+        // loose bound (half of it), so a parallel test freeing its own 64 MiB cannot break it.
         let before = platform::phys_footprint_bytes().expect("readable on macOS");
-        assert!(before > 1 << 20, "{before}");
-        let big = vec![1u8; 64 << 20];
+        assert!((1 << 20..1 << 40).contains(&before), "{before}");
+        let big = std::hint::black_box(vec![1u8; 256 << 20]);
         let after = platform::phys_footprint_bytes().unwrap();
-        assert!(after >= before + (32 << 20), "{before} -> {after}");
-        drop(big);
+        assert!(
+            after >= before + (128 << 20),
+            "{before} -> {after}: 256 MiB touched"
+        );
+        drop(std::hint::black_box(big));
     }
 
     #[test]
