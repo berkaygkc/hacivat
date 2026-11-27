@@ -464,6 +464,11 @@ struct Lib {
     /// `from` (so a reader of the snapshot sees the move), and that removal is not a delete.
     moved: HashMap<RelPath, RelPath>,
     deleted: HashSet<RelPath>,
+    // ## demofix-1 fix round 1 (m1)
+    /// Open files that were deleted and came back: their next stamp read is announced even
+    /// when it equals the remembered one (Put Back keeps the bytes and the time). The stamp
+    /// itself is kept, so a rename right after still pairs by content.
+    returned: HashSet<RelPath>,
     snap: Arc<LibrarySnapshot>,
 }
 
@@ -530,6 +535,7 @@ impl Lib {
             remembered: HashMap::new(),
             moved: HashMap::new(),
             deleted: HashSet::new(),
+            returned: HashSet::new(),
             snap,
         }
     }
@@ -1854,6 +1860,15 @@ impl Actor {
         let mut due = Vec::new();
         for rel in changes.created {
             if lib.deleted.remove(&rel) && lib.remembered.contains_key(&rel) {
+                // ## demofix-1 (PO demo F4; fix round 1, m1): an open file deleted and back is
+                // announced even when it is the same file (an undo of a move to the Trash keeps
+                // its bytes and time), so its tab leaves the "deleted on disk" state. The
+                // remembered stamp stays (a rename right after still pairs by content); the
+                // path is marked so `stamped` reports it whatever its stamp.
+                if lib.returned.len() >= RECENT_DELETES {
+                    lib.returned.clear();
+                }
+                lib.returned.insert(rel.clone());
                 due.push(rel);
             }
         }
@@ -1986,6 +2001,8 @@ impl Actor {
     fn stamped(&mut self, i: usize, rel: RelPath, out: StampOut) {
         let lib = &mut self.libs[i];
         let id = lib.id();
+        // ## demofix-1 fix round 1 (m1): a file that came back is announced once.
+        let returned = lib.returned.remove(&rel);
         let Some(meta) = out.meta else {
             // Gone or no longer a plain file: the watcher's report patches the listing.
             return;
@@ -2005,7 +2022,7 @@ impl Actor {
             return;
         };
         let known = lib.remembered.get(&rel).copied().flatten();
-        if !lib.remembered.contains_key(&rel) || known == Some(stamp) {
+        if !lib.remembered.contains_key(&rel) || (known == Some(stamp) && !returned) {
             return;
         }
         self.remember(i, rel.clone(), Some(stamp));

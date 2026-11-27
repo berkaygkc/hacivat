@@ -5286,3 +5286,13 @@ hv-cmd-input-delete-to-next-word-start = Alan: sonraki sözcüğün başına kad
 hv-cmd-input-undo = Alan: geri al
 # Review: PO
 hv-cmd-input-redo = Alan: yinele
+
+## demofix-1
+# Review: PO
+hv-cmd-workspace-results-larger = Sonuçlar: büyüt
+# Review: PO
+hv-cmd-workspace-results-smaller = Sonuçlar: küçült
+# Review: PO
+hv-status-version-copy-tip = Sürümün tamamını kopyalamak için tıklayın.
+# Review: PO
+hv-status-version-copied = Sunucu sürümü kopyalandı

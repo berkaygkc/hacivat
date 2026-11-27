@@ -232,21 +232,96 @@ fn connection_parts(
                     fluent(tr(cx, ids::hv::CAPSULE_UNSUPPORTED, NoArgs)),
                 ));
             }
-            let version = if info.server.raw_version.is_empty() {
-                info.server.product.clone()
-            } else {
-                format!("{} {}", info.server.product, info.server.raw_version)
-            };
+            // ## demofix-1 (PO demo F9): "PostgreSQL 16.16", never the product twice or the
+            // whole build line; the full text is the segment's tooltip.
+            let (short, full) = crate::connections::report::version_texts(
+                &info.server.product,
+                &info.server.raw_version,
+                info.server.version.as_ref(),
+            );
+            let short_name: SharedString = short.clone().into();
             // ## m2b-t22-live (fix round 1): the last segment, it ellipsizes when the bar is full.
+            let label = status_label(theme, short, TextSource::Data).truncate(true);
             out.push((
                 Part::Version,
-                status_label(theme, version, TextSource::Data)
-                    .truncate(true)
-                    .into_any_element(),
+                match full {
+                    // Fix round 1 (m7): the whole text is the tooltip, the accessible
+                    // description, and what a click copies (with a toast saying so).
+                    // ## demofix-1 re-review (r2): a real Tab stop; Enter or Space copies too.
+                    Some(full) => {
+                        use hacivat_ui::popover::{A11yDecl, Declare as _};
+                        let hint = crate::l10n_global::tr_id(cx, "hv-status-version-copy-tip");
+                        let tip: SharedString = format!("{full}\n{hint}").into();
+                        let (on_click, on_key) = (full.clone(), full.clone());
+                        let t = theme.tokens;
+                        let segment = div()
+                            .id("status-version-tip")
+                            .debug_selector(|| "status-version-tip".to_string())
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .min_w(px(0.0))
+                            .rounded(px(t.radii.sm))
+                            .cursor_pointer()
+                            .child(label)
+                            .declare_full(
+                                A11yDecl::new(
+                                    hacivat_ui_core::gpui_surface::Role::Button,
+                                    short_name.clone(),
+                                )
+                                .description(full.into()),
+                            )
+                            .on_click(move |_, _, cx| copy_version(on_click.clone(), cx))
+                            .on_key_down(move |e, _, cx| {
+                                if matches!(e.keystroke.key.as_str(), "enter" | "space")
+                                    && !e.keystroke.modifiers.modified()
+                                {
+                                    cx.stop_propagation();
+                                    copy_version(on_key.clone(), cx);
+                                }
+                            })
+                            .tooltip(move |_, cx| Tip::view(tip.clone(), cx));
+                        match cx.try_global::<VersionFocus>() {
+                            Some(VersionFocus(focus)) => segment
+                                .track_focus(focus)
+                                .focus_visible(|s| s.bg(t.colors.blue_tint.to_hsla()))
+                                .into_any_element(),
+                            None => segment.into_any_element(),
+                        }
+                    }
+                    None => label.into_any_element(),
+                },
             ));
             out
         }
     }
+}
+
+// ## demofix-1 re-review (r2)
+/// The status bar's version segment focus: a Tab stop that Enter or Space activates.
+struct VersionFocus(hacivat_ui_core::gpui_surface::FocusHandle);
+
+impl Global for VersionFocus {}
+
+/// The version segment's focus handle (tests reach it with Tab).
+pub fn version_focus(cx: &App) -> Option<hacivat_ui_core::gpui_surface::FocusHandle> {
+    cx.try_global::<VersionFocus>().map(|f| f.0.clone())
+}
+
+// ## demofix-1 fix round 1 (m7)
+/// Copies the server's whole version text, and says so.
+fn copy_version(full: String, cx: &mut App) {
+    use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
+    cx.write_to_clipboard(hacivat_ui_core::gpui_surface::ClipboardItem::new_string(
+        full,
+    ));
+    ToastQueue::push(
+        cx,
+        Toast::new(
+            ToastKind::Info,
+            std::rc::Rc::new(|cx: &App| crate::l10n_global::tr_id(cx, "hv-status-version-copied")),
+        ),
+    );
 }
 
 // ## m3a-t34-status-follows
@@ -389,6 +464,9 @@ impl Global for StatusFollow {}
 /// Called from `connections::live::install`, beside the `status_left` hook.
 pub fn install(cx: &mut App) {
     cx.default_global::<StatusFollow>();
+    // ## demofix-1 re-review (r2): the version segment's Tab stop, one for the app.
+    let focus = cx.focus_handle().tab_stop(true);
+    cx.set_global(VersionFocus(focus));
     cx.observe_global::<FocusedEditor>(|cx| {
         note_focus(cx);
         cx.refresh_windows();

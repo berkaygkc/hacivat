@@ -104,3 +104,5 @@ pub use script_run::{
 };
 // ## m4b-t18-run-as-script: the app's database check between the passes (re-export only).
 pub use script_run::DatabaseCheck;
+// ## demofix-1 (PO demo F6): the bounds of a streamed run's log (re-export only).
+pub use script_run::{SCRIPT_QUIET_EVERY, SCRIPT_SLOW_MS, SCRIPT_TAIL_STATEMENTS};

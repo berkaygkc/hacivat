@@ -154,6 +154,34 @@ impl ScrollState {
         self.exclude_since(before);
     }
 
+    // ## demofix-1 (PO demo F8)
+    /// `delta` rows were inserted (positive) or removed (negative) before the first row, as a
+    /// capped log drops its oldest lines while new ones arrive. A view that is not following the
+    /// tail stays on the rows it shows (its top row moves by `delta`; when its own top row was
+    /// removed, it shows the first row). A view following the tail stays at the bottom. Not a
+    /// scroll for the velocity.
+    pub fn on_rows_shifted(&mut self, delta: i64) {
+        if delta == 0 || self.follow_tail {
+            return;
+        }
+        let before = self.position();
+        let top = i128::from(self.top_row) + i128::from(delta);
+        if top < 0 {
+            self.top_row = 0;
+            self.top_row_offset = 0.0;
+        } else {
+            self.top_row = u64::try_from(top).unwrap_or(u64::MAX);
+        }
+        self.clamp();
+        self.exclude_since(before);
+    }
+
+    /// Paused: not following the tail, with rows below the view (the user scrolled away from
+    /// the bottom while rows stream in).
+    pub fn paused(&self) -> bool {
+        !self.follow_tail && self.top_row < self.max_top_row()
+    }
+
     /// A new generation (a re-run): back to the first row, the tail no longer followed, queued
     /// vertical deltas dropped. Not a scroll for the velocity. `left_x` stays (a re-run with the
     /// same columns keeps its widths); `set_content_width` clamps it to the new columns.

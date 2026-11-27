@@ -910,6 +910,22 @@ impl LibraryService {
         text: SaveText,
         expect: Option<DiskStamp>,
     ) -> Result<DiskStamp, SaveError> {
+        let expect = expect.map_or(fileio::SaveExpect::Anything, fileio::SaveExpect::Stamp);
+        self.save_expecting(id, rel, env, text, expect).await
+    }
+
+    // ## demofix-1 (PO demo F4)
+    /// [`save`](Self::save) with an explicit [`fileio::SaveExpect`]: a tab whose file was
+    /// deleted saves with `Recreate`, so a different file at the path is never replaced
+    /// without the user's answer.
+    pub async fn save_expecting(
+        &self,
+        id: LibraryId,
+        rel: &RelPath,
+        env: Option<EnvTag>,
+        text: SaveText,
+        expect: fileio::SaveExpect,
+    ) -> Result<DiskStamp, SaveError> {
         let root = self
             .root_of(id)
             .ok_or(SaveError::Io(io::ErrorKind::NotFound))?;
@@ -918,18 +934,11 @@ impl LibraryService {
         let (path, echo) = (rel.clone(), self.echoes.get(id));
         let saved = self
             .blocking(move || {
-                fileio::save_echoing_landing(
-                    &root,
-                    &path,
-                    env,
-                    text,
-                    expect,
-                    &mut |landing, stamp| {
-                        if let Some(echo) = &echo {
-                            echo.record(landing.clone(), *stamp);
-                        }
-                    },
-                )
+                fileio::save_expecting(&root, &path, env, text, expect, &mut |landing, stamp| {
+                    if let Some(echo) = &echo {
+                        echo.record(landing.clone(), *stamp);
+                    }
+                })
             })
             .await
             .unwrap_or(Err(SaveError::Io(io::ErrorKind::Interrupted)));

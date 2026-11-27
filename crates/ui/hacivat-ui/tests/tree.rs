@@ -814,6 +814,48 @@ fn status_slot_draws_glyph_and_exposes_its_text(cx: &mut TestAppContext) {
     assert_eq!(item.description.as_deref(), Some("Modified"));
 }
 
+// ## demofix-1 (PO demo F5)
+/// The git letters are painted in their own hues (M `git-modified`, N `git-new`), so the
+/// check fails if every badge shares one colour again; the letter is still drawn (colour is
+/// never the only cue). GPUI's test platform rasterizes no text, so the rows' recorder says
+/// which ink each status glyph was drawn in.
+#[gpui::test]
+fn git_letters_are_painted_each_in_its_own_hue(cx: &mut TestAppContext) {
+    use hacivat_ui::tree::{status_record, status_take};
+    use hacivat_ui_core::theme::DARK;
+    let mut f = Fixture::parse("modified.sql\nnew.sql\nplain.sql\n");
+    for (label, kind, glyph, text) in [
+        ("modified.sql", StatusKind::Modified, "M", "Modified"),
+        ("new.sql", StatusKind::New, "N", "New"),
+    ] {
+        let k = f.key(label);
+        f.row_mut(k).status = Some(RowStatus {
+            kind,
+            glyph: glyph.into(),
+            text: text.into(),
+        });
+    }
+    status_record();
+    let (_tree, vcx, _) = open(cx, f, 400.0);
+    draw(vcx);
+    let drawn = status_take();
+    let texts: Vec<_> = texts(vcx).into_iter().map(|t| t.text.to_string()).collect();
+    assert!(texts.contains(&"M".to_string()) && texts.contains(&"N".to_string()));
+    let ink_of = |kind| {
+        drawn
+            .iter()
+            .rev()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, ink)| *ink)
+            .unwrap_or_else(|| panic!("{kind:?} drawn: {drawn:?}"))
+    };
+    let (m, n) = (ink_of(StatusKind::Modified), ink_of(StatusKind::New));
+    assert_ne!(m, n, "M and N share a colour");
+    assert_eq!(m, DARK.colors.git_modified.to_hsla());
+    assert_eq!(n, DARK.colors.git_new.to_hsla());
+}
+// ## demofix-1
+
 #[gpui::test]
 fn row_geometry_23px_and_11px_floor(cx: &mut TestAppContext) {
     let mut f = Fixture::parse(OUTLINE);

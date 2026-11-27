@@ -523,14 +523,17 @@ impl<M: TreeModel> TreeView<M> {
             );
         }
         if let Some(status) = data.status {
-            // Never red (Hue Is Meaning); the text alternative is the item's description.
+            // Its own hue per letter (demofix-1, PO F5); the text alternative is the item's
+            // description, so the letter and the words carry it, never the colour alone.
             // ## m4b-t13-explorer (named exception, controller ruling R-T2-1 a)
-            let ink = status_ink(status.kind, c);
+            // Fix round 1 (m6): the recorder notes the very value the label is drawn in.
+            let ink = status_ink(status.kind, c).to_hsla();
+            status_note(status.kind, ink);
             el = el.child(div().flex_none().ml(px(gap)).child(Label::new(
                 status.glyph,
                 TextSource::Fluent,
                 t.type_ramp.mono_micro,
-                ink.to_hsla(),
+                ink,
             )));
         }
         if let (Some(pill), Some(i)) = (data.pill, pill_i)
@@ -714,21 +717,52 @@ impl<M: TreeModel> TreeView<M> {
 }
 
 // ## m4b-t13-explorer (named exception, controller ruling R-T2-1 a)
-/// The status glyph's ink: Modified and New amber (an uncommitted change, Pending Amber),
+/// The status glyph's ink. ## demofix-1 (PO demo F5, superseding R-T2-1 a's one amber): M
+/// `git-modified` (amber), N `git-new` (green), each its own token apart from Pending Amber,
+/// Direct-Path Green and Production Red; the letters stay, so colour is never the only cue.
 /// Conflicted ink (a refusal-like state, Errors Without A New Hue), the folder dot `text-2`,
-/// Unknown `text-3`. Never red, never green. The glyph stays `mono_micro` (weight 400).
+/// Unknown `text-3`. `git-deleted` (red, D) is for a deleted summary, which no row shows yet.
+/// The glyph stays `mono_micro` (weight 400).
 fn status_ink(
     kind: StatusKind,
     c: &hacivat_ui_core::theme::Colors,
 ) -> hacivat_ui_core::theme::Color {
     match kind {
-        StatusKind::Modified | StatusKind::New => c.amber,
+        StatusKind::Modified => c.git_modified,
+        StatusKind::New => c.git_new,
         StatusKind::Conflicted => c.text,
         StatusKind::ContainsChanges => c.text_2,
         StatusKind::Unknown => c.text_3,
     }
 }
 // ## m4b-t13-explorer
+
+// ## demofix-1 (PO demo F5)
+thread_local! {
+    static STATUS_DRAWN: std::cell::RefCell<Option<Vec<(StatusKind, hacivat_ui_core::gpui_surface::Hsla)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Starts (or restarts) recording the status glyphs rows draw on this thread, with their
+/// ink. GPUI's test platform rasterizes no text, so a check that the git letters do not share
+/// one colour reads what the rows asked for.
+pub fn status_record() {
+    STATUS_DRAWN.with(|d| *d.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stops recording; the status glyphs drawn since [`status_record`], in drawing order.
+pub fn status_take() -> Vec<(StatusKind, hacivat_ui_core::gpui_surface::Hsla)> {
+    STATUS_DRAWN.with(|d| d.borrow_mut().take().unwrap_or_default())
+}
+
+fn status_note(kind: StatusKind, ink: hacivat_ui_core::gpui_surface::Hsla) {
+    STATUS_DRAWN.with(|d| {
+        if let Some(log) = d.borrow_mut().as_mut() {
+            log.push((kind, ink));
+        }
+    });
+}
+// ## demofix-1
 
 /// Reachable for the row-key helpers' tests.
 #[cfg(test)]
@@ -744,8 +778,10 @@ mod tests {
             &hacivat_ui_core::theme::LIGHT,
         ] {
             let c = &tokens.colors;
-            assert_eq!(status_ink(StatusKind::Modified, c), c.amber);
-            assert_eq!(status_ink(StatusKind::New, c), c.amber);
+            // demofix-1 (PO F5): M and N each their own hue.
+            assert_eq!(status_ink(StatusKind::Modified, c), c.git_modified);
+            assert_eq!(status_ink(StatusKind::New, c), c.git_new);
+            assert_ne!(c.git_modified, c.git_new);
             assert_eq!(status_ink(StatusKind::Conflicted, c), c.text);
             assert_eq!(status_ink(StatusKind::ContainsChanges, c), c.text_2);
             assert_eq!(status_ink(StatusKind::Unknown, c), c.text_3);
@@ -756,8 +792,16 @@ mod tests {
                 StatusKind::ContainsChanges,
                 StatusKind::Unknown,
             ] {
-                assert_ne!(status_ink(k, c), c.red, "{k:?} is never red");
-                assert_ne!(status_ink(k, c), c.green, "{k:?} is never green");
+                // Never a trust or state hue: production red, the capsule fill, pending
+                // amber, direct-path green.
+                for (hue, name) in [
+                    (c.red, "red"),
+                    (c.cp_fill, "cp-fill"),
+                    (c.amber, "amber"),
+                    (c.green, "green"),
+                ] {
+                    assert_ne!(status_ink(k, c), hue, "{k:?} is never {name}");
+                }
             }
             // Mono micro, weight 400.
             assert_eq!(tokens.type_ramp.mono_micro.weight, 400);

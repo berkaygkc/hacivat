@@ -939,6 +939,9 @@ fn show_menu_is_the_only_platform_gated_action() {
             "workspace.split_down",
             "workspace.focus_next_pane",
             "workspace.toggle_explorer",
+            // ## demofix-1 fix round 1 (named exception, review m5): the editor / results seam.
+            "workspace.results_larger",
+            "workspace.results_smaller",
             "workspace.toggle_theme",
             "workspace.next_language",
             "workspace.reload_translations",

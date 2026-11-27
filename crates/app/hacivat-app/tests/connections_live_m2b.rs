@@ -1104,6 +1104,37 @@ fn tab_reaches_the_access_segment(cx: &mut TestAppContext) {
     assert!(layer_open(vcx));
 }
 
+// ## demofix-1 re-review (r2): the status bar's version segment is a Tab stop; Enter or
+// Space copies the server's whole version text.
+#[gpui::test]
+fn tab_reaches_the_version_segment_and_enter_copies_it(cx: &mut TestAppContext) {
+    let (vcx, id) = connected_with(cx, AccessLabel::ReadWrite, vec![]);
+    let raw = "PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on aarch64-unknown-linux-gnu, 64-bit";
+    let mut live = info("16.16", AccessLabel::ReadWrite, vec![]);
+    live.server.raw_version = raw.to_string();
+    set_state(vcx, id, LiveState::Connected(Arc::new(live)));
+    let segment = vcx
+        .cx
+        .update(|cx| hacivat_app::connections::status::version_focus(cx))
+        .expect("the segment's focus is installed");
+    let mut reached = false;
+    for _ in 0..60 {
+        vcx.simulate_keystrokes("tab");
+        if focused(vcx).as_ref() == Some(&segment) {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "Tab never reached the version segment");
+    vcx.simulate_keystrokes("enter");
+    let copied = vcx.read_from_clipboard().and_then(|i| i.text());
+    assert_eq!(copied.as_deref(), Some(raw));
+    vcx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+    vcx.simulate_keystrokes("space");
+    let copied = vcx.read_from_clipboard().and_then(|i| i.text());
+    assert_eq!(copied.as_deref(), Some(raw), "Space copies too");
+}
+
 #[gpui::test]
 fn a_press_outside_closes_the_explanation(cx: &mut TestAppContext) {
     let (vcx, _) = connected_with(cx, AccessLabel::ReadOnlyGuarded, vec![]);

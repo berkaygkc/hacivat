@@ -1254,3 +1254,10 @@ exec-script-modes-unknown = Dosyadaki hiçbir şey çalıştırılmadı: Hacivat
 exec-script-database-check = Dosyadaki hiçbir şey çalıştırılmadı: bağlantı bu sekmenin veritabanında değil ya da Hacivat hangi veritabanında olduğunu denetleyemedi.
 # Review: PO
 exec-script-lost-track = Hacivat bağlantının durumunu izleyemedi; betik { NUMBER($n, useGrouping: "false") }. ifadeden sonra durdu. Sonrasında hiçbir şey gönderilmedi.
+
+## demofix-1
+# Review: PO
+exec-script-quiet = { $n ->
+        [one] { NUMBER($first, useGrouping: "false") }. ifade çalıştı: { $rows } satır etkilendi, listelenmedi.
+       *[other] { NUMBER($first, useGrouping: "false") }–{ NUMBER($last, useGrouping: "false") }. ifadeler çalıştı: { $n } ifade, { $rows } satır etkilendi; tek tek listelenmedi.
+    }

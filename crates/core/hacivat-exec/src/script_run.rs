@@ -83,7 +83,7 @@ use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
 use hacivat_results::FetchPolicy;
 use hacivat_session::session::{
     ClassifierContext, ErrorPolicy, RunSummary, SessionEvent, SessionHandle, SessionSnapshot,
-    SessionState,
+    SessionState, UnitId,
 };
 use sha2::{Digest, Sha256};
 use sql_dialect::{ClientFlavor, DialectCtx, DialectId, LexModes};
@@ -1181,6 +1181,127 @@ struct Run<'a> {
     check: Option<DatabaseCheck>,
     /// The context generation that check read: the first unit's must be it.
     checked_generation: Option<u64>,
+    // ## demofix-1 (PO demo F6)
+    /// The statements that ran with nothing to say, not yet written to the console's log.
+    quiet: QuietLog,
+}
+
+// ## demofix-1 (PO demo F6): the Output of a streamed run is bounded.
+/// The statements a streamed run keeps one by one before it writes them: the last ones before
+/// the end, a failure or a server notice. Earlier statements that ran with nothing to say (a
+/// row count, "Completed") are counted in one `exec-script-quiet` line instead of a line each.
+pub const SCRIPT_TAIL_STATEMENTS: usize = 50;
+/// A counted line is written at least every this many statements, so a long clean run still
+/// shows its progress in the log (the strip shows every statement).
+pub const SCRIPT_QUIET_EVERY: u64 = 10_000;
+
+/// A line of a unit's own log, as the console's log takes it.
+type UnitLine = (
+    LogMsg,
+    Option<Arc<str>>,
+    Option<std::ops::Range<usize>>,
+    Option<UnitId>,
+);
+
+/// The quiet statements of a run: the counted ones, then the last ones kept one by one. Its
+/// memory is bounded by [`SCRIPT_TAIL_STATEMENTS`] units' lines, whatever the file's length.
+#[derive(Debug, Default)]
+struct QuietLog {
+    /// The counted statements: the first and last numbers, how many, and the rows they changed.
+    first: u64,
+    last: u64,
+    n: u64,
+    rows: u64,
+    /// The last quiet statements' own lines, oldest first.
+    tail: std::collections::VecDeque<(u64, Vec<UnitLine>)>,
+}
+
+/// ## demofix-1 fix round 1 (m4): a statement that took this long keeps its own line (with its
+/// time) even in a quiet run.
+pub const SCRIPT_SLOW_MS: u64 = 1_000;
+
+/// The rows a line reports when it is one a quiet statement writes (`None`: it says more).
+/// Quiet: a row count or "Completed" under [`SCRIPT_SLOW_MS`], and (fix round 1, m3) a
+/// transaction-control line (`BEGIN`, `SET` and `SAVEPOINT` write "Completed"; `COMMIT` and
+/// `ROLLBACK` write their own), so a per-row `BEGIN; INSERT; COMMIT;` script stays bounded.
+///
+/// ## demofix-1 re-review (r1): "rolled back" is quiet only for the statement that asked for
+/// it (`rollback_stmt`: the unit is a `ROLLBACK` or `ABORT`). A `COMMIT` the server turned into
+/// a rollback (its transaction had already failed) keeps its own line.
+fn quiet_rows(msg: &LogMsg, rollback_stmt: bool) -> Option<u64> {
+    match msg {
+        LogMsg::RowsAffected { rows, ms } if *ms < SCRIPT_SLOW_MS => Some(*rows),
+        LogMsg::Completed { ms } if *ms < SCRIPT_SLOW_MS => Some(0),
+        LogMsg::TxCommitted => Some(0),
+        LogMsg::TxRolledBack if rollback_stmt => Some(0),
+        _ => None,
+    }
+}
+
+// ## demofix-1 re-review (r1)
+/// Whether a statement whose lines are `msgs` is quiet (counted, not listed); `rollback_stmt`:
+/// it is a `ROLLBACK` or `ABORT` ([`is_rollback_stmt`]).
+fn quiet_statement<'a>(rollback_stmt: bool, mut msgs: impl Iterator<Item = &'a LogMsg>) -> bool {
+    msgs.all(|m| quiet_rows(m, rollback_stmt).is_some())
+}
+
+/// Whether `sql` is a `ROLLBACK` or `ABORT` (its first word; leading comments make it `false`,
+/// which only keeps a line visible).
+fn is_rollback_stmt(sql: &str) -> bool {
+    let word = crate::sqlctx::first_word(sql.trim_start());
+    word.eq_ignore_ascii_case("ROLLBACK") || word.eq_ignore_ascii_case("ABORT")
+}
+
+// ## demofix-1 fix round 1 (m3, m4)
+#[cfg(test)]
+mod quiet_tests {
+    use super::{LogMsg, SCRIPT_SLOW_MS, is_rollback_stmt, quiet_rows, quiet_statement};
+
+    #[test]
+    fn slow_statements_and_failures_keep_their_own_line() {
+        assert_eq!(
+            quiet_rows(&LogMsg::RowsAffected { rows: 3, ms: 12 }, false),
+            Some(3)
+        );
+        assert_eq!(quiet_rows(&LogMsg::Completed { ms: 0 }, false), Some(0));
+        assert_eq!(quiet_rows(&LogMsg::TxCommitted, false), Some(0));
+        // ## demofix-1 re-review (r1): a ROLLBACK's own line is quiet; a COMMIT the server
+        // rolled back keeps its line.
+        assert_eq!(quiet_rows(&LogMsg::TxRolledBack, true), Some(0));
+        assert_eq!(quiet_rows(&LogMsg::TxRolledBack, false), None);
+        assert!(is_rollback_stmt("ROLLBACK"));
+        assert!(is_rollback_stmt("  abort;"));
+        assert!(is_rollback_stmt("rollback to savepoint a"));
+        assert!(!is_rollback_stmt("COMMIT"));
+        assert!(!is_rollback_stmt("END"));
+        // A whole statement: the user's ROLLBACK is counted; a COMMIT the server answered
+        // with a rollback keeps its lines; a plain COMMIT is counted.
+        let quiet =
+            |sql: &str, msgs: &[LogMsg]| quiet_statement(is_rollback_stmt(sql), msgs.iter());
+        let rolled = [LogMsg::Completed { ms: 0 }, LogMsg::TxRolledBack];
+        assert!(quiet("ROLLBACK", &rolled));
+        assert!(quiet("abort", &rolled));
+        assert!(!quiet("COMMIT", &rolled));
+        assert!(!quiet("END", &rolled));
+        assert!(quiet(
+            "COMMIT",
+            &[LogMsg::Completed { ms: 0 }, LogMsg::TxCommitted]
+        ));
+        assert_eq!(
+            quiet_rows(
+                &LogMsg::RowsAffected {
+                    rows: 1,
+                    ms: SCRIPT_SLOW_MS
+                },
+                false
+            ),
+            None,
+            "a statement of a second or more keeps its line with its time"
+        );
+        assert_eq!(quiet_rows(&LogMsg::Completed { ms: 40_000 }, false), None);
+        assert_eq!(quiet_rows(&LogMsg::ImplicitCommit, false), None);
+        assert_eq!(quiet_rows(&LogMsg::TxRolledBackByServer, false), None);
+    }
 }
 
 impl<'a> Run<'a> {
@@ -1208,6 +1329,7 @@ impl<'a> Run<'a> {
             // ## m4b-t18-run-as-script (named exception)
             check: None,
             checked_generation: None,
+            quiet: QuietLog::default(),
         }
     }
 
@@ -1226,7 +1348,9 @@ impl<'a> Run<'a> {
 
     /// The outcome's lines in the console's log: why nothing ran, why the run stopped, and the
     /// run's summary.
-    fn log_outcome(&self, out: &ScriptRunOutcome) {
+    fn log_outcome(&mut self, out: &ScriptRunOutcome) {
+        // ## demofix-1 (PO demo F6): the statements still waiting, before why the run ended.
+        self.write_quiet();
         let log = &self.req.log;
         let at_args = |at: Option<ScriptPosition>| -> Vec<(&'static str, LogArg)> {
             at.map(|p| {
@@ -1732,6 +1856,8 @@ impl<'a> Run<'a> {
             reports: reports.iter().map(|r| Some(r.items.clone())).collect(),
         });
         let unit = prepared[0].unit.clone();
+        // ## demofix-1 re-review (r1)
+        let rollback_stmt = is_rollback_stmt(&unit.text);
         // ## m4b-t18-run-as-script fix round 1 (named exception; review I2)
         let masked: Arc<[Arc<str>]> = Arc::from(vec![prepared[0].masked.clone()]);
         // The service's lines go to the unit's own log, then to the console's numbered by the
@@ -1773,13 +1899,13 @@ impl<'a> Run<'a> {
                     Ok(_) => {}
                     Err(_) => self.summary.last_unit_unknown = true,
                 }
-                self.copy_log(&unit_log, at.unit);
+                self.copy_log(&unit_log, at.unit, rollback_stmt);
                 return UnitDone::Stop(StopReason::Cancelled);
             }
         };
         // The results are not kept: the ticket goes here.
         drop(ticket);
-        self.copy_log(&unit_log, at.unit);
+        self.copy_log(&unit_log, at.unit, rollback_stmt);
         match summary {
             Ok(s) if s.failed > 0 => UnitDone::Failed,
             Ok(s) if s.executed > 0 => UnitDone::Ran,
@@ -1790,8 +1916,14 @@ impl<'a> Run<'a> {
 
     /// The unit's log lines in the console's log, statement numbers being the unit's place in
     /// the file (`unit`); its per-run summary line is left out (the run writes one).
-    fn copy_log(&self, unit_log: &SessionLog, unit: u64) {
+    ///
+    /// ## demofix-1 (PO demo F6): a unit whose lines only say it ran (a row count, "Completed")
+    /// waits in the run's [`QuietLog`]: the last [`SCRIPT_TAIL_STATEMENTS`] are written one by
+    /// one before the next line that says more (a failure, a notice, a stop) and at the end,
+    /// and earlier ones are counted in one `exec-script-quiet` line. The log keeps its order.
+    fn copy_log(&mut self, unit_log: &SessionLog, unit: u64, rollback_stmt: bool) {
         let n = u32::try_from(unit).unwrap_or(u32::MAX);
+        let mut lines: Vec<UnitLine> = Vec::new();
         for line in unit_log.lines().iter() {
             let msg = match &line.msg {
                 LogMsg::Summary(_) => continue,
@@ -1805,9 +1937,70 @@ impl<'a> Run<'a> {
                 LogMsg::RolledBackContinue { .. } => LogMsg::RolledBackContinue { n },
                 other => other.clone(),
             };
-            self.req
-                .log
-                .append_tagged(msg, line.tag.clone(), line.source.clone(), line.unit);
+            lines.push((msg, line.tag.clone(), line.source.clone(), line.unit));
+        }
+        if lines.is_empty() {
+            return;
+        }
+        if quiet_statement(rollback_stmt, lines.iter().map(|l| &l.0)) {
+            self.quiet.tail.push_back((unit, lines));
+            if self.quiet.tail.len() > SCRIPT_TAIL_STATEMENTS
+                && let Some((at, old)) = self.quiet.tail.pop_front()
+            {
+                let q = &mut self.quiet;
+                if q.n == 0 {
+                    q.first = at;
+                }
+                q.last = at;
+                q.n += 1;
+                q.rows = old
+                    .iter()
+                    .filter_map(|l| quiet_rows(&l.0, rollback_stmt))
+                    .fold(q.rows, u64::saturating_add);
+                if q.n >= SCRIPT_QUIET_EVERY {
+                    self.write_counted();
+                }
+            }
+            return;
+        }
+        self.write_quiet();
+        for (msg, tag, source, unit) in lines {
+            self.req.log.append_tagged(msg, tag, source, unit);
+        }
+    }
+
+    // ## demofix-1 (PO demo F6)
+    /// Writes the counted quiet statements as one line, if there are any.
+    fn write_counted(&mut self) {
+        let q = std::mem::take(&mut self.quiet.n);
+        if q == 0 {
+            return;
+        }
+        let (first, last, rows) = (self.quiet.first, self.quiet.last, self.quiet.rows);
+        self.quiet.rows = 0;
+        self.req.log.append(
+            LogMsg::RunUi {
+                id: "exec-script-quiet",
+                args: vec![
+                    ("first", LogArg::U64(first)),
+                    ("last", LogArg::U64(last)),
+                    ("n", LogArg::U64(q)),
+                    ("rows", LogArg::U64(rows)),
+                ],
+                warn: false,
+            },
+            None,
+            None,
+        );
+    }
+
+    /// Writes the waiting quiet statements: the counted line, then the kept ones one by one.
+    fn write_quiet(&mut self) {
+        self.write_counted();
+        for (_, lines) in std::mem::take(&mut self.quiet.tail) {
+            for (msg, tag, source, unit) in lines {
+                self.req.log.append_tagged(msg, tag, source, unit);
+            }
         }
     }
 

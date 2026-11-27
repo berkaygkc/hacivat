@@ -286,7 +286,7 @@ Create these profiles (⌘N, "Save and connect"):
     - "Stopped during statement N; statements after it were not sent." (R-T18-2: the statement in
       flight was already sent);
     - "Stopped after N statements. Nothing after them was sent."
-  - Memory stays flat. Activity Monitor shows no growth near 150 MB.
+  - Memory stays flat. Activity Monitor shows no growth near 150 MB (see the F6 re-check below).
 - **Also check:**
   - R-T22-1 and R-T22-2: during the run, drag the results split up to its smallest size. Stop
     stays visible in the toolbar. Tab onto a notice button: it scrolls into view.
@@ -310,6 +310,26 @@ Create these profiles (⌘N, "Save and connect"):
     `6f9adcdb` (`m4b.md` E8);
   - the `scripts_run_as_script` set (T18, 17 tests), `cross_surface_m4b`, `the_landing_never_edits_or_scans_the_change`.
   - Docker, CI only: the 150 MiB dump on mysql84 (`m4b.md` E8).
+- **F6 re-check (demofix-1; the PO saw Activity Monitor go 208 → 330 → 214 MB during the first
+  demo).** What used the ~120 MB is **not attributed yet**: the headless measurement
+  (`streamed_run_memory_stays_flat`, see the report) has no window server and no Metal. Run this
+  on the same 150 MB staging run, with release binaries of `83bfebaf` (before) and the
+  demofix-1 head (after), one after the other:
+  1. Open the file, wait 30 s idle, then
+     `PID=$(pgrep -x hacivat); vmmap --summary $PID > v0.txt; footprint $PID > f0.txt`.
+  2. Start Run as script. At about 30 s and 60 s:
+     `vmmap --summary $PID > v1.txt; footprint $PID > f1.txt; heap $PID | head -60 > h1.txt`.
+  3. Stop, wait 10 s, take the same three as `v2.txt`, `f2.txt`, `h2.txt`.
+  4. Compare the deltas: the `MALLOC_*` / `DefaultMallocZone` rows are the app's heap (the
+     Output, per-statement state, the editor); `IOAccelerator`, `IOSurface`, `CoreAnimation` and
+     `IOKit` rows are the GPU and window side.
+  5. Repeat with the window minimized, or with the results tile on a tab other than Output,
+     during the run. If the peak goes away, it is driven by redrawing.
+  6. Before against after shows what the bounded Output (one counted line instead of a line per
+     statement, from demofix-1) saved by itself.
+  - Expected after demofix-1: the Output holds a few dozen lines ("Statements 1–…: … not listed
+    one by one."), and Activity Monitor's figure should stay near its idle value. Record the
+    numbers in §4.2.
 
 ### Step 10: quit with an unsaved script; force-quit and recover
 

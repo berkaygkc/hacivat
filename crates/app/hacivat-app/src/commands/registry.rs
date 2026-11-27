@@ -112,6 +112,10 @@ pub fn quit_requests(cx: &App) -> u32 {
 const SETTINGS_TAB: &str = "settings";
 
 /// Runs `f` on the window's workspace (nothing when the root view is not one).
+// ## demofix-1 fix round 1 (m5)
+/// How far "Results: larger" / "Results: smaller" move the editor / results seam.
+pub const RESULTS_STEP_PX: f32 = 40.0;
+
 fn on_workspace(
     f: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
 ) -> ActionFn {
@@ -204,6 +208,20 @@ pub fn register_workspace_actions(reg: &mut ActionRegistry) {
             on_workspace(Workspace::toggle_explorer),
             always,
         ),
+        // ## demofix-1 fix round 1 (m5): the editor / results seam from the keyboard.
+        (
+            "workspace.results_larger",
+            ids::hv::CMD_WORKSPACE_RESULTS_LARGER.id,
+            on_workspace(|ws, window, cx| ws.move_results_seam(-RESULTS_STEP_PX, window, cx)),
+            always,
+        ),
+        (
+            "workspace.results_smaller",
+            ids::hv::CMD_WORKSPACE_RESULTS_SMALLER.id,
+            on_workspace(|ws, window, cx| ws.move_results_seam(RESULTS_STEP_PX, window, cx)),
+            always,
+        ),
+        // ## demofix-1
         (
             "workspace.toggle_theme",
             ids::hv::CMD_WORKSPACE_TOGGLE_THEME.id,

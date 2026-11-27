@@ -213,15 +213,28 @@ fn rig(
     routes: Vec<(DbmsKind, &'static str, FakeDriver)>,
     files: &[(&str, &str)],
 ) -> Rig {
+    rig_writing(cx, routes, files.len(), |root| {
+        for (rel, text) in files {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, text).unwrap();
+        }
+    })
+}
+
+// ## demofix-1 fix round 1 (I2): the library's `n` files written by `write` (the F6 memory
+// test streams its file to disk in chunks, so no large allocation precedes its baseline).
+fn rig_writing(
+    cx: &mut TestAppContext,
+    routes: Vec<(DbmsKind, &'static str, FakeDriver)>,
+    n: usize,
+    write: impl FnOnce(&std::path::Path),
+) -> Rig {
     let (vcx, fakes) = shell_with_routes(cx, "en", routes);
     in_window(vcx, |window, _| window.activate_window());
     let root = temp_root().join("orders");
-    for (rel, text) in files {
-        let p = root.join(rel);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(&p, text).unwrap();
-    }
     std::fs::create_dir_all(&root).unwrap();
+    write(&root);
     let root = std::fs::canonicalize(&root).unwrap();
     let paths = paths(vcx);
     let rt = vcx.cx.read(|cx| {
@@ -252,7 +265,6 @@ fn rig(
         false,
     ))
     .expect("the library attaches");
-    let n = files.len();
     wait_until(vcx, "the library is listed", |_| {
         service
             .snapshot()
@@ -1382,3 +1394,237 @@ fn a_paste_from_a_mysql_script_tab_never_runs_on_the_profiles_database(cx: &mut 
     );
     assert!(queries(&r.fakes[0]).is_empty(), "nothing ran on orders");
 }
+
+// ## demofix-1 (PO demo F6): a streamed run's Output stays a few rows long and its memory flat.
+
+/// `n` one-row statements, `pad` bytes of literal each (the PO's dump: about 1.9 KB).
+fn updates(n: u64, pad: usize) -> String {
+    let x = "x".repeat(pad);
+    (1..=n)
+        .map(|i| format!("UPDATE demo SET v = '{x}' WHERE id = {i};\n"))
+        .collect()
+}
+
+impl Rig {
+    /// The lines of console `tab`'s log, and the rows of its Output list (when the tile shows
+    /// it).
+    fn output_size(&self, tab: TabId) -> (usize, Option<usize>) {
+        let console = self.console(tab);
+        self.vcx.cx.read(|cx| {
+            let log = Consoles::get(cx, console).map_or(0, |s| s.log.lines().len());
+            let rows = hacivat_app::results::view::hosts(cx)
+                .into_iter()
+                .find_map(|h| h.read(cx).log_list(console))
+                .map(|l| l.read(cx).rows().line_count());
+            (log, rows)
+        })
+    }
+}
+
+#[gpui::test]
+fn a_streamed_runs_output_counts_quiet_statements_instead_of_listing_them(cx: &mut TestAppContext) {
+    use hacivat_exec::SCRIPT_TAIL_STATEMENTS;
+    let (mut r, tab) = dev_console(cx);
+    let n = 2_000;
+    r.pasted(tab, &updates(n, 8));
+    r.run_as_script();
+    let end = r.ended(tab);
+    assert!(end.starts_with("Ran 2,000 statements"), "{end}");
+    redraw_full(r.vcx);
+    let (log, rows) = r.output_size(tab);
+    // One counted line, the last 50 statements, the run's summary: never a line each.
+    assert!(log <= SCRIPT_TAIL_STATEMENTS + 3, "{log} log lines");
+    assert!(
+        rows.is_none_or(|rows| rows <= SCRIPT_TAIL_STATEMENTS + 3),
+        "{rows:?}"
+    );
+    assert!(r.log_ids(tab).contains(&"exec-script-quiet"));
+    // The counted line heads the Output (scroll to its top to read it as drawn).
+    let console = r.console(tab);
+    let list = r
+        .vcx
+        .cx
+        .read(|cx| {
+            hacivat_app::results::view::hosts(cx)
+                .into_iter()
+                .find_map(|h| h.read(cx).log_list(console))
+        })
+        .expect("the Output list");
+    r.vcx
+        .cx
+        .update(|cx| list.update(cx, |l, cx| l.scroll_to_top(cx)));
+    redraw_full(r.vcx);
+    let texts = r.texts();
+    assert!(
+        texts.iter().any(|t| t
+            == "Statements 1–1950 ran: 1,950 statements, 0 rows affected, not listed one by one."),
+        "{texts:?}"
+    );
+}
+
+/// The PO's F6 measurement, in the app (fix round 1, I2: unconfounded). A streamed run of
+/// `HACIVAT_PERF_UNITS` (default 60,000) statements of about 1.9 KB each, from a library file
+/// written to disk in chunks (no large allocation exists before the baseline), with a fake
+/// that keeps no log of its own. Run it alone (`cargo test … -- --ignored --exact
+/// streamed_run_memory_stays_flat`), so the process is fresh. `phys_footprint` (Activity
+/// Monitor's "Memory") and the resident size are sampled every 250 ms on a thread for a true
+/// peak; `vmmap --summary`'s MALLOC rows are taken before the run, at the highest footprint
+/// seen while it runs (re-taken at most every 5 s), and after. Headless: no window server and
+/// no Metal, so GPU-side memory is not in these numbers. Self-gated on `HACIVAT_PERF=1`.
+#[gpui::test]
+#[ignore = "perf"]
+fn streamed_run_memory_stays_flat(cx: &mut TestAppContext) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    if std::env::var("HACIVAT_PERF").as_deref() != Ok("1") {
+        return;
+    }
+    let units: u64 = std::env::var("HACIVAT_PERF_UNITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000);
+    let bytes = Arc::new(AtomicU64::new(0));
+    let written = bytes.clone();
+    let mut r = rig_writing(
+        cx,
+        vec![(DbmsKind::Postgres, DEV, pg_fake("orders").unrecorded())],
+        1,
+        move |root| {
+            use std::io::Write as _;
+            let f = std::fs::File::create(root.join("big.sql")).unwrap();
+            let mut w = std::io::BufWriter::with_capacity(64 << 10, f);
+            let x = "x".repeat(1_900);
+            for i in 1..=units {
+                let line = format!("UPDATE demo SET v = '{x}' WHERE id = {i};\n");
+                written.fetch_add(line.len() as u64, Ordering::Relaxed);
+                w.write_all(line.as_bytes()).unwrap();
+            }
+            w.flush().unwrap();
+        },
+    );
+    let bytes = bytes.load(Ordering::Relaxed);
+    let dev = add_profile(r.vcx, pg_profile("orders-dev", EnvTag::Dev, DEV, "orders"));
+    connected(&r, "orders-dev");
+    let tab = r.open("big.sql", dev);
+    r.wait_session(tab);
+    redraw_full(r.vcx);
+    // Settle: a few quiet frames, then the baseline.
+    for _ in 0..20 {
+        r.vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let footprint = || hacivat_ui_core::platform::phys_footprint_bytes().unwrap_or(0);
+    let rss = || hacivat_ui_core::platform::resident_set_mib().unwrap_or(0);
+    fn vmmap_summary(pid: &str) -> String {
+        std::process::Command::new("vmmap")
+            .args(["--summary", pid])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| {
+                        let t = l.trim_start();
+                        t.starts_with("MALLOC")
+                            || t.starts_with("DefaultMallocZone")
+                            || t.starts_with("TOTAL")
+                            || t.starts_with("Physical footprint")
+                    })
+                    .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .unwrap_or_default()
+    }
+    let pid = std::process::id().to_string();
+    let vmmap = || vmmap_summary(&pid);
+    let before = (footprint(), rss(), vmmap());
+    // The sampler: a true peak, every 250 ms.
+    let stop = Arc::new(AtomicBool::new(false));
+    let peak = Arc::new(AtomicU64::new(before.0));
+    let peak_rss = Arc::new(AtomicU64::new(before.1));
+    let samples = Arc::new(AtomicU64::new(0));
+    // `vmmap` at the highest footprint seen, re-taken at most every 5 s (the UI loop is busy
+    // while the stream runs, so the sampler takes it).
+    let at_peak = Arc::new(std::sync::Mutex::new((0u64, String::new())));
+    let sampler = {
+        let (stop, peak, peak_rss, samples, at_peak, pid) = (
+            stop.clone(),
+            peak.clone(),
+            peak_rss.clone(),
+            samples.clone(),
+            at_peak.clone(),
+            pid.clone(),
+        );
+        std::thread::spawn(move || {
+            let mut last_vmmap: Option<std::time::Instant> = None;
+            while !stop.load(Ordering::Relaxed) {
+                let now = footprint();
+                peak.fetch_max(now, Ordering::Relaxed);
+                peak_rss.fetch_max(rss(), Ordering::Relaxed);
+                samples.fetch_add(1, Ordering::Relaxed);
+                let due = last_vmmap.is_none_or(|t| t.elapsed() >= Duration::from_secs(5));
+                if due && now > at_peak.lock().unwrap().0 {
+                    last_vmmap = Some(std::time::Instant::now());
+                    let summary = vmmap_summary(&pid);
+                    *at_peak.lock().unwrap() = (now, summary);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        })
+    };
+    r.run_as_script();
+    let started = std::time::Instant::now();
+    loop {
+        r.vcx.run_until_parked();
+        redraw_full(r.vcx);
+        if !r.running(tab) && text_of(r.vcx, "script-run-end").is_some() {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(1_800),
+            "the run ends"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let secs = started.elapsed().as_secs();
+    for _ in 0..20 {
+        r.vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    stop.store(true, Ordering::Relaxed);
+    sampler.join().unwrap();
+    let vmmap_at_peak = at_peak.lock().unwrap().clone();
+    let after = (footprint(), rss(), vmmap());
+    let (log, rows) = r.output_size(tab);
+    let mib = |b: u64| b / (1 << 20);
+    let (peak, peak_rss) = (
+        peak.load(Ordering::Relaxed),
+        peak_rss.load(Ordering::Relaxed),
+    );
+    println!(
+        "HV-FACT demofix-1 f6 units={units} bytes={bytes} secs={secs} samples={} \
+         footprint_before_mib={} footprint_peak_mib={} footprint_after_mib={} \
+         footprint_growth_mib={} rss_before_mib={} rss_peak_mib={peak_rss} rss_after_mib={} \
+         log_lines={log} output_rows={rows:?}",
+        samples.load(Ordering::Relaxed),
+        mib(before.0),
+        mib(peak),
+        mib(after.0),
+        mib(peak.saturating_sub(before.0)),
+        before.1,
+        after.1,
+    );
+    println!("HV-FACT demofix-1 f6 vmmap_before: {}", before.2);
+    println!(
+        "HV-FACT demofix-1 f6 vmmap_at_peak ({} MiB): {}",
+        mib(vmmap_at_peak.0),
+        vmmap_at_peak.1
+    );
+    println!("HV-FACT demofix-1 f6 vmmap_after: {}", after.2);
+    assert!(log <= hacivat_exec::SCRIPT_TAIL_STATEMENTS + 12, "{log}");
+    assert!(
+        peak.saturating_sub(before.0) < 64 << 20,
+        "the run grew the app's footprint by {} MiB",
+        mib(peak.saturating_sub(before.0))
+    );
+}
+// ## demofix-1

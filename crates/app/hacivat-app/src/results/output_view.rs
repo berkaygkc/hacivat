@@ -226,6 +226,11 @@ pub struct LogRows {
     /// "n events not shown": the lines the ring pushed out before they were read, since the
     /// last clear; the list's first row while there are any.
     missed: Option<LogLine>,
+    // ## demofix-1 (PO demo F8)
+    /// Rows inserted (positive) or removed (negative) before the first row since the list last
+    /// took them ([`take_shift`](Self::take_shift)): a full ring drops its oldest rows, so a
+    /// view the user scrolled up keeps its rows instead of drifting.
+    shift: i64,
 }
 
 impl std::fmt::Debug for LogRows {
@@ -254,7 +259,22 @@ impl LogRows {
             list: None,
             focus: None,
             missed: None,
+            shift: 0,
         }
+    }
+
+    // ## demofix-1 (PO demo F8)
+    /// The rows inserted or removed before the first row since the last call (the list moves a
+    /// paused view by as much, `VirtualList::shift_rows`).
+    pub fn take_shift(&mut self) -> i64 {
+        std::mem::take(&mut self.shift)
+    }
+
+    /// The `seq` of the line row `row` shows (`None` for the "not shown" row or past the end).
+    pub fn row_seq(&self, row: u64) -> Option<u64> {
+        let ix = usize::try_from(row.checked_sub(self.header())?).ok()?;
+        let item = self.items.get(ix)?;
+        self.line(item.line()).map(|l| l.seq)
     }
 
     /// Shows `lines` (the log's current lines, oldest first) in place of what it showed.
@@ -269,6 +289,8 @@ impl LogRows {
             rest.next();
         }
         self.push_lines(rest.cloned());
+        // demofix-1 (F8): a new list, nothing to keep in view.
+        self.shift = 0;
         self.taken = lines.len() as u64;
         if let Some(last) = lines.last() {
             self.next_seq = last.seq.saturating_add(1);
@@ -284,6 +306,8 @@ impl LogRows {
         self.items.clear();
         self.selected = None;
         self.missed = None;
+        // demofix-1 (F8): nothing is left to keep in view.
+        self.shift = 0;
     }
 
     /// Takes the log's new lines (`SessionLog::lines_since(next_seq)`): `gap` when the ring
@@ -296,6 +320,10 @@ impl LogRows {
         if gap {
             let missed = first.seq.saturating_sub(self.next_seq);
             if missed > 0 {
+                // demofix-1 (F8): the "not shown" row appears before the first line.
+                if self.missed.is_none() {
+                    self.shift += 1;
+                }
                 let before = match self.missed.as_ref().map(|l| &l.msg) {
                     Some(LogMsg::Dropped { n }) => *n,
                     _ => 0,
@@ -366,6 +394,8 @@ impl LogRows {
                 self.first += 1;
                 while self.items.front().is_some_and(|i| i.line() < self.first) {
                     self.items.pop_front();
+                    // demofix-1 (F8): a row left the front.
+                    self.shift -= 1;
                 }
                 if self.selected.is_some_and(|s| s < self.first) {
                     self.selected = None;
@@ -526,17 +556,28 @@ fn line_row_of(line: &LogLine, ix: &str, cx: &App) -> AnyElement {
                 .size(IconSize::Chrome)
                 .color(if ink_text { c.text } else { c.text_2 }.to_hsla()),
         )
-        .child(
-            div().flex_none().child(
+        // ## demofix-1 fix round 1 (m8): a sentence alone on its row (no code, no server text)
+        // that is longer than the row (the counted line at 960 in a long locale) ellipsizes
+        // instead of running out of it; Copy has it whole. Rows with a code or server text keep
+        // their sentence whole, as before.
+        .child({
+            let alone = code.is_none() && server_text.is_none();
+            let cell = if alone {
+                div().flex_shrink(1.0).min_w(px(0.0))
+            } else {
+                div().flex_none()
+            };
+            cell.child(
                 Label::new(
                     core_text(&line.msg, cx),
                     TextSource::Fluent,
                     style,
                     ink.to_hsla(),
                 )
+                .truncate(alone)
                 .id(ElementId::Name(format!("log-sentence-{ix}").into())),
-            ),
-        )
+            )
+        })
         .children(code.map(|code| {
             div()
                 .flex_none()
@@ -643,6 +684,8 @@ impl hacivat_ui_grid::RowRenderer for LogRows {
                 .pl(px(12.0))
                 .pr(px(12.0))
                 .overflow_hidden()
+                // ## demofix-1 fix round 1 (m8): a row the list cuts at its fold is scrolled.
+                .child(hacivat_ui::text::clip_box())
                 .child(line_row_of(missed, "dropped", cx))
                 .into_any_element();
         }
@@ -672,6 +715,9 @@ impl hacivat_ui_grid::RowRenderer for LogRows {
             .pl(px(indent))
             .pr(px(12.0))
             .overflow_hidden()
+            // ## demofix-1 fix round 1 (m8): a row the list cuts at its fold is scrolled, not
+            // clipped (the frame checks; the list notes itself as a scroll viewport).
+            .child(hacivat_ui::text::clip_box())
             .children(content);
         // ## m3b-t25-results: the selected line reads as a selection (blue tint, Hue Is
         // Meaning: blue is selection).

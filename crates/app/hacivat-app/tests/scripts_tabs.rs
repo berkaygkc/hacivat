@@ -2492,3 +2492,261 @@ fn restore_with_deleted_profile_is_unbound_and_runs_nothing(cx: &mut TestAppCont
     assert_eq!(capsule(vcx), None, "no connection shown for it");
     stop_service(vcx);
 }
+
+// ## demofix-1 (PO demo F4): the deleted state ends when the file comes back, and Save in it
+// never writes over a different file.
+
+impl Rig {
+    /// Moves `from` to `to` (paths under the library, or outside it) and hints both, as the OS
+    /// watcher reports a rename.
+    fn move_file(&self, from: &Path, to: &Path) {
+        std::fs::rename(from, to).unwrap();
+        let hints = [from, to]
+            .into_iter()
+            .filter(|p| p.starts_with(&self.root))
+            .map(|p| RawHint::Path(p.to_path_buf()))
+            .collect();
+        assert!(self.watch.emit(&self.root, hints));
+    }
+}
+
+#[gpui::test]
+fn put_back_from_the_trash_ends_the_deleted_state(cx: &mut TestAppContext) {
+    // The PO's demo, step 5: rename in Finder, move to the Trash, Put Back, rename back.
+    let (mut r, _, staging) = prod_staging(cx, &[("a.sql", "SELECT 1")]);
+    let tab = r.open("a.sql", Some(staging), Some("orders"));
+    let trash = temp_root().join("a.sql");
+    let (a, b) = (r.root.join("a.sql"), r.root.join("b.sql"));
+    r.move_file(&a, &b);
+    wait_until(r.vcx, "followed to b.sql", |_| {
+        r.spec(tab).rel.as_str() == "b.sql"
+    });
+    r.move_file(&b, &trash);
+    wait_until(r.vcx, "the deleted bar", |_| {
+        r.notices(tab).contains(&Notice::Deleted)
+    });
+    // Put Back: the same file (bytes and time) at the same path.
+    r.move_file(&trash, &b);
+    wait_until(r.vcx, "the deleted bar goes", |_| {
+        !r.notices(tab).contains(&Notice::Deleted)
+    });
+    assert!(
+        !r.notices(tab).contains(&Notice::Changed),
+        "the same file: nothing to reload or ask: {:?}",
+        r.notices(tab)
+    );
+    // Rename back: the tab follows; one bar says so, and it is not contradicted.
+    r.move_file(&b, &a);
+    wait_until(r.vcx, "followed back to a.sql", |_| {
+        r.spec(tab).rel.as_str() == "a.sql"
+    });
+    let notices = r.notices(tab);
+    assert!(
+        notices
+            .iter()
+            .any(|n| matches!(n, Notice::Moved { path } if path == "a.sql")),
+        "{notices:?}"
+    );
+    assert!(!notices.contains(&Notice::Deleted), "{notices:?}");
+    assert_eq!(r.text(tab), "SELECT 1");
+    assert!(!r.dirty(tab));
+    // Drawn: no "was deleted on disk" line beside "Moved to a.sql".
+    let drawn: Vec<String> = full_frame(r.vcx)
+        .into_iter()
+        .map(|t| t.text.to_string())
+        .collect();
+    assert!(
+        !drawn.iter().any(|t| t.contains("was deleted on disk")),
+        "{drawn:?}"
+    );
+    assert!(drawn.iter().any(|t| t == "Moved to a.sql"), "{drawn:?}");
+}
+
+#[gpui::test]
+fn a_rename_reported_while_the_tab_thinks_its_file_deleted_ends_that_state(
+    cx: &mut TestAppContext,
+) {
+    // The rename can reach the tab while it still shows "deleted" (the Put Back was not
+    // reported on its own): the file exists at its new path, so the bar goes.
+    let (mut r, _, staging) = prod_staging(cx, &[("a.sql", "SELECT 1")]);
+    let tab = r.open("a.sql", Some(staging), Some("orders"));
+    r.vcx.cx.update(|cx| tabs::fixtures::mark_deleted(tab, cx));
+    let (a, b) = (r.root.join("a.sql"), r.root.join("b.sql"));
+    r.move_file(&a, &b);
+    wait_until(r.vcx, "followed to b.sql", |_| {
+        r.spec(tab).rel.as_str() == "b.sql"
+    });
+    let notices = r.notices(tab);
+    assert!(!notices.contains(&Notice::Deleted), "{notices:?}");
+    assert!(!r.vcx.cx.read(|cx| tabs::fixtures::is_deleted(tab, cx)));
+}
+
+#[gpui::test]
+fn save_after_delete_asks_before_writing_over_a_different_file(cx: &mut TestAppContext) {
+    let (mut r, prod, _) = prod_staging(cx, &[("a.sql", "SELECT 1")]);
+    let tab = r.open("a.sql", Some(prod), Some("orders"));
+    // Edits: whether or not the watcher reports the new file before the save (R-DF-1), the
+    // tab keeps its text and the save must ask.
+    r.type_text(tab, " -- mine");
+    std::fs::remove_file(r.root.join("a.sql")).unwrap();
+    r.hint("a.sql");
+    wait_until(r.vcx, "the deleted bar", |_| {
+        r.notices(tab).contains(&Notice::Deleted)
+    });
+    // Someone else's file appears at the path; the watcher has not said so yet.
+    std::fs::write(r.root.join("a.sql"), "-- someone else's").unwrap();
+    r.save(tab);
+    wait_until(r.vcx, "Overwrite? asks", |vcx| {
+        has_dialog(
+            vcx,
+            "The file changed on disk since you opened it. Overwrite?",
+        )
+    });
+    // Cancel keeps their file; the tab keeps its text.
+    press_key(r.vcx, "escape");
+    wait_until(r.vcx, "the question closed", |vcx| {
+        !layer_ids(vcx).contains(&"dialog")
+    });
+    assert_eq!(
+        std::fs::read_to_string(r.root.join("a.sql")).unwrap(),
+        "-- someone else's"
+    );
+    assert_eq!(r.text(tab), "SELECT 1 -- mine");
+    // Overwrite writes it, as any save over a change.
+    r.save(tab);
+    wait_until(r.vcx, "asks again", |vcx| {
+        layer_ids(vcx).contains(&"dialog")
+    });
+    press_key(r.vcx, "shift-tab");
+    press_key(r.vcx, "enter");
+    wait_until(r.vcx, "overwritten", |_| {
+        std::fs::read_to_string(r.root.join("a.sql")).unwrap() == "SELECT 1 -- mine"
+    });
+    wait_until(r.vcx, "no bar", |_| {
+        let n = r.notices(tab);
+        !n.contains(&Notice::Deleted) && !n.contains(&Notice::Changed)
+    });
+}
+
+// ## demofix-1 fix round 1 (ruling R-DF-1): a file reappearing where a deleted one was is an
+// external change like any other: a clean tab reloads silently, a dirty tab gets the Changed
+// bar, and no bar ever speaks of edits that do not exist.
+
+#[gpui::test]
+fn a_clean_tab_reloads_a_different_file_where_its_deleted_one_was(cx: &mut TestAppContext) {
+    let (mut r, prod, _) = prod_staging(cx, &[("a.sql", "SELECT 1")]);
+    let tab = r.open("a.sql", Some(prod), Some("orders"));
+    std::fs::remove_file(r.root.join("a.sql")).unwrap();
+    r.hint("a.sql");
+    wait_until(r.vcx, "the deleted bar", |_| {
+        r.notices(tab).contains(&Notice::Deleted)
+    });
+    r.write_file("a.sql", "-- someone else's");
+    wait_until(r.vcx, "reloaded", |_| r.text(tab) == "-- someone else's");
+    let n = r.notices(tab);
+    assert!(
+        !n.contains(&Notice::Deleted) && !n.contains(&Notice::Changed),
+        "{n:?}"
+    );
+    assert!(!r.dirty(tab));
+}
+
+#[gpui::test]
+fn a_clean_tab_reloads_identical_content_with_a_new_time_silently(cx: &mut TestAppContext) {
+    // `git checkout -- a.sql` after a delete: the same bytes, a new modification time.
+    let (mut r, prod, _) = prod_staging(cx, &[("a.sql", "SELECT 1")]);
+    let tab = r.open("a.sql", Some(prod), Some("orders"));
+    std::fs::remove_file(r.root.join("a.sql")).unwrap();
+    r.hint("a.sql");
+    wait_until(r.vcx, "the deleted bar", |_| {
+        r.notices(tab).contains(&Notice::Deleted)
+    });
+    let f = std::fs::File::create(r.root.join("a.sql")).unwrap();
+    std::io::Write::write_all(&mut &f, b"SELECT 1").unwrap();
+    f.set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    drop(f);
+    r.hint("a.sql");
+    wait_until(r.vcx, "the deleted bar goes", |_| {
+        !r.notices(tab).contains(&Notice::Deleted)
+    });
+    r.vcx.run_until_parked();
+    assert!(
+        !r.notices(tab).contains(&Notice::Changed),
+        "{:?}",
+        r.notices(tab)
+    );
+    assert_eq!(r.text(tab), "SELECT 1");
+    assert!(!r.dirty(tab));
+}
+
+#[gpui::test]
+fn a_dirty_tab_gets_the_changed_bar_for_a_file_where_its_deleted_one_was(cx: &mut TestAppContext) {
+    let (mut r, prod, _) = prod_staging(cx, &[("a.sql", "SELECT 1")]);
+    let tab = r.open("a.sql", Some(prod), Some("orders"));
+    r.type_text(tab, " -- mine");
+    std::fs::remove_file(r.root.join("a.sql")).unwrap();
+    r.hint("a.sql");
+    wait_until(r.vcx, "the deleted bar", |_| {
+        r.notices(tab).contains(&Notice::Deleted)
+    });
+    r.write_file("a.sql", "-- someone else's");
+    wait_until(r.vcx, "the changed bar", |_| {
+        r.notices(tab).contains(&Notice::Changed)
+    });
+    assert!(!r.notices(tab).contains(&Notice::Deleted));
+    assert_eq!(
+        r.text(tab),
+        "SELECT 1 -- mine",
+        "a dirty tab is never reloaded"
+    );
+}
+
+#[gpui::test]
+fn a_sibling_tab_follows_the_other_tabs_recreate_save_silently(cx: &mut TestAppContext) {
+    // The same file under two connections; the prod tab saves it back after a delete.
+    let (mut r, prod, staging) = prod_staging(cx, &[("a.sql", "SELECT 1")]);
+    let sibling = r.open("a.sql", Some(staging), Some("orders"));
+    let tab = r.open("a.sql", Some(prod), Some("orders"));
+    r.type_text(tab, " -- mine");
+    std::fs::remove_file(r.root.join("a.sql")).unwrap();
+    r.hint("a.sql");
+    wait_until(r.vcx, "both deleted", |_| {
+        r.notices(tab).contains(&Notice::Deleted) && r.notices(sibling).contains(&Notice::Deleted)
+    });
+    r.save(tab);
+    wait_until(r.vcx, "the sibling follows", |_| {
+        r.text(sibling) == "SELECT 1 -- mine"
+    });
+    let n = r.notices(sibling);
+    assert!(
+        !n.contains(&Notice::Deleted) && !n.contains(&Notice::Changed),
+        "{n:?}"
+    );
+    assert!(!r.dirty(sibling));
+    assert!(!layer_ids(r.vcx).contains(&"dialog"), "nothing asked");
+}
+
+#[gpui::test]
+fn save_after_delete_with_nothing_there_recreates_the_file(cx: &mut TestAppContext) {
+    let (mut r, prod, _) = prod_staging(cx, &[("a.sql", "SELECT 1")]);
+    let tab = r.open("a.sql", Some(prod), Some("orders"));
+    r.type_text(tab, " -- mine");
+    std::fs::remove_file(r.root.join("a.sql")).unwrap();
+    r.hint("a.sql");
+    wait_until(r.vcx, "the deleted bar", |_| {
+        r.notices(tab).contains(&Notice::Deleted)
+    });
+    r.save(tab);
+    wait_until(r.vcx, "written again", |_| {
+        std::fs::read_to_string(r.root.join("a.sql"))
+            .ok()
+            .as_deref()
+            == Some("SELECT 1 -- mine")
+    });
+    assert!(!layer_ids(r.vcx).contains(&"dialog"), "nothing to ask");
+    wait_until(r.vcx, "clean, no bar", |_| {
+        !r.dirty(tab) && !r.notices(tab).contains(&Notice::Deleted)
+    });
+}
+// ## demofix-1

@@ -411,6 +411,62 @@ fn save_creates_a_new_file_and_refuses_one_deleted_since_open() {
     assert!(!d.path().join("nope").exists());
 }
 
+// ## demofix-1 (PO demo F4)
+/// "Deleted on disk: Save writes the file again" recreates the file, but never over a
+/// different file that appeared at the path since (it asks, as any save over a change):
+/// nothing there is created (no-replace), the tab's own file back is saved over, anything else
+/// is `ChangedOnDisk` with what is there now.
+#[test]
+fn recreate_never_writes_over_a_different_file() {
+    use hacivat_scripts::fileio::{SaveExpect, save_expecting};
+    let save_as = |d: &tempfile::TempDir, s: &str, expect: SaveExpect| {
+        save_expecting(
+            &root(d),
+            &rel("a.sql"),
+            None,
+            text(s),
+            expect,
+            &mut |_, _| {},
+        )
+    };
+    let d = tempfile::tempdir().unwrap();
+    fs::write(d.path().join("a.sql"), "SELECT 1;\n").unwrap();
+    let mine = read_default(&d, "a.sql").stamp;
+    let recreate = SaveExpect::Recreate { last: Some(mine) };
+    // Gone: created again.
+    fs::remove_file(d.path().join("a.sql")).unwrap();
+    let s = save_as(&d, "SELECT 2;\n", recreate).unwrap();
+    assert_eq!(fs::read(d.path().join("a.sql")).unwrap(), b"SELECT 2;\n");
+    assert_eq!(read_default(&d, "a.sql").stamp, s);
+    // A different file at the path: refused with its stamp, the file untouched.
+    fs::write(d.path().join("a.sql"), "-- someone else's\n").unwrap();
+    let theirs = read_default(&d, "a.sql").stamp;
+    assert_eq!(
+        save_as(&d, "mine", recreate),
+        Err(SaveError::ChangedOnDisk(theirs))
+    );
+    assert_eq!(
+        fs::read(d.path().join("a.sql")).unwrap(),
+        b"-- someone else's\n"
+    );
+    // A tab that never had the file (`last: None`) is refused over any file too.
+    assert_eq!(
+        save_as(&d, "mine", SaveExpect::Recreate { last: None }),
+        Err(SaveError::ChangedOnDisk(theirs))
+    );
+    // The tab's own file back (the same stamp): saved over, as a normal save.
+    save_as(&d, "mine", SaveExpect::Recreate { last: Some(theirs) }).unwrap();
+    assert_eq!(fs::read(d.path().join("a.sql")).unwrap(), b"mine");
+    // The old forms keep their meaning.
+    assert!(matches!(
+        save_as(&d, "x", SaveExpect::Stamp(mine)),
+        Err(SaveError::ChangedOnDisk(_))
+    ));
+    save_as(&d, "any", SaveExpect::Anything).unwrap();
+    assert_eq!(fs::read(d.path().join("a.sql")).unwrap(), b"any");
+}
+// ## demofix-1
+
 #[test]
 fn save_refuses_a_folder_and_hidden_paths() {
     let d = tempfile::tempdir().unwrap();

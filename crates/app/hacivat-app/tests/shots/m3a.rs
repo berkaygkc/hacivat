@@ -136,7 +136,7 @@ pub(super) enum M3a {
 /// The single-session connection (surface 12).
 pub(super) const SHARED: &str = "orders-shared";
 
-pub(super) const M3A: [M3a; 68] = [
+pub(super) const M3A: [M3a; 70] = [
     M3a::ConsoleEditor,
     M3a::ConsoleSelection,
     M3a::ConsoleUnfocused,
@@ -197,6 +197,9 @@ pub(super) const M3A: [M3a; 68] = [
     M3a::Results(ResultsShot::MoreResultSets),
     M3a::Results(ResultsShot::RunLog),
     M3a::Results(ResultsShot::EventsDropped),
+    // ## demofix-1 fix round 1 (m8): the bounded Run-as-script Output and the paused log.
+    M3a::Results(ResultsShot::ScriptCounted),
+    M3a::Results(ResultsShot::LogPaused),
     M3a::GridRange,
     M3a::PromptClose,
     M3a::PromptQuit,
@@ -1213,6 +1216,9 @@ pub(super) fn results_name(r: ResultsShot) -> &'static str {
         ResultsShot::MoreResultSets => "strip-more-result-sets",
         ResultsShot::RunLog => "output-run-log",
         ResultsShot::EventsDropped => "output-events-dropped",
+        // ## demofix-1 fix round 1 (m8)
+        ResultsShot::ScriptCounted => "output-script-counted",
+        ResultsShot::LogPaused => "output-paused",
         // ## m3b-t25-results (named exception); ## m3b-t29-shots: Task 25's states are M3b's.
         r => super::m3b::results_name(r),
     }
@@ -1236,6 +1242,9 @@ pub(super) fn results_marker(r: ResultsShot) -> (&'static str, Option<&'static s
         | ResultsShot::Error
         | ResultsShot::RunLog
         | ResultsShot::EventsDropped => (OUTPUT, None),
+        // ## demofix-1 fix round 1 (m8)
+        ResultsShot::ScriptCounted => (OUTPUT, None),
+        ResultsShot::LogPaused => ("#button-label-results-log-end", None),
         // ## m3b-t25-results (named exception); ## m3b-t29-shots: Task 25's states are M3b's.
         r => super::m3b::results_marker(r),
     }
@@ -1729,7 +1738,7 @@ pub(super) fn results(shot: ResultsShot, env: Option<EnvTag>) -> Vec<Step> {
         Some(EnvTag::Production) => PROD,
         _ => DEV,
     };
-    vec![
+    let mut steps = vec![
         save_only(name, EnvTag::Dev),
         step(
             move |window, cx| {
@@ -1738,7 +1747,32 @@ pub(super) fn results(shot: ResultsShot, env: Option<EnvTag>) -> Vec<Step> {
             },
             |_, _| true,
         ),
-    ]
+    ];
+    // ## demofix-1 fix round 1 (m8): the user scrolled the Output up: it is paused.
+    if shot == ResultsShot::LogPaused {
+        steps.push(step(
+            |_, cx| {
+                for host in hosts(cx) {
+                    let lists: Vec<_> = Consoles::ids(cx)
+                        .into_iter()
+                        .filter_map(|c| host.read(cx).log_list(c))
+                        .collect();
+                    for list in lists {
+                        list.update(cx, |l, cx| l.scroll_px(-21.0 * 120.0, cx));
+                    }
+                }
+            },
+            |_, cx| {
+                hosts(cx).into_iter().any(|h| {
+                    Consoles::ids(cx)
+                        .into_iter()
+                        .filter_map(|c| h.read(cx).log_list(c))
+                        .any(|l| l.read(cx).paused())
+                })
+            },
+        ));
+    }
+    steps
 }
 
 /// Selects a 3 × 2 range in the shown grid through the grid's commands (from row 2, column 2).
