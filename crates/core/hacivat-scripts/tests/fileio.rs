@@ -420,7 +420,14 @@ fn save_creates_a_new_file_and_refuses_one_deleted_since_open() {
 fn recreate_never_writes_over_a_different_file() {
     use hacivat_scripts::fileio::{SaveExpect, save_expecting};
     let save_as = |d: &tempfile::TempDir, s: &str, expect: SaveExpect| {
-        save_expecting(&root(d), &rel("a.sql"), None, text(s), expect, &mut |_, _| {})
+        save_expecting(
+            &root(d),
+            &rel("a.sql"),
+            None,
+            text(s),
+            expect,
+            &mut |_, _| {},
+        )
     };
     let d = tempfile::tempdir().unwrap();
     fs::write(d.path().join("a.sql"), "SELECT 1;\n").unwrap();

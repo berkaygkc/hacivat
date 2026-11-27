@@ -934,18 +934,11 @@ impl LibraryService {
         let (path, echo) = (rel.clone(), self.echoes.get(id));
         let saved = self
             .blocking(move || {
-                fileio::save_expecting(
-                    &root,
-                    &path,
-                    env,
-                    text,
-                    expect,
-                    &mut |landing, stamp| {
-                        if let Some(echo) = &echo {
-                            echo.record(landing.clone(), *stamp);
-                        }
-                    },
-                )
+                fileio::save_expecting(&root, &path, env, text, expect, &mut |landing, stamp| {
+                    if let Some(echo) = &echo {
+                        echo.record(landing.clone(), *stamp);
+                    }
+                })
             })
             .await
             .unwrap_or(Err(SaveError::Io(io::ErrorKind::Interrupted)));

@@ -330,7 +330,15 @@ fn saved_done(
                     },
                     Box::new(move |yes, window, cx| {
                         if yes {
-                            write(&doc, text, version, SaveExpect::Stamp(on_disk), window, cx, then);
+                            write(
+                                &doc,
+                                text,
+                                version,
+                                SaveExpect::Stamp(on_disk),
+                                window,
+                                cx,
+                                then,
+                            );
                         } else if let Some(then) = then {
                             then(SaveOutcome::NotSaved, cx);
                         }

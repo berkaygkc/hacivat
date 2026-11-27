@@ -527,6 +527,7 @@ impl<M: TreeModel> TreeView<M> {
             // description, so the letter and the words carry it, never the colour alone.
             // ## m4b-t13-explorer (named exception, controller ruling R-T2-1 a)
             let ink = status_ink(status.kind, c);
+            status_note(status.kind, ink.to_hsla());
             el = el.child(div().flex_none().ml(px(gap)).child(Label::new(
                 status.glyph,
                 TextSource::Fluent,
@@ -734,6 +735,33 @@ fn status_ink(
     }
 }
 // ## m4b-t13-explorer
+
+// ## demofix-1 (PO demo F5)
+thread_local! {
+    static STATUS_DRAWN: std::cell::RefCell<Option<Vec<(StatusKind, hacivat_ui_core::gpui_surface::Hsla)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Starts (or restarts) recording the status glyphs rows draw on this thread, with their
+/// ink. GPUI's test platform rasterizes no text, so a check that the git letters do not share
+/// one colour reads what the rows asked for.
+pub fn status_record() {
+    STATUS_DRAWN.with(|d| *d.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stops recording; the status glyphs drawn since [`status_record`], in drawing order.
+pub fn status_take() -> Vec<(StatusKind, hacivat_ui_core::gpui_surface::Hsla)> {
+    STATUS_DRAWN.with(|d| d.borrow_mut().take().unwrap_or_default())
+}
+
+fn status_note(kind: StatusKind, ink: hacivat_ui_core::gpui_surface::Hsla) {
+    STATUS_DRAWN.with(|d| {
+        if let Some(log) = d.borrow_mut().as_mut() {
+            log.push((kind, ink));
+        }
+    });
+}
+// ## demofix-1
 
 /// Reachable for the row-key helpers' tests.
 #[cfg(test)]

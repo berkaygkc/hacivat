@@ -2892,7 +2892,13 @@ async fn a_deleted_open_file_that_comes_back_unchanged_is_announced() {
     // … and back.
     std::fs::rename(trash.path().join("a.sql"), d.path().join("a.sql")).unwrap();
     r.hint(&root, &["a.sql"]);
-    let e = wait_event(&mut r.rx, &mut seen, "a.sql back", file_changed(id, "a.sql")).await;
+    let e = wait_event(
+        &mut r.rx,
+        &mut seen,
+        "a.sql back",
+        file_changed(id, "a.sql"),
+    )
+    .await;
     assert_eq!(
         e,
         LibraryEvent::FileChanged {

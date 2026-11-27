@@ -130,6 +130,9 @@ fn a_paused_list_keeps_its_rows_when_the_front_is_dropped(cx: &mut TestAppContex
     vcx.update(|_, cx| view.update(cx, |l, cx| l.scroll_to_end(cx)));
     vcx.run_until_parked();
     assert!(!view.read_with(vcx, |l, _| l.paused()));
+    // End resumed following (a list opened at its top, not following, was paused).
+    assert_eq!(heard.borrow().last(), Some(&ListEvent::Paused(false)));
+    heard.borrow_mut().clear();
     // The user scrolls up.
     vcx.update(|_, cx| view.update(cx, |l, cx| l.scroll_px(-18.0 * 50.0, cx)));
     vcx.run_until_parked();

@@ -1196,7 +1196,12 @@ pub const SCRIPT_TAIL_STATEMENTS: usize = 50;
 pub const SCRIPT_QUIET_EVERY: u64 = 10_000;
 
 /// A line of a unit's own log, as the console's log takes it.
-type UnitLine = (LogMsg, Option<Arc<str>>, Option<std::ops::Range<usize>>, Option<UnitId>);
+type UnitLine = (
+    LogMsg,
+    Option<Arc<str>>,
+    Option<std::ops::Range<usize>>,
+    Option<UnitId>,
+);
 
 /// The quiet statements of a run: the counted ones, then the last ones kept one by one. Its
 /// memory is bounded by [`SCRIPT_TAIL_STATEMENTS`] units' lines, whatever the file's length.

@@ -383,7 +383,7 @@ fn the_explorer_filter_placeholder_ellipsizes_in_a_narrow_explorer(cx: &mut Test
 #[gpui::test]
 fn every_seam_has_a_visible_grip_and_a_hover_line(cx: &mut TestAppContext) {
     use gpui::{Modifiers, MouseButton, point, px};
-    use hacivat_app::shell::tiles::{GRIP_LONG_PX, GRIP_SHORT_PX, SEAM_GRAB_PX, SEAM_HOT_PX};
+    use hacivat_app::shell::tiles::{GRIP_LONG_PX, GRIP_SHORT_PX, SEAM_GRAB_PX};
     let vcx = shell(cx, "en");
     vcx.run_until_parked();
     for (name, vertical) in [("explorer", true), ("connection", false), ("editor", false)] {
@@ -404,13 +404,20 @@ fn every_seam_has_a_visible_grip_and_a_hover_line(cx: &mut TestAppContext) {
             (GRIP_SHORT_PX, GRIP_LONG_PX),
             "{name}"
         );
-        assert!(band.contains(&grip.center()), "{name}: the grip on its band");
+        assert!(
+            band.contains(&grip.center()),
+            "{name}: the grip on its band"
+        );
     }
     #[cfg(feature = "scene-check")]
     {
+        use hacivat_app::shell::tiles::SEAM_HOT_PX;
         let (text_3, blue) = vcx.update(|_, cx| {
             let c = &hacivat_ui_core::theme::Theme::get(cx).tokens.colors;
-            (gpui::Rgba::from(c.text_3.to_hsla()), gpui::Rgba::from(c.blue.to_hsla()))
+            (
+                gpui::Rgba::from(c.text_3.to_hsla()),
+                gpui::Rgba::from(c.blue.to_hsla()),
+            )
         });
         let fills = |vcx: &mut gpui::VisualTestContext| {
             vcx.update(|window, _| {
@@ -434,7 +441,10 @@ fn every_seam_has_a_visible_grip_and_a_hover_line(cx: &mut TestAppContext) {
         let before = fills(vcx);
         let grips = before
             .iter()
-            .filter(|q| same(q.0, text_3) && (q.1 - GRIP_LONG_PX).abs().min((q.2 - GRIP_LONG_PX).abs()) < 0.5)
+            .filter(|q| {
+                same(q.0, text_3)
+                    && (q.1 - GRIP_LONG_PX).abs().min((q.2 - GRIP_LONG_PX).abs()) < 0.5
+            })
             .count();
         assert_eq!(grips, 3, "a text-3 grip per seam");
         // The pointer on the editor seam: its line shows, blue and 2 px tall.

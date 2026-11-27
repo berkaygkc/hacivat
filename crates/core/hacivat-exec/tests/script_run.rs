@@ -1117,7 +1117,15 @@ async fn a_streamed_runs_quiet_statements_are_counted_and_its_failure_listed() {
     assert_eq!(quiet_lines(&r), [(1, 120 - tail, 120 - tail)]);
     let msgs: Vec<LogMsg> = r.log.lines().iter().map(|l| l.msg.clone()).collect();
     let at = |pred: &dyn Fn(&LogMsg) -> bool| msgs.iter().position(pred).unwrap();
-    let counted = at(&|m| matches!(m, LogMsg::RunUi { id: "exec-script-quiet", .. }));
+    let counted = at(&|m| {
+        matches!(
+            m,
+            LogMsg::RunUi {
+                id: "exec-script-quiet",
+                ..
+            }
+        )
+    });
     let failed = at(&|m| matches!(m, LogMsg::Error { n: 121, .. }));
     // In order: the counted line, the last 50 statements' own lines, the failure.
     assert!(counted < failed);

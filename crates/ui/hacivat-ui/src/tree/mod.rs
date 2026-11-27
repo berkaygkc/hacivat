@@ -39,6 +39,8 @@ use crate::text::TextSource;
 
 pub use typeahead::Fold;
 pub use view::{TREE_OVERSCAN_ROWS, TreeView};
+// ## demofix-1 (PO demo F5): what the rows' status glyphs were drawn in.
+pub use view::{status_record, status_take};
 
 /// A node's identity: opaque to the widget. The app derives it from its own object identity
 /// with a stable hash (`ObjectKey`, Task 14), never from a display string.

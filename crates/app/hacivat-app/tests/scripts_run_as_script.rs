@@ -1410,9 +1410,7 @@ impl Rig {
 }
 
 #[gpui::test]
-fn a_streamed_runs_output_counts_quiet_statements_instead_of_listing_them(
-    cx: &mut TestAppContext,
-) {
+fn a_streamed_runs_output_counts_quiet_statements_instead_of_listing_them(cx: &mut TestAppContext) {
     use hacivat_exec::SCRIPT_TAIL_STATEMENTS;
     let (mut r, tab) = dev_console(cx);
     let n = 2_000;
@@ -1424,8 +1422,26 @@ fn a_streamed_runs_output_counts_quiet_statements_instead_of_listing_them(
     let (log, rows) = r.output_size(tab);
     // One counted line, the last 50 statements, the run's summary: never a line each.
     assert!(log <= SCRIPT_TAIL_STATEMENTS + 3, "{log} log lines");
-    assert!(rows.is_none_or(|rows| rows <= SCRIPT_TAIL_STATEMENTS + 3), "{rows:?}");
+    assert!(
+        rows.is_none_or(|rows| rows <= SCRIPT_TAIL_STATEMENTS + 3),
+        "{rows:?}"
+    );
     assert!(r.log_ids(tab).contains(&"exec-script-quiet"));
+    // The counted line heads the Output (scroll to its top to read it as drawn).
+    let console = r.console(tab);
+    let list = r
+        .vcx
+        .cx
+        .read(|cx| {
+            hacivat_app::results::view::hosts(cx)
+                .into_iter()
+                .find_map(|h| h.read(cx).log_list(console))
+        })
+        .expect("the Output list");
+    r.vcx
+        .cx
+        .update(|cx| list.update(cx, |l, cx| l.scroll_to_top(cx)));
+    redraw_full(r.vcx);
     let texts = r.texts();
     assert!(
         texts.iter().any(|t| t
@@ -1467,7 +1483,10 @@ fn streamed_run_memory_stays_flat(cx: &mut TestAppContext) {
             .args(["-o", "rss=", "-p", &pid])
             .output()
             .expect("ps");
-        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
     };
     let footprint = || -> String {
         std::process::Command::new("footprint")
@@ -1503,7 +1522,10 @@ fn streamed_run_memory_stays_flat(cx: &mut TestAppContext) {
         if !r.running(tab) && text_of(r.vcx, "script-run-end").is_some() {
             break;
         }
-        assert!(started.elapsed() < Duration::from_secs(1_800), "the run ends");
+        assert!(
+            started.elapsed() < Duration::from_secs(1_800),
+            "the run ends"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
     let after = (rss_kib(), footprint());

@@ -400,7 +400,10 @@ fn attach_over_existing_manifest_does_not_rewrite_it(cx: &mut TestAppContext) {
         .filter(|i| i.name == hacivat_ui::icon::IconName::Info)
         .map(|i| i.size_px)
         .collect();
-    assert!(!info.is_empty() && info.iter().all(|s| *s == 14.0), "{info:?}");
+    assert!(
+        !info.is_empty() && info.iter().all(|s| *s == 14.0),
+        "{info:?}"
+    );
     let frame: Vec<String> = full_frame(r.vcx)
         .into_iter()
         .map(|t| t.text.to_string())

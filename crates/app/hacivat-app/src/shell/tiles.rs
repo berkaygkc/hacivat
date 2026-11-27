@@ -443,9 +443,17 @@ fn seam_marks(band: Div, seam: Seam, active: Option<Seam>, theme: &Theme) -> Div
     };
     let mut centre = div().absolute().flex().items_center().justify_center();
     centre = if vertical {
-        centre.top_0().bottom_0().left(px(grip_off)).w(px(GRIP_SHORT_PX))
+        centre
+            .top_0()
+            .bottom_0()
+            .left(px(grip_off))
+            .w(px(GRIP_SHORT_PX))
     } else {
-        centre.left_0().right_0().top(px(grip_off)).h(px(GRIP_SHORT_PX))
+        centre
+            .left_0()
+            .right_0()
+            .top(px(grip_off))
+            .h(px(GRIP_SHORT_PX))
     };
     band.group(group)
         .debug_selector(move || format!("seam-grab-{name}"))

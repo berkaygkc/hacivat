@@ -415,7 +415,9 @@ impl ResultsHost {
         let ran = *changes.borrow() > 0;
         let observe = cx.observe(results, |_, _, cx| cx.notify());
         // ## demofix-1 (PO demo F8): "Scroll to end" shows prominently while the log is paused.
-        let paused = cx.subscribe(&list, |_, _, _: &hacivat_ui_grid::ListEvent, cx| cx.notify());
+        let paused = cx.subscribe(&list, |_, _, _: &hacivat_ui_grid::ListEvent, cx| {
+            cx.notify()
+        });
         // ## m3a-t30 fix round 1 (T33 merge obligation): what the tile asks of the run UI.
         let events = cx.subscribe_in(results, window, |_, _, event: &ResultsEvent, window, cx| {
             crate::exec_ui::handle_results_event(event, window, cx);

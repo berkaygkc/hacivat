@@ -2626,9 +2626,7 @@ fn save_after_delete_asks_before_writing_over_a_different_file(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn a_different_file_where_a_deleted_one_was_never_replaces_the_tab_text(
-    cx: &mut TestAppContext,
-) {
+fn a_different_file_where_a_deleted_one_was_never_replaces_the_tab_text(cx: &mut TestAppContext) {
     // A clean tab whose file was deleted holds the only copy of that text: another file at
     // the path asks (Reload / Keep mine), it never reloads over it.
     let (mut r, prod, _) = prod_staging(cx, &[("a.sql", "SELECT 1")]);
@@ -2658,7 +2656,10 @@ fn save_after_delete_with_nothing_there_recreates_the_file(cx: &mut TestAppConte
     });
     r.save(tab);
     wait_until(r.vcx, "written again", |_| {
-        std::fs::read_to_string(r.root.join("a.sql")).ok().as_deref() == Some("SELECT 1 -- mine")
+        std::fs::read_to_string(r.root.join("a.sql"))
+            .ok()
+            .as_deref()
+            == Some("SELECT 1 -- mine")
     });
     assert!(!layer_ids(r.vcx).contains(&"dialog"), "nothing to ask");
     wait_until(r.vcx, "clean, no bar", |_| {

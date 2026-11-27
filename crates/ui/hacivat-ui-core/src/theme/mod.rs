@@ -151,12 +151,16 @@ mod tests {
         }
     }
 
-    /// `fg` over `bg` (its alpha), as linear RGB.
+    /// `fg` over `bg` (its alpha), blended in sRGB space as GPUI's framebuffer and the
+    /// design mocks blend, then as linear RGB.
     fn composite(fg: Color, bg: Color) -> [f64; 3] {
         let [r, g, b, a] = fg.0.to_be_bytes();
         let [br, bgc, bb, _] = bg.0.to_be_bytes();
         let a = f64::from(a) / 255.0;
-        let mix = |f: u8, b: u8| linear(u32::from(f)) * a + linear(u32::from(b)) * (1.0 - a);
+        let mix = |f: u8, b: u8| {
+            let srgb = f64::from(f) * a + f64::from(b) * (1.0 - a);
+            linear(srgb.round() as u32)
+        };
         [mix(r, br), mix(g, bgc), mix(b, bb)]
     }
 

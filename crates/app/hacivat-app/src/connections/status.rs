@@ -297,7 +297,9 @@ pub(crate) fn version_texts(product: &str, raw: &str) -> (String, Option<SharedS
 fn escape_controls(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_control() || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
+        if c.is_control()
+            || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        {
             out.push_str(&format!("<U+{:04X}>", c as u32));
         } else {
             out.push(c);
@@ -1163,7 +1165,10 @@ mod tests {
             super::version_texts("SQLite", "3.45.0"),
             ("SQLite 3.45.0".to_string(), None)
         );
-        assert_eq!(super::version_texts("PostgreSQL", ""), ("PostgreSQL".to_string(), None));
+        assert_eq!(
+            super::version_texts("PostgreSQL", ""),
+            ("PostgreSQL".to_string(), None)
+        );
         // A pre-release keeps its word; a text with no number keeps the product only.
         assert_eq!(
             super::version_texts("PostgreSQL", "PostgreSQL 18beta1 on x86_64").0,
@@ -1177,7 +1182,10 @@ mod tests {
         assert_eq!(short, "MySQL 8.0.1<U+202E>x");
         assert_eq!(tip, None);
         let long = "9".repeat(80);
-        assert_eq!(super::version_texts("MySQL", &long).0.len(), "MySQL ".len() + 24);
+        assert_eq!(
+            super::version_texts("MySQL", &long).0.len(),
+            "MySQL ".len() + 24
+        );
     }
 
     use hacivat_driver::TxStatus;

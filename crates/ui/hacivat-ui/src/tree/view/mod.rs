@@ -27,6 +27,8 @@ mod element;
 mod keyboard;
 mod pointer;
 mod row;
+// ## demofix-1 (PO demo F5)
+pub use row::{status_record, status_take};
 
 use std::ops::Range;
 use std::rc::Rc;
