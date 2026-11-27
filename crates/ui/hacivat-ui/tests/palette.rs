@@ -160,3 +160,22 @@ fn keys_are_not_navigation_while_composing(cx: &mut TestAppContext) {
         ]
     );
 }
+
+// ## inputnav-1 fix round 1 (m5)
+/// On the macOS keymap ↑/↓ move the list (the palette takes them before its field), while
+/// ⇧↑/⇧↓ stay with the field and select to its start or end.
+#[gpui::test]
+fn arrows_move_the_list_and_shift_arrows_select_in_the_field(cx: &mut TestAppContext) {
+    use hacivat_ui::input::keys::InputKeymap;
+    use hacivat_ui_core::keymap::KeymapPlatform;
+    cx.update(|cx| cx.set_global(InputKeymap::defaults(KeymapPlatform::MacOs)));
+    let (pal, vcx) = palette_with(cx, &["a", "b", "c"]);
+    let events = record_palette_events(&pal, vcx);
+    vcx.simulate_input("ab");
+    events.take();
+    vcx.simulate_keystrokes("shift-up");
+    let input = pal.read_with(vcx, |p, _| p.input().clone());
+    assert_eq!(input.read_with(vcx, |i, _| i.selection()), (0..2, true));
+    vcx.simulate_keystrokes("down enter");
+    assert_eq!(events.take(), vec![PaletteEvent::Confirmed("b".into())]);
+}

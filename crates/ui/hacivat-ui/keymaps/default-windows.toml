@@ -732,3 +732,170 @@ context = "ScriptTab"
 chord = "f2"
 command = "scripts.rename"
 context = "ExplorerTree"
+
+## inputnav-1
+# Single-line text fields (context `TextInput`, PO demo finding F1): the keys of a native
+# Windows text field. The focused field resolves them itself (`hacivat_ui::input::keys`), after
+# the workspace dispatcher: a chord an outer context binds would win, so CI keeps these chords
+# out of every context that stays live while a field has the focus (`keymap_collisions.rs`).
+# No Ctrl+Alt chord: that is AltGr text. Enter and Escape stay the field's Submitted and
+# Cancelled events.
+
+[[binding]]
+chord = "left"
+command = "input.move_left"
+context = "TextInput"
+
+[[binding]]
+chord = "right"
+command = "input.move_right"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-left"
+command = "input.select_left"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-right"
+command = "input.select_right"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-left"
+command = "input.move_word_left"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-right"
+command = "input.move_next_word_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-left"
+command = "input.select_word_left"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-right"
+command = "input.select_next_word_start"
+context = "TextInput"
+
+[[binding]]
+chord = "home"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "end"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-home"
+command = "input.select_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-end"
+command = "input.select_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "backspace"
+command = "input.delete_backward"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-backspace"
+command = "input.delete_backward"
+context = "TextInput"
+
+[[binding]]
+chord = "delete"
+command = "input.delete_forward"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-backspace"
+command = "input.delete_word_backward"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-delete"
+command = "input.delete_to_next_word_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-a"
+command = "input.select_all"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-c"
+command = "input.copy"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-x"
+command = "input.cut"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-v"
+command = "input.paste"
+context = "TextInput"
+
+# inputnav-1 fix round 1 (m4): Ctrl+Home/End (with ⇧ they select), the old clipboard keys
+# (⇧Delete cut, Ctrl+Insert copy, ⇧Insert paste; a masked field still never copies or cuts),
+# and undo (Ctrl+Z) and redo (Ctrl+Y, Ctrl+⇧Z) in the field.
+
+[[binding]]
+chord = "ctrl-home"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-end"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-home"
+command = "input.select_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-end"
+command = "input.select_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-delete"
+command = "input.cut"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-insert"
+command = "input.copy"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-insert"
+command = "input.paste"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-z"
+command = "input.undo"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-y"
+command = "input.redo"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-z"
+command = "input.redo"
+context = "TextInput"

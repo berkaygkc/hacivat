@@ -24,6 +24,8 @@ use std::time::Instant;
 
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::input::FocusedInput;
+// ## inputnav-1
+use hacivat_ui::input::keys::set_input_keymap;
 use hacivat_ui_core::gpui_surface::{
     AnyWindowHandle, App, Global, KeyDownEvent, RunCommand, SharedString, Window, WindowHandle,
 };
@@ -45,11 +47,18 @@ impl Global for DispatcherState {}
 /// builds the menus.
 pub fn install(cx: &mut App) {
     register_workspace_actions(cx.default_global::<ActionRegistry>());
+    // ## inputnav-1
+    registry::register_input_commands(cx.default_global::<ActionRegistry>());
 
     let (keymap, layout) = match cx.try_global::<ActiveKeymap>() {
         Some(a) => (a.keymap.clone(), a.layout.clone()),
         None => (empty_keymap(), KeyboardLayoutId("us".to_string())),
     };
+    // ## inputnav-1: text fields resolve their keys against the active keymap too (without
+    // one they keep the host's defaults, never the empty keymap).
+    if cx.has_global::<ActiveKeymap>() {
+        set_input_keymap(cx, keymap.clone(), layout.clone());
+    }
     let state = DispatcherState(Rc::new(RefCell::new(Dispatcher::new(keymap, layout))));
     cx.set_global(state.clone());
     set_key_capture(cx, Rc::new(on_key_down));
@@ -58,6 +67,8 @@ pub fn install(cx: &mut App) {
     cx.observe_global::<ActiveKeymap>(|cx| {
         let active = cx.global::<ActiveKeymap>();
         let (keymap, layout) = (active.keymap.clone(), active.layout.clone());
+        // ## inputnav-1
+        set_input_keymap(cx, keymap.clone(), layout.clone());
         if let Some(state) = cx.try_global::<DispatcherState>().cloned() {
             state.0.borrow_mut().set_keymap(keymap, layout);
         }
