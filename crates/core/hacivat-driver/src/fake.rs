@@ -132,6 +132,10 @@ struct ExecState {
     // ## m3b-t01c-core-seams
     /// Every typed query's bind values, in order (`binds_seen`).
     binds: Mutex<Vec<Vec<BindValue>>>,
+    // ## demofix-1 (PO demo F6)
+    /// `unrecorded`: the texts of statements and typed calls are not kept, so a memory
+    /// measurement of a long streamed run sees the app's memory, not the fake's log.
+    unrecorded: std::sync::atomic::AtomicBool,
 }
 
 impl ExecState {
@@ -149,12 +153,18 @@ impl ExecState {
 
     /// Logs an `execute`/`batch` text (in `executed` and the call log).
     fn log_statement(&self, sql: &str) {
+        if self.unrecorded.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         lock(&self.executed).push(sql.to_string());
         lock(&self.calls).push(FakeCall::Statement(sql.to_string()));
     }
 
     /// Logs a typed call (in `typed_log` and the call log).
     fn log_typed(&self, call: FakeTypedCall) {
+        if self.unrecorded.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         lock(&self.typed).push(call.clone());
         lock(&self.calls).push(FakeCall::Typed(call));
     }
@@ -881,6 +891,16 @@ impl FakeDriver {
     /// transaction leaves it `Failed`.
     pub fn tracks_transactions(mut self) -> Self {
         self.tracks_tx = true;
+        self
+    }
+
+    // ## demofix-1 (PO demo F6)
+    /// Keeps no log of statements or typed calls (`executed`, `typed_log` and `call_log` stay
+    /// empty), for memory measurements of long streamed runs.
+    pub fn unrecorded(self) -> Self {
+        self.exec
+            .unrecorded
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self
     }
 

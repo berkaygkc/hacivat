@@ -1072,3 +1072,87 @@ async fn log_lines_carry_the_units_place_in_the_file() {
     };
     assert_eq!((s.executed, s.failed, s.total), (2, 1, 3));
 }
+
+// ## demofix-1 (PO demo F6): the log of a streamed run is bounded.
+
+/// The `exec-script-quiet` lines of `r`'s log: (first, last, n).
+fn quiet_lines(r: &Rig) -> Vec<(u64, u64, u64)> {
+    r.log
+        .lines()
+        .iter()
+        .filter_map(|l| match &l.msg {
+            LogMsg::RunUi {
+                id: "exec-script-quiet",
+                args,
+                ..
+            } => {
+                let get = |k: &str| {
+                    args.iter().find_map(|(name, a)| match a {
+                        hacivat_exec::LogArg::U64(v) if *name == k => Some(*v),
+                        _ => None,
+                    })
+                };
+                Some((get("first")?, get("last")?, get("n")?))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Statements that only say they ran are counted, not listed one by one: the last
+/// `SCRIPT_TAIL_STATEMENTS` before a failure are listed, in order, right before it.
+#[tokio::test]
+async fn a_streamed_runs_quiet_statements_are_counted_and_its_failure_listed() {
+    use hacivat_exec::SCRIPT_TAIL_STATEMENTS;
+    let r = rig(fake_pg().queries(vec![failing("UPDATE nope")]), false).await;
+    let mut text: String = (1..=120)
+        .map(|i| format!("UPDATE a SET x = 1 WHERE id = {i};\n"))
+        .collect();
+    text.push_str("UPDATE nope SET x = 1 WHERE id = 1;\n");
+    let (out, _) = r
+        .run(r.request(script(&text).boxed(), None, Answers::new(&[])))
+        .await;
+    assert!(matches!(out, ScriptRunOutcome::Failed(_)), "{out:?}");
+    let tail = SCRIPT_TAIL_STATEMENTS as u64;
+    assert_eq!(quiet_lines(&r), [(1, 120 - tail, 120 - tail)]);
+    let msgs: Vec<LogMsg> = r.log.lines().iter().map(|l| l.msg.clone()).collect();
+    let at = |pred: &dyn Fn(&LogMsg) -> bool| msgs.iter().position(pred).unwrap();
+    let counted = at(&|m| matches!(m, LogMsg::RunUi { id: "exec-script-quiet", .. }));
+    let failed = at(&|m| matches!(m, LogMsg::Error { n: 121, .. }));
+    // In order: the counted line, the last 50 statements' own lines, the failure.
+    assert!(counted < failed);
+    let listed = msgs[counted + 1..failed]
+        .iter()
+        .filter(|m| matches!(m, LogMsg::Completed { .. } | LogMsg::RowsAffected { .. }))
+        .count() as u64;
+    assert_eq!(listed, tail, "{msgs:?}");
+    assert!(msgs.len() as u64 <= tail + 6, "{} lines", msgs.len());
+}
+
+/// A long clean run writes a counted line every `SCRIPT_QUIET_EVERY` statements, so its log
+/// stays a few lines long whatever the file's length (the PO's demo had one line per
+/// statement, 78,118 of them).
+#[tokio::test]
+async fn a_long_clean_run_writes_a_counted_line_every_ten_thousand_statements() {
+    use hacivat_exec::{SCRIPT_QUIET_EVERY, SCRIPT_TAIL_STATEMENTS};
+    let r = rig(fake_pg(), false).await;
+    let total = SCRIPT_QUIET_EVERY + SCRIPT_TAIL_STATEMENTS as u64 + 10;
+    let text: String = (1..=total)
+        .map(|i| format!("UPDATE a SET x = 1 WHERE id = {i};\n"))
+        .collect();
+    let (out, progress) = r
+        .run(r.request(script(&text).boxed(), None, Answers::new(&[])))
+        .await;
+    assert!(matches!(out, ScriptRunOutcome::Finished(_)), "{out:?}");
+    assert_eq!(progress.units_run, total);
+    assert_eq!(
+        quiet_lines(&r),
+        [
+            (1, SCRIPT_QUIET_EVERY, SCRIPT_QUIET_EVERY),
+            (SCRIPT_QUIET_EVERY + 1, SCRIPT_QUIET_EVERY + 10, 10)
+        ]
+    );
+    // Two counted lines, the last 50 statements, the run's summary.
+    assert_eq!(r.log.lines().len(), 2 + SCRIPT_TAIL_STATEMENTS + 1);
+}
+// ## demofix-1

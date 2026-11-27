@@ -83,7 +83,7 @@ use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
 use hacivat_results::FetchPolicy;
 use hacivat_session::session::{
     ClassifierContext, ErrorPolicy, RunSummary, SessionEvent, SessionHandle, SessionSnapshot,
-    SessionState,
+    SessionState, UnitId,
 };
 use sha2::{Digest, Sha256};
 use sql_dialect::{ClientFlavor, DialectCtx, DialectId, LexModes};
@@ -1181,6 +1181,43 @@ struct Run<'a> {
     check: Option<DatabaseCheck>,
     /// The context generation that check read: the first unit's must be it.
     checked_generation: Option<u64>,
+    // ## demofix-1 (PO demo F6)
+    /// The statements that ran with nothing to say, not yet written to the console's log.
+    quiet: QuietLog,
+}
+
+// ## demofix-1 (PO demo F6): the Output of a streamed run is bounded.
+/// The statements a streamed run keeps one by one before it writes them: the last ones before
+/// the end, a failure or a server notice. Earlier statements that ran with nothing to say (a
+/// row count, "Completed") are counted in one `exec-script-quiet` line instead of a line each.
+pub const SCRIPT_TAIL_STATEMENTS: usize = 50;
+/// A counted line is written at least every this many statements, so a long clean run still
+/// shows its progress in the log (the strip shows every statement).
+pub const SCRIPT_QUIET_EVERY: u64 = 10_000;
+
+/// A line of a unit's own log, as the console's log takes it.
+type UnitLine = (LogMsg, Option<Arc<str>>, Option<std::ops::Range<usize>>, Option<UnitId>);
+
+/// The quiet statements of a run: the counted ones, then the last ones kept one by one. Its
+/// memory is bounded by [`SCRIPT_TAIL_STATEMENTS`] units' lines, whatever the file's length.
+#[derive(Debug, Default)]
+struct QuietLog {
+    /// The counted statements: the first and last numbers, how many, and the rows they changed.
+    first: u64,
+    last: u64,
+    n: u64,
+    rows: u64,
+    /// The last quiet statements' own lines, oldest first.
+    tail: std::collections::VecDeque<(u64, Vec<UnitLine>)>,
+}
+
+/// The rows a line reports when it is one a quiet statement writes (`None`: it says more).
+fn quiet_rows(msg: &LogMsg) -> Option<u64> {
+    match msg {
+        LogMsg::RowsAffected { rows, .. } => Some(*rows),
+        LogMsg::Completed { .. } => Some(0),
+        _ => None,
+    }
 }
 
 impl<'a> Run<'a> {
@@ -1208,6 +1245,7 @@ impl<'a> Run<'a> {
             // ## m4b-t18-run-as-script (named exception)
             check: None,
             checked_generation: None,
+            quiet: QuietLog::default(),
         }
     }
 
@@ -1226,7 +1264,9 @@ impl<'a> Run<'a> {
 
     /// The outcome's lines in the console's log: why nothing ran, why the run stopped, and the
     /// run's summary.
-    fn log_outcome(&self, out: &ScriptRunOutcome) {
+    fn log_outcome(&mut self, out: &ScriptRunOutcome) {
+        // ## demofix-1 (PO demo F6): the statements still waiting, before why the run ended.
+        self.write_quiet();
         let log = &self.req.log;
         let at_args = |at: Option<ScriptPosition>| -> Vec<(&'static str, LogArg)> {
             at.map(|p| {
@@ -1790,8 +1830,14 @@ impl<'a> Run<'a> {
 
     /// The unit's log lines in the console's log, statement numbers being the unit's place in
     /// the file (`unit`); its per-run summary line is left out (the run writes one).
-    fn copy_log(&self, unit_log: &SessionLog, unit: u64) {
+    ///
+    /// ## demofix-1 (PO demo F6): a unit whose lines only say it ran (a row count, "Completed")
+    /// waits in the run's [`QuietLog`]: the last [`SCRIPT_TAIL_STATEMENTS`] are written one by
+    /// one before the next line that says more (a failure, a notice, a stop) and at the end,
+    /// and earlier ones are counted in one `exec-script-quiet` line. The log keeps its order.
+    fn copy_log(&mut self, unit_log: &SessionLog, unit: u64) {
         let n = u32::try_from(unit).unwrap_or(u32::MAX);
+        let mut lines: Vec<UnitLine> = Vec::new();
         for line in unit_log.lines().iter() {
             let msg = match &line.msg {
                 LogMsg::Summary(_) => continue,
@@ -1805,9 +1851,70 @@ impl<'a> Run<'a> {
                 LogMsg::RolledBackContinue { .. } => LogMsg::RolledBackContinue { n },
                 other => other.clone(),
             };
-            self.req
-                .log
-                .append_tagged(msg, line.tag.clone(), line.source.clone(), line.unit);
+            lines.push((msg, line.tag.clone(), line.source.clone(), line.unit));
+        }
+        if lines.is_empty() {
+            return;
+        }
+        if lines.iter().all(|l| quiet_rows(&l.0).is_some()) {
+            self.quiet.tail.push_back((unit, lines));
+            if self.quiet.tail.len() > SCRIPT_TAIL_STATEMENTS
+                && let Some((at, old)) = self.quiet.tail.pop_front()
+            {
+                let q = &mut self.quiet;
+                if q.n == 0 {
+                    q.first = at;
+                }
+                q.last = at;
+                q.n += 1;
+                q.rows = old
+                    .iter()
+                    .filter_map(|l| quiet_rows(&l.0))
+                    .fold(q.rows, u64::saturating_add);
+                if q.n >= SCRIPT_QUIET_EVERY {
+                    self.write_counted();
+                }
+            }
+            return;
+        }
+        self.write_quiet();
+        for (msg, tag, source, unit) in lines {
+            self.req.log.append_tagged(msg, tag, source, unit);
+        }
+    }
+
+    // ## demofix-1 (PO demo F6)
+    /// Writes the counted quiet statements as one line, if there are any.
+    fn write_counted(&mut self) {
+        let q = std::mem::take(&mut self.quiet.n);
+        if q == 0 {
+            return;
+        }
+        let (first, last, rows) = (self.quiet.first, self.quiet.last, self.quiet.rows);
+        self.quiet.rows = 0;
+        self.req.log.append(
+            LogMsg::RunUi {
+                id: "exec-script-quiet",
+                args: vec![
+                    ("first", LogArg::U64(first)),
+                    ("last", LogArg::U64(last)),
+                    ("n", LogArg::U64(q)),
+                    ("rows", LogArg::U64(rows)),
+                ],
+                warn: false,
+            },
+            None,
+            None,
+        );
+    }
+
+    /// Writes the waiting quiet statements: the counted line, then the kept ones one by one.
+    fn write_quiet(&mut self) {
+        self.write_counted();
+        for (_, lines) in std::mem::take(&mut self.quiet.tail) {
+            for (msg, tag, source, unit) in lines {
+                self.req.log.append_tagged(msg, tag, source, unit);
+            }
         }
     }
 

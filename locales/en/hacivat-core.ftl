@@ -1837,3 +1837,17 @@ exec-script-database-check = Nothing in the file was run: the connection isn't o
 # Variables:
 #   $n (Number) - how many statements of the file were handled before the stop, e.g. 41.
 exec-script-lost-track = Hacivat lost track of the connection's state, so the script stopped after statement { NUMBER($n, useGrouping: "false") }. Nothing after it was sent.
+
+## demofix-1
+# Run as script (PO demo F6): statements that ran with nothing to say are counted in one line
+# instead of a line each; the last 50 before the end, a failure or a server notice are still
+# listed one by one.
+# Variables:
+#   $first (Number) - the first such statement's number in the file, e.g. 1.
+#   $last (Number) - the last one's number in the file, e.g. 10000.
+#   $n (Number) - how many statements the line counts, e.g. 10000.
+#   $rows (Number) - the rows they changed together, e.g. 10000.
+exec-script-quiet = { $n ->
+        [one] Statement { NUMBER($first, useGrouping: "false") } ran ({ $rows } rows affected), not listed.
+       *[other] Statements { NUMBER($first, useGrouping: "false") }–{ NUMBER($last, useGrouping: "false") } ran: { $n } statements, { $rows } rows affected, not listed one by one.
+    }

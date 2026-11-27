@@ -77,8 +77,8 @@ pub use binding::{DbNode, resolve};
 pub use envscope::{EnvScope, EnvSet, ScopeProblem, visible};
 pub use events::LibraryEvent;
 pub use fileio::{
-    Decoded, DiskStamp, FileMeta, LineEnding, ReadError, SaveError, SaveText, SizeTier,
-    TextEncoding,
+    Decoded, DiskStamp, FileMeta, LineEnding, ReadError, SaveError, SaveExpect, SaveText,
+    SizeTier, TextEncoding,
 };
 pub use names::{DatabaseName, LogicalDb, NameError};
 pub use pathsafe::{PathError, RelPath};

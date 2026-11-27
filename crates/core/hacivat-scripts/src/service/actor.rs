@@ -1854,6 +1854,11 @@ impl Actor {
         let mut due = Vec::new();
         for rel in changes.created {
             if lib.deleted.remove(&rel) && lib.remembered.contains_key(&rel) {
+                // ## demofix-1 (PO demo F4): an open file deleted and back is announced even
+                // when it is the same file (an undo of a move to the Trash keeps its bytes and
+                // time), so its tab leaves the "deleted on disk" state. Forgetting the stamp
+                // here makes `stamped` report it; it is learned again from what is on disk.
+                lib.remembered.insert(rel.clone(), None);
                 due.push(rel);
             }
         }

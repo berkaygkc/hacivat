@@ -420,6 +420,36 @@ pub fn save_echoing_landing(
     expect: Option<DiskStamp>,
     echo: &mut dyn FnMut(&RelPath, &DiskStamp),
 ) -> Result<DiskStamp, SaveError> {
+    let expect = expect.map_or(SaveExpect::Anything, SaveExpect::Stamp);
+    save_expecting(root, rel, env, text, expect, echo)
+}
+
+// ## demofix-1 (PO demo F4)
+/// What a save expects to find at its path (HV-SCRIPT-07 step 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveExpect {
+    /// Whatever is there: a missing file is created, an existing one replaced.
+    Anything,
+    /// The file at this stamp: another file is [`SaveError::ChangedOnDisk`], none
+    /// [`SaveError::DeletedOnDisk`].
+    Stamp(DiskStamp),
+    /// The tab's file was deleted ("Deleted on disk: Save writes the file again"), or it never
+    /// had one: nothing at the path is created (a no-replace publish, so a file that appears
+    /// meanwhile is not replaced); the tab's own file back (`last`, the stamp it knew) is saved
+    /// over as with [`SaveExpect::Stamp`]; any other file is [`SaveError::ChangedOnDisk`], so
+    /// the user is asked ("Overwrite?") and never loses a different file silently.
+    Recreate { last: Option<DiskStamp> },
+}
+
+/// [`save_echoing_landing`] with an explicit [`SaveExpect`].
+pub fn save_expecting(
+    root: &LibraryRoot,
+    rel: &RelPath,
+    env: Option<EnvTag>,
+    text: SaveText,
+    expect: SaveExpect,
+    echo: &mut dyn FnMut(&RelPath, &DiskStamp),
+) -> Result<DiskStamp, SaveError> {
     // fr2 I-fr1-2: a preview's meta travels with whatever text the tab builds; never saved.
     if text.meta.partial {
         return Err(SaveError::PreviewOnly);
@@ -433,15 +463,20 @@ pub fn save_echoing_landing(
     dir.sweep_stale_temps(&is_temp_name);
     match target {
         Target::Missing { dir, name } => {
-            if expect.is_some() {
+            if matches!(expect, SaveExpect::Stamp(_)) {
                 return Err(SaveError::DeletedOnDisk);
             }
             publish_new(&dir, &name, &bytes, echo)
         }
         Target::Existing { dir, name, lstat } => {
             let current = stamp_streaming(&dir, &name, &lstat)?;
-            if let Some(expected) = expect
-                && expected != current
+            let expected = match expect {
+                SaveExpect::Anything => None,
+                SaveExpect::Stamp(s) => Some(Some(s)),
+                SaveExpect::Recreate { last } => Some(last),
+            };
+            if let Some(expected) = expected
+                && expected != Some(current)
             {
                 return Err(SaveError::ChangedOnDisk(current));
             }
