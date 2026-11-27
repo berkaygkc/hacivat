@@ -102,6 +102,18 @@ pub(crate) fn prompt_open(cx: &App) -> bool {
         .is_some_and(|e| e.prompt.is_some())
 }
 
+// ## m4b-t14-tabs (named exception, R-M4b-39): the unsaved-changes prompt holds the same
+// one-prompt slot (`dialog`: once it is open; a window close answers it with Cancel).
+pub(crate) fn hold_prompt(dialog: Option<Entity<Dialog>>, cx: &mut App) {
+    cx.default_global::<ExecUi>().prompt = Some(OpenPrompt { dialog });
+}
+
+/// Frees the one-prompt slot the unsaved-changes prompt held.
+pub(crate) fn release_prompt(cx: &mut App) {
+    cx.default_global::<ExecUi>().prompt = None;
+}
+// ## m4b-t14-tabs
+
 /// The open prompt's dialog (tests read its role).
 pub fn open_prompt_dialog(cx: &App) -> Option<Entity<Dialog>> {
     cx.try_global::<ExecUi>()?.prompt.as_ref()?.dialog.clone()
@@ -123,6 +135,11 @@ pub fn tab_close_guard(tab: TabId, window: &mut Window, cx: &mut App) -> CloseDe
             CloseDecision::Defer
         }
         None => {
+            // ## m4b-t14-tabs (named exception, R-M4b-39): a dirty script tab asks about its
+            // unsaved edits after the transaction (none open here).
+            if let Some(decision) = crate::scripts::unsaved_prompt::close_guard(tab, window, cx) {
+                return decision;
+            }
             release_console(console, cx);
             CloseDecision::Proceed
         }
@@ -132,6 +149,10 @@ pub fn tab_close_guard(tab: TabId, window: &mut Window, cx: &mut App) -> CloseDe
 /// The `quit_guard` hook: asked for a quit, a window close and a restart
 /// (`crate::commands::request_restart`, which says so through `take_restart_intent`).
 pub fn quit_guard(cx: &mut App) -> CloseDecision {
+    // ## m3b-t21-confirm (named exception): a quit or a window close answers every open
+    // confirmation with Cancel and every confirm-in-transaction prompt with Roll back (Undo)
+    // first; nothing is run or kept by a close (R-M3-55, D-014).
+    crate::exec_ui::confirm::answer_open_prompts_safely(cx);
     let restart = crate::commands::take_restart_intent(cx);
     if prompt_open(cx) {
         // Any close while the prompt is open answers Cancel (NOTES surface 13).
@@ -139,6 +160,11 @@ pub fn quit_guard(cx: &mut App) -> CloseDecision {
         return CloseDecision::Defer;
     }
     let Some((console, tx)) = next_open_tx(cx) else {
+        // ## m4b-t14-tabs (named exception, R-M4b-39): every dirty script tab asks in turn,
+        // after the transactions.
+        if let Some(decision) = crate::scripts::unsaved_prompt::quit_guard(restart, cx) {
+            return decision;
+        }
         return CloseDecision::Proceed;
     };
     if workspace_window(cx).is_none() {
@@ -358,6 +384,11 @@ fn answered(console: ConsoleId, closing: Closing, answer: Answer, cx: &mut App) 
         }
         cx.update(|cx| match closing {
             Closing::Tab(tab) => {
+                // ## m4b-t14-tabs (named exception, R-M4b-39): the unsaved-changes prompt
+                // follows the transaction prompt; it closes the tab itself.
+                if crate::scripts::unsaved_prompt::close_after_tx(tab, cx) {
+                    return;
+                }
                 release_console(console, cx);
                 crate::exec_ui::in_workspace_window(cx, move |ws, _, cx| {
                     ws.update(cx, |ws, cx| ws.force_close_tab(tab, cx));

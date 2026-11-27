@@ -27,12 +27,16 @@
 //! quality as soon as the velocity is back under the threshold: one frame after the scroll
 //! slows.
 
+// ## m3b-t01b-seams: Task 40's AccessKit rows (`a11y_rows`) and Task 38's axis swap
+// (`transpose`), both called from `grid.rs` already.
+pub mod a11y_rows;
 mod autosize;
 mod grid;
 pub mod layers;
 mod pointer;
 pub mod scrollbar;
 pub mod text_cache;
+mod transpose;
 pub mod truncate;
 
 use hacivat_ui_core::gpui_surface::{Bounds, Pixels, SharedString};
@@ -44,6 +48,8 @@ pub use autosize::AUTOSIZE_MEASURES_PER_FRAME;
 pub(crate) use autosize::AutosizeState;
 pub(crate) use grid::GridElement;
 pub(crate) use pointer::PointerState;
+// ## m3c-t38: the Transposed view's source.
+pub use transpose::{TRANSPOSED_NAME_WIDTH, TRANSPOSED_ROW_WIDTH, TransposedSource};
 
 /// Above this many rows per frame the grid paints in fast-scroll mode (R-M3-12).
 pub const FAST_SCROLL_ROWS_PER_FRAME: f64 = 40.0;
@@ -143,18 +149,28 @@ pub struct Geometry {
     pub vtrack: Bounds<Pixels>,
     pub htrack: Option<Bounds<Pixels>>,
     pub row_h: f32,
-    /// Visible rows and columns (indices into the visible columns).
+    /// Visible rows and columns (indices into the visible columns). ## m3c-t35: `cols` are the
+    /// scrolling columns on screen; the frozen ones are `0..frozen`.
     pub rows: std::ops::Range<u64>,
     pub cols: std::ops::Range<usize>,
     pub scale: f32,
+    // ## m3c-t35
+    /// The frozen columns this frame shows (`ColumnLayout::frozen_shown`) and their width: the
+    /// frozen layer covers the body's (and the header's) first `frozen_w` px.
+    pub frozen: usize,
+    pub frozen_w: f32,
 }
 
 /// One cell a recorded frame painted (`test-support`).
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaintedCell {
+    /// The view row.
     pub row: u64,
     pub col: ColId,
+    // ## m3c-t35
+    /// The cell's left edge in window coordinates (a frozen column's never moves).
+    pub left: f32,
     /// The painted text, controls shown as their chips, before any ellipsis (empty for a
     /// skeleton bar).
     pub text: SharedString,
@@ -171,10 +187,11 @@ pub struct PaintedCell {
 
 #[cfg(feature = "test-support")]
 impl PaintedCell {
-    pub(crate) fn of(row: u64, col: ColId, s: &Shaped) -> Self {
+    pub(crate) fn of(row: u64, col: ColId, left: f32, s: &Shaped) -> Self {
         PaintedCell {
             row,
             col,
+            left,
             text: s.display.clone(),
             chips: s
                 .chips()
@@ -187,10 +204,11 @@ impl PaintedCell {
         }
     }
 
-    pub(crate) fn skeleton(row: u64, col: ColId) -> Self {
+    pub(crate) fn skeleton(row: u64, col: ColId, left: f32) -> Self {
         PaintedCell {
             row,
             col,
+            left,
             text: SharedString::default(),
             chips: Vec::new(),
             truncated: false,
@@ -212,14 +230,60 @@ pub struct PaintedHeader {
     pub degraded: bool,
 }
 
-/// A header whose name the last frame ellipsized: the grid shows the whole name in a tooltip
-/// over `bounds` (window coordinates).
+/// A header whose name the last frame ellipsized, or (## m3c-t35) a frozen column's header: the
+/// grid shows a tooltip over `bounds` (window coordinates) with the whole name when ellipsized,
+/// and "Frozen: …" when frozen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeaderTip {
     pub col: ColId,
     /// The column's whole name (catalog text).
     pub name: SharedString,
     pub bounds: Bounds<Pixels>,
+    // ## m3c-t35
+    /// The name was ellipsized.
+    pub ellipsized: bool,
+    /// The column is frozen.
+    pub frozen: bool,
+    // ## m3c-t36
+    /// The column's sort level (0: the first key), when it is sorted: its tooltip says so.
+    pub sort: Option<usize>,
+}
+
+// ## m3c-t36
+/// A sort indicator a recorded frame painted (`test-support`): the column, its level (0: the
+/// first key), the direction, the arrow's window x, and the level number when one was drawn.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaintedSortMark {
+    pub col: ColId,
+    pub level: usize,
+    pub desc: bool,
+    pub x: f32,
+    pub number: Option<SharedString>,
+}
+
+// ## m3c-t37
+/// A find mark a recorded frame painted (`test-support`): the view row and column, the
+/// outline's window x span, and whether it is the current match (filled).
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaintedFindMark {
+    pub row: u64,
+    pub col: ColId,
+    pub x0: f32,
+    pub x1: f32,
+    pub current: bool,
+}
+
+/// The rows the grid scrolls over for `count`: the exact total when known, the skeleton rows
+/// while the first rows are arriving, the loaded rows otherwise. (## m3c-t35: moved from
+/// `grid.rs`; `GridView::scroll_rows` gives a filter's kept rows instead.)
+pub(crate) fn scroll_rows(count: &crate::source::RowCount) -> u64 {
+    match count.exact_total {
+        Some(total) => total.max(count.loaded),
+        None if count.loaded == 0 && count.more => crate::view::SKELETON_ROWS,
+        None => count.loaded,
+    }
 }
 
 /// A visible column's paint geometry for one frame (reused buffer).
@@ -267,6 +331,16 @@ pub(crate) struct PaintState {
     pub recorded: Option<Vec<PaintedCell>>,
     #[cfg(feature = "test-support")]
     pub recorded_headers: Option<Vec<PaintedHeader>>,
+    // ## m3c-t36
+    #[cfg(feature = "test-support")]
+    pub recorded_sort_marks: Vec<PaintedSortMark>,
+    /// The unsorted tail's boundary line the last recorded frame drew (window y).
+    #[cfg(feature = "test-support")]
+    pub recorded_tail_y: Option<f32>,
+    // ## m3c-t37
+    /// The find marks the last frame painted.
+    #[cfg(feature = "test-support")]
+    pub recorded_find_marks: Vec<PaintedFindMark>,
 }
 
 impl PaintState {
@@ -288,6 +362,12 @@ impl PaintState {
             recorded: None,
             #[cfg(feature = "test-support")]
             recorded_headers: None,
+            #[cfg(feature = "test-support")]
+            recorded_sort_marks: Vec::new(),
+            #[cfg(feature = "test-support")]
+            recorded_tail_y: None,
+            #[cfg(feature = "test-support")]
+            recorded_find_marks: Vec::new(),
         }
     }
 
@@ -315,6 +395,26 @@ impl crate::view::GridView {
     #[cfg(feature = "test-support")]
     pub fn painted_headers(&self) -> &[PaintedHeader] {
         self.paint.recorded_headers.as_deref().unwrap_or(&[])
+    }
+
+    // ## m3c-t36
+    /// The sort indicators the last frame painted (`test-support`).
+    #[cfg(feature = "test-support")]
+    pub fn painted_sort_marks(&self) -> &[PaintedSortMark] {
+        &self.paint.recorded_sort_marks
+    }
+
+    /// The window y of the unsorted tail's boundary line the last frame drew (`test-support`).
+    #[cfg(feature = "test-support")]
+    pub fn painted_tail_y(&self) -> Option<f32> {
+        self.paint.recorded_tail_y
+    }
+
+    // ## m3c-t37
+    /// The find marks the last frame painted (`test-support`).
+    #[cfg(feature = "test-support")]
+    pub fn painted_find_marks(&self) -> &[PaintedFindMark] {
+        &self.paint.recorded_find_marks
     }
 
     /// The hovered body cell (view row, visible column index) and whether a pointer drag is in

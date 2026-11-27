@@ -24,15 +24,26 @@
 //!   [`raw_text_in`] is the raw channel with a `timestamptz` in the display zone, so a copied
 //!   instant reads as the cell shows it.
 
+// ## m3b-t01c-core-seams (P-M3b-17): `Purpose::{Tooltip, A11y}` (Tasks 38, 40).
+mod a11y_text;
+// ## m3c-t36: the local sort's comparisons (HV-GRID-07, R-M3-70).
+pub mod compare;
 mod display;
 mod idlike;
 mod raw;
+mod tooltip;
 
 pub use display::format_cell;
+// ## m3b-t07-types (ledger 246)
 #[doc(hidden)]
 pub use display::formatter_builds;
+#[doc(hidden)]
+pub use display::mysql_charset_width;
+pub use display::type_label;
 pub use idlike::id_like;
 pub use raw::{RawText, raw_text, raw_text_in};
+// ## m3c-t38: the tooltip's cap, a fraction of the cell's grapheme cap.
+pub use tooltip::TOOLTIP_FRACTION;
 
 use hacivat_proto::DbmsKind;
 

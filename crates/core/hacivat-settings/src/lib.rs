@@ -2,6 +2,8 @@
 
 pub mod fsio;
 pub mod paths;
+// ## m4-t01c-core: the only reader and writer of `profiles/<uuid>.toml`.
+pub mod profile_data;
 pub mod schema;
 pub mod store;
 pub mod workspace_state;

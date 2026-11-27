@@ -24,18 +24,21 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common::matrix::*;
+// ## m3b-t26-prod-unlock
+use common::t28::{Con, Port, Spec};
 use hacivat_driver::{Protocol, TxStatus};
-use hacivat_exec::{LogMsg, UnitStatus, UnitSummary, console_ux};
+use hacivat_exec::classify_pool::ClassifyPool;
+use hacivat_exec::{ConfirmPort, LogMsg, UnitStatus, UnitSummary, console_ux};
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_results::{
     CloseReason, Completeness, FetchPolicy, MemoryBudget, ResultId, ResultStore, ResultWriter,
 };
 use hacivat_session::session::{
-    CancelOutcome, ClosePolicy, ErrorPolicy, ObserverRef, RowsOutcome, RunEvent, RunId,
-    RunObserver, RunSpec, RunUnit, SessionState, TxOwner, UnitId,
+    CancelOutcome, ClosePolicy, CommitAnswer, ErrorPolicy, ObserverRef, RowsOutcome, RunEvent,
+    RunId, RunObserver, RunSpec, RunUnit, SessionState, TxOwner, UnitId,
 };
 use hacivat_values::{
-    DateVal, DecimalVal, LogicalType, OpaqueVal, ResultSchema, SpecialVal, TimeVal, TsVal, Value,
+    DateVal, DecimalVal, LogicalType, ResultSchema, SpecialVal, TimeVal, TsVal, Value,
 };
 
 /// The cancel test's budget is measured on a quiet matrix: it takes this for writing, every
@@ -252,6 +255,25 @@ async fn server_view(a: &mut Side, c: &Console, backend: Option<&str>) -> Server
     }
 }
 
+// ## m3b-ci (controller): the server's own view lags the client by a moment (MariaDB's
+// processlist can still show the thread as not sleeping right after the error reply reached
+// the client; CI run 44031973211). A condition wait, not a sleep: poll until the view is
+// clear, at most 5 s, and answer the last view.
+async fn server_view_settled(a: &mut Side, c: &Console, backend: Option<&str>) -> ServerView {
+    let clear = ServerView {
+        idle_in_tx: 0,
+        running: 0,
+    };
+    let deadline = tokio::time::Instant::now() + secs(5);
+    loop {
+        let view = server_view(a, c, backend).await;
+        if view == clear || tokio::time::Instant::now() >= deadline {
+            return view;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// After a cursor ended: the session is idle with no cursor and no transaction of anyone's,
 /// the server agrees, the connection is the same one, and the next statement runs.
 async fn assert_freed(c: &Console, a: &mut Side, backend: Option<&str>, what: &str) {
@@ -267,7 +289,7 @@ async fn assert_freed(c: &Console, a: &mut Side, backend: Option<&str>, what: &s
     let snap = c.snap();
     assert_eq!(snap.tx.status, TxStatus::Idle, "{id} {what}: {:?}", snap.tx);
     assert_eq!(
-        server_view(a, c, backend).await,
+        server_view_settled(a, c, backend).await,
         ServerView {
             idle_in_tx: 0,
             running: 0
@@ -317,13 +339,6 @@ fn text(s: &str) -> Value {
 
 fn bytes(b: &[u8]) -> Value {
     Value::Bytes(b.into())
-}
-
-fn opaque(type_name: &str, text: &str) -> Value {
-    Value::Opaque(Arc::new(OpaqueVal {
-        type_name: type_name.into(),
-        text: text.into(),
-    }))
 }
 
 fn civil(y: i32, m: u8, d: u8) -> DateVal {
@@ -449,8 +464,8 @@ fn golden_rows(line: &Line) -> Vec<Vec<Value>> {
                         micros: ((4 * 60 + 5) * 60 + 6) * 1_000_000 + 7,
                     },
                     text("happy"),
-                    opaque("_int4", "{1,NULL,3}"),
-                    opaque("inet", "192.168.0.1/24"),
+                    text("{1,NULL,3}"),
+                    text("192.168.0.1/24"),
                 ],
                 vec![
                     Value::Int(2),
@@ -473,8 +488,8 @@ fn golden_rows(line: &Line) -> Vec<Vec<Value>> {
                         micros: 0,
                     },
                     text("sad"),
-                    opaque("_int4", "{}"),
-                    opaque("inet", "::1"),
+                    text("{}"),
+                    text("::1"),
                 ],
                 std::iter::once(Value::Int(3))
                     .chain((0..17).map(|_| Value::Null))
@@ -529,7 +544,7 @@ fn golden_rows(line: &Line) -> Vec<Vec<Value>> {
                     date(2024, 2, 29),
                     ts(leap_day + 13 * 3_600 + 14 * 60 + 15, 123_456_000),
                     Value::Time(TimeVal::from_micros(13 * H + 14 * 60_000_000 + 15_250_000)),
-                    opaque("bit", "10110"),
+                    text("10110"),
                 ],
                 std::iter::once(Value::Int(2))
                     .chain((0..13).map(|_| Value::Null))
@@ -553,7 +568,7 @@ fn golden_rows(line: &Line) -> Vec<Vec<Value>> {
                         days: 0,
                         micros: -(H + 30 * 60_000_000 + 500_000),
                     },
-                    opaque("bit", "00000"),
+                    text("00000"),
                 ],
             ]
         }
@@ -608,12 +623,8 @@ fn golden_types(line: &Line) -> Vec<(&'static str, LogicalType)> {
                     tz: false,
                 },
             ),
-            (
-                "bt",
-                LogicalType::Opaque {
-                    type_name: "bit".into(),
-                },
-            ),
+            // m3b-t07 (R-M3-67): a bit string.
+            ("bt", LogicalType::BitString { len: Some(5) }),
         ],
     }
 }
@@ -1543,7 +1554,7 @@ async fn read_only_bypass_rows_blocked_through_run_without_classifier() {
             // Nothing is held after the row (review M3): the console's backend is idle out of
             // any transaction, and the fixture can be locked at once from the side channel.
             let backend = ro_mysql_backend(&c).await;
-            let view = server_view(&mut a, &c, backend.as_deref()).await;
+            let view = server_view_settled(&mut a, &c, backend.as_deref()).await;
             if view.idle_in_tx != 0 || view.running != 0 {
                 failures.push(format!(
                     "{id} {row} `{sql}`: the server still holds {view:?}"
@@ -1570,7 +1581,11 @@ async fn read_only_bypass_rows_blocked_through_run_without_classifier() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "docker"]
-async fn production_console_rejects_insert_on_every_engine() {
+// ## m3b-t26-prod-unlock: was `production_console_rejects_insert_on_every_engine`. The
+// production console is read-write now (R-M3-6 REVISED ends); what refused the writes moves to
+// the gate's confirmations, proved with the same strength: every write asks before it is kept,
+// an unanswered confirmation sends nothing, an Undo keeps nothing, and nothing changes.
+async fn production_console_confirms_every_write_on_every_engine() {
     if !docker_enabled() {
         return;
     }
@@ -1587,36 +1602,80 @@ async fn production_console_rejects_insert_on_every_engine() {
 
         // The control: the same INSERT writes on a development console.
         let dev = Console::dev(line).await;
-        let ux = console_ux(Some(EnvTag::Dev), true, &dev.snap(), None, None);
-        assert!(!ux.read_only && !ux.forced_read_only, "{id}: {ux:?}");
+        let ux = console_ux(Some(EnvTag::Dev), &dev.snap(), None, None);
+        assert!(!ux.read_only, "{id}: {ux:?}");
         let ran = dev.ok(&insert).await;
         assert_eq!(rows_of(ran.unit(0)), Some(RowsOutcome::Affected(1)), "{id}");
         assert_eq!(a.count(&count).await, 1, "{id}: the control wrote");
         dev.shutdown().await;
 
-        // A production console under the app's policy: read-only, and every write refused.
+        // A production console under the app's configuration: read-write in Manual mode, and
+        // every write goes through the gate (`common::t28`).
         let prod = Console::open(
             line,
             Opts {
                 env: Some(EnvTag::Production),
-                production_policy: true,
                 ..Opts::default()
             },
         )
         .await;
-        let ux = console_ux(Some(EnvTag::Production), true, &prod.snap(), None, None);
-        assert!(
-            ux.production && ux.read_only && ux.forced_read_only,
-            "{id}: {ux:?}"
-        );
+        let ux = console_ux(Some(EnvTag::Production), &prod.snap(), None, None);
+        assert!(ux.production && !ux.read_only, "{id}: {ux:?}");
+        let pool = ClassifyPool::new(2);
+        let gated = Con::open(line, Spec::production(), &pool).await;
         let mut outcomes = Vec::new();
-        for sql in [
-            insert.clone(),
-            format!("DELETE FROM {t}"),
-            format!("UPDATE {t} SET a = 2"),
+        // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): the MySQL family asks
+        // before it sends a DML; PostgreSQL and SQLite run it in a transaction, then ask.
+        let dml = if line.is_mysql_family() {
+            "confirm"
+        } else {
+            "tx-confirm"
+        };
+        for (sql, want) in [
+            (insert.clone(), dml),
+            (format!("DELETE FROM {t}"), "confirm+type"),
+            (format!("UPDATE {t} SET a = 2"), "confirm+type"),
         ] {
-            let ran = prod.run(&sql).await;
-            assert_eq!(ran.names(), ["Failed"], "{id} `{sql}`");
+            let planned = gated.plan(&sql, &[]).await;
+            assert_eq!(planned.shapes(), [want], "{id} `{sql}`: asked first");
+            // ## m3b-t26-prod-unlock (fix round 1, A-M6): the name asked is the table's.
+            if want == "confirm+type" {
+                let typed = match &planned.plan.items[0].decision {
+                    hacivat_exec::GateDecision::Confirm {
+                        type_to_confirm: Some(n),
+                        ..
+                    } => n.to_string(),
+                    other => panic!("{id} `{sql}`: {other:?}"),
+                };
+                assert_eq!(typed, t, "{id} `{sql}`: the typed name");
+            }
+            let ran = if want == "tx-confirm" {
+                // Run in the user's transaction, then asked: Undo keeps nothing.
+                let port = Port::new();
+                let run = gated.send(
+                    &planned,
+                    ErrorPolicy::StopOnError,
+                    Some(port.clone() as Arc<dyn ConfirmPort>),
+                );
+                port.question(id, 1).await;
+                assert_eq!(
+                    a.count(&count).await,
+                    1,
+                    "{id} `{sql}`: invisible while asked"
+                );
+                port.answer(CommitAnswer::RollBack);
+                ended(run).await
+            } else {
+                // A confirmation nobody answered: the service sends nothing.
+                let ran = ended(gated.send(&planned, ErrorPolicy::StopOnError, None)).await;
+                assert_eq!(
+                    ran.names(),
+                    ["Skipped"],
+                    "{id} `{sql}`: not sent unanswered"
+                );
+                ran
+            };
+            gated.settled().await;
             assert_eq!(a.count(&count).await, 1, "{id} `{sql}`: nothing changed");
             assert_eq!(
                 a.count(&format!("SELECT count(*) FROM {t} WHERE a = 1"))
@@ -1624,18 +1683,16 @@ async fn production_console_rejects_insert_on_every_engine() {
                 1,
                 "{id} `{sql}`"
             );
-            outcomes.push(ran.outcome());
+            outcomes.push(format!("{want}:{}", ran.outcome()));
         }
-        // ## m3a-f5-demo (DEMO-7): refused by the console, nothing sent (`input`), on
-        // every engine; not merely rejected by the server.
-        assert!(outcomes.iter().all(|o| o == INPUT), "{id}: {outcomes:?}");
+        gated.shutdown().await;
         // Reads still run on production.
         let ran = prod.ok(&count).await;
         assert_eq!(int(&cell(ran.tab(0), 0, 0)), 1, "{id}");
         record.add(
             line,
             prod.version.as_ref(),
-            "production INSERT/DELETE/UPDATE",
+            "production INSERT/DELETE/UPDATE (gated)",
             &outcomes.join(","),
         );
         prod.shutdown().await;
@@ -2032,11 +2089,10 @@ async fn dml_and_ddl_report_update_counts_on_a_dev_console() {
                 other => other.fluent_id().into(),
             })
             .collect();
-        let created = if line.is_pg() {
-            "completed"
-        } else {
-            "affected 0"
-        };
+        // ## m3b-t16-run-service (named exception; PO, ledger 535): the log says "Completed"
+        // for a DDL statement on every engine, whatever count the server gave (the unit's
+        // status above keeps it).
+        let created = "completed";
         assert_eq!(
             lines_logged,
             [
@@ -2089,19 +2145,24 @@ async fn dml_and_ddl_report_update_counts_on_a_dev_console() {
             units: units
                 .iter()
                 .enumerate()
-                .map(|(i, u)| RunUnit {
-                    id: UnitId {
-                        run,
-                        ordinal: u32::try_from(i).unwrap(),
-                    },
-                    sql: u.text.clone(),
-                    protocol: Protocol::Extended,
-                    suspendable: u.suspendable,
+                .map(|(i, u)| {
+                    RunUnit::plain(
+                        UnitId {
+                            run,
+                            ordinal: u32::try_from(i).unwrap(),
+                        },
+                        u.text.clone(),
+                        Protocol::Extended,
+                        u.suspendable,
+                    )
                 })
                 .collect(),
             policy: ErrorPolicy::StopOnError,
             fetch: FetchPolicy::default(),
             observer: ObserverRef(tags.clone()),
+            // ## m3b-t01c-core-seams
+            confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
+            context_generation: None,
         };
         c.s.run(spec)
             .reply

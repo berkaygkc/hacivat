@@ -8,8 +8,9 @@ use std::ops::Range;
 
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Element, ElementId, Entity,
-    GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement,
-    Pixels, Render, ScrollEvent, Style, Styled, Window, div, point, px, relative, size,
+    EventEmitter, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
+    ParentElement, Pixels, Render, ScrollEvent, Style, Styled, Window, div, point, px, relative,
+    size,
 };
 
 use crate::model::ScrollState;
@@ -29,7 +30,21 @@ pub struct VirtualList<R: RowRenderer> {
     row_height: f32,
     scroll: ScrollState,
     visible: Range<u64>,
+    // ## demofix-1 (PO demo F8)
+    /// Whether the last frame was paused ([`ScrollState::paused`]).
+    paused: bool,
 }
+
+// ## demofix-1 (PO demo F8)
+/// What a [`VirtualList`] says to its host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListEvent {
+    /// The view stopped following new rows (the user scrolled away from the bottom: `true`) or
+    /// follows them again (`false`). The host shows "Scroll to end" prominently while paused.
+    Paused(bool),
+}
+
+impl<R: RowRenderer> EventEmitter<ListEvent> for VirtualList<R> {}
 
 impl<R: RowRenderer> std::fmt::Debug for VirtualList<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -49,7 +64,24 @@ impl<R: RowRenderer> VirtualList<R> {
             row_height,
             scroll: ScrollState::new(row_height),
             visible: 0..0,
+            paused: false,
         }
+    }
+
+    // ## demofix-1 (PO demo F8)
+    /// `delta` rows were inserted (positive) or removed (negative) before the first row (a
+    /// capped log dropped its oldest lines): a paused view stays on its rows, a following one
+    /// at the bottom ([`ScrollState::on_rows_shifted`]).
+    pub fn shift_rows(&mut self, delta: i64, cx: &mut Context<Self>) {
+        if delta != 0 {
+            self.scroll.on_rows_shifted(delta);
+            cx.notify();
+        }
+    }
+
+    /// The view does not follow new rows: the user scrolled away from the bottom.
+    pub fn paused(&self) -> bool {
+        self.paused
     }
 
     pub fn rows(&self) -> &R {
@@ -153,12 +185,22 @@ impl<R: RowRenderer> Element for ListElement<R> {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<AnyElement> {
-        let (rows, row_h) = self.view.update(cx, |list, _| {
+        // ## demofix-1 fix round 1 (m8): the list scrolls, so a row its viewport cuts at the top
+        // or bottom edge is scrolled, not clipped (the frame checks; as the tree does).
+        let mask = window.content_mask().bounds.intersect(&bounds);
+        hacivat_ui::text::TextRegistry::note_scroll_viewport(cx, mask);
+        let (rows, row_h) = self.view.update(cx, |list, cx| {
             let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
             list.scroll.set_viewport(w, h);
             list.scroll.on_row_count(list.rows.len());
             list.scroll.apply_pending();
             list.visible = list.scroll.visible_rows();
+            // ## demofix-1 (PO demo F8): the host hears when following stops or resumes.
+            let paused = list.scroll.paused();
+            if paused != list.paused {
+                list.paused = paused;
+                cx.emit(ListEvent::Paused(paused));
+            }
             (list.visible.clone(), list.row_height)
         });
         let space = size(

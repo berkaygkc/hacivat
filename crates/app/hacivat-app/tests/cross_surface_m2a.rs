@@ -385,6 +385,7 @@ fn the_leak_check_finds_english_text() {
         // ## m2b-t24-shots (fix round 1): the registry's two new facts.
         visible: true,
         outside_card: false,
+        folded: false,
     };
     let leaks = english_leaks(&[
         label("New connection"),
@@ -406,12 +407,9 @@ fn the_status_bar_and_the_sheet_use_the_shared_environment_words(cx: &mut TestAp
         matches!(live(vcx, "orders-prod"), LiveState::Connected(_))
     });
     let status = status_bar_text(vcx);
-    // ## m3a-t01b-seams (P21): a production profile's session is read-only since M3a
-    // (`connections/boot.rs`, `production_read_only`); the fake enforces nothing, so the guard.
-    assert!(
-        status.contains("üretim · salt okunur (korumalı)"),
-        "{status}"
-    );
+    // ## m3a-t01b-seams (P21): a production profile's session was read-only in M3a.
+    // ## m3b-t26-prod-unlock: read-write again, as in M2b (its writes are confirmed by the gate).
+    assert!(status.contains("üretim · okuma-yazma"), "{status}");
 }
 
 /// A keyring whose deletes fail (a locked keychain).

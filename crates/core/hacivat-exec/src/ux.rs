@@ -1,9 +1,10 @@
 //! Console UX state (Task 23): the pure table the toolbar, the status bar and the capsule read
-//! (production, forced read-only, the transaction badge, the cursor, cancel, waiting).
+//! (production, read-only, the transaction badge, the cursor, cancel, waiting).
 //!
 //! The table, row by row:
-//! - `production`: the profile is tagged production; `read_only` is the session's;
-//!   `forced_read_only`: read-only because the production policy forces it (R-M3-6, R-M3-29);
+//! - `production`: the profile is tagged production; `read_only` is the session's (## m3b-t26-
+//!   prod-unlock: `forced_read_only` and the production policy are gone, R-M3-6 REVISED ends:
+//!   a production session is read-only only when its profile is);
 //! - `tx`: only the user's transaction is a badge (`TxOwner::User`, R-M3-27): open is
 //!   `UserOpen`, failed is `Failed` (R-M3-16 amended); Hacivat's own transaction around a
 //!   PostgreSQL cursor is `CursorSnapshot`; the read-only guard's, or one nobody claimed, is
@@ -46,8 +47,6 @@ pub struct ConsoleUx {
     pub env: Option<EnvTag>,
     pub production: bool,
     pub read_only: bool,
-    /// Read-only because the profile is production (R-M3-6), not because it says so.
-    pub forced_read_only: bool,
     pub access: AccessLabel,
     pub tx: TxBadge,
     pub cursor: Option<CursorBadge>,
@@ -57,11 +56,9 @@ pub struct ConsoleUx {
     pub waiting_for_connection: Option<(u8, u8)>,
 }
 
-/// The console UX for a session. `forced` is the production read-only policy
-/// (`ConnectionManager::policy()`); `run` is the console's latest run.
+/// The console UX for a session; `run` is the console's latest run.
 pub fn console_ux(
     env: Option<EnvTag>,
-    forced: bool,
     snap: &SessionSnapshot,
     run: Option<&RunStatus>,
     waiting: Option<(u8, u8)>,
@@ -71,7 +68,6 @@ pub fn console_ux(
         env,
         production,
         read_only: snap.read_only,
-        forced_read_only: forced && production && snap.read_only,
         access: snap.access,
         tx: tx_badge(snap),
         cursor: snap.cursor,

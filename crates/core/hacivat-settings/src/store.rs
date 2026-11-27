@@ -9,9 +9,13 @@ use unic_langid::LanguageIdentifier;
 
 use crate::fsio;
 use crate::schema::{
-    CaretBlinkPref, EditorSettings, KeymapPreset, LanguagePref, SETTINGS_VERSION, Settings,
-    TabSize, TextRenderingPref, ThemePref, TimeZonePref,
+    CaretBlinkPref, EditorSettings, FindTolerancePref, KeymapPreset, LanguagePref,
+    SETTINGS_VERSION, Settings, TabSize, TextRenderingPref, ThemePref, TimeZonePref,
 };
+// ## m3b-t01c-core-seams
+use crate::schema::{ExecSettings, HistorySettings, ValueLimit};
+// ## m4-t01c-core
+use crate::schema::{CacheMb, MetadataSettings, RefreshAfterDdl, ValidateInterval};
 
 /// A problem found while loading; Task 13 shows each code as a toast.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,8 +89,79 @@ pub fn load(path: &Path) -> LoadOutcome {
             d,
         );
         s.editor.caret_blink = read_key_or(ed, "editor", "caret_blink", def.caret_blink, d);
+        // ## m3c-t33-find
+        s.editor.find_turkish_tolerant = read_key_or(
+            ed,
+            "editor",
+            "find_turkish_tolerant",
+            def.find_turkish_tolerant,
+            d,
+        );
+    }
+    // ## m3b-t01c-core-seams (P-M3b-9): a missing table means its defaults.
+    if let Some(ex) = section(root, "exec", d) {
+        let def = ExecSettings::default();
+        s.exec.confirm_unsafe_where = read_key_or(
+            ex,
+            "exec",
+            "confirm_unsafe_where",
+            def.confirm_unsafe_where,
+            d,
+        );
+        s.exec.error_policy_ask =
+            read_key_or(ex, "exec", "error_policy_ask", def.error_policy_ask, d);
+    }
+    if let Some(rs) = section(root, "results", d) {
+        s.results.max_value_bytes = read_value_limit(rs, d);
+    }
+    if let Some(hi) = section(root, "history", d) {
+        let def = HistorySettings::default();
+        s.history.enabled = read_key_or(hi, "history", "enabled", def.enabled, d);
+    }
+    if let Some(gr) = section(root, "grid", d) {
+        s.grid.raw_display = read_key(gr, "grid", "raw_display", d);
+    }
+    // ## m4-t01c-core: a missing table means its defaults; a bad value is its default, with a
+    // diagnostic.
+    if let Some(md) = section(root, "metadata", d) {
+        let def = MetadataSettings::default();
+        s.metadata.refresh_after_ddl = read_key(md, "metadata", "refresh_after_ddl", d);
+        s.metadata.validate_interval_min = read_key(md, "metadata", "validate_interval_min", d);
+        s.metadata.cache_mb_per_profile = read_key_or(
+            md,
+            "metadata",
+            "cache_mb_per_profile",
+            def.cache_mb_per_profile,
+            d,
+        );
+        s.metadata.cache_mb_total =
+            read_key_or(md, "metadata", "cache_mb_total", def.cache_mb_total, d);
     }
     out
+}
+
+// ## m3b-t01c-core-seams (P-M3b-9)
+/// `results.max_value_bytes`: an integer clamped to `ValueLimit`'s range, with a diagnostic
+/// when it was out of it (the value still counts, at the nearest bound); anything else is the
+/// default, with a diagnostic.
+fn read_value_limit(table: &dyn TableLike, diags: &mut Vec<SettingsDiag>) -> ValueLimit {
+    const KEY: &str = "results.max_value_bytes";
+    match table.get("max_value_bytes") {
+        None => ValueLimit::default(),
+        Some(item) => match item.as_integer() {
+            Some(n) => {
+                let limit = ValueLimit::clamped(n);
+                if i64::from(limit.get()) != n {
+                    diags.push(diag("settings-invalid-value", KEY));
+                }
+                limit
+            }
+            None => {
+                diags.push(diag("settings-invalid-value", KEY));
+                ValueLimit::default()
+            }
+        },
+    }
 }
 
 /// Merges `new` into the file at `path` with `toml_edit`: only keys whose value changed are
@@ -133,6 +208,75 @@ pub fn save_changes(path: &Path, new: &Settings) -> io::Result<()> {
         "caret_blink",
         &ed.caret_blink,
         &def.caret_blink,
+    );
+    // ## m3c-t33-find
+    write_key_or(
+        &mut doc,
+        "editor",
+        "find_turkish_tolerant",
+        &ed.find_turkish_tolerant,
+        &def.find_turkish_tolerant,
+    );
+    // ## m3b-t01c-core-seams (P-M3b-9): each key written only when it changed; a key at its
+    // default is never added.
+    let def = ExecSettings::default();
+    write_key_or(
+        &mut doc,
+        "exec",
+        "confirm_unsafe_where",
+        &new.exec.confirm_unsafe_where,
+        &def.confirm_unsafe_where,
+    );
+    write_key_or(
+        &mut doc,
+        "exec",
+        "error_policy_ask",
+        &new.exec.error_policy_ask,
+        &def.error_policy_ask,
+    );
+    write_key(
+        &mut doc,
+        "results",
+        "max_value_bytes",
+        &new.results.max_value_bytes,
+    );
+    write_key_or(
+        &mut doc,
+        "history",
+        "enabled",
+        &new.history.enabled,
+        &HistorySettings::default().enabled,
+    );
+    write_key(&mut doc, "grid", "raw_display", &new.grid.raw_display);
+    // ## m4-t01c-core: each key written only when it changed; a key at its default is never
+    // added.
+    let def = MetadataSettings::default();
+    let md = &new.metadata;
+    write_key(
+        &mut doc,
+        "metadata",
+        "refresh_after_ddl",
+        &md.refresh_after_ddl,
+    );
+    write_key(
+        &mut doc,
+        "metadata",
+        "validate_interval_min",
+        &md.validate_interval_min,
+    );
+    write_key_or(
+        &mut doc,
+        "metadata",
+        "cache_mb_per_profile",
+        &md.cache_mb_per_profile,
+        &def.cache_mb_per_profile,
+    );
+    write_key_or(
+        &mut doc,
+        "metadata",
+        "cache_mb_total",
+        &md.cache_mb_total,
+        &def.cache_mb_total,
     );
     fsio::atomic_write(path, doc.to_string().as_bytes())
 }
@@ -361,6 +505,26 @@ impl Pref for bool {
     }
 }
 
+// ## m3b-t01c-core-seams
+/// `results.max_value_bytes`: a TOML integer in `ValueLimit`'s range (loading clamps one out
+/// of it, `read_value_limit`).
+impl Pref for ValueLimit {
+    fn parse(text: &str) -> Option<Self> {
+        text.parse::<u32>().ok().and_then(ValueLimit::new)
+    }
+    fn as_text(&self) -> String {
+        self.get().to_string()
+    }
+    fn from_item(item: &Item) -> Option<Self> {
+        item.as_integer()
+            .and_then(|v| u32::try_from(v).ok())
+            .and_then(ValueLimit::new)
+    }
+    fn to_value(&self) -> Value {
+        Value::from(i64::from(self.get()))
+    }
+}
+
 impl Pref for CaretBlinkPref {
     fn parse(text: &str) -> Option<Self> {
         match text {
@@ -378,14 +542,115 @@ impl Pref for CaretBlinkPref {
     }
 }
 
+// ## m3c-t33-find
+/// `editor.find_turkish_tolerant`: `"auto"`, `"on"` or `"off"`.
+impl Pref for FindTolerancePref {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(Self::Auto),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+    fn as_text(&self) -> String {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+        .to_owned()
+    }
+}
+
+// ## m4-t01c-core
+/// `metadata.refresh_after_ddl`: `"always"`, `"ask"` or `"never"`.
+impl Pref for RefreshAfterDdl {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "always" => Some(Self::Always),
+            "ask" => Some(Self::Ask),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+    fn as_text(&self) -> String {
+        match self {
+            Self::Always => "always",
+            Self::Ask => "ask",
+            Self::Never => "never",
+        }
+        .to_owned()
+    }
+}
+
+/// `metadata.validate_interval_min`: the string `"auto"` or a TOML integer `0`, `5`, `10`,
+/// `30`.
+impl Pref for ValidateInterval {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+    fn as_text(&self) -> String {
+        match self {
+            Self::Auto => "auto".to_owned(),
+            Self::Off => "0".to_owned(),
+            Self::Minutes(m) => m.get().to_string(),
+        }
+    }
+    fn from_item(item: &Item) -> Option<Self> {
+        match item.as_integer() {
+            Some(n) => ValidateInterval::from_minutes(n),
+            None => item.as_str().and_then(Self::parse),
+        }
+    }
+    fn to_value(&self) -> Value {
+        match self {
+            Self::Auto => Value::from("auto"),
+            Self::Off => Value::from(0_i64),
+            Self::Minutes(m) => Value::from(i64::from(m.get())),
+        }
+    }
+}
+
+/// `metadata.cache_mb_*`: a TOML integer in `CacheMb`'s range.
+impl Pref for CacheMb {
+    fn parse(text: &str) -> Option<Self> {
+        text.parse::<u32>().ok().and_then(CacheMb::new)
+    }
+    fn as_text(&self) -> String {
+        self.get().to_string()
+    }
+    fn from_item(item: &Item) -> Option<Self> {
+        item.as_integer()
+            .and_then(|v| u32::try_from(v).ok())
+            .and_then(CacheMb::new)
+    }
+    fn to_value(&self) -> Value {
+        Value::from(i64::from(self.get()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::{LanguagePref, ThemePref};
     use crate::{LocalPaths, workspace_state};
 
+    thread_local! {
+        /// Keeps each fixture's directory until the test thread ends, then removes it.
+        static DIRS: std::cell::RefCell<Vec<tempfile::TempDir>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A fresh directory that lives until the test thread ends.
     fn tmp() -> PathBuf {
-        tempfile::tempdir().unwrap().keep()
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        DIRS.with(|d| d.borrow_mut().push(dir));
+        path
     }
     fn write_tmp_named(name: &str, content: &str) -> PathBuf {
         let p = tmp().join(name);
@@ -615,5 +880,161 @@ mod tests {
         );
         assert!(!t.contains("copy_line_without_selection"), "{t}");
         assert_eq!(load(&p).settings.editor, s.editor);
+    }
+
+    // ## m3c-t33-find
+    #[test]
+    fn find_tolerance_round_trips_and_auto_writes_nothing() {
+        let p = write_tmp("[editor]\nfind_turkish_tolerant = \"sometimes\"\n");
+        let o = load(&p);
+        assert_eq!(
+            o.settings.editor.find_turkish_tolerant,
+            FindTolerancePref::Auto
+        );
+        assert_eq!(o.diags.len(), 1, "{:?}", o.diags);
+        let p = write_tmp("[ui]\ntheme = \"light\"\n");
+        let mut s = load(&p).settings;
+        save_changes(&p, &s).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("find_"));
+        s.editor.find_turkish_tolerant = FindTolerancePref::Off;
+        save_changes(&p, &s).unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        assert!(t.contains("find_turkish_tolerant = \"off\""), "{t}");
+        assert_eq!(
+            load(&p).settings.editor.find_turkish_tolerant,
+            FindTolerancePref::Off
+        );
+    }
+
+    // ## m3b-t01c-core-seams (P-M3b-9)
+
+    /// A settings file as an M3a build writes it.
+    const M3A_SETTINGS_TEXT: &str = "version = 1\n[ui]\ntheme = \"light\"\nlanguage = \"tr\"\n[keymap]\npreset = \"datagrip\"\n[editor]\ntab_size = 2\n";
+
+    #[test]
+    fn m3a_settings_file_loads_with_new_defaults_and_no_diagnostic() {
+        let o = load(&write_tmp(M3A_SETTINGS_TEXT));
+        assert!(o.diags.is_empty(), "{:?}", o.diags);
+        assert!(o.settings.exec.confirm_unsafe_where);
+        assert!(o.settings.exec.error_policy_ask);
+        assert_eq!(o.settings.results.max_value_bytes.get(), 1 << 20);
+        assert!(o.settings.history.enabled);
+        assert!(!o.settings.grid.raw_display);
+        assert_eq!(o.settings.ui.theme, ThemePref::Light);
+    }
+
+    #[test]
+    fn value_limit_clamps_with_a_diagnostic() {
+        let o = load(&write_tmp("[results]\nmax_value_bytes = 1\n"));
+        assert_eq!(o.settings.results.max_value_bytes.get(), 65_536);
+        assert_eq!(o.diags.len(), 1);
+        assert_eq!(o.diags[0].key, "results.max_value_bytes");
+        let o = load(&write_tmp("[results]\nmax_value_bytes = 1000000000000\n"));
+        assert_eq!(o.settings.results.max_value_bytes.get(), 67_108_864);
+        assert_eq!(o.diags.len(), 1);
+        let o = load(&write_tmp("[results]\nmax_value_bytes = \"big\"\n"));
+        assert_eq!(o.settings.results.max_value_bytes.get(), 1 << 20);
+        assert_eq!(o.diags.len(), 1);
+        let o = load(&write_tmp("[results]\nmax_value_bytes = 2097152\n"));
+        assert_eq!(o.settings.results.max_value_bytes.get(), 2 << 20);
+        assert!(o.diags.is_empty());
+    }
+
+    #[test]
+    fn new_tables_round_trip_through_save() {
+        let p = write_tmp(M3A_SETTINGS_TEXT);
+        let mut s = load(&p).settings;
+        // Defaults write nothing: an M3a file stays as it was.
+        save_changes(&p, &s).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), M3A_SETTINGS_TEXT);
+        s.exec.confirm_unsafe_where = false;
+        s.exec.error_policy_ask = false;
+        s.results.max_value_bytes = ValueLimit::new(8 << 20).unwrap();
+        s.history.enabled = false;
+        s.grid.raw_display = true;
+        save_changes(&p, &s).unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        for line in [
+            "confirm_unsafe_where = false",
+            "error_policy_ask = false",
+            "max_value_bytes = 8388608",
+            "enabled = false",
+            "raw_display = true",
+        ] {
+            assert!(t.contains(line), "{line} in {t}");
+        }
+        let back = load(&p);
+        assert!(back.diags.is_empty());
+        assert_eq!(back.settings, s);
+        // A wrong type keeps the default alone, beside the good keys.
+        let o = load(&write_tmp(
+            "[exec]\nconfirm_unsafe_where = \"no\"\nerror_policy_ask = false\n",
+        ));
+        assert!(o.settings.exec.confirm_unsafe_where);
+        assert!(!o.settings.exec.error_policy_ask);
+        assert_eq!(o.diags[0].key, "exec.confirm_unsafe_where");
+    }
+
+    // ## m4-t01c-core
+    #[test]
+    fn metadata_keys_load_save_and_validate() {
+        use crate::schema::ValidateMinutes;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        // Missing table: the defaults; saving the defaults adds no table.
+        save_changes(&path, &Settings::default()).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("metadata"));
+        let mut s = Settings::default();
+        s.metadata.refresh_after_ddl = RefreshAfterDdl::Ask;
+        s.metadata.validate_interval_min = ValidateInterval::Minutes(ValidateMinutes::Thirty);
+        s.metadata.cache_mb_per_profile = CacheMb::new(256).unwrap();
+        s.metadata.cache_mb_total = CacheMb::new(1024).unwrap();
+        save_changes(&path, &s).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for line in [
+            "refresh_after_ddl = \"ask\"",
+            "validate_interval_min = 30",
+            "cache_mb_per_profile = 256",
+            "cache_mb_total = 1024",
+        ] {
+            assert!(text.contains(line), "{line} in:\n{text}");
+        }
+        let o = load(&path);
+        assert!(o.diags.is_empty(), "{:?}", o.diags);
+        assert_eq!(o.settings.metadata, s.metadata);
+        // `0` is off, `"auto"` is auto; anything else is the default with a diagnostic.
+        std::fs::write(
+            &path,
+            "[metadata]\nvalidate_interval_min = 0\nrefresh_after_ddl = \"sometimes\"\n\
+             cache_mb_total = 0\ncache_mb_per_profile = \"512\"\n",
+        )
+        .unwrap();
+        let o = load(&path);
+        assert_eq!(
+            o.settings.metadata.validate_interval_min,
+            ValidateInterval::Off
+        );
+        assert_eq!(
+            o.settings.metadata.refresh_after_ddl,
+            RefreshAfterDdl::Always
+        );
+        assert_eq!(o.settings.metadata.cache_mb_total.get(), 4096);
+        assert_eq!(o.settings.metadata.cache_mb_per_profile.get(), 512);
+        let keys: Vec<&str> = o.diags.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "metadata.refresh_after_ddl",
+                "metadata.cache_mb_per_profile",
+                "metadata.cache_mb_total"
+            ]
+        );
+        std::fs::write(&path, "[metadata]\nvalidate_interval_min = \"auto\"\n").unwrap();
+        assert_eq!(
+            load(&path).settings.metadata.validate_interval_min,
+            ValidateInterval::Auto
+        );
+        std::fs::write(&path, "[metadata]\nvalidate_interval_min = 15\n").unwrap();
+        assert_eq!(load(&path).diags[0].key, "metadata.validate_interval_min");
     }
 }

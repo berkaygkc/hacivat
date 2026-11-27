@@ -9,12 +9,15 @@ use std::rc::Rc;
 
 use gpui::TestAppContext;
 use hacivat_sql_editor::{exec_points, preview_of, statement_spans};
+// ## m3b-t24-exec-ui (named exception)
+use hacivat_sql_editor::{InsideChoice, RunPolicy, preview_with, run_policy};
 use hacivat_ui_editor::{
     Confidence, DocContext, ExecAction, ExecAt, LanguageService, PreviewState, Tier,
 };
 use proptest::prelude::*;
 use smallvec::smallvec;
 use sql_dialect::{ClientFlavor, DialectCtx, DialectId};
+use sql_split::exec_range::SelectionPolicy;
 use sql_split::exec_range::{
     CandidateKind, CaretOrSelection, ExecPolicy, InsidePolicy, RangeResolution, TextRange,
     TextSize, UnitKind, UnitSpan, resolve,
@@ -789,4 +792,158 @@ fn a_paren_copy_after_a_comment_previews_what_execution_sends() {
         preview_matches_resolve(&doc, &At::Carets(11189, 0), remembered)
             .unwrap_or_else(|e| panic!("{remembered:?}: {e}"));
     }
+}
+
+// ## m3b-t24-exec-ui (named exception: the preview_truth rule extended to the console's run
+// policy, CHOOSE-06, and to a selection run as one, R-M3-60)
+
+/// What the console's policy sends: a verbatim selection runs as one when the policy says so,
+/// as `hacivat_exec::units` sends it (`Verbatim` → one unit); `COPY` streams never.
+fn sent_under(units: &[UnitSpan], as_one: bool) -> bool {
+    units.iter().all(|u| match u.kind {
+        UnitKind::CopyIn { .. } | UnitKind::CopyStream => false,
+        UnitKind::Verbatim => as_one,
+        _ => true,
+    })
+}
+
+/// One case: the preview under `custom` against what execution resolves under the same
+/// policy table (`run_policy`, the one Run calls).
+fn preview_matches_policy(
+    (id, flavor, text): &(DialectId, ClientFlavor, String),
+    at: &At,
+    custom: &RunPolicy,
+) -> Result<(), TestCaseError> {
+    let doc = SqlDocument::new(text.clone(), DialectCtx::new(*id, None), *flavor).snapshot();
+    let (exec_at, points) = place(text, at);
+    for action in [
+        ExecAction::Execute1,
+        ExecAction::Execute2,
+        ExecAction::Execute3,
+    ] {
+        let policy = run_policy(action, custom);
+        let as_one = policy.selection == SelectionPolicy::AsOne;
+        let p = preview_with(&doc, &exec_at, action, true, None, custom);
+        let run = resolve(&doc, &points, &policy, SplitMode::Execution, None, None);
+        match &run {
+            RangeResolution::Units(u) if sent_under(u, as_one) => {
+                prop_assert_eq!(p.state, PreviewState::Units, "{:?}", run);
+                prop_assert_eq!(p.ranges.to_vec(), ranges(u));
+                // A (non-empty) selection run as one is exactly one unit; an empty one is a
+                // caret.
+                if as_one
+                    && let ExecAt::Selections(s) = &exec_at
+                    && s.iter().all(|r| !r.is_empty())
+                {
+                    prop_assert!(u.len() <= 1, "{:?}", u);
+                }
+            }
+            RangeResolution::Ask {
+                candidates,
+                preselect,
+            } if sent_under(&candidates[*preselect].units, as_one) => {
+                prop_assert_eq!(p.state, PreviewState::AskPreselected, "{:?}", run);
+                prop_assert_eq!(p.ranges.to_vec(), ranges(&candidates[*preselect].units));
+            }
+            RangeResolution::NothingToRun => {
+                prop_assert_eq!(p.state, PreviewState::Nothing);
+            }
+            _ => prop_assert_eq!(p.state, PreviewState::Uncertain, "{:?}", run),
+        }
+    }
+    // The default policy is M3a's: the same answers as `preview_of`.
+    if *custom == RunPolicy::default() {
+        for action in [ExecAction::Execute1, ExecAction::Execute3] {
+            prop_assert_eq!(
+                preview_with(&doc, &exec_at, action, true, None, custom),
+                preview_of(&doc, &exec_at, action, true, None)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_policies() -> impl Strategy<Value = RunPolicy> {
+    (
+        prop_oneof![
+            Just(InsideChoice::Ask),
+            Just(InsideChoice::Smallest),
+            Just(InsideChoice::Largest),
+            Just(InsideChoice::Whole),
+        ],
+        any::<bool>(),
+    )
+        .prop_map(|(inside, selection_as_one)| RunPolicy {
+            inside,
+            selection_as_one,
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(cases()))]
+
+    /// CHOOSE-06 and R-M3-60: under any console policy the band shows a range as runnable only
+    /// when Run under that policy sends exactly it, and a selection run as one is one unit.
+    #[test]
+    fn preview_equals_execution_under_the_console_policy(
+        doc in sql_docs(),
+        c in carets(),
+        custom in run_policies(),
+    ) {
+        preview_matches_policy(&doc, &c, &custom)?;
+    }
+}
+
+/// A selection of two statements previews as one unit when the console runs selections as
+/// one, and as two units otherwise.
+#[test]
+fn a_selection_previews_as_one_unit_under_as_one() {
+    let text = "SELECT 1; SELECT 2;";
+    let snap = SqlDocument::new(
+        text.to_string(),
+        DialectCtx::new(DialectId::Postgres, None),
+        ClientFlavor::None,
+    )
+    .snapshot();
+    let at = ExecAt::Selections(smallvec![0..text.len()]);
+    let separate = preview_of(&snap, &at, ExecAction::Execute1, true, None);
+    assert_eq!(separate.state, PreviewState::Units);
+    assert_eq!(separate.ranges.len(), 2);
+    let as_one = RunPolicy {
+        selection_as_one: true,
+        ..RunPolicy::default()
+    };
+    let one = preview_with(&snap, &at, ExecAction::Execute1, true, None, &as_one);
+    assert_eq!(one.state, PreviewState::Units);
+    assert_eq!(
+        one.ranges.to_vec(),
+        vec![0..text.len()],
+        "one unit: the selection as written"
+    );
+}
+
+// ## m3c-t34-editor (named exception, the T24/T29 carry): the band's "as one · n statements".
+/// A selection previewed as one unit says how many statements it holds; run as separate
+/// statements, or at a caret, it says nothing of the kind.
+#[test]
+fn an_as_one_preview_counts_its_statements() {
+    let text = "SELECT 1; SELECT 2;\nSELECT 3;";
+    let snap = SqlDocument::new(
+        text.to_string(),
+        DialectCtx::new(DialectId::Postgres, None),
+        ClientFlavor::None,
+    )
+    .snapshot();
+    let at = ExecAt::Selections(smallvec![0..text.len()]);
+    let as_one = RunPolicy {
+        selection_as_one: true,
+        ..RunPolicy::default()
+    };
+    let one = preview_with(&snap, &at, ExecAction::Execute1, true, None, &as_one);
+    assert_eq!((one.ranges.len(), one.as_one), (1, 3));
+    let separate = preview_of(&snap, &at, ExecAction::Execute1, true, None);
+    assert_eq!(separate.as_one, 0);
+    let caret = ExecAt::Carets(smallvec![3]);
+    let at_caret = preview_with(&snap, &caret, ExecAction::Execute1, true, None, &as_one);
+    assert_eq!(at_caret.as_one, 0);
 }

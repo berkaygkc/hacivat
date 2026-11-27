@@ -5,12 +5,19 @@
 pub mod bench;
 pub mod commands;
 pub mod connections;
+// ## m4-t01b-seams: the M4 explorer tree and the DDL view tab.
+pub mod ddl_view;
+pub mod explorer;
 // ## m3a-t01b-seams
 pub mod console;
 pub mod exec_ui;
+// ## m3b-t01b-seams: the history dialog (Task 27).
+pub mod history;
 pub mod l10n_global;
 pub mod menus;
 pub mod results;
+// ## m4b-t01b-seams: the script workspace (M4b, L14).
+pub mod scripts;
 pub mod settings_ui;
 pub mod shell;
 pub mod theme_pref;
@@ -40,6 +47,13 @@ pub fn init(cx: &mut App) {
     console::install(cx);
     results::install(cx);
     exec_ui::install(cx);
+    // ## m3b-t01b-seams
+    history::install(cx);
+    // ## m4-t01b-seams
+    explorer::install(cx);
+    ddl_view::install(cx);
+    // ## m4b-t01b-seams
+    scripts::install(cx);
 }
 
 #[cfg(test)]

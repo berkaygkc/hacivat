@@ -6,7 +6,8 @@
 //! ([`on_parser_stack`]). Every libpg_query call runs on that one 16 MiB-stack thread, after a
 //! check that refuses brackets nested deeper than [`MAX_ORACLE_NESTING`] (R-M3-3, R-M3-35).
 //! Every function here blocks its caller until that thread has run the call: never call one on
-//! the UI thread. No `pg_query` type appears in this crate's public API. Messages are the
+//! the UI thread. No `pg_query` type appears in this crate's public API, except the protobuf
+//! module [`tree::pb`] that `sql-safety`'s PG backend walks (M3b, Task 9). Messages are the
 //! server's English text, never translated.
 
 // ## m3a-t01b-seams: the oracle's modules (Task 9 fills them; it may move `PgError`,
@@ -21,3 +22,7 @@ pub use stack::{MAX_ORACLE_NESTING, on_parser_stack};
 // ## m3a-t09-oracle-pg: Task 1a's items, moved into their modules.
 pub use error::PgError;
 pub use split::{statement_count, version};
+
+// ## m3b-t01a-seams: the parse tree, scanner tokens and fingerprint for the PG classifier
+// backend (Task 9); fail-closed stubs until then.
+pub mod tree;

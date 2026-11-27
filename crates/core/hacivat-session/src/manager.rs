@@ -53,8 +53,10 @@ use crate::session::{
 };
 use crate::test_conn::TestReport;
 // ## m3a-t01b-seams
-use crate::session::{SessionPolicy, effective_read_only};
-use crate::test_conn::test_connection_with_policy;
+use crate::session::effective_read_only;
+use crate::test_conn::test_connection_continuing;
+// ## m3b-t01c-core-seams
+use crate::session::StatementClassifier;
 
 /// How the bytes travel, as the capsule shows it (HV-CONN-01). Only `Direct` in M2a.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -133,7 +135,10 @@ pub enum LiveState {
 }
 
 /// Manager timings (CONN-04, P15).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// ## m3b-t01c-core-seams: equality and hashing compare `classifier` by pointer (a
+/// `dyn StatementClassifier` has no value equality), as `ObserverRef` does.
+#[derive(Debug, Clone)]
 pub struct ManagerConfig {
     /// How often a live connection is pinged: the keep-alive of every profile without one of
     /// its own, unless `presets` (M2a compatibility).
@@ -149,11 +154,74 @@ pub struct ManagerConfig {
     /// B19: a lost default session reconnects with backoff; without it (M2a, R12) the profile
     /// is `Lost`.
     pub reconnect: bool,
-    // ## m3a-t01b-seams
-    /// R-M3-6 REVISED, R-M3-29: production-tagged profiles get read-only sessions and Test
-    /// connections (`effective_read_only`). Off in `default()` and `m2b()`; the app's boot
-    /// turns it on. M3b removes it when confirmations land.
-    pub production_read_only: bool,
+    // ## m3b-t01c-core-seams (R-M3-83, P-M3b-11)
+    /// The classifier every read-only session's step 0b asks (`Core::step0b`, Task 18); the
+    /// app's boot installs `hacivat-exec`'s `ClassifyPool` (Task 18). `None` (the default, and
+    /// `m2b()`) keeps the M2b/M3a behaviour: the guard's layers alone.
+    pub classifier: Option<Arc<dyn StatementClassifier>>,
+    // ## m3b-t12-session-carries (C11)
+    /// The settings' `ui.time_zone`: every PostgreSQL session sends `SET TIME ZONE` with an
+    /// IANA zone after connect and in its environment replay (never MySQL or MariaDB, R5).
+    /// `System` (the default) keeps the server's zone.
+    pub time_zone: hacivat_settings::TimeZonePref,
+}
+
+// ## m3b-t01c-core-seams (review M1)
+/// What equality and hashing compare: every field, the classifier by its address.
+type ConfigKey = (
+    Duration,
+    Duration,
+    bool,
+    bool,
+    Option<*const ()>,
+    // ## m3b-t12-session-carries
+    hacivat_settings::TimeZonePref,
+);
+
+impl ManagerConfig {
+    /// Every field, by value; the classifier by address. The destructuring names each field
+    /// (no `..`), so a field added later is a compile error here until it joins the key.
+    fn key(&self) -> ConfigKey {
+        let Self {
+            liveness,
+            shutdown_budget,
+            presets,
+            reconnect,
+            classifier,
+            time_zone,
+        } = self;
+        (
+            *liveness,
+            *shutdown_budget,
+            *presets,
+            *reconnect,
+            classifier.as_ref().map(|c| Arc::as_ptr(c).cast::<()>()),
+            time_zone.clone(),
+        )
+    }
+
+    // ## m3b-t12-session-carries (C11)
+    /// The IANA zone sessions send, if any.
+    fn zone(&self) -> Option<String> {
+        match &self.time_zone {
+            hacivat_settings::TimeZonePref::Iana(zone) => Some(zone.clone()),
+            hacivat_settings::TimeZonePref::System => None,
+        }
+    }
+}
+
+impl PartialEq for ManagerConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for ManagerConfig {}
+
+impl std::hash::Hash for ManagerConfig {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key().hash(state);
+    }
 }
 
 impl Default for ManagerConfig {
@@ -165,7 +233,10 @@ impl Default for ManagerConfig {
             shutdown_budget: Duration::from_secs(2),
             presets: false,
             reconnect: false,
-            production_read_only: false,
+            // ## m3b-t01c-core-seams
+            classifier: None,
+            // ## m3b-t12-session-carries
+            time_zone: hacivat_settings::TimeZonePref::System,
         }
     }
 }
@@ -178,8 +249,6 @@ impl ManagerConfig {
         ManagerConfig {
             presets: true,
             reconnect: true,
-            // ## m3a-t01b-seams: unchanged for M2b callers; the app boot sets it.
-            production_read_only: false,
             ..ManagerConfig::default()
         }
     }
@@ -279,11 +348,49 @@ struct Shared {
     /// One lock per SSH chain generation: the dependents of a dead chain reconnect one at a
     /// time, so the first brings the chain back and the others share it (B20).
     transport_locks: Mutex<HashMap<TransportGeneration, Arc<tokio::sync::Mutex<()>>>>,
+    // ## m3b-t12-session-carries (C11; fix round 1, review m7)
+    // ## m3b-t22-tx-ui (named exception, T12 carry r1-m2): one zone per profile, so one
+    // server that refuses it never stops it reaching another profile's server; replaced by
+    // `ConnectionManager::set_time_zone`.
+    /// The settings' time zone, per profile: one a server refused is sent by none of that
+    /// profile's sessions, across reconnects too.
+    zone: Mutex<ZoneScope>,
+}
+
+// ## m3b-t22-tx-ui (named exception, T12 carry r1-m2)
+/// The settings' time zone and each profile's own [`SessionZone`](crate::session::env::SessionZone)
+/// of it, made on the profile's first connect after the zone was set.
+#[derive(Debug, Default)]
+struct ZoneScope {
+    /// The IANA name sessions send; `None` keeps the server's.
+    name: Option<String>,
+    by_profile: HashMap<ProfileId, Arc<crate::session::env::SessionZone>>,
+}
+
+impl ZoneScope {
+    fn of(&mut self, id: ProfileId) -> Option<Arc<crate::session::env::SessionZone>> {
+        let name = self.name.as_deref()?;
+        Some(
+            self.by_profile
+                .entry(id)
+                .or_insert_with(|| Arc::new(crate::session::env::SessionZone::new(name)))
+                .clone(),
+        )
+    }
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    // ## m3b-t22-tx-ui (named exception, T12 carry r1-m2)
+    /// Profile `id`'s time zone (lock order: `inner`, then `zone`).
+    fn zone_of(&self, id: ProfileId) -> Option<Arc<crate::session::env::SessionZone>> {
+        self.zone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .of(id)
     }
 
     /// Sets `id`'s state and bumps the generation.
@@ -399,10 +506,11 @@ impl Shared {
             self.deps.clone(),
             budget.clone(),
         );
-        // ## m3a-t01b-seams: before any session exists (R-M3-29, P4).
-        sessions.set_policy(SessionPolicy {
-            production_read_only: self.config.production_read_only,
-        });
+        // ## m3b-t01c-core-seams (P-M3b-11): the read-only guard's classifier, likewise.
+        sessions.set_classifier(self.config.classifier.clone());
+        // ## m3b-t12-session-carries (C11): the settings' time zone, likewise.
+        // ## m3b-t22-tx-ui (named exception): the profile's own zone (carry r1-m2).
+        sessions.set_time_zone(self.zone_of(id));
         // ## m2b-t22-live (T17 carry): the gaps of the profile's other sessions (pooled
         // read-only ones) are relayed as the default session's are (Q35).
         let weak = Arc::downgrade(self);
@@ -412,6 +520,15 @@ impl Shared {
                     profile: id,
                     reason,
                 });
+            }
+        }));
+        // ## m3b-t12-session-carries (fix round 1, review C1): a console session that loses
+        // its connection while it holds, or may be opening, a user transaction is told as
+        // the default session's loss is.
+        let weak = Arc::downgrade(self);
+        sessions.relay_losses(Arc::new(move |lost| {
+            if let Some(shared) = weak.upgrade() {
+                shared.emit(ConnectionEvent::SessionLost { profile: id, lost });
             }
         }));
         let stop = CancellationToken::new();
@@ -630,7 +747,7 @@ impl Shared {
         let (progress_tx, mut progress_rx) = watch::channel(fresh_progress());
         let req = ConnectRequest {
             // ## m3a-t01b-seams (R-M3-29)
-            read_only: effective_read_only(&profile, self.config.production_read_only),
+            read_only: effective_read_only(&profile),
             profile: profile.clone(),
             draft_password: draft,
             purpose: Purpose::Main,
@@ -785,6 +902,10 @@ async fn monitor(
                         return;
                     }
                     SessionState::Broken(ErrClass::Cancelled) => {
+                        // ## m3b-t12-session-carries (fix round 1, review I1): the default's
+                        // Disconnect closes the profile (R-M3-73); `end_live` is
+                        // `end_live_with(.., None)`, so another session's user transaction,
+                        // held or maybe opening at that moment, is told as `SessionLost`.
                         shared.end_live(id, seq, LiveState::Disconnected);
                         return;
                     }
@@ -1079,6 +1200,12 @@ impl Drop for ConnectionManager {
 
 impl ConnectionManager {
     pub fn new(rt: Handle, deps: Arc<ConnectDeps>, config: ManagerConfig) -> Arc<Self> {
+        // ## m3b-t12-session-carries
+        // ## m3b-t22-tx-ui (named exception): per profile (carry r1-m2).
+        let zone = Mutex::new(ZoneScope {
+            name: config.zone(),
+            by_profile: HashMap::new(),
+        });
         let shared = Arc::new(Shared {
             rt,
             deps,
@@ -1094,6 +1221,7 @@ impl ConnectionManager {
             events: broadcast::Sender::new(64),
             tunnel_watch: CancellationToken::new(),
             transport_locks: Mutex::new(HashMap::new()),
+            zone,
         });
         // ## m2b-t17-liveness (B20)
         watch_tunnels(&shared);
@@ -1121,14 +1249,46 @@ impl ConnectionManager {
         self.shared.events.receiver_count()
     }
 
-    // ## m3a-t01b-seams (fix round 1)
-    /// The session policy every profile's sessions follow (R-M3-29): the app reads it instead
-    /// of repeating its boot configuration (the console's `effective_read_only`, the console
-    /// UX's forced read-only).
-    pub fn policy(&self) -> crate::session::SessionPolicy {
-        crate::session::SessionPolicy {
-            production_read_only: self.shared.config.production_read_only,
+    // ## m3b-t22-tx-ui (named exception, T12 concern 2 / carry r1-m2)
+    /// Changes the settings' time zone (`ui.time_zone`) at runtime: every session opened from
+    /// now on, of every profile, sends `zone` on PostgreSQL (`System` sends nothing); sessions
+    /// already open keep the zone they connected with. Each profile gets a fresh zone, so a
+    /// name a server refused before is tried again once per profile. The app's boot calls it
+    /// with the settings' value, and again whenever the setting changes.
+    pub fn set_time_zone(&self, zone: hacivat_settings::TimeZonePref) {
+        let name = match zone {
+            hacivat_settings::TimeZonePref::Iana(z) => Some(z),
+            hacivat_settings::TimeZonePref::System => None,
+        };
+        let inner = self.shared.lock();
+        let mut scope = self
+            .shared
+            .zone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if scope.name == name {
+            return;
         }
+        scope.name = name;
+        scope.by_profile.clear();
+        for (id, entry) in &inner.entries {
+            if let Some(live) = &entry.live {
+                live.sessions.set_time_zone(scope.of(*id));
+            }
+        }
+    }
+
+    // ## m3b-t22-tx-ui (named exception, review I4)
+    /// The settings' time zone a server of profile `id` refused, if one did: that profile's
+    /// sessions no longer send it, so a retry connects (the UI keeps Retry and says why).
+    pub fn refused_time_zone(&self, id: ProfileId) -> Option<String> {
+        self.shared
+            .zone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .by_profile
+            .get(&id)
+            .and_then(|z| z.refused_by_server().map(str::to_string))
     }
 
     /// The sessions of a connected (or reconnecting) profile (B4): its default console session
@@ -1314,6 +1474,12 @@ impl ConnectionManager {
         self.shared.changes.subscribe()
     }
 
+    // ## m3b-t18-safe06 (named exception: T1c review M7, the app's boot test)
+    /// The configuration this manager was made with (the boot's, in the app).
+    pub fn config(&self) -> &ManagerConfig {
+        &self.shared.config
+    }
+
     /// Starts a test of `draft` on the core runtime (HV-CONN-07): fresh resources, no budget
     /// permit, nothing stored. Dropping the handle (or `cancel`) stops it.
     pub fn test(&self, draft: ProfileDraft, ix: Interaction) -> TestHandle {
@@ -1332,20 +1498,12 @@ impl ConnectionManager {
         let (result_tx, result) = oneshot::channel();
         let deps = self.shared.deps.clone();
         let cancel = token.clone();
-        // ## m3a-t01b-seams: a Test of a production profile runs read-only under the policy
-        // (R-M3-29), so it exercises the path its sessions take.
-        let production_read_only = self.shared.config.production_read_only;
+        // ## m3b-t26-prod-unlock: a Test runs read-only exactly when the profile is, as its
+        // sessions do (`effective_read_only`; the production policy is gone).
         self.shared.rt.spawn(async move {
-            let report = test_connection_with_policy(
-                &deps,
-                draft,
-                prior_rejections,
-                production_read_only,
-                ix,
-                cancel,
-                progress_tx,
-            )
-            .await;
+            let report =
+                test_connection_continuing(&deps, draft, prior_rejections, ix, cancel, progress_tx)
+                    .await;
             let _ = result_tx.send(report);
         });
         TestHandle::new(progress, result, token)

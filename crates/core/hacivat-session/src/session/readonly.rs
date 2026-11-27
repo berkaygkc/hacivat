@@ -56,6 +56,15 @@ use hacivat_proto::{AccessLabel, DbmsKind, ErrClass};
 use crate::session::recovery::connection_ending;
 use crate::session::schema::{Family, family};
 use crate::session::{DenyLayer, ExecError, ExecErrorKind, Reply};
+// ## m3b-t18-safe06
+use std::sync::Arc;
+
+use hacivat_driver::SessionSettings;
+use hacivat_guard::{GuardInputs, pinnable_sql_mode, plan_for_with};
+
+use crate::session::env::{EnvPlan, EnvStep};
+use crate::session::schema::split_search_path;
+use crate::session::verdict::{ClassifierContext, RoCheck};
 
 /// First keywords a read-only statement may not start with (Q35): they end or nest the guard's
 /// transaction. This list produces `DenyLayer::Transaction`; it is not a classifier, and the
@@ -112,6 +121,257 @@ pub fn run_guarded<'a>(
     replay: &'a [String],
 ) -> BoxFuture<'a, Result<ExecSummary, ExecError>> {
     Box::pin(async move { guarded(conn, kind, sql, opts, replay).await.reply })
+}
+
+// ## m3b-t01c-core-seams (P-M3b-11), m3b-t18-safe06 (the body)
+impl crate::session::actor::Core {
+    /// Step 0b (R-M3-83, Task 18): a user statement of a read-only session (a typed `Run`
+    /// unit, an M2b `Exec { origin: User }`) is checked by the injected classifier
+    /// (`Core::classifier`) with the profile's function allowlist, in the session's context
+    /// ([`Core::classifier_context`]), before the guard runs it; `RoCheck::Deny(d)` →
+    /// `ExecErrorKind::SafetyDenied(d)`, nothing sent. `None` keeps the M2b/M3a layers alone
+    /// (run B). The actor calls it right before `guarded` and `guarded_query`; internal
+    /// statements never reach it.
+    ///
+    /// The classifier only ever denies early: an `Allow` sends the statement into the guard's
+    /// layers (L3–L6) exactly as without a classifier (`alg/13` §0.1). A statement the
+    /// classifier says may change the context makes the next check read the context again.
+    pub(crate) async fn step0b(&mut self, sql: &str) -> Result<(), ExecError> {
+        let Some(classifier) = self.classifier.clone() else {
+            return Ok(());
+        };
+        if !self.read_only {
+            return Ok(());
+        }
+        let ctx = self.classifier_context().await;
+        let allow: Arc<[Arc<str>]> = self
+            .profile
+            .read_only_fn_allowlist
+            .iter()
+            .map(|name| Arc::from(name.as_str()))
+            .collect();
+        let answer = classifier
+            .check_read_only_in(self.kind, Arc::from(sql), allow, ctx)
+            .await;
+        match answer.check {
+            RoCheck::Allow => {
+                if answer.changes_context {
+                    self.ro_context = RoContextRead::Stale;
+                }
+                Ok(())
+            }
+            RoCheck::Deny(denial) => Err(ExecError::of(ExecErrorKind::SafetyDenied(denial))),
+        }
+    }
+
+    /// What the classifier is told of the session's context (plan amendment C2(b)/I1): the
+    /// server version and the settings the connect read (`RawConn::session_settings`), or the
+    /// ones read again after a statement that may have changed them ([`RoContextRead`]), seen
+    /// through what the guard puts back after every statement (the reset, then the replay).
+    ///
+    /// - **PostgreSQL:** the lexing modes are known only when `standard_conforming_strings`
+    ///   reads `on`: the replay's setup pins it `on` after every reset, so a connection that
+    ///   started `off` would lex its first statement otherwise; then they are unknown (the
+    ///   classifier reads every mode, fail-closed). The search path is the one the replay
+    ///   restores when it restores one (the session's last schema context), else the one read;
+    ///   unread, it is unknown (`None`: unqualified builtins are then unknown, T9 D5).
+    /// - **MySQL and MariaDB:** the observed `sql_mode`, which the replay pins after every
+    ///   `COM_RESET_CONNECTION` (R-M3-57); unknown when it was not read or cannot be pinned. The
+    ///   "search path" is the current database alone (the T20 carry): the one the replay
+    ///   restores (`USE`, the session's last schema), else `DATABASE()` as the connect (or a read
+    ///   after a context change) read it; `None` when there is none.
+    /// - **SQLite:** no setting (its lexing has no session mode).
+    pub(crate) async fn classifier_context(&mut self) -> ClassifierContext {
+        let server_version = self
+            .live
+            .as_ref()
+            .and_then(|live| live.server.version.clone());
+        if self.ro_context == RoContextRead::Stale {
+            match self.read_context_again().await {
+                Some(read) => self.ro_context = RoContextRead::Reread(read),
+                // ## fix round 1 (m2): a failed read stays `Stale`, so the next check reads
+                // again (at most one read per check, so per statement); this check is told
+                // nothing (fail-closed).
+                None => {
+                    return ClassifierContext {
+                        lex_modes: None,
+                        search_path: None,
+                        server_version,
+                    };
+                }
+            }
+        }
+        let settings = match &self.ro_context {
+            RoContextRead::Reread(read) => read.clone(),
+            _ => self
+                .live
+                .as_mut()
+                .map(|live| live.raw().session_settings())
+                .unwrap_or_default(),
+        };
+        // ## fix round 1 (m3): a schema switch whose re-probe failed leaves the database (search
+        // path) unknown: never the replay's old one, never the connect's.
+        let schema_known = self.ro_context != RoContextRead::DatabaseUnknown;
+        match family(self.kind) {
+            Family::Postgres => {
+                let lex_modes = settings
+                    .lex_modes
+                    .filter(|scs| scs.trim().eq_ignore_ascii_case("on"));
+                let replayed = replayed_search_path(&self.env_plan());
+                let search_path = replayed
+                    .or_else(|| settings.search_path.map(|s| split_search_path(&s)))
+                    .filter(|_| schema_known)
+                    .map(|path| path.into_iter().map(Arc::from).collect());
+                ClassifierContext {
+                    lex_modes,
+                    search_path,
+                    server_version,
+                }
+            }
+            Family::MySql => {
+                // A context read again is the server's own answer; else the pinned one.
+                let lex_modes = match &self.ro_context {
+                    RoContextRead::Reread(read) => read.lex_modes.clone(),
+                    _ => self.observed_sql_mode.as_deref().map(Arc::from),
+                }
+                .filter(|mode| pinnable_sql_mode(mode));
+                let database = replayed_search_path(&self.env_plan())
+                    .and_then(|path| path.into_iter().next())
+                    .or_else(|| settings.search_path.as_deref().map(str::to_string))
+                    .filter(|_| schema_known);
+                ClassifierContext {
+                    lex_modes,
+                    search_path: database.map(|db| Arc::from(vec![Arc::<str>::from(db)])),
+                    server_version,
+                }
+            }
+            Family::Sqlite | Family::Other => ClassifierContext {
+                lex_modes: None,
+                search_path: None,
+                server_version,
+            },
+        }
+    }
+
+    /// Reads the session's context again after a statement that may have changed it (one
+    /// internal round trip; Hacivat's own constant text, outside the guard): PostgreSQL
+    /// `standard_conforming_strings` and `search_path`, MySQL/MariaDB `sql_mode` and the current
+    /// database. `None` when the read fails or answers no row (fix round 1, m2: the caller
+    /// reads again at its next check).
+    // ## m3b-t24-exec-ui (named exception): crate-visible, Run's context reads it too.
+    pub(crate) async fn read_context_again(&mut self) -> Option<SessionSettings> {
+        let sql = match family(self.kind) {
+            Family::Postgres => PG_CONTEXT_SQL,
+            Family::MySql => MYSQL_CONTEXT_SQL,
+            Family::Sqlite | Family::Other => return Some(SessionSettings::default()),
+        };
+        let conn = self.conn().ok()?;
+        let row = match conn.execute(sql, ExecOpts::values(1)).await {
+            Ok(answer) if !answer.truncated => answer.rows.into_iter().next(),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::debug!(kind = ?e.kind, "the read-only guard could not read the context");
+                None
+            }
+        };
+        self.observe(false);
+        let row = row?;
+        let cell = |i: usize| -> Option<Arc<str>> { row.get(i).cloned().flatten().map(Arc::from) };
+        // Both engines' queries answer the lexing setting, then the search path (PostgreSQL)
+        // or the current database (MySQL/MariaDB).
+        Some(SessionSettings {
+            lex_modes: cell(0),
+            search_path: cell(1),
+        })
+    }
+
+    // ## fix round 1 (m3)
+    /// After `SwitchSchema`: when its re-probe did not read the new schema (`known` false),
+    /// the session's database and search path are unknown to the classifier until the next
+    /// context read (a statement that may change the context) or a later switch that probes.
+    pub(crate) fn note_schema_switch(&mut self, known: bool) {
+        if !self.read_only {
+            return;
+        }
+        if !known {
+            self.ro_context = RoContextRead::DatabaseUnknown;
+        } else if self.ro_context == RoContextRead::DatabaseUnknown {
+            self.ro_context = RoContextRead::Connect;
+        }
+    }
+
+    /// `plan` with the observed `sql_mode` pinned after the read-only setup (R-M3-57,
+    /// P-M3b-33: `hacivat_guard::plan_for_with`), so every replay after the guard's
+    /// `COM_RESET_CONNECTION`, and a reconnect's, puts it back: the server then lexes as the
+    /// classifier does. Nothing changes on a read-write session, on other engines, or when no
+    /// pinnable `sql_mode` was observed.
+    pub(crate) fn pin_observed(&self, mut plan: EnvPlan) -> EnvPlan {
+        if !self.read_only || family(self.kind) != Family::MySql {
+            return plan;
+        }
+        let inputs = GuardInputs {
+            sql_mode: self.observed_sql_mode.clone(),
+        };
+        let Some(pinned) = plan_for_with(self.kind, &inputs).map(|p| p.pinned) else {
+            return plan;
+        };
+        if pinned.is_empty() {
+            return plan;
+        }
+        match plan.steps.iter_mut().find_map(|step| match step {
+            EnvStep::ReadOnly(setup) => Some(setup),
+            _ => None,
+        }) {
+            Some(setup) => setup.extend(pinned),
+            None => plan.steps.insert(0, EnvStep::ReadOnly(pinned)),
+        }
+        plan
+    }
+}
+
+// ## m3b-t18-safe06
+/// Which session settings the read-only guard's classifier is told (`Core::ro_context`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum RoContextRead {
+    /// The ones the live connection read at connect (`RawConn::session_settings`).
+    #[default]
+    Connect,
+    /// A statement may have changed them: read them again before the next check.
+    Stale,
+    /// The ones read again.
+    Reread(SessionSettings),
+    // ## fix round 1 (m3)
+    /// The connect's settings, but a schema switch's re-probe failed: the database (search
+    /// path) is unknown.
+    DatabaseUnknown,
+}
+
+/// PostgreSQL's context read after a statement that may have changed it (`pg_catalog`
+/// qualified: no schema on the search path can shadow it).
+const PG_CONTEXT_SQL: &str = "SELECT pg_catalog.current_setting('standard_conforming_strings'), \
+                              pg_catalog.current_setting('search_path')";
+/// MySQL's and MariaDB's: the mode and the current database (the T20 carry).
+const MYSQL_CONTEXT_SQL: &str = "SELECT @@SESSION.sql_mode, DATABASE()";
+
+/// The `sql_mode` a read-only MySQL/MariaDB session pins (R-M3-57): what its first connection
+/// read at connect, in the connect's own round trip (no round trip of its own, the T18
+/// carry). `None` on a read-write session and on other engines. A reconnect keeps it: the
+/// replay pins it on the new connection too.
+pub(crate) fn observed_sql_mode(read_only: bool, conn: &dyn RawConn) -> Option<String> {
+    (read_only && family(conn.kind()) == Family::MySql)
+        .then(|| conn.session_settings().lex_modes)
+        .flatten()
+        .map(|mode| mode.to_string())
+}
+
+/// The search path the replay restores (`EnvStep::RestoreSearchPath`, or a PostgreSQL
+/// `RestoreSchema`, which sets the path to that one schema), in the classifier's form.
+fn replayed_search_path(plan: &EnvPlan) -> Option<Vec<String>> {
+    plan.steps.iter().rev().find_map(|step| match step {
+        EnvStep::RestoreSearchPath(path) => Some(path.clone()),
+        EnvStep::RestoreSchema(name) => Some(vec![name.clone()]),
+        _ => None,
+    })
 }
 
 /// [`run_guarded`], and whether the connection must be discarded (the actor's entry point).
@@ -887,7 +1147,8 @@ impl GuardFailure {
 #[derive(Debug)]
 pub(crate) struct GuardedCursor {
     pub(crate) kind: DbmsKind,
-    plan: GuardPlan,
+    /// ## m3b-t18-safe06: boxed (the plan grew `pinned`; `cursor::Hold` stays small).
+    plan: Box<GuardPlan>,
     /// The readings of the statement's first keyword (step 7).
     keywords: Keywords,
 }
@@ -921,7 +1182,7 @@ pub(crate) async fn guarded_query(
         .await;
     let guard = GuardedCursor {
         kind,
-        plan,
+        plan: Box::new(plan),
         keywords,
     };
     let Err(e) = queried else {
@@ -1004,6 +1265,11 @@ impl GuardedCursor {
         completed: bool,
         end: Option<&ResultEnd>,
     ) -> Result<(), GuardFailure> {
+        // ## m3b-t18-safe06 (fix round 1, m1; ledger 279): a statement that completed without
+        // a result end (a release whose drain read a MySQL result to its end has no final OK)
+        // has no tag and no count. A reading that would need the count to be judged is
+        // unknown, never clean: the guard ends, then the connection is discarded as a gap.
+        let count_unknown = completed && end.is_none() && needs_count(self.kind, &self.keywords);
         let ran = match end {
             Some(end) if completed => Ran {
                 ok: true,
@@ -1026,6 +1292,177 @@ impl GuardedCursor {
             },
             None => Ran::default(),
         };
-        post_steps(conn, self.kind, &self.plan, &self.keywords, ran, replay).await
+        post_steps(conn, self.kind, &self.plan, &self.keywords, ran, replay).await?;
+        if count_unknown {
+            tracing::warn!("a read-only statement that may write ended without its count");
+            return Err(GuardFailure::gap(GapReason::WriteSucceeded));
+        }
+        Ok(())
+    }
+}
+
+// ## m3b-t18-safe06 (fix round 1, m1; ledger 279)
+/// First keywords whose statement is judged by its affected-row count (`hacivat_guard`'s
+/// row-write tags; on MySQL and MariaDB also `CALL` and `DO`). Only a statement with a result
+/// set is ever drained, so `SELECT` and `WITH … SELECT` are left out: a drained read is the
+/// common release (Docker: a locking `WITH` cursor), and such a read writes only through a
+/// function or `INTO OUTFILE`, which the read-only transaction (1792), the principal (no
+/// `FILE`) and step 0b already stop; a MySQL `WITH … DELETE` has no result set to drain.
+const COUNT_JUDGED: [&str; 7] = [
+    "INSERT", "UPDATE", "DELETE", "MERGE", "COPY", "REPLACE", "LOAD",
+];
+const MYSQL_COUNT_JUDGED: [&str; 2] = ["CALL", "DO"];
+
+/// Whether some reading of the statement's first keyword is one whose post-check needs the
+/// count (readings cut short count too: fail-closed).
+fn needs_count(kind: DbmsKind, keywords: &Keywords) -> bool {
+    let mysql = family(kind) == Family::MySql;
+    !keywords.complete
+        || keywords
+            .words()
+            .any(|k| COUNT_JUDGED.contains(&k) || (mysql && MYSQL_COUNT_JUDGED.contains(&k)))
+}
+
+// ## m3b-t01a-seams (fix round 1, I1)
+/// The guard's first-keyword readings of `sql` on `kind` (what steps 1a and 7 judge), for
+/// Task 18's `guard_keywords_are_a_subset_of_lexer_readings` in
+/// `hacivat-exec/tests/cross_crate_equalities.rs`: each reading ASCII upper-cased, `Some("")`
+/// when the statement starts with something other than a word, `None` when the reading holds
+/// no statement; and whether the readings are complete (`false` when a limit cut them short).
+// ## m3b-t18-safe06 (T1a review R1-M1): a test seam, not API.
+#[doc(hidden)]
+pub fn guard_keyword_readings(kind: DbmsKind, sql: &str) -> (Vec<Option<String>>, bool) {
+    let k = guard_keywords(kind, sql);
+    (k.readings, k.complete)
+}
+
+// ## m3b-t01a-seams (fix round 1, I1)
+#[cfg(test)]
+mod m3b_t01a_tests {
+    use super::*;
+
+    #[test]
+    fn guard_keyword_readings_expose_the_guards_readings() {
+        assert_eq!(
+            guard_keyword_readings(DbmsKind::Postgres, "  /* c */ select 1"),
+            (vec![Some("SELECT".to_string())], true)
+        );
+        // A version-gated executable comment is read both ways on MySQL.
+        let (readings, complete) =
+            guard_keyword_readings(DbmsKind::MySql, "/*!50000 BEGIN */ SELECT 1");
+        assert!(complete);
+        assert!(
+            readings.contains(&Some("BEGIN".to_string())),
+            "{readings:?}"
+        );
+        assert!(
+            readings.contains(&Some("SELECT".to_string())),
+            "{readings:?}"
+        );
+    }
+}
+
+// ## m3b-t18-safe06 (fix round 1, m1; ledger 279)
+#[cfg(test)]
+mod m3b_t18_tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use hacivat_driver::fake::FakeDriver;
+    use hacivat_driver::{Driver, DriverConnect, Endpoint, InsecureAuth};
+
+    use super::*;
+
+    #[test]
+    fn the_readings_that_need_a_count() {
+        let needs = |kind, sql| needs_count(kind, &guard_keywords(kind, sql));
+        assert!(needs(DbmsKind::MySql, "CALL p()"));
+        assert!(needs(DbmsKind::MariaDb, "do release_lock('x')"));
+        assert!(!needs(
+            DbmsKind::MySql,
+            "WITH d AS (SELECT 1) SELECT * FROM d"
+        ));
+        assert!(needs(DbmsKind::MySql, "/*!50000 CALL p() */ SELECT 1"));
+        assert!(needs(DbmsKind::Postgres, "INSERT INTO t VALUES (1)"));
+        assert!(!needs(DbmsKind::MySql, "SELECT * FROM t"));
+        assert!(!needs(
+            DbmsKind::Postgres,
+            "WITH x AS (SELECT 1) SELECT * FROM x"
+        ));
+    }
+
+    /// A fake MySQL connection inside the guard's read-only transaction.
+    async fn in_guard_tx(f: &FakeDriver) -> Box<dyn RawConn> {
+        let mut conn = f
+            .connect(DriverConnect {
+                endpoint: Endpoint::File {
+                    path: PathBuf::from("hv-t18.db"),
+                    create_if_missing: false,
+                    read_only: true,
+                },
+                tls: None,
+                user: Some("hv_test".into()),
+                password: None,
+                database: None,
+                application_name: "Hacivat".into(),
+                read_only: true,
+                options: Vec::new(),
+                connect_timeout: Duration::from_secs(15),
+                events: Arc::new(|_| {}),
+                insecure_auth: InsecureAuth::default(),
+            })
+            .await
+            .expect("the fake connects");
+        conn.batch("START TRANSACTION READ ONLY")
+            .await
+            .expect("the guard's transaction");
+        assert_eq!(conn.tx_status(), TxStatus::InTx);
+        conn
+    }
+
+    fn cursor(sql: &str) -> GuardedCursor {
+        GuardedCursor {
+            kind: DbmsKind::MySql,
+            plan: Box::new(plan_for(DbmsKind::MySql).expect("a plan")),
+            keywords: guard_keywords(DbmsKind::MySql, sql),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_drained_result_without_its_final_ok_is_never_clean() {
+        let f = FakeDriver::new(DbmsKind::MySql).tracks_transactions();
+        // A `CALL` read to its end by a drain has no final OK: no tag, no count. Unknown, so a
+        // gap: the connection is discarded.
+        let mut conn = in_guard_tx(&f).await;
+        let failure = cursor("CALL p()")
+            .finish(conn.as_mut(), &[], true, None)
+            .await
+            .expect_err("unknown is never clean");
+        assert_eq!(
+            failure.error.kind,
+            ExecErrorKind::EnforcementGap(GapReason::WriteSucceeded)
+        );
+        assert!(failure.discard.is_some());
+        // The guard still ended first (rollback, reset): nothing is left open.
+        assert_eq!(conn.tx_status(), TxStatus::Idle);
+        // A drained `SELECT` (the common release) stays clean.
+        let mut conn = in_guard_tx(&f).await;
+        cursor("SELECT * FROM t")
+            .finish(conn.as_mut(), &[], true, None)
+            .await
+            .expect("a drained read is clean");
+        // With its result end, a `CALL` is judged by its tag and count as before.
+        let mut conn = in_guard_tx(&f).await;
+        let end = ResultEnd {
+            rows: 0,
+            kept: 0,
+            command_tag: Some("CALL".into()),
+            rows_affected: Some(0),
+        };
+        cursor("CALL p()")
+            .finish(conn.as_mut(), &[], true, Some(&end))
+            .await
+            .expect("a call that wrote nothing");
     }
 }

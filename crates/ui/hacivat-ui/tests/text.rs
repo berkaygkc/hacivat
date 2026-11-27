@@ -392,3 +392,160 @@ fn text_past_its_dialog_card_is_recorded_as_such(cx: &mut TestAppContext) {
     // The scope closes with the card: text after it is never measured against it.
     assert!(!outside("no-card"), "a label outside any card");
 }
+
+// ## m3c-shotfix F3/F5: a paragraph is measured with the line height its text is laid out
+// with. GPUI snaps a fractional line height (caption: 16.2 px) to the device pixel, so a
+// wrapped paragraph of n lines is n × 16 px tall here; measuring it at 16.2 px a line flagged
+// every paragraph of three lines or more as cut, though nothing was.
+struct ProseHost;
+
+impl Render for ProseHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let ink = DARK.colors.text.to_hsla();
+        div()
+            .w(px(120.0))
+            .child(paragraph(TOO_WIDE, TextSource::Data, DARK.type_ramp.caption, ink).id("prose"))
+    }
+}
+
+#[gpui::test]
+fn a_paragraph_of_many_lines_at_a_fractional_line_height_is_not_cut(cx: &mut TestAppContext) {
+    assert!(
+        DARK.type_ramp.caption.line_height.fract() != 0.0,
+        "the case needs a fractional line height"
+    );
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let (_, vcx) = cx.add_window_view(|_, _| ProseHost);
+    vcx.run_until_parked();
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let r = frame
+        .iter()
+        .find(|r| r.path.ends_with("#prose"))
+        .unwrap_or_else(|| panic!("the paragraph was recorded: {frame:?}"));
+    assert!(r.painted_px <= 120.0, "it wraps in its box: {r:?}");
+    assert!(!r.clipped, "a wrapped paragraph that shows whole: {r:?}");
+}
+
+// ## m3c-shotfix F3 (fix rounds 1 and 2, m5): the snap hides no real cut. The paragraph is
+// measured at its natural height (its lines at the snapped pitch); a container that clips it 1 px
+// short of that is still flagged, and one exactly that tall is not: the threshold is bracketed.
+struct ShortProseHost {
+    /// The clip's height; `None`: no clip (the natural height is measured).
+    clip: Option<f32>,
+}
+
+impl Render for ShortProseHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let ink = DARK.colors.text.to_hsla();
+        let prose = div()
+            .debug_selector(|| "prose-box".into())
+            .child(paragraph(TOO_WIDE, TextSource::Data, DARK.type_ramp.caption, ink).id("prose"));
+        let room = div().w(px(120.0));
+        match self.clip {
+            Some(h) => room.h(px(h)).overflow_hidden().child(prose),
+            None => room.child(prose),
+        }
+    }
+}
+
+fn prose_clipped(cx: &mut TestAppContext, clip: Option<f32>) -> (bool, f32) {
+    let (_, vcx) = cx.add_window_view(move |_, _| ShortProseHost { clip });
+    vcx.run_until_parked();
+    let height = f32::from(vcx.debug_bounds("prose-box").expect("drawn").size.height);
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let r = frame
+        .iter()
+        .find(|r| r.path.ends_with("#prose"))
+        .unwrap_or_else(|| panic!("the paragraph was recorded: {frame:?}"));
+    (r.clipped, height)
+}
+
+#[gpui::test]
+fn a_paragraph_one_snapped_line_short_is_still_cut(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let (clipped, natural) = prose_clipped(cx, None);
+    let line = DARK.type_ramp.caption.line_height.round();
+    assert!(
+        !clipped && natural >= 3.0 * line,
+        "{natural}: three lines or more"
+    );
+    let (clipped, _) = prose_clipped(cx, Some(natural));
+    assert!(!clipped, "a clip exactly its height cuts nothing");
+    let (clipped, _) = prose_clipped(cx, Some(natural - 1.0));
+    assert!(clipped, "a clip 1 px short of its height cuts it");
+}
+
+// ## m4b-t21-shots (T13 fr1 re-review n8): the shared tooltip takes a line break, and a line
+// too wide for the window wraps inside it.
+
+/// A view showing one `Tip` (the tooltip view) as its content.
+struct TipHost(gpui::AnyView);
+
+impl Render for TipHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(self.0.clone())
+    }
+}
+
+/// Draws a `Tip` of `text` in a window `width` px wide; returns what the frame recorded.
+fn draw_tip(cx: &mut TestAppContext, text: &str, width: f32) -> Vec<RenderedText> {
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let text: gpui::SharedString = text.to_string().into();
+    let (_, vcx) = cx.add_window_view(|_, cx| TipHost(hacivat_ui::popover::Tip::view(text, cx)));
+    vcx.simulate_resize(size(px(width), px(400.0)));
+    vcx.run_until_parked();
+    vcx.read(|cx| cx.global::<TextRegistry>().frame.clone())
+}
+
+#[gpui::test]
+fn a_tooltip_with_a_line_break_draws_each_line(cx: &mut TestAppContext) {
+    // Before: GPUI's line shaper panicked on the `\n` on hover.
+    let frame = draw_tip(
+        cx,
+        "13 scripts listed here\nAlso under orders-staging",
+        960.0,
+    );
+    let texts: Vec<&str> = frame.iter().map(|r| r.text.as_ref()).collect();
+    assert_eq!(
+        texts,
+        ["13 scripts listed here", "Also under orders-staging"],
+        "{frame:?}"
+    );
+    assert!(frame.iter().all(|r| !r.clipped && r.visible), "{frame:?}");
+}
+
+#[gpui::test]
+fn a_tooltip_wider_than_its_window_wraps_and_one_that_fits_stays_one_line(cx: &mut TestAppContext) {
+    let long = "Points outside the library, so Hacivat never opens it. · Kept in the cloud, not \
+                downloaded. Opening it downloads it first. · ? Unknown: git status could not \
+                be read for this file";
+    // At 400 px it cannot be one line: it wraps in its box, nothing cut.
+    let frame = draw_tip(cx, long, 400.0);
+    assert_eq!(frame.len(), 1, "{frame:?}");
+    let r = &frame[0];
+    assert!(!r.clipped && r.visible, "{r:?}");
+    assert!(r.painted_px <= 400.0 - 16.0, "{r:?}");
+    assert!(r.path.contains("hacivat-ui/src/popover.rs"), "{r:?}");
+    // A short one is the one-line label it always was.
+    let frame = draw_tip(cx, "Run this statement", 960.0);
+    assert_eq!(frame.len(), 1, "{frame:?}");
+    assert!(!frame[0].clipped && !frame[0].truncated, "{:?}", frame[0]);
+}

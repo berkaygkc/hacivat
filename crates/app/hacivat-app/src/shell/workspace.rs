@@ -13,6 +13,7 @@ use hacivat_settings::{LanguagePref, ThemePref, fsio, workspace_state};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::capsule::{Capsule, CapsuleModel, EnvKind};
 use hacivat_ui::dialog::{Dialog, DialogEvent, DialogSpec};
+use hacivat_ui::focus_home::{self, HomeSlot};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::menu::{MenuItemSpec, PopupMenu, PopupMenuEvent};
 use hacivat_ui::panes::{
@@ -47,7 +48,7 @@ use crate::shell::hooks::{CloseDecision, TabDecor, tab_close_decision};
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::layers::{DIALOG_CONTEXT, Layer, Layers, MENU_CONTEXT};
 use crate::shell::persist::LatestWriter;
-use crate::shell::tab_content::{TabContentRegistry, TabKind};
+use crate::shell::tab_content::{DdlObjectId, TabContentRegistry, TabKind};
 use crate::shell::tabs::{CONSOLE_CONTEXT, context_of, title_of};
 use crate::shell::tiles::TileBounds;
 use crate::shell::tiles::{self, Seam, TileLayout};
@@ -57,7 +58,12 @@ use hacivat_proto::ProfileId;
 use hacivat_ui_core::gpui_surface::FluentBuilder as _;
 
 /// The `workspace.json` format version this build writes and reads.
-pub const WORKSPACE_STATE_VERSION: u32 = 1;
+// ## m4b-t01b-seams (named line, R-M4b-29): version 2 adds the script tab kind. A version-1
+// file loads unchanged (it has no script tabs); an older build sets a version-2 file aside
+// (`workspace_state::load`, `*.newer-<ts>`).
+pub const WORKSPACE_STATE_VERSION: u32 = 2;
+// ## m4b-t01b-seams (R-M4b-29): the first version that saves script tabs.
+const SCRIPT_TABS_SINCE: u64 = 2;
 /// How long a layout change waits before it is saved; a later change restarts the wait.
 pub const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// The workspace's own key context, the bottom of every context stack.
@@ -101,6 +107,38 @@ enum SavedKind {
     Registered {
         name: String,
     },
+    // ## m4b-t01b-seams (named lines, R-M4b-22, R-M4b-29): a script tab (version 2). The file
+    // holds the binding itself; `interned` is the restored tab's handle, set by `restore`
+    // (never saved).
+    // ## m4b-t14-tabs (named exception, T1b m1): every field is read leniently (a value of
+    // another type, or none, is `None`), so a bad entry closes its own tab, never the layout.
+    Script {
+        #[serde(default, deserialize_with = "crate::scripts::restore::lenient")]
+        library: Option<String>,
+        #[serde(default, deserialize_with = "crate::scripts::restore::lenient")]
+        rel_path: Option<String>,
+        #[serde(default, deserialize_with = "crate::scripts::restore::lenient")]
+        profile: Option<String>,
+        #[serde(default, deserialize_with = "crate::scripts::restore::lenient")]
+        database: Option<String>,
+        // ## m4b-t14-tabs fix round 1 (C2, R-T14-1): a SQLite tab's file, as it was at open
+        // (its canonical path and `dev:ino`, with `:secs.nanos` of its birth time on Linux since
+        // m4b-cifix-4); left out for every other tab.
+        #[serde(
+            default,
+            deserialize_with = "crate::scripts::restore::lenient",
+            skip_serializing_if = "Option::is_none"
+        )]
+        sqlite_path: Option<String>,
+        #[serde(
+            default,
+            deserialize_with = "crate::scripts::restore::lenient",
+            skip_serializing_if = "Option::is_none"
+        )]
+        sqlite_id: Option<String>,
+        #[serde(skip)]
+        interned: Option<crate::scripts::ScriptTabId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,6 +175,10 @@ pub struct Workspace {
     results_view: Option<AnyView>,
     layers: Layers,
     focus: FocusHandle,
+    // ## m4-t33d-fr1 (ruling R-T33d-5, named exception): the focused pane's content is a focus
+    // home; its primary (the content's own home, else its first Tab stop) is the active pane's
+    // default, where a control outside every home hands the focus when it stops being drawn.
+    pane_home: HomeSlot,
     drag: Option<Seam>,
     state_path: Option<PathBuf>,
     /// Writes `workspace.json`; a pending state is flushed on quit and when the view goes.
@@ -214,6 +256,7 @@ impl Workspace {
             results_view,
             layers: Layers::default(),
             focus: cx.focus_handle(),
+            pane_home: HomeSlot::new(),
             drag: None,
             state_path,
             saver: LatestWriter::new(write_state),
@@ -227,7 +270,30 @@ impl Workspace {
             top: t.spacing.titlebar_height,
             bottom: t.spacing.statusbar_height,
         };
-        ws.restore(bounds, cx);
+        // ## m4-t24-live (named lines): the explorer's expanded rows (`explorer.expanded`).
+        if let Some(explorer) = ws.restore(bounds, cx) {
+            let map = crate::explorer::live::parse_saved(&explorer);
+            crate::explorer::live::set_restored(map, cx);
+        }
+        // ## m4-t33d-fr1 (ruling R-T33d-5, named exception): a focused control that stops being
+        // drawn hands the focus to its surface's primary, else to the active pane's default
+        // (none while a layer is open: the layer's own home serves it).
+        let recovery = focus_home::recover_lost_focus(ws.focus.clone(), window, cx, |ws, _, _| {
+            if ws.layers.is_empty() {
+                ws.pane_default()
+            } else {
+                None
+            }
+        });
+        ws._subscriptions.push(recovery);
+        // The cached trees of app start, now that the expanded rows are known (R-M4-15).
+        crate::explorer::live::start(cx);
+        ws._subscriptions
+            .push(
+                cx.observe_global::<crate::explorer::live::ExpandedState>(|this, cx| {
+                    this.layout_changed(cx);
+                }),
+            );
         ws
     }
 
@@ -236,30 +302,52 @@ impl Workspace {
     /// Restores `workspace.json` when it is readable and consistent; otherwise keeps one
     /// `Console 1`. A file that parses as JSON but does not describe a valid workspace is set
     /// aside (`*.corrupt-<ts>`) before anything overwrites it.
-    fn restore(&mut self, bounds: TileBounds, cx: &App) {
-        let Some(path) = &self.state_path else {
-            return;
-        };
-        let Some(value) = workspace_state::load(path, WORKSPACE_STATE_VERSION) else {
-            return;
-        };
+    // ## m4-t24-live (named lines): answers the file's `explorer` part (the expanded rows),
+    // when the file was restored.
+    // ## m4b-t01b-seams (named exception, R-M4b-29): `cx` is mutable, so a restored script tab
+    // gets its handle (`scripts::tabs::intern`) before the state is checked.
+    fn restore(&mut self, bounds: TileBounds, cx: &mut App) -> Option<serde_json::Value> {
+        let path = self.state_path.as_ref()?;
+        let value = workspace_state::load(path, WORKSPACE_STATE_VERSION)?;
+        let explorer = value.get("explorer").cloned();
+        // ## m4b-t01b-seams (R-M4b-29): script tabs are read from version 2 on; a tab of that
+        // kind in an older file, or one whose binding does not parse, closes like a tab of a
+        // kind nobody registered.
+        let scripts = value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|v| v >= SCRIPT_TABS_SINCE);
+        let saved = serde_json::from_value::<SavedState>(value).map(|mut saved| {
+            if scripts {
+                // ## m4b-t14-tabs (named exception, T1b m2): one tab per (file, connection).
+                let mut dedup = crate::scripts::restore::Dedup::default();
+                for tab in &mut saved.tabs {
+                    intern_script_tab(&mut tab.kind, cx);
+                    if let SavedKind::Script { interned, .. } = &mut tab.kind
+                        && let Some(id) = *interned
+                        && !dedup.first(id)
+                    {
+                        *interned = None;
+                    }
+                }
+            }
+            saved
+        });
         let registry = cx.try_global::<TabContentRegistry>();
-        let restored = serde_json::from_value::<SavedState>(value)
-            .map_err(|e| e.to_string())
-            .and_then(|saved| {
-                validate(
-                    saved,
-                    |name| registry.and_then(|r| r.kind_named(name)),
-                    bounds,
-                )
-                .map_err(str::to_string)
-            });
+        let restored = saved.map_err(|e| e.to_string()).and_then(|saved| {
+            validate(
+                saved,
+                |name| registry.and_then(|r| r.kind_named(name)),
+                bounds,
+            )
+            .map_err(str::to_string)
+        });
         let restored = match restored {
             Ok(restored) => restored,
             Err(reason) => {
                 tracing::warn!(path = %path.display(), %reason, "workspace: state set aside");
                 let _ = fsio::quarantine(path, "corrupt", SystemTime::now());
-                return;
+                return None;
             }
         };
         for kind in restored.tabs.values() {
@@ -269,26 +357,69 @@ impl Workspace {
         self.tiles = restored.tiles;
         self.panes = restored.panes;
         self.tabs = restored.tabs;
+        explorer
     }
 
-    fn saved_state(&self) -> SavedState {
+    // ## m4b-t01b-seams (named exception, R-M4b-29): `cx` reads a script tab's binding.
+    fn saved_state(&self, cx: &App) -> SavedState {
+        // ## m4-t01b-seams (ruling R-W0-1, named exception): DDL view tabs are not saved; the
+        // saved panes leave them out as if they were closed.
+        let mut panes = self.panes.clone();
+        for (id, kind) in &self.tabs {
+            // ## m4b-t01b-seams: a script tab whose handle names nothing (never in practice)
+            // is left out the same way, so the saved panes name only saved tabs.
+            let unsaved = match kind {
+                TabKind::DdlView { .. } => true,
+                TabKind::Script { script } => crate::scripts::tabs::spec(*script, cx).is_none(),
+                _ => false,
+            };
+            if unsaved {
+                let holders: Vec<PaneId> = panes
+                    .panes
+                    .iter()
+                    .filter(|(_, p)| p.tabs.contains(id))
+                    .map(|(pane, _)| *pane)
+                    .collect();
+                for pane in holders {
+                    panes.close_tab(pane, *id);
+                }
+            }
+        }
         SavedState {
             tiles: self.tiles,
-            panes: self.panes.clone(),
+            panes,
             tabs: self
                 .tabs
                 .iter()
-                .map(|(id, kind)| SavedTab {
-                    id: *id,
-                    kind: match kind {
-                        TabKind::Console { n, profile } => SavedKind::Console {
-                            n: *n,
-                            profile: profile.map(|p| p.to_string()),
+                .filter_map(|(id, kind)| {
+                    Some(SavedTab {
+                        id: *id,
+                        kind: match kind {
+                            TabKind::Console { n, profile } => SavedKind::Console {
+                                n: *n,
+                                profile: profile.map(|p| p.to_string()),
+                            },
+                            TabKind::Registered(name) => SavedKind::Registered {
+                                name: (*name).to_string(),
+                            },
+                            TabKind::DdlView { .. } => return None,
+                            // ## m4b-t01b-seams (R-M4b-22): the binding itself, never a handle.
+                            TabKind::Script { script } => {
+                                let tab = crate::scripts::tabs::spec(*script, cx)?;
+                                // ## m4b-t14-tabs fix round 1 (C2)
+                                let file = crate::scripts::tabs::sqlite_file(*script, cx);
+                                SavedKind::Script {
+                                    library: Some(tab.library.to_string()),
+                                    rel_path: Some(tab.rel.as_str().to_string()),
+                                    profile: tab.profile.map(|p| p.to_string()),
+                                    database: tab.database.map(|d| d.as_str().to_string()),
+                                    sqlite_id: file.as_ref().and_then(|f| f.id_text()),
+                                    sqlite_path: file.map(|f| f.path),
+                                    interned: None,
+                                }
+                            }
                         },
-                        TabKind::Registered(name) => SavedKind::Registered {
-                            name: (*name).to_string(),
-                        },
-                    },
+                    })
                 })
                 .collect(),
         }
@@ -311,9 +442,11 @@ impl Workspace {
         let Some(path) = self.state_path.clone() else {
             return;
         };
-        let Ok(value) = serde_json::to_value(self.saved_state()) else {
+        let Ok(mut value) = serde_json::to_value(self.saved_state(cx)) else {
             return;
         };
+        // ## m4-t24-live (named line): the explorer's expanded rows.
+        crate::explorer::live::add_saved(&mut value, cx);
         self.save_task = Some(self.saver.submit((path, value), Some(SAVE_DEBOUNCE), cx));
     }
 
@@ -326,6 +459,13 @@ impl Workspace {
 
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    // ## m4-t33d-fr1 (ruling R-T33d-5, named exception)
+    /// The active pane's default focus as the last frame found it: its content's home primary
+    /// (a console's editor, a DDL view's code area), else its first Tab stop.
+    pub fn pane_default(&self) -> Option<FocusHandle> {
+        self.pane_home.primary()
     }
 
     /// The focused pane's active tab.
@@ -366,7 +506,9 @@ impl Workspace {
             .values()
             .filter_map(|k| match k {
                 TabKind::Console { n, .. } => Some(*n),
-                TabKind::Registered(_) => None,
+                // ## m4-t01b-seams (ruling R-W0-1, named exception)
+                // ## m4b-t01b-seams (named exception): a script tab has no console number.
+                TabKind::Registered(_) | TabKind::DdlView { .. } | TabKind::Script { .. } => None,
             })
             .max()
             .map_or(1, |n| n.saturating_add(1))
@@ -508,9 +650,44 @@ impl Workspace {
         }
     }
 
+    // ## demofix-1 fix round 1 (m5): the editor / results seam from the keyboard (palette
+    // commands "Results: larger" and "Results: smaller"), as a drag of the seam would move it.
+    /// Moves the editor / results seam by `delta` px (positive: the results get smaller).
+    pub fn move_results_seam(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let t = Theme::get(cx).tokens;
+        let inset = match chrome_kind(window) {
+            ChromeKind::LinuxClient => window.client_inset().map_or(0.0, f32::from),
+            _ => 0.0,
+        };
+        let size = window.viewport_size();
+        let window_px = (
+            f32::from(size.width) - 2.0 * inset,
+            f32::from(size.height) - 2.0 * inset,
+        );
+        let top = t.spacing.titlebar_height;
+        let y = top + self.tiles.editor_h + delta;
+        self.tiles.drag(
+            Seam::Editor,
+            point(px(0.0), px(y)),
+            window_px,
+            top,
+            t.spacing.statusbar_height,
+        );
+        self.layout_changed(cx);
+    }
+
     pub fn toggle_explorer(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.tiles.explorer_visible = !self.tiles.explorer_visible;
         self.layout_changed(cx);
+    }
+
+    // ## m3c-t38 (named exception): the record inspector's visibility (`TileLayout`, saved).
+    /// Opens or closes the record inspector of the results tile (HV-GRID-12).
+    pub fn set_inspector_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.tiles.inspector_visible != visible {
+            self.tiles.inspector_visible = visible;
+            self.layout_changed(cx);
+        }
     }
 
     /// Activates the tab of registered `kind`, or opens one in the focused pane. A kind nobody
@@ -545,6 +722,93 @@ impl Workspace {
         self.layout_changed(cx);
     }
 
+    // ## m4-t01b-seams (ruling R-W0-1, named exception)
+    /// Activates the DDL view tab of `object` of `profile`, or opens one in the focused pane:
+    /// one tab per object. Returns the tab (`None` only when the tab IDs are used up).
+    pub fn open_ddl_view_tab(
+        &mut self,
+        profile: ProfileId,
+        object: DdlObjectId,
+        cx: &mut Context<Self>,
+    ) -> Option<TabId> {
+        let kind = TabKind::DdlView { profile, object };
+        let existing = self
+            .tabs
+            .iter()
+            .find(|(_, k)| **k == kind)
+            .map(|(id, _)| *id);
+        let tab = match existing {
+            Some(tab) => {
+                let found = self.panes.panes.iter().find_map(|(pane, p)| {
+                    p.tabs.iter().position(|t| *t == tab).map(|i| (*pane, i))
+                });
+                if let Some((pane, idx)) = found {
+                    self.panes.activate(pane, idx);
+                }
+                tab
+            }
+            None => {
+                let tab = self.fresh_tab(kind)?;
+                self.add_to_focused(tab);
+                tab
+            }
+        };
+        self.layout_changed(cx);
+        Some(tab)
+    }
+
+    // ## m4b-t01b-seams (named lines, R-M4b-4, R-M4b-29)
+    /// Activates the script tab of `script` (the same library, file, connection and database),
+    /// or opens one in the focused pane: one tab per (file, connection). Returns the tab
+    /// (`None` only when the tab IDs are used up). Task 14's `open_script` is its caller.
+    pub fn open_script_tab(
+        &mut self,
+        script: crate::scripts::ScriptTabId,
+        cx: &mut Context<Self>,
+    ) -> Option<TabId> {
+        let kind = TabKind::Script { script };
+        let existing = self
+            .tabs
+            .iter()
+            .find(|(_, k)| **k == kind)
+            .map(|(id, _)| *id);
+        let tab = match existing {
+            Some(tab) => {
+                let found = self.panes.panes.iter().find_map(|(pane, p)| {
+                    p.tabs.iter().position(|t| *t == tab).map(|i| (*pane, i))
+                });
+                if let Some((pane, idx)) = found {
+                    self.panes.activate(pane, idx);
+                }
+                tab
+            }
+            None => {
+                let tab = self.fresh_tab(kind)?;
+                self.add_to_focused(tab);
+                tab
+            }
+        };
+        self.layout_changed(cx);
+        Some(tab)
+    }
+
+    /// The view of DDL view `tab` from `crate::ddl_view`, built once.
+    fn ddl_view_view(
+        &mut self,
+        tab: TabId,
+        profile: ProfileId,
+        object: DdlObjectId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyView> {
+        if let Some(view) = self.tab_views.get(&tab) {
+            return Some(view.clone());
+        }
+        let view = crate::ddl_view::tab_view(profile, object, window, cx)?;
+        self.tab_views.insert(tab, view.clone());
+        Some(view)
+    }
+
     /// Builds the view of a registered tab once.
     fn build_view(&mut self, tab: TabId, window: &mut Window, cx: &mut App) -> Option<AnyView> {
         if let Some(view) = self.tab_views.get(&tab) {
@@ -570,8 +834,15 @@ impl Workspace {
             .get(&pane)
             .and_then(|p| p.tabs.iter().position(|t| *t == tab))
         {
+            // ## m3c-t41-chrome (named exception; ledger 331): a click on the tab that is
+            // already active says "this one" again: the status bar and the capsule follow its
+            // console again after an explorer pick (`ActiveTab` observers re-run).
+            let again = self.active_tab() == Some(tab);
             self.panes.activate(pane, idx);
             self.layout_changed(cx);
+            if again {
+                cx.set_global(ActiveTab(Some(tab)));
+            }
         }
     }
 
@@ -621,8 +892,20 @@ impl Workspace {
     /// Removes the layer showing `view` (wherever it is in the stack) and gives the focus back
     /// (`pub` since m2a-t17: a custom modal layer closes itself by its view).
     pub fn remove_layer(&mut self, view: EntityId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(layer) = self.layers.remove_view(view) {
-            self.closed(layer, window, cx);
+        // ## m3b-t21-confirm (named exception): a layer removed from under another (a prompt
+        // that closed on its own timer or session event under another modal) leaves the focus
+        // on the top layer; only the top layer gives the focus back.
+        match self.layers.remove_view_in_stack(view) {
+            Some((layer, true)) => {
+                self.closed(layer, window, cx);
+            }
+            Some((layer, false)) => {
+                if layer.modal && !self.layers.has_modal() {
+                    rebuild_menus_later(cx);
+                }
+                cx.notify();
+            }
+            None => {}
         }
     }
 
@@ -775,6 +1058,10 @@ impl Workspace {
         match kind {
             TabKind::Console { .. } => Some(CONSOLE_CONTEXT),
             TabKind::Registered(name) => self.kind_contexts.get(name).copied(),
+            // ## m4-t01b-seams (ruling R-W0-1, named exception)
+            TabKind::DdlView { .. } => Some(crate::ddl_view::DDL_VIEW_CONTEXT),
+            // ## m4b-t01b-seams (named exception, R-M4b-37)
+            TabKind::Script { .. } => Some(crate::scripts::SCRIPT_TAB_CONTEXT),
         }
     }
 
@@ -860,6 +1147,50 @@ fn write_state((path, value): &(PathBuf, serde_json::Value)) {
     }
 }
 
+// ## m4b-t01b-seams (R-M4b-22, R-M4b-29)
+/// Gives a saved script tab its handle when its binding parses: a library ID, a valid path in
+/// the library, and a profile that is a UUID (an unreadable profile restores the tab unbound,
+/// as for a console; it is never bound to another connection). Anything else leaves it without
+/// one, and it closes.
+fn intern_script_tab(kind: &mut SavedKind, cx: &mut App) {
+    let SavedKind::Script {
+        library,
+        rel_path,
+        profile,
+        database,
+        sqlite_path,
+        sqlite_id,
+        interned,
+    } = kind
+    else {
+        return;
+    };
+    // ## m4b-t14-tabs (named exception): the fields are optional (read leniently).
+    let (Some(library), Some(Ok(rel))) = (
+        library
+            .as_deref()
+            .and_then(crate::scripts::parse_library_id),
+        rel_path.as_deref().map(crate::scripts::RelPath::parse),
+    ) else {
+        return;
+    };
+    let tab = crate::scripts::ScriptTab {
+        library,
+        rel,
+        profile: profile.as_deref().and_then(|p| p.parse().ok()),
+        database: database.as_deref().map(crate::scripts::DatabaseName::new),
+    };
+    let id = crate::scripts::tabs::intern(tab, cx);
+    // ## m4b-t14-tabs fix round 2 (m-fr1-7): its first read waits for the library's listing.
+    crate::scripts::tabs::mark_restored(id, cx);
+    // ## m4b-t14-tabs fix round 1 (C2): the SQLite file it was opened on (Run compares it).
+    if let Some(path) = sqlite_path.as_deref() {
+        let file = crate::scripts::tabs::SqliteFile::parse(path, sqlite_id.as_deref());
+        crate::scripts::tabs::set_sqlite_file(id, file, cx);
+    }
+    *interned = Some(id);
+}
+
 /// A restored workspace, consistent and within the window.
 #[derive(Debug, Clone, PartialEq)]
 struct Restored {
@@ -900,6 +1231,8 @@ fn validate(
                 profile: profile.and_then(|p| p.parse().ok()),
             }),
             SavedKind::Registered { name } => registered(&name).map(TabKind::Registered),
+            // ## m4b-t01b-seams (R-M4b-29): its handle, when `restore` gave it one.
+            SavedKind::Script { interned, .. } => interned.map(|script| TabKind::Script { script }),
         };
         if described.insert(tab.id, kind).is_some() {
             return Err("a tab is listed twice");
@@ -1073,17 +1406,29 @@ impl Workspace {
             });
         }
         let modal = self.layers.has_modal();
+        // ## m4-m3carry (U-6 c, P2-04): the collapsed field's tooltip and name, its words and
+        // keys as the narrow Run button joins them (`hv-console-button-keys`).
+        let placeholder = tr(cx, ids::hv::TITLEBAR_PALETTE, NoArgs);
+        let palette_tip = if keys.is_empty() {
+            placeholder.clone()
+        } else {
+            tr(
+                cx,
+                ids::hv::CONSOLE_BUTTON_KEYS,
+                ids::hv::HvConsoleButtonKeys {
+                    label: Text(placeholder.to_string()),
+                    keys: Text(keys.to_string()),
+                },
+            )
+        };
         let mut bar = TitleBar::new(chrome)
             .inert(modal)
             .brand(tr(cx, ids::cm::BRAND_HACIVAT_CAPS, NoArgs))
             .capsule(capsule)
-            .palette_field(
-                tr(cx, ids::hv::TITLEBAR_PALETTE, NoArgs),
-                keys,
-                |_, window, cx| {
-                    ActionRegistry::run(PALETTE_ACTION, window, cx);
-                },
-            )
+            .palette_field(placeholder, keys, |_, window, cx| {
+                ActionRegistry::run(PALETTE_ACTION, window, cx);
+            })
+            .palette_tip(palette_tip)
             .right(vec![
                 language_switch(cx, modal),
                 theme_switch(theme, cx, modal),
@@ -1197,7 +1542,8 @@ impl Workspace {
                         None => tiles::results(theme, cx).into_any_element(),
                     }),
             );
-        let grabs: Vec<Div> = tiles::seam_grabs(&l)
+        // ## demofix-1 (PO demo F7): visible grips, the dragged seam highlighted.
+        let grabs: Vec<Div> = tiles::seam_grabs(&l, self.drag, theme)
             .into_iter()
             .map(|(seam, grab)| {
                 grab.on_mouse_down(
@@ -1205,6 +1551,8 @@ impl Workspace {
                     cx.listener(move |this, _, _, cx| {
                         this.drag = Some(seam);
                         cx.stop_propagation();
+                        // demofix-1 (F7): the dragged seam is drawn highlighted.
+                        cx.notify();
                     }),
                 )
             })
@@ -1288,6 +1636,7 @@ impl Workspace {
                     title,
                     title_source,
                     env,
+                    title_parts,
                     ..
                 } = decor(*tab, cx);
                 let (title, title_source) = match title {
@@ -1298,8 +1647,11 @@ impl Workspace {
                     id: *tab,
                     title,
                     title_source,
-                    dirty: false,
+                    // ## m4b-t14-tabs (named exception): a script tab's unsaved edits.
+                    dirty: crate::scripts::tabs::tab_dirty(*tab, cx),
                     env,
+                    // ## m4b-t21-shots (named line; ruling (d))
+                    parts: title_parts,
                 }
             })
             .collect();
@@ -1323,6 +1675,12 @@ impl Workspace {
         let content = match pane.tabs.get(pane.active) {
             Some(tab) => self.tab_content(*tab, theme, window, cx),
             None => editor_empty(theme, cx),
+        };
+        // ## m4-t33d-fr1 (ruling R-T33d-5, named exception): the active pane's default.
+        let content = if id == self.panes.focused {
+            focus_home::first_stop_home(&self.pane_home, content).into_any_element()
+        } else {
+            content
         };
         div()
             .flex()
@@ -1391,6 +1749,25 @@ impl Workspace {
                     None => editor_empty(theme, cx),
                 }
             }
+            // ## m4-t01b-seams (ruling R-W0-1, named exception): the view `crate::ddl_view`
+            // builds for the tab, once.
+            Some(TabKind::DdlView { profile, object }) => {
+                match self.ddl_view_view(tab, profile, object, window, cx) {
+                    Some(view) => div().size_full().child(view).into_any_element(),
+                    None => editor_empty(theme, cx),
+                }
+            }
+            // ## m4b-t01b-seams (named exception, R-M4b-29), ## m4b-t14-tabs (named exception):
+            // the script tab's console view, built once.
+            Some(TabKind::Script { script }) => {
+                if let Some(view) = self.tab_views.get(&tab) {
+                    view.clone().into_any_element()
+                } else {
+                    let view = crate::console::view::build_script(tab, script, window, cx);
+                    self.tab_views.insert(tab, view.clone());
+                    view.into_any_element()
+                }
+            }
             None => editor_empty(theme, cx),
         }
     }
@@ -1420,6 +1797,8 @@ impl Render for Workspace {
         // ## m3a-t34-status-follows (fix round 1, C1): every path to a new active tab (a
         // restored layout included) is mirrored before the status bar and capsule are built.
         self.mirror_active_tab(cx);
+        // ## m4b-t22-pre (named line, T21 r2): a closed pane's tab-strip width goes.
+        hacivat_ui::panes::keep_strip_widths(window, self.panes.panes.keys().copied(), cx);
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
@@ -1462,6 +1841,8 @@ impl Render for Workspace {
             .on_key_down(escape)
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
+            // ## m4-t33d-fr1 (ruling R-T33d-5, named exception)
+            .child(focus_home::frame_start())
             .child(title_bar)
             .child(tiles)
             .child(status_bar)
@@ -1876,6 +2257,8 @@ mod validate_tests {
             editor_h: -5.0,
             inspector_w: f32::INFINITY,
             explorer_visible: true,
+            // ## m3c-t38 (named exception): the new field.
+            inspector_visible: false,
         };
         let t = validate(saved, none, bounds()).unwrap().tiles;
         assert_eq!(t.explorer_w, 276.0);

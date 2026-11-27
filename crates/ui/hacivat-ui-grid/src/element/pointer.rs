@@ -3,6 +3,18 @@
 //! (columns) and the corner (everything), drag selection with edge autoscroll capped at 40 rows
 //! per frame, scrollbar thumb drags and track jumps, and column resizing from a header's right
 //! edge (`ColumnResized` when the drag ends).
+//!
+//! ## m3c-t35 (M3c Task 35)
+//! - Rows hit are **view rows**, turned into model rows through the view map (a click on a
+//!   sorted grid selects the data it shows).
+//! - Columns are hit through the frozen layer first (`ColumnLayout::col_at_screen_x`): left of
+//!   the frozen width a frozen column, right of it a scrolled one; a header edge hidden under
+//!   the frozen layer cannot be grabbed.
+//! - ⌘/Ctrl-click and -drag add a range (M3a's `add_cell` then `extend_to`, kept).
+//! - A double-click on a header's right edge fits the column (`grid.auto_fit`'s path).
+//! - **Edge autoscroll while still** (ledger 213): while a cell or row drag rests past the
+//!   body's edge, a timer ([`crate::view::AUTOSCROLL_TICK`]) keeps scrolling and extending, as
+//!   a move would; it stops when the pointer comes back inside or the drag ends.
 
 use hacivat_ui_core::gpui_surface::{
     App, Context, CursorStyle, Entity, Hitbox, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -11,13 +23,16 @@ use hacivat_ui_core::gpui_surface::{
 
 use super::scrollbar;
 use super::{Geometry, RESIZE_GRAB_PX};
-use crate::model::ViewMap;
 use crate::model::autosize::clamp_user_width;
-use crate::source::{ColId, ModelCell, ModelRow};
-use crate::view::{GridEvent, GridView};
+use crate::source::{ColId, ModelCell, ModelRow, ViewRow};
+use crate::view::{AUTOSCROLL_TICK, GridEvent, GridView};
 
 /// Edge autoscroll while drag-selecting moves at most this many rows per event.
 pub const AUTOSCROLL_MAX_ROWS: f64 = 40.0;
+
+// ## m3c-t35
+/// Edge autoscroll moves at most this many px sideways per event.
+pub const AUTOSCROLL_MAX_X_PX: f64 = 120.0;
 
 /// What a pointer drag is doing.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,13 +65,25 @@ pub(crate) struct PointerState {
     /// Where the pointer last moved over the grid: each frame re-derives the hover from it, so
     /// after a wheel scroll the hover follows the pointer, not the row it was on.
     pub position: Option<Point<Pixels>>,
+    // ## m3c-t35
+    /// Where a drag's pointer last was (the edge autoscroll extends to it while it rests).
+    pub drag_at: Option<Point<Pixels>>,
 }
 
 impl PointerState {
-    /// The x of the resize guide while a column is being resized, in content px.
-    pub fn resize_guide(&self, layout: &crate::model::ColumnLayout) -> Option<f64> {
+    /// The x of the resize guide while a column is being resized: the column's visible index.
+    pub fn resize_guide(&self, layout: &crate::model::ColumnLayout) -> Option<usize> {
         match self.drag {
-            Some(Drag::Resize { col, .. }) => layout.index_of(col).map(|ix| layout.x_of(ix + 1)),
+            Some(Drag::Resize { col, .. }) => layout.index_of(col),
+            _ => None,
+        }
+    }
+
+    // ## m3c-t35
+    /// The column being resized and its width so far.
+    pub fn resizing(&self) -> Option<(ColId, f32)> {
+        match self.drag {
+            Some(Drag::Resize { col, width, .. }) => Some((col, width)),
             _ => None,
         }
     }
@@ -69,6 +96,7 @@ pub(crate) enum Hit {
     /// The resize edge of a header (visible column index).
     Border(usize),
     Header(usize),
+    /// A view row.
     Gutter(u64),
     /// A body cell: view row and visible column index (the row may be past the loaded rows).
     Cell(u64, usize),
@@ -84,6 +112,17 @@ fn contains(b: &hacivat_ui_core::gpui_surface::Bounds<Pixels>, p: Point<Pixels>)
 }
 
 impl GridView {
+    /// The right edge of visible column `ix` in window x for the frame `g` (## m3c-t35: a
+    /// frozen column's never scrolls).
+    pub(crate) fn col_right(&self, g: &Geometry, ix: usize) -> f32 {
+        let x = if ix < g.frozen {
+            self.layout.x_of(ix + 1)
+        } else {
+            self.layout.x_of(ix + 1) - self.scroll.left_x
+        };
+        f32::from(g.body.left()) + x as f32
+    }
+
     /// What lies under `p` in the last frame.
     pub(crate) fn hit_test(&self, g: &Geometry, p: Point<Pixels>) -> Hit {
         let (x, y) = (f32::from(p.x), f32::from(p.y));
@@ -93,19 +132,24 @@ impl GridView {
         if contains(&g.corner, p) {
             return Hit::Corner;
         }
-        let content_x = |x: f32| self.scroll.left_x + f64::from(x - f32::from(g.body.left()));
+        let body_x = f32::from(g.body.left());
+        let col_at = |x: f32| {
+            self.layout
+                .col_at_screen_x(f64::from(x - body_x), self.scroll.left_x)
+        };
         if contains(&g.header, p) {
-            for ix in g.cols.clone() {
-                let right = f32::from(g.body.left())
-                    + (self.layout.x_of(ix + 1) - self.scroll.left_x) as f32;
+            // ## m3c-t35: the frozen edges, then the scrolling ones right of the frozen layer.
+            let pane = body_x + g.frozen_w;
+            for ix in (0..g.frozen).chain(g.cols.clone()) {
+                let right = self.col_right(g, ix);
+                if ix >= g.frozen && right < pane {
+                    continue;
+                }
                 if (x - right).abs() <= RESIZE_GRAB_PX {
                     return Hit::Border(ix);
                 }
             }
-            return self
-                .layout
-                .col_at_x(content_x(x))
-                .map_or(Hit::Nothing, Hit::Header);
+            return col_at(x).map_or(Hit::Nothing, Hit::Header);
         }
         if contains(&g.gutter, p) {
             return self
@@ -115,8 +159,7 @@ impl GridView {
         }
         if contains(&g.body, p) {
             let row = self.scroll.row_at(y - f32::from(g.body.top()));
-            let col = self.layout.col_at_x(content_x(x));
-            return match (row, col) {
+            return match (row, col_at(x)) {
                 (Some(r), Some(c)) => Hit::Cell(r, c),
                 _ => Hit::Nothing,
             };
@@ -140,11 +183,13 @@ impl GridView {
         Hit::Nothing
     }
 
-    /// The cell a drag at `p` reaches: clamped into the body and the loaded rows.
+    /// The cell a drag at `p` reaches: clamped into the body and the shown rows, as a model
+    /// cell through the view map.
     fn drag_cell(&self, g: &Geometry, p: Point<Pixels>) -> Option<ModelCell> {
-        let loaded = self.data.count.loaded;
+        let map = self.view_map();
+        let shown = map.len();
         let order = self.layout.visible();
-        if loaded == 0 || order.is_empty() {
+        if shown == 0 || order.is_empty() {
             return None;
         }
         let body = g.body;
@@ -154,15 +199,14 @@ impl GridView {
             .scroll
             .row_at(y - f32::from(body.top()))
             .unwrap_or_else(|| self.scroll.row_count().saturating_sub(1))
-            .min(loaded - 1);
-        let content = self.scroll.left_x + f64::from(x - f32::from(body.left()));
+            .min(shown - 1);
         let ix = self
             .layout
-            .col_at_x(content)
+            .col_at_screen_x(f64::from(x - f32::from(body.left())), self.scroll.left_x)
             .unwrap_or(order.len() - 1)
             .min(order.len() - 1);
         Some(ModelCell {
-            row: ModelRow(row),
+            row: map.view_to_model(ViewRow(row)).unwrap_or(ModelRow(row)),
             col: order[ix],
         })
     }
@@ -173,6 +217,11 @@ impl GridView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // ## m3c-t39 (named exception): a right press asks for the context menu.
+        if e.button == MouseButton::Right && self.pointer.drag.is_none() {
+            self.context_press(e, window, cx);
+            return;
+        }
         if e.button != MouseButton::Left {
             return;
         }
@@ -180,17 +229,27 @@ impl GridView {
         let Some(g) = self.geometry.clone() else {
             return;
         };
-        let loaded = self.data.count.loaded;
-        let map = ViewMap::identity(loaded);
+        // ## m3c-t35: the rows the view shows, through its map.
+        let map = self.view_map().clone();
+        let shown = map.len();
+        let model = |row: u64| map.view_to_model(ViewRow(row)).unwrap_or(ModelRow(row));
         let extend = e.modifiers.shift;
         let add = e.modifiers.secondary(cx);
         let focus_row = self.selection.focus().map_or(ModelRow(0), |f| f.row);
         let first_col = self.layout.visible().first().copied();
         let focus_col = self.selection.focus().map(|f| f.col).or(first_col);
         let before = self.selection.clone();
+        self.pointer.drag_at = Some(e.position);
         match self.hit_test(&g, e.position) {
             Hit::Corner => {
                 self.selection.select_all();
+                self.pointer.drag = None;
+            }
+            // ## m3c-t35: a double-click on the edge fits the column.
+            Hit::Border(ix) if e.click_count >= 2 => {
+                if let Some(col) = self.layout.visible().get(ix).copied() {
+                    self.autosize.queue_fit(col);
+                }
                 self.pointer.drag = None;
             }
             Hit::Border(ix) => {
@@ -216,22 +275,22 @@ impl GridView {
                     self.pointer.drag = Some(Drag::Cols);
                 }
             }
-            Hit::Gutter(row) if row < loaded => {
+            Hit::Gutter(row) if row < shown => {
                 if let Some(col) = focus_col {
                     if extend {
-                        self.selection.extend_rows_to(ModelRow(row));
+                        self.selection.extend_rows_to_in(model(row), &map);
                     } else if add {
-                        self.selection.add_row(ModelRow(row), col);
+                        self.selection.add_row(model(row), col);
                     } else {
-                        self.selection.select_row(ModelRow(row), col);
+                        self.selection.select_row(model(row), col);
                     }
                     self.pointer.drag = Some(Drag::Rows);
                 }
             }
-            Hit::Cell(row, ix) if row < loaded => {
+            Hit::Cell(row, ix) if row < shown => {
                 if let Some(col) = self.layout.visible().get(ix).copied() {
                     let cell = ModelCell {
-                        row: ModelRow(row),
+                        row: model(row),
                         col,
                     };
                     if extend {
@@ -273,6 +332,76 @@ impl GridView {
         cx.notify();
     }
 
+    // ## m3c-t39 (named exception: Task 39's menu)
+    /// A right press: over a cell, a column header (or its edge) or a row number, the grid
+    /// takes the focus and asks the host for the menu there
+    /// ([`GridEvent::ContextMenuRequested`] at the pointer). What it hits outside the
+    /// selection is selected first, as a left click would select it; inside the selection
+    /// nothing changes, so the menu acts on the selection. The corner, the scrollbars and a
+    /// row past the shown rows ask for nothing.
+    fn context_press(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(g) = self.geometry.clone() else {
+            return;
+        };
+        let map = self.view_map().clone();
+        let shown = map.len();
+        let model = |row: u64| map.view_to_model(ViewRow(row)).unwrap_or(ModelRow(row));
+        let focus_row = self.selection.focus().map_or(ModelRow(0), |f| f.row);
+        let first_col = self.layout.visible().first().copied();
+        let focus_col = self.selection.focus().map(|f| f.col).or(first_col);
+        let before = self.selection.clone();
+        let (cell, header, row_number) = match self.hit_test(&g, e.position) {
+            Hit::Header(ix) | Hit::Border(ix) => {
+                let Some(col) = self.layout.visible().get(ix).copied() else {
+                    return;
+                };
+                if !self.selection.col_selected(col) {
+                    self.selection.select_column(col, focus_row);
+                }
+                (None, Some(col), false)
+            }
+            Hit::Gutter(row) if row < shown => {
+                let Some(col) = focus_col else {
+                    return;
+                };
+                let row = model(row);
+                if !self.selection.row_selected(row) {
+                    self.selection.select_row(row, col);
+                }
+                (Some(ModelCell { row, col }), None, true)
+            }
+            Hit::Cell(row, ix) if row < shown => {
+                let Some(col) = self.layout.visible().get(ix).copied() else {
+                    return;
+                };
+                let cell = ModelCell {
+                    row: model(row),
+                    col,
+                };
+                if !self.selection.contains(ViewRow(row), col, &map) {
+                    self.selection.select_cell(cell, &map);
+                }
+                (Some(cell), None, false)
+            }
+            _ => return,
+        };
+        window.focus(&self.focus, cx);
+        if self.selection != before {
+            self.mark_selection_changed();
+            if self.selection.focus() != before.focus() {
+                cx.emit(GridEvent::FocusChanged(self.selection.focus()));
+            }
+        }
+        cx.emit(GridEvent::ContextMenuRequested {
+            at: e.position,
+            cell,
+            header,
+            row_number,
+            pointer: true,
+        });
+        cx.notify();
+    }
+
     /// The hovered body cell and header edge at `p` in the frame `g`.
     pub(crate) fn hover_at(
         &self,
@@ -286,7 +415,13 @@ impl GridView {
         }
     }
 
-    pub(crate) fn mouse_move(&mut self, e: &MouseMoveEvent, hovered: bool, cx: &mut Context<Self>) {
+    pub(crate) fn mouse_move(
+        &mut self,
+        e: &MouseMoveEvent,
+        hovered: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(g) = self.geometry.clone() else {
             return;
         };
@@ -294,7 +429,7 @@ impl GridView {
             && !e.dragging()
         {
             // The button went up where we never heard it (outside the window): the drag ended.
-            self.pointer.drag = None;
+            self.end_drag();
             if let Drag::Resize { col, width, .. } = stale {
                 cx.emit(GridEvent::ColumnResized { col, width });
             }
@@ -314,19 +449,16 @@ impl GridView {
             }
             return;
         };
-        let map = ViewMap::identity(self.data.count.loaded);
+        self.pointer.drag_at = Some(e.position);
         let before = self.selection.clone();
         match drag {
-            Drag::Cells => {
-                self.autoscroll(&g, e.position);
-                if let Some(cell) = self.drag_cell(&g, e.position) {
-                    self.selection.extend_to(cell, &map);
-                }
-            }
-            Drag::Rows => {
-                self.autoscroll(&g, e.position);
-                if let Some(cell) = self.drag_cell(&g, e.position) {
-                    self.selection.extend_rows_to(cell.row);
+            Drag::Cells | Drag::Rows => {
+                self.drag_extend(&g, e.position);
+                // ## m3c-t35: past the edge, keep going while the pointer rests there.
+                if outside(&g, e.position, drag) {
+                    self.start_autoscroll(window, cx);
+                } else {
+                    self.autoscroll = None;
                 }
             }
             Drag::Cols => {
@@ -343,7 +475,7 @@ impl GridView {
                 let width = clamp_user_width(start_w + (f32::from(e.position.x) - start_x));
                 if self.layout.set_width(col, width) {
                     self.autosize.mark_user_sized(col);
-                    self.scroll.set_content_width(self.layout.total_width());
+                    self.scroll.set_content_width(self.layout.scroll_width());
                     self.pointer.drag = Some(Drag::Resize {
                         col,
                         start_x,
@@ -378,18 +510,95 @@ impl GridView {
         if e.button != MouseButton::Left {
             return;
         }
-        if let Some(Drag::Resize { col, width, .. }) = self.pointer.drag.take() {
+        let drag = self.pointer.drag;
+        self.end_drag();
+        if let Some(Drag::Resize { col, width, .. }) = drag {
             cx.emit(GridEvent::ColumnResized { col, width });
             cx.notify();
-        } else if self.pointer.drag.is_some() {
-            self.pointer.drag = None;
+        } else if drag.is_some() {
             cx.notify();
         }
     }
 
+    /// A drag ended: no drag, no autoscroll.
+    fn end_drag(&mut self) {
+        self.pointer.drag = None;
+        self.pointer.drag_at = None;
+        self.autoscroll = None;
+    }
+
+    // ## m3c-t35 fix round 1 (I3)
+    /// The grid lost the focus or its window was deactivated: a drag ends where it is (a
+    /// resize keeps the width it reached and reports it), and the edge autoscroll stops.
+    pub(crate) fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.pointer.drag else {
+            self.autoscroll = None;
+            return;
+        };
+        self.end_drag();
+        if let Drag::Resize { col, width, .. } = drag {
+            cx.emit(GridEvent::ColumnResized { col, width });
+        }
+        cx.notify();
+    }
+
+    /// Ends drags on blur and on window deactivation (I3): subscribed once, from the first
+    /// frame (the hooks need the window).
+    pub(crate) fn watch_drag_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag_hooks.is_some() {
+            return;
+        }
+        let focus = self.focus.clone();
+        let blur = cx.on_blur(&focus, window, |v, _, cx| v.cancel_drag(cx));
+        let active = cx.observe_window_activation(window, |v, window, cx| {
+            if !window.is_window_active() {
+                v.cancel_drag(cx);
+            }
+        });
+        self.drag_hooks = Some((blur, active));
+    }
+
+    /// A cell or row drag at `p`: scrolls towards it past the edge, then extends the selection
+    /// to the cell (or row) it reaches. Answers whether the scroll or the selection changed;
+    /// nothing is extended (nothing allocated) when the target is already the focus.
+    fn drag_extend(&mut self, g: &Geometry, p: Point<Pixels>) -> bool {
+        let rows_only = matches!(self.pointer.drag, Some(Drag::Rows));
+        let before = (
+            self.scroll.top_row,
+            self.scroll.top_row_offset,
+            self.scroll.left_x,
+        );
+        self.autoscroll(g, p, !rows_only);
+        let scrolled = before
+            != (
+                self.scroll.top_row,
+                self.scroll.top_row_offset,
+                self.scroll.left_x,
+            );
+        let Some(cell) = self.drag_cell(g, p) else {
+            return scrolled;
+        };
+        let focus = self.selection.focus();
+        let moves = if rows_only {
+            focus.is_none_or(|f| f.row != cell.row)
+        } else {
+            focus != Some(cell)
+        };
+        if moves {
+            let map = self.view_map().clone();
+            if rows_only {
+                self.selection.extend_rows_to_in(cell.row, &map);
+            } else {
+                self.selection.extend_to(cell, &map);
+            }
+        }
+        scrolled || moves
+    }
+
     /// Scrolls towards a drag that left the body, in proportion to the distance, capped at
-    /// [`AUTOSCROLL_MAX_ROWS`].
-    fn autoscroll(&mut self, g: &Geometry, p: Point<Pixels>) {
+    /// [`AUTOSCROLL_MAX_ROWS`] rows down or up and (`sideways`: a cell drag, never a row drag
+    /// in the gutter; ## m3c-t35 fix round 1, I2) [`AUTOSCROLL_MAX_X_PX`] sideways.
+    fn autoscroll(&mut self, g: &Geometry, p: Point<Pixels>, sideways: bool) {
         let (y, top, bottom) = (
             f32::from(p.y),
             f32::from(g.body.top()),
@@ -406,7 +615,100 @@ impl GridView {
             let cap = AUTOSCROLL_MAX_ROWS * f64::from(self.scroll.row_height());
             self.scroll.scroll_by(over.clamp(-cap, cap));
         }
+        // ## m3c-t35: sideways, past the body's left (over the gutter) or right edge.
+        let (x, left, right) = (
+            f32::from(p.x),
+            f32::from(g.body.left()),
+            f32::from(g.body.right()),
+        );
+        let over_x = if !sideways {
+            0.0
+        } else if x < left {
+            f64::from(x - left)
+        } else if x >= right {
+            f64::from(x - right)
+        } else {
+            0.0
+        };
+        if over_x != 0.0 {
+            self.scroll
+                .scroll_x_by(over_x.clamp(-AUTOSCROLL_MAX_X_PX, AUTOSCROLL_MAX_X_PX));
+        }
     }
+
+    // ## m3c-t35
+    /// Starts the edge autoscroll's timer (once): every [`AUTOSCROLL_TICK`] it does what a move
+    /// to the resting pointer would, until the pointer is back inside or the drag ended.
+    fn start_autoscroll(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.autoscroll.is_some() {
+            return;
+        }
+        let executor = cx.background_executor().clone();
+        self.autoscroll = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                executor.timer(AUTOSCROLL_TICK).await;
+                let more = this
+                    .update_in(cx, |v, window, cx| v.autoscroll_tick(window, cx))
+                    .unwrap_or(false);
+                if !more {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// One tick of the edge autoscroll; answers whether to go on. ## m3c-t35 fix round 1 (I2,
+    /// I3, M6): a tick that changes neither the scroll nor the selection stops the timer
+    /// without a repaint (the result's end, or a side that cannot scroll), so a lost mouse-up
+    /// never runs on past it; a tick allocates only when the selection moves.
+    fn autoscroll_tick(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        // The grid lost the focus since the last tick (the blur hook may not have run yet):
+        // the drag ends here.
+        if !self.focus.contains_focused(window, cx) {
+            self.cancel_drag(cx);
+            return false;
+        }
+        let resting = match (
+            self.pointer.drag,
+            self.pointer.drag_at,
+            self.geometry.clone(),
+        ) {
+            (Some(drag @ (Drag::Cells | Drag::Rows)), Some(p), Some(g)) if outside(&g, p, drag) => {
+                Some((g, p))
+            }
+            _ => None,
+        };
+        let Some((g, p)) = resting else {
+            self.autoscroll = None;
+            return false;
+        };
+        let focus = self.selection.focus();
+        if !self.drag_extend(&g, p) {
+            self.autoscroll = None;
+            return false;
+        }
+        if self.selection.focus() != focus {
+            self.mark_selection_changed();
+            cx.emit(GridEvent::FocusChanged(self.selection.focus()));
+        }
+        cx.notify();
+        true
+    }
+
+    /// Whether the edge autoscroll's timer runs (`test-support`).
+    #[cfg(feature = "test-support")]
+    pub fn autoscrolling(&self) -> bool {
+        self.autoscroll.is_some()
+    }
+}
+
+/// Whether `p` is past the body's edge of the frame `g` for `drag`: a row drag (in the gutter)
+/// only above or below the body (## m3c-t35 fix round 1, I2).
+fn outside(g: &Geometry, p: Point<Pixels>, drag: Drag) -> bool {
+    if matches!(drag, Drag::Rows) {
+        return p.y < g.body.top() || p.y >= g.body.bottom();
+    }
+    !contains(&g.body, p)
 }
 
 /// Registers the frame's pointer listeners (paint phase) and the resize cursor.
@@ -430,7 +732,7 @@ pub(crate) fn register(view: &Entity<GridView>, hitbox: &Hitbox, window: &mut Wi
                 s.drag.is_some() || s.hover.is_some() || s.border.is_some()
             };
             if interested {
-                move_view.update(cx, |v, cx| v.mouse_move(e, hovered, cx));
+                move_view.update(cx, |v, cx| v.mouse_move(e, hovered, window, cx));
             }
         }
     });

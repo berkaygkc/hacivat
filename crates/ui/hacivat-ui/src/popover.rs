@@ -175,25 +175,45 @@ pub trait Declare: StatefulInteractiveElement + Sized {
     }
 
     /// Like `declare`, with the description and active-descendant extras GPUI supports.
+    ///
+    /// ## m3b-t29-shots (named exception; T29 review I3): what is recorded is what was applied
+    /// to the element, field by field (a field this function does not pass to GPUI is not in
+    /// the record, so a test of the record sees a dropped field); the list position is passed
+    /// now (`aria_position_in_set`, `aria_size_of_set`).
     fn declare_full(self, decl: A11yDecl) -> Self {
-        a11y_note(&decl);
+        let mut applied = A11yDecl {
+            wrapper: decl.wrapper,
+            ..A11yDecl::default()
+        };
+        applied.role = Some(decl.role.unwrap_or(Role::GenericContainer));
         let mut el = self.role(decl.role.unwrap_or(Role::GenericContainer));
         el = el.aria_label(decl.name.clone());
+        applied.name = decl.name.clone();
         if let Some(selected) = decl.selected {
             el = el.aria_selected(selected);
+            applied.selected = Some(selected);
         }
         if let Some(description) = decl.description {
-            el = el.aria_description(description);
+            el = el.aria_description(description.clone());
+            applied.description = Some(description);
         }
         if decl.active_descendant {
             el = el.aria_active_descendant();
+            applied.active_descendant = true;
         }
         if let Some(expanded) = decl.expanded {
             el = el.aria_expanded(expanded);
+            applied.expanded = Some(expanded);
         }
         if let Some(toggled) = decl.toggled {
             el = el.aria_toggled(accesskit::Toggled::from(toggled));
+            applied.toggled = Some(toggled);
         }
+        if let Some((position, size)) = decl.position {
+            el = el.aria_position_in_set(position).aria_size_of_set(size);
+            applied.position = Some((position, size));
+        }
+        a11y_note(&applied);
         el
     }
 }
@@ -324,7 +344,23 @@ impl Element for A11yNode {
     }
 
     fn write_a11y_info(&self, node: &mut accesskit::Node) {
-        let d = &self.decl;
+        // ## m3b-t29-shots (named exception; T29 review I3): one writer, which tests call on a
+        // recorded declaration (the test platforms build no AccessKit tree).
+        write_node(&self.decl, node);
+    }
+}
+
+// ## m3b-t29-shots (named exception; T29 review I3)
+/// The AccessKit node an [`A11yNode`] of `decl` writes (its role aside): what assistive
+/// technology reads. Tests build the node from a recorded declaration with it.
+pub fn node_of(decl: &A11yDecl) -> accesskit::Node {
+    let mut node = accesskit::Node::new(decl.role.unwrap_or(Role::GenericContainer));
+    write_node(decl, &mut node);
+    node
+}
+
+fn write_node(d: &A11yDecl, node: &mut accesskit::Node) {
+    {
         node.set_label(d.name.to_string());
         if d.modal {
             node.set_modal();
@@ -357,10 +393,20 @@ impl Element for A11yNode {
     }
 }
 
-/// A one-line tooltip on a popover surface.
+/// A tooltip on a popover surface: one line, as long as it fits the window.
+// ## m4b-t21-shots (named exception, T13 fr1 re-review n8): a text with a line break, or one
+// line wider than the window can show, is laid out as wrapping lines at [`TIP_WRAP_W`]
+// instead (a `Label` is one shaped line, and GPUI's line shaper panics on a `\n`; a row
+// tooltip that folds several facts into one line ran past the window at 960 in TR/XT). A
+// text that fits on one line draws exactly as before.
 pub struct Tip {
     text: SharedString,
 }
+
+/// How wide a wrapping tooltip is (the narrower of this and the window less 8 px each side).
+const TIP_WRAP_W: f32 = 360.0;
+/// The tooltip's side padding (each side).
+const TIP_PAD_X: f32 = 8.0;
 
 impl Tip {
     /// The tooltip view for `text`, in the shape `.tooltip(..)` expects.
@@ -370,17 +416,69 @@ impl Tip {
 }
 
 impl Render for Tip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let t = theme.tokens;
-        popover_surface(&theme)
-            .px(px(8.0))
-            .py(px(4.0))
-            .child(Label::new(
-                self.text.clone(),
-                TextSource::Fluent,
-                t.type_ramp.body_sm,
-                t.colors.text.to_hsla(),
-            ))
+        let (style, ink) = (t.type_ramp.body_sm, t.colors.text.to_hsla());
+        let surface = popover_surface(&theme).px(px(TIP_PAD_X)).py(px(4.0));
+        let room = window.viewport_size().width - px(2.0 * TIP_PAD_X);
+        if !self.text.contains('\n')
+            && line_width(&self.text, style, ink, window) + px(2.0 * TIP_PAD_X) <= room
+        {
+            return surface
+                .child(Label::new(
+                    self.text.clone(),
+                    TextSource::Fluent,
+                    style,
+                    ink,
+                ))
+                .into_any_element();
+        }
+        // ## m4b-t21-shots: wrapping lines in a set width (a tooltip is laid out at its
+        // min-content size, so a wrapping one needs its width): its widest line's, up to
+        // `TIP_WRAP_W` (fix round 1, m8: two short lines hug their text).
+        let lines: Vec<SharedString> = self
+            .text
+            .split('\n')
+            .map(|l| SharedString::from(l.to_string()))
+            .collect();
+        let widest = lines
+            .iter()
+            .map(|l| line_width(l, style, ink, window))
+            .fold(px(0.0), Pixels::max);
+        let width = (widest + px(2.0 * TIP_PAD_X + 1.0))
+            .min(px(TIP_WRAP_W))
+            .min(window.viewport_size().width - px(2.0 * TIP_PAD_X));
+        surface
+            .w(width)
+            .flex()
+            .flex_col()
+            .children(
+                lines
+                    .into_iter()
+                    .map(|l| crate::text::paragraph(l, TextSource::Fluent, style, ink)),
+            )
+            .into_any_element()
     }
+}
+
+/// The width `text` shapes to on one line in `style`.
+fn line_width(
+    text: &SharedString,
+    style: hacivat_ui_core::theme::TypeStyle,
+    color: hacivat_ui_core::gpui_surface::Hsla,
+    window: &Window,
+) -> Pixels {
+    let run = hacivat_ui_core::gpui_surface::TextRun {
+        len: text.len(),
+        font: hacivat_ui_core::fonts::font_for(&style),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(text.clone(), px(style.size_px), &[run], None)
+        .width
 }

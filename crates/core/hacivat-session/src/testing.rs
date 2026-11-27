@@ -25,8 +25,10 @@ use crate::pipeline::{
     TransportWrap, connect, fresh_progress,
 };
 use crate::profile::Profile;
+use crate::session::actor::spawn_supervised;
 use crate::session::{
-    ClientId, SessionHandle, SessionHooks, SessionKind, SessionSpec, SideConnector, spawn_session,
+    ClientId, SessionHandle, SessionHooks, SessionKind, SessionSpec, SideConnector,
+    StatementClassifier,
 };
 
 /// A transport over `tokio::io::duplex`: no socket is ever opened.
@@ -104,10 +106,9 @@ impl SideConnector for FakeSide {
 }
 
 /// A console session (the default client) of `profile` over `fake`, connected and spawned on
-/// `rt`; read-only exactly when `profile.read_only`. It ignores the production policy on
-/// purpose (the plan's helper, P6): a production profile's session is read-write here, and the
-/// policy is tested through `ConnectionManager` (`production_policy_reaches_a_connected_session`). Returns the handle and the fake, whose
-/// counters and logs the test reads. Awaitable from any executor (the connect runs on `rt`).
+/// `rt`; read-only exactly when `profile.read_only`, as every session since M3b Task 26 (a
+/// production profile's session is read-write, `effective_read_only`). Returns the handle and
+/// the fake, whose counters and logs the test reads. Awaitable from any executor (the connect runs on `rt`).
 ///
 /// # Panics
 /// When the connect fails (the profile does not suit the fake: its engine, a password, a file
@@ -133,6 +134,34 @@ pub async fn fake_session_with_side(
     fake: FakeDriver,
     side: FakeDriver,
     profile: Profile,
+) -> (SessionHandle, Arc<FakeDriver>, Arc<FakeDriver>) {
+    spawn_fake(rt, fake, side, profile, None).await
+}
+
+// ## m3b-t01c-core-seams
+/// [`fake_session`] whose read-only guard asks `classifier` at step 0b (R-M3-83), as a session
+/// of a `ConnectionManager` with `ManagerConfig::classifier` does (Task 18's tests).
+///
+/// # Panics
+/// As [`fake_session`].
+pub async fn fake_session_classified(
+    rt: Handle,
+    fake: FakeDriver,
+    profile: Profile,
+    classifier: Arc<dyn StatementClassifier>,
+) -> (SessionHandle, Arc<FakeDriver>) {
+    let side = FakeDriver::new(fake.descriptor().kind);
+    let (handle, fake, _) = spawn_fake(rt, fake, side, profile, Some(classifier)).await;
+    (handle, fake)
+}
+
+/// Connects `profile` over `fake` on `rt` and spawns its console session.
+async fn spawn_fake(
+    rt: Handle,
+    fake: FakeDriver,
+    side: FakeDriver,
+    profile: Profile,
+    classifier: Option<Arc<dyn StatementClassifier>>,
 ) -> (SessionHandle, Arc<FakeDriver>, Arc<FakeDriver>) {
     let fake = Arc::new(fake);
     let side = Arc::new(side);
@@ -173,7 +202,18 @@ pub async fn fake_session_with_side(
         department: Department::Console,
     };
     (
-        spawn_session(&rt, spec, Arc::new(profile), live, hooks),
+        spawn_supervised(
+            &rt,
+            spec,
+            Arc::new(profile),
+            live,
+            hooks,
+            None,
+            None,
+            classifier,
+            // ## m3b-t12-session-carries (named exception): no settings time zone.
+            None,
+        ),
         fake,
         side,
     )

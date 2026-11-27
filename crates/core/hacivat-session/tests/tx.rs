@@ -111,16 +111,15 @@ async fn manual_to_auto_in_transaction_is_refused() {
     );
 }
 
+// ## m3b-t19-confirm-tx (named exception): Smart answered `NeedsClassifier` until Task 19; it
+// is accepted now (C2; `tests/smart.rs`).
 #[tokio::test]
-async fn smart_mode_needs_classifier() {
+async fn smart_mode_is_accepted() {
     let (h, _) = session(fake_pg()).await;
-    assert_eq!(
-        tx_cmd(&h, TxCommand::SetMode(TxMode::Smart))
-            .await
-            .unwrap_err()
-            .kind,
-        ExecErrorKind::Tx(TxError::NeedsClassifier)
-    );
+    tx_cmd(&h, TxCommand::SetMode(TxMode::Smart))
+        .await
+        .expect("Smart is accepted since Task 19");
+    assert_eq!(snap(&h).tx.mode, TxMode::Smart);
 }
 
 #[tokio::test]

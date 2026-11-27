@@ -25,7 +25,7 @@ use anyhow::{Context, Result, bail};
 /// How long `up` waits for every selected service to report healthy.
 const WAIT_TIMEOUT_SECS: u32 = 180;
 /// The crates whose `#[ignore = "docker"]` tests `test` runs when no `-p` is given.
-const DEFAULT_TEST_CRATES: [&str; 6] = [
+const DEFAULT_TEST_CRATES: [&str; 8] = [
     "hacivat-driver-pg",
     "hacivat-driver-mysql",
     "hacivat-driver-sqlite",
@@ -34,11 +34,22 @@ const DEFAULT_TEST_CRATES: [&str; 6] = [
     "hacivat-testkit",
     // ## m3a-t01b-seams: the typed-execution matrix (Task 31, P6).
     "hacivat-exec",
+    // ## m4-t01c-fixtures (P-M4-6): the introspectors' Docker tests (Tasks 16–18, 21, 22, 28,
+    // 31), so `docker-pr`, `docker-full` and the gate run them.
+    "hacivat-introspect",
+    // ## m4b-t01a-seams (R-M4b-36): Task 19's `docker_m4b`.
+    "hacivat-scripts",
 ];
 const COMPOSE_FILE: &str = "docker/m2a/compose.yml";
 /// The Dockerfiles whose `FROM` lines are pinned too.
-const DOCKERFILES: [&str; 2] = ["docker/m2a/pg-tr/Dockerfile", "docker/m2a/sshd/Dockerfile"];
-/// Images that `compose build` produces locally: never pulled, so never pinned.
+const DOCKERFILES: [&str; 3] = [
+    "docker/m2a/pg-tr/Dockerfile",
+    "docker/m2a/sshd/Dockerfile",
+    // ## m4-t01c-fixtures: pg17wrap (R-M4-43).
+    "docker/m2a/pg-wrap/Dockerfile",
+];
+/// Images that `compose build` produces locally (`hacivat-m2a-pg17-tr`, `-sshd`,
+/// `-pg17wrap`): never pulled, so never pinned.
 const LOCAL_IMAGE_PREFIX: &str = "hacivat-m2a-";
 const TARGETS_FILE: &str = "docker/m2a/targets.toml";
 /// The service whose auto-generated CA certificate the MySQL TLS tests trust.
@@ -737,7 +748,8 @@ mod tests {
         );
         let full = services_in_set(&text, "full").unwrap();
         // ## m2b-fix-f2-x509: and mysql84-x509 (its certificate generator is no target).
-        assert_eq!(full.len(), 17);
+        // ## m4-t01c-fixtures (named exception): and pg17wrap.
+        assert_eq!(full.len(), 18);
         assert!(full.iter().any(|s| s == CA_SERVICE));
         assert!(full.iter().any(|s| s == "mysql84-x509"));
         assert!(services_in_set(&text, "nightly").is_err());
@@ -806,10 +818,13 @@ mod tests {
 
     #[test]
     fn test_runs_the_ignored_tests_of_the_chosen_crates() {
+        // ## m4b-t01a-seams (named exception, review M6): `-p hacivat-scripts` joins the pinned
+        // default list (R-M4b-36).
         assert_eq!(
             test_args(&[], None).join(" "),
             "test -p hacivat-driver-pg -p hacivat-driver-mysql -p hacivat-driver-sqlite \
-             -p hacivat-session -p hacivat-testkit -p hacivat-exec -- --ignored"
+             -p hacivat-session -p hacivat-testkit -p hacivat-exec -p hacivat-introspect \
+             -p hacivat-scripts -- --ignored"
         );
         assert_eq!(
             test_args(&["hacivat-session".to_string()], None).join(" "),
@@ -834,6 +849,47 @@ mod tests {
     #[test]
     fn exec_is_a_default_docker_crate() {
         assert!(DEFAULT_TEST_CRATES.contains(&"hacivat-exec"));
+    }
+
+    // ## m4b-t01a-seams (R-M4b-36): Task 19's `docker_m4b` runs in docker-pr, docker-full and
+    // the gate only if `xtask docker test` without `-p` includes the crate.
+    #[test]
+    fn docker_test_crates_include_hacivat_scripts() {
+        assert!(DEFAULT_TEST_CRATES.contains(&"hacivat-scripts"));
+        let args = test_args(&[], None);
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-p" && w[1] == "hacivat-scripts"),
+            "{args:?}"
+        );
+    }
+
+    // ## m4-t01c-fixtures
+    #[test]
+    fn introspect_is_a_default_docker_crate_and_pg_wrap_is_pinned() {
+        assert!(DEFAULT_TEST_CRATES.contains(&"hacivat-introspect"));
+        assert!(DOCKERFILES.contains(&"docker/m2a/pg-wrap/Dockerfile"));
+        let compose = read(COMPOSE_FILE);
+        let wrap = service_block(&compose, "pg17wrap").unwrap();
+        assert!(wrap.contains("build: ./pg-wrap"), "{wrap}");
+        assert!(
+            wrap.contains(&format!("image: {LOCAL_IMAGE_PREFIX}pg17wrap:")),
+            "{wrap}"
+        );
+        let ids = services_in_set(&read(TARGETS_FILE), "full").unwrap();
+        assert!(ids.contains(&"pg17wrap".to_string()));
+        assert!(
+            !services_in_set(&read(TARGETS_FILE), "pr")
+                .unwrap()
+                .contains(&"pg17wrap".to_string())
+        );
+        for svc in ["mysql80", "mysql84", "mysql84-x509"] {
+            let b = service_block(&compose, svc).unwrap();
+            assert!(
+                b.contains("--log-bin-trust-function-creators=1"),
+                "{svc}: {b}"
+            );
+        }
     }
 
     #[test]
@@ -926,7 +982,8 @@ mod tests {
     #[test]
     fn repo_compose_and_dockerfiles_are_pinned() {
         assert!(unpinned(&read(COMPOSE_FILE)).is_empty());
-        for d in ["docker/m2a/pg-tr/Dockerfile", "docker/m2a/sshd/Dockerfile"] {
+        // ## m4-t01c-fixtures: every listed Dockerfile (named exception).
+        for d in DOCKERFILES {
             assert!(unpinned_dockerfile(&read(d)).is_empty(), "{d}");
         }
     }

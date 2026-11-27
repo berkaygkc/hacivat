@@ -7,7 +7,8 @@
 //! `close_query` default to failing closed with `RawErrorKind::Unsupported`; Tasks 12, 14 and 15
 //! implement them per engine, `FakeDriver` (feature `fake`) scripts them.
 //!
-//! **Event grammar.** `(ResultStart Rows* (Suspended {fetch_more} Rows*)* ResultEnd)* Done`. A
+//! **Event grammar.** `(ResultStart Rows* (Suspended {fetch_more} Rows*)* ResultEnd)* Done`,
+//! with a `Notice` allowed before any event but `Done` (m3b-t01c, R-M3-77). A
 //! statement that returns no rows (DML, DDL, `SET`) still reports one result, with an empty
 //! schema: `ResultStart` of zero columns, then `ResultEnd` with `rows_affected` and the command
 //! tag. The first chunk holds at most `first_rows` rows, later chunks `chunk_rows` rows or
@@ -51,9 +52,11 @@ use crate::driver::{Protocol, TxStatus};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QuerySpec<'a> {
     pub sql: &'a str,
-    /// Empty in M3a (binds are M3b).
+    /// One per placeholder of `sql`, else `Unsupported` before anything runs (m3b-t13; never
+    /// put into the text).
     pub binds: &'a [BindValue],
-    /// `Extended` only in M3a; `Simple` answers `Unsupported`.
+    /// `Simple`: Run as one (m3b-t13, R-M3-60): every statement of `sql` its own result, no
+    /// binds, never suspends (MySQL: read-write connections only).
     pub protocol: Protocol,
     /// The query may stop at a read-ahead point and resume (a console cursor, R-M3-23).
     pub suspendable: bool,
@@ -75,6 +78,57 @@ pub enum NoticeSeverity {
     Info,
     Notice,
     Warning,
+}
+
+// ## m3b-t01c-core-seams
+/// A server notice (PostgreSQL `NOTICE`/`WARNING`, a MySQL warning; R-M3-77): server text,
+/// kept verbatim and never written to tracing logs or the history. [`Notice::new`] caps the
+/// text at [`Notice::MAX_TEXT_BYTES`], cut at a character boundary.
+///
+/// ## m3b-t13-drivers (T1c review M4)
+/// `#[non_exhaustive]`: outside this crate a `Notice` is built only by [`Notice::new`], so no
+/// driver can skip the cap; its fields stay readable.
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use hacivat_driver::{Notice, NoticeSeverity};
+/// let uncapped = Notice {
+///     severity: NoticeSeverity::Notice,
+///     code: None,
+///     text: Arc::from("x".repeat(Notice::MAX_TEXT_BYTES + 1)),
+/// };
+/// ```
+///
+/// ```
+/// use hacivat_driver::{Notice, NoticeSeverity};
+/// let n = Notice::new(NoticeSeverity::Notice, None, &"x".repeat(Notice::MAX_TEXT_BYTES + 1));
+/// assert_eq!(n.text.len(), Notice::MAX_TEXT_BYTES);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct Notice {
+    pub severity: NoticeSeverity,
+    /// The server's code (a SQLSTATE, a MySQL error number), when it sent one.
+    pub code: Option<Arc<str>>,
+    pub text: Arc<str>,
+}
+
+impl Notice {
+    /// The most bytes of a notice's text kept (16 KiB).
+    pub const MAX_TEXT_BYTES: usize = 16 * 1024;
+
+    /// A notice whose text is `text` cut to [`Self::MAX_TEXT_BYTES`] at a character boundary.
+    pub fn new(severity: NoticeSeverity, code: Option<&str>, text: &str) -> Notice {
+        let mut end = text.len().min(Self::MAX_TEXT_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Notice {
+            severity,
+            code: code.map(Arc::from),
+            text: Arc::from(&text[..end]),
+        }
+    }
 }
 
 /// The end of one result set.
@@ -104,6 +158,10 @@ pub enum QueryEvent {
     ResultEnd(ResultEnd),
     Suspended,
     Done(QueryDone),
+    // ## m3b-t01c-core-seams
+    /// A server notice (R-M3-77): may come before any event but `Done` and changes nothing in
+    /// the grammar around it (Task 13's drivers; `FakeQuery::notices`).
+    Notice(Notice),
 }
 
 /// How `close_query` ends an open query.
@@ -128,6 +186,21 @@ pub enum Closed {
     /// MySQL: the drain ran out; the session kills `thread_id` on a side connection, then
     /// calls `close_query(AfterKill(..))`.
     NeedsServerKill { thread_id: u64 },
+}
+
+// ## m3b-t13-drivers (fix round 1, I-1; controller-approved named exception)
+/// What a `close_query` of a Run as one (`Protocol::Simple`) closed before its end did beyond
+/// the result it closed (`RawConn::take_close_report`). PostgreSQL sends a protocol cancel at
+/// once and reads the rest to keep the connection in step; statements may still finish before
+/// the cancel lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CloseReport {
+    /// Statements after the closed result whose end was read: they ran, and none of their
+    /// results was shown.
+    pub statements_ran: u32,
+    /// The rest stopped (cancelled or failed) before the text's end: the statements after it
+    /// did not run.
+    pub rest_not_run: bool,
 }
 
 /// What a connection's typed path can do.

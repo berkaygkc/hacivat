@@ -22,6 +22,8 @@ fn tab(id: u32, title: &'static str) -> TabSpec {
         title_source: TextSource::Data,
         dirty: false,
         env: None,
+        // ## m4b-t21-shots (named line)
+        parts: None,
     }
 }
 
@@ -210,6 +212,57 @@ fn button_click_fires_and_disabled_button_does_not(cx: &mut TestAppContext) {
     assert_eq!(hits.get(), 1, "a disabled button never runs its handler");
 }
 
+// ## m4-t33d (R-T33-1): a Button is a Tab stop by default (HTML parity); `.tab_stop(false)`
+// opts out; a disabled button is never a stop; a handle the owner passes keeps its own flag.
+#[gpui::test]
+fn a_button_is_a_tab_stop_unless_it_opts_out(cx: &mut TestAppContext) {
+    use std::cell::RefCell;
+    let log = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let plain = cx.update(|cx| cx.focus_handle());
+    let sink = log.clone();
+    let vcx = host(cx, move |_, _| {
+        let button = |id: &'static str| {
+            let sink = sink.clone();
+            Button::new(id, id.into()).on_click(move |_, _, _| sink.borrow_mut().push(id))
+        };
+        div()
+            .flex()
+            .child(button("first"))
+            .child(button("out").tab_stop(false))
+            .child(button("off").disabled(true))
+            .child(button("passed").focus_handle(plain.clone()))
+            .child(button("last"))
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    let enter = |vcx: &mut VisualTestContext| {
+        vcx.simulate_keystrokes("enter");
+        vcx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        vcx.run_until_parked();
+    };
+    let next = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| window.focus_next(cx));
+        vcx.run_until_parked();
+    };
+    next(vcx);
+    enter(vcx);
+    next(vcx);
+    enter(vcx);
+    next(vcx);
+    enter(vcx);
+    assert_eq!(
+        *log.borrow(),
+        vec!["first", "last", "first"],
+        "Tab visits the default buttons only, and wraps"
+    );
+    vcx.update(|window, cx| window.focus_prev(cx));
+    vcx.run_until_parked();
+    enter(vcx);
+    assert_eq!(log.borrow().last(), Some(&"last"), "Shift-Tab goes back");
+}
+
 #[gpui::test]
 fn the_tab_strip_reports_activation_and_close(cx: &mut TestAppContext) {
     let log = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
@@ -322,6 +375,117 @@ fn toasts_show_three_at_a_time_and_expire_after_six_seconds(cx: &mut TestAppCont
         );
         assert_eq!(ToastQueue::waiting(cx), 0);
     });
+}
+
+// ## m4-t33d (R-T33-1): a toast's buttons are out of the window's Tab order until the focus is
+// in the toast (F6, `focus_newest_sticky`); then Tab walks its actions and its ✕, and goes on
+// out of it.
+#[gpui::test]
+fn a_toast_is_in_the_tab_order_only_once_it_has_the_focus(cx: &mut TestAppContext) {
+    use hacivat_ui::toast::{ToastAction, ToastQueue, ToastStack, focus_newest_sticky};
+    use std::cell::RefCell;
+    let log = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let sink = log.clone();
+    cx.update(|cx| {
+        let mut t = toast("sticky");
+        t.sticky = true;
+        t.actions = ["one", "two"]
+            .into_iter()
+            .map(|name| {
+                let sink = sink.clone();
+                ToastAction {
+                    label: Rc::new(move |_: &gpui::App| name.into()),
+                    run: Rc::new(move |_, _| sink.borrow_mut().push(name)),
+                }
+            })
+            .collect();
+        ToastQueue::push(cx, t);
+    });
+    let sink = log.clone();
+    let vcx = host(cx, move |_, _| {
+        let sink = sink.clone();
+        div()
+            .size_full()
+            .child(
+                Button::new("outside", "Outside".into())
+                    .on_click(move |_, _, _| sink.borrow_mut().push("outside")),
+            )
+            .child(ToastStack::new())
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    let enter = |vcx: &mut VisualTestContext| {
+        vcx.simulate_keystrokes("enter");
+        vcx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        vcx.run_until_parked();
+    };
+    let next = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| window.focus_next(cx));
+        vcx.run_until_parked();
+    };
+    // Out of the toast, Tab only knows the outside button.
+    next(vcx);
+    next(vcx);
+    enter(vcx);
+    assert_eq!(
+        *log.borrow(),
+        vec!["outside"],
+        "the toast is not a Tab stop"
+    );
+    // F6: the first action; Tab, Tab: the second, then the ✕ (Enter dismisses, no action).
+    vcx.update(|window, cx| assert!(focus_newest_sticky(window, cx)));
+    vcx.run_until_parked();
+    next(vcx);
+    next(vcx);
+    enter(vcx);
+    assert_eq!(*log.borrow(), vec!["outside"], "no action ran");
+    assert!(
+        vcx.update(|_, cx| ToastQueue::visible_ids(cx).is_empty()),
+        "Tab, Tab from the first action is the ✕"
+    );
+}
+
+// ## m4-t33d (R-T33-1): Tab from a toast's first action is its second.
+#[gpui::test]
+fn tab_moves_between_a_focused_toasts_actions(cx: &mut TestAppContext) {
+    use hacivat_ui::toast::{ToastAction, ToastQueue, ToastStack, focus_newest_sticky};
+    use std::cell::RefCell;
+    let log = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let sink = log.clone();
+    cx.update(|cx| {
+        let mut t = toast("sticky");
+        t.sticky = true;
+        t.actions = ["one", "two"]
+            .into_iter()
+            .map(|name| {
+                let sink = sink.clone();
+                ToastAction {
+                    label: Rc::new(move |_: &gpui::App| name.into()),
+                    run: Rc::new(move |_, _| sink.borrow_mut().push(name)),
+                }
+            })
+            .collect();
+        ToastQueue::push(cx, t);
+    });
+    let vcx = host(cx, move |_, _| {
+        div()
+            .size_full()
+            .child(ToastStack::new())
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| assert!(focus_newest_sticky(window, cx)));
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.focus_next(cx));
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    vcx.run_until_parked();
+    assert_eq!(*log.borrow(), vec!["two"]);
 }
 
 #[gpui::test]
@@ -721,6 +885,154 @@ fn a_menu_that_fits_the_room_moves_up_rather_than_scroll(cx: &mut TestAppContext
     );
 }
 
+// ## m3c-shotfix F1: a menu wider than the room right of its anchor moves left until it ends at
+// the window's right edge, every row whole; one that fits keeps its anchor's left.
+#[gpui::test]
+fn a_wide_menu_near_the_right_edge_moves_left_into_the_window(cx: &mut TestAppContext) {
+    registry_on(cx);
+    let wide: hacivat_ui::text::TextFn =
+        Rc::new(|_| "A menu row whose label is far wider than the room right of its anchor".into());
+    let list = vec![
+        hacivat_ui::menu::MenuItemSpec::new(wide, "menu.wide"),
+        items(1, |_| false).remove(0),
+    ];
+    let (_host, vcx) = cx.add_window_view(move |window, cx| {
+        MenuHost(hacivat_ui::menu::PopupMenu::new(
+            point(px(1100.), px(100.)),
+            list,
+            window,
+            cx,
+        ))
+    });
+    vcx.simulate_resize(gpui::size(px(1280.), px(800.)));
+    let layout = layout_of(vcx);
+    let column = layout.viewport.expect("the column");
+    assert!(f32::from(column.right()) <= 1280.0, "{column:?}");
+    assert!(
+        f32::from(column.left()) < 1100.0,
+        "it moved left: {column:?}"
+    );
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let clipped: Vec<_> = frame.iter().filter(|r| r.clipped).collect();
+    assert!(clipped.is_empty(), "{clipped:?}");
+    // A menu that fits keeps its left at the anchor.
+    let (_host, vcx) = open_menu(cx, 100.0, items(3, |_| false));
+    let column = layout_of(vcx).viewport.expect("the column");
+    assert!((f32::from(column.left()) - 900.0).abs() < 8.0, "{column:?}");
+}
+
+// ## m3b-ci (controller fix): CI run 44051024805 (Linux, wider fonts) drew the transaction
+// menu past the window's right side at 960x600, so its hints were cut there. A menu wider than
+// the room right of its anchor moves left and shows whole; one wider than the window is held
+// inside it and ellipsizes its hints, never its label; the frame check sees a row past a side.
+fn hinted(hint: &'static str) -> Vec<hacivat_ui::menu::MenuItemSpec> {
+    use hacivat_ui::menu::MenuItemSpec;
+    let text = |s: &'static str| -> hacivat_ui::text::TextFn { Rc::new(move |_| s.into()) };
+    vec![
+        MenuItemSpec::new(text("Manual"), "tx.manual").hint(text(hint)),
+        MenuItemSpec::new(text("Auto-commit"), "tx.auto"),
+    ]
+}
+
+fn open_menu_at(
+    cx: &mut TestAppContext,
+    anchor_x: f32,
+    window_w: f32,
+    list: Vec<hacivat_ui::menu::MenuItemSpec>,
+) -> &mut VisualTestContext {
+    let (_host, vcx) = cx.add_window_view(move |window, cx| {
+        let menu = hacivat_ui::menu::PopupMenu::new(point(px(anchor_x), px(40.)), list, window, cx);
+        // Access keys shown on every platform, as Linux and Windows draw them (the label in
+        // runs around its key letter), so macOS checks the same drawing.
+        menu.update(cx, |m, _| m.set_access_keys(true));
+        MenuHost(menu)
+    });
+    vcx.simulate_resize(gpui::size(px(window_w), px(800.)));
+    vcx
+}
+
+fn drawn(vcx: &mut VisualTestContext, text: &str) -> RenderedText {
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    vcx.read(|cx| cx.global::<TextRegistry>().frame.clone())
+        .into_iter()
+        .find(|r| r.text.as_ref() == text)
+        .unwrap_or_else(|| panic!("{text:?} is not drawn"))
+}
+
+#[gpui::test]
+fn a_menu_wider_than_the_room_right_of_its_anchor_moves_left(cx: &mut TestAppContext) {
+    registry_on(cx);
+    let hint = "Changes wait for Commit · Server default · READ COMMITTED";
+    // ## m3c (m3b forward merge, controller ruling): also the ruled case, 60 px from the side.
+    let vcx = open_menu_at(cx, 1220.0, 1280.0, hinted(hint));
+    let column = layout_of(vcx).viewport.expect("the column");
+    assert!(f32::from(column.right()) <= 1280.0, "{column:?}");
+    assert!(
+        menu_violations(vcx).is_empty(),
+        "{:?}",
+        menu_violations(vcx)
+    );
+    let vcx = open_menu_at(cx, 1180.0, 1280.0, hinted(hint));
+    let layout = layout_of(vcx);
+    let column = layout.viewport.expect("the column");
+    assert!(
+        f32::from(column.size.width) > 100.0,
+        "wider than the 100 px right of the anchor: {column:?}"
+    );
+    assert!(f32::from(column.right()) <= 1280.0, "{column:?}");
+    assert!(f32::from(column.left()) < 1180.0, "moved left: {column:?}");
+    assert!(
+        menu_violations(vcx).is_empty(),
+        "{:?}",
+        menu_violations(vcx)
+    );
+    let hint = drawn(vcx, hint);
+    assert!(!hint.clipped && !hint.truncated, "shown whole: {hint:?}");
+}
+
+#[gpui::test]
+fn a_menu_wider_than_the_window_stays_inside_and_ellipsizes_its_hint(cx: &mut TestAppContext) {
+    registry_on(cx);
+    let hint = "SELECT o.id, o.total, o.status FROM orders o JOIN customers c ON c.id = \
+                o.customer_id WHERE o.status = 'open' ORDER BY o.total DESC";
+    let vcx = open_menu_at(cx, 20.0, 320.0, hinted(hint));
+    let layout = layout_of(vcx);
+    let column = layout.viewport.expect("the column");
+    assert!(f32::from(column.right()) <= 320.0, "{column:?}");
+    assert!(
+        menu_violations(vcx).is_empty(),
+        "{:?}",
+        menu_violations(vcx)
+    );
+    let shown = drawn(vcx, hint);
+    assert!(shown.truncated && !shown.clipped, "{shown:?}");
+    // Where access keys show (Linux, Windows) the label is drawn as runs around its key letter
+    // (P15): every run must be whole.
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let runs = support::find_label_runs(&frame, "Manual").expect("the label is drawn");
+    for run in &runs {
+        assert!(!run.truncated && !run.clipped, "{run:?}");
+    }
+}
+
+#[gpui::test]
+fn the_menu_check_sees_a_row_past_the_windows_side(cx: &mut TestAppContext) {
+    use gpui::{Bounds, size};
+    let row = |x: f32, w: f32| Bounds::new(point(px(x), px(40.)), size(px(w), px(24.)));
+    let layout = hacivat_ui::menu::MenuLayout {
+        viewport: None,
+        rows: vec![(0, row(700.0, 300.0)), (1, row(-4.0, 100.0))],
+        window_height: 600.0,
+        statusbar_height: 22.0,
+        window_width: 960.0,
+    };
+    cx.update(|cx| cx.set_global(layout));
+    let found = cx.read(hacivat_ui::menu::MenuLayout::violations);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found.iter().all(|v| v.contains("past the window's side")));
+}
+
 struct MenuHost(gpui::Entity<hacivat_ui::menu::PopupMenu>);
 
 impl gpui::Render for MenuHost {
@@ -806,4 +1118,411 @@ fn pseudo_locale_brackets_fluent_segments_but_not_verbatim_ones_or_the_capsule_n
     assert_eq!(source_of("[Read only]"), TextSource::Fluent);
     // Nothing is flagged: every Fluent text is bracketed, user data and verbatim text is not.
     assert_eq!(unbracketed_fluent(&frame), Vec::<String>::new());
+}
+
+// ## m3c-t41-chrome (fix round 1, m5): a menu wider than its minimum, anchored near the
+// window's right edge, is placed inside the window by the frame that first draws it: it is
+// not drawn past the edge and then placed again.
+#[gpui::test]
+fn a_wide_menu_near_the_right_edge_fits_on_its_first_frame(cx: &mut TestAppContext) {
+    use hacivat_ui::menu::{MenuItemSpec, PopupMenu};
+    use hacivat_ui_core::theme::{Theme, ThemeMode};
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    let label = |s: &'static str| -> hacivat_ui::text::TextFn { Rc::new(move |_| s.into()) };
+    let (host_view, vcx) = cx.add_window_view(|window, cx| {
+        let width = window.viewport_size().width;
+        let menu = PopupMenu::new(
+            point(width - px(60.), px(20.)),
+            vec![
+                MenuItemSpec::new(label("Auto-commit"), "mode.auto").hint(label(
+                    "Each statement commits as it runs, with nothing to commit by hand",
+                )),
+                MenuItemSpec::new(label("Manual"), "mode.manual")
+                    .hint(label("Changes wait for Commit or Roll back")),
+            ],
+            window,
+            cx,
+        );
+        MenuHost(menu)
+    });
+    let menu = host_view.read_with(vcx, |h, _| h.0.clone());
+    let renders = Rc::new(std::cell::Cell::new(0u32));
+    let seen = renders.clone();
+    vcx.update(|_, cx| {
+        cx.observe(&menu, move |_, _| seen.set(seen.get() + 1))
+            .detach()
+    });
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let bounds = vcx.debug_bounds("popup-menu").expect("the menu");
+    let width = vcx.update(|window, _| window.viewport_size().width);
+    assert!(
+        bounds.size.width > px(MENU_WIDE_PX),
+        "the menu is wider than its minimum: {bounds:?}"
+    );
+    assert!(
+        bounds.left() >= px(0.) && bounds.right() <= width,
+        "{bounds:?} past the window's edge ({width:?})"
+    );
+    assert_eq!(renders.get(), 0, "the menu was placed again after it drew");
+}
+
+/// Wider than the menu's 200 px minimum.
+const MENU_WIDE_PX: f32 = 240.0;
+
+// ## m3c-shotfix F1 (fix round 1, controller ruling): a menu wider than the window is capped at
+// the window less its 4 px margins and snapped inside them; its hint ellipsizes, its label
+// shows whole, and the menu's own frame checks find nothing.
+#[gpui::test]
+fn a_menu_wider_than_the_window_is_capped_and_its_hint_gives_way(cx: &mut TestAppContext) {
+    use hacivat_ui::menu::{MenuItemSpec, PopupMenu};
+    registry_on(cx);
+    let label = |s: &'static str| -> hacivat_ui::text::TextFn { Rc::new(move |_| s.into()) };
+    let hint = "A hint far longer than any window could hold, so the menu that carries it would \
+                be wider than the whole window if nothing capped it at the window's width, which \
+                is exactly what this case needs to show";
+    let (_host, vcx) = cx.add_window_view(|window, cx| {
+        let menu = PopupMenu::new(
+            point(px(440.), px(40.)),
+            vec![MenuItemSpec::new(label("Normalize to LF"), "eol.lf").hint(label(hint))],
+            window,
+            cx,
+        );
+        MenuHost(menu)
+    });
+    vcx.simulate_resize(gpui::size(px(500.), px(400.)));
+    let layout = layout_of(vcx);
+    assert!(
+        menu_violations(vcx).is_empty(),
+        "{:?}",
+        menu_violations(vcx)
+    );
+    let bounds = vcx.debug_bounds("popup-menu").expect("the menu");
+    assert!(
+        bounds.left() >= px(4.) - px(0.5) && bounds.right() <= px(496.) + px(0.5),
+        "inside the 4 px margins: {bounds:?}"
+    );
+    assert!(layout.viewport.is_some());
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let find = |id: &str| {
+        frame
+            .iter()
+            .find(|r| r.path.ends_with(id))
+            .unwrap_or_else(|| panic!("{id}: {frame:?}"))
+            .clone()
+    };
+    let label = find("#menu-item-label");
+    assert!(!label.truncated && !label.clipped, "{label:?}");
+    let hint = find("#menu-item-hint");
+    assert!(hint.truncated && !hint.clipped, "{hint:?}");
+}
+
+// ## m4b-t21-shots (ruling (d), R-T2-5 d; fix round 2: R-T21-1, width-based)
+/// A tab with a two-part title (`short`: its connection's short form).
+fn script_tab(id: u32, head: &str, tail: &str, short: Option<&str>) -> TabSpec {
+    TabSpec {
+        parts: Some(hacivat_ui::panes::TitleParts {
+            head: head.to_string().into(),
+            tail: tail.to_string().into(),
+            tail_short: short.map(|t| t.to_string().into()),
+        }),
+        ..tab(id, "full title")
+    }
+}
+
+/// Draws `tabs` (the second active) in a strip `width` px wide; the frame's records once the
+/// strip has planned with its own width (the next frame).
+fn draw_strip(cx: &mut TestAppContext, width: f32, tabs: Vec<TabSpec>) -> Vec<RenderedText> {
+    cx.update(|cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        })
+    });
+    let vcx = host(cx, move |_, _| {
+        div()
+            .w(px(width))
+            .flex()
+            .flex_row()
+            .child(TabStrip::new(PaneId(0), tabs.clone()).active(1))
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    vcx.cx.read(|cx| cx.global::<TextRegistry>().frame.clone())
+}
+
+const LONG: &str = " · orders-reporting-replica-eu-west-1-read-staging";
+const LONG_SHORT: &str = " · orders-reporting-rep…west-1-read-staging";
+
+fn conns(frame: &[RenderedText]) -> Vec<&RenderedText> {
+    frame
+        .iter()
+        .filter(|r| r.path.ends_with("#tab-title-conn"))
+        .collect()
+}
+
+/// Ruling (d): a script tab's connection never ellipsizes. In a strip too narrow for both
+/// tabs, the active tab's file name gives way, its connection stays whole, and the inactive
+/// tab collapses: no cut connection is drawn anywhere.
+#[gpui::test]
+fn a_script_tabs_connection_never_ellipsizes(cx: &mut TestAppContext) {
+    let tabs = vec![
+        script_tab(1, "orders_report.sql", " · orders-prod", None),
+        script_tab(2, "orders_report.sql", LONG, Some(LONG_SHORT)),
+    ];
+    let frame = draw_strip(cx, 420.0, tabs.clone());
+    for r in conns(&frame) {
+        assert!(!(r.visible && (r.truncated || r.clipped)), "{r:?}");
+    }
+    let active = conns(&frame)
+        .into_iter()
+        .find(|r| r.visible && r.text.contains("orders-reporting"))
+        .expect("the active tab's connection");
+    assert!(!active.truncated && !active.clipped, "{active:?}");
+    // With room, both tabs draw both parts whole.
+    let frame = draw_strip(cx, 1200.0, tabs);
+    let whole = frame
+        .iter()
+        .filter(|r| r.path.contains("#tab-title") && r.visible && !r.truncated && !r.clipped)
+        .count();
+    assert_eq!(whole, 4, "{frame:?}");
+}
+
+/// R-T21-1: the 47-character connection is whole while the active tab fits (1280), and shown
+/// in its short form (both ends kept) only in a strip where it would overflow.
+#[gpui::test]
+fn the_connection_is_shortened_only_where_the_tab_would_overflow(cx: &mut TestAppContext) {
+    let tabs = vec![
+        script_tab(1, "orders_report.sql", " · orders-prod", None),
+        script_tab(2, "orders_report.sql", LONG, Some(LONG_SHORT)),
+    ];
+    let shown = |frame: &[RenderedText]| -> Vec<String> {
+        conns(frame)
+            .into_iter()
+            .filter(|r| r.visible && r.text.contains("orders-reporting"))
+            .map(|r| r.text.to_string())
+            .collect()
+    };
+    let wide = draw_strip(cx, 1280.0, tabs.clone());
+    assert_eq!(shown(&wide), [LONG], "whole at 1280");
+    let narrow = draw_strip(cx, 330.0, tabs);
+    assert_eq!(
+        shown(&narrow),
+        [LONG_SHORT],
+        "short where it would overflow"
+    );
+    let r = conns(&narrow)
+        .into_iter()
+        .find(|r| r.visible && r.text.contains("orders-reporting"))
+        .unwrap();
+    assert!(!r.truncated && !r.clipped, "{r:?}");
+}
+
+/// R-T21-1: two connections that differ only in the middle read apart on their tabs at 1280.
+#[gpui::test]
+fn names_that_differ_in_the_middle_read_apart(cx: &mut TestAppContext) {
+    let us = " · orders-reporting-replica-us-west-1-read-staging";
+    let tabs = vec![
+        script_tab(1, "a.sql", LONG, Some(LONG_SHORT)),
+        script_tab(
+            2,
+            "a.sql",
+            us,
+            Some(" · orders-reporting-rep…west-1-read-staging"),
+        ),
+    ];
+    let frame = draw_strip(cx, 1280.0, tabs);
+    let texts: Vec<String> = conns(&frame)
+        .into_iter()
+        .filter(|r| r.visible && !r.truncated && !r.clipped)
+        .map(|r| r.text.to_string())
+        .collect();
+    assert!(texts.contains(&LONG.to_string()), "{texts:?}");
+    assert!(texts.contains(&us.to_string()), "{texts:?}");
+}
+
+// ## m4b-t22-pre (T21 r2, r3)
+
+/// A view that counts its renders (drawn cached by its host).
+struct Counted(Rc<Cell<usize>>);
+
+impl gpui::Render for Counted {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        self.0.set(self.0.get() + 1);
+        div().size(px(10.0))
+    }
+}
+
+/// A strip with a two-part title (so it plans with its width) beside a cached view, in a
+/// window of its own; the cached view's render count.
+fn strip_beside_a_cached_view(
+    cx: &mut TestAppContext,
+) -> (&mut VisualTestContext, Rc<Cell<usize>>) {
+    let renders = Rc::new(Cell::new(0));
+    let counted = cx.update(|cx| gpui::AppContext::new(cx, |_| Counted(renders.clone())));
+    let tabs = vec![
+        script_tab(1, "orders_report.sql", " · orders-prod", None),
+        script_tab(2, "orders_report.sql", LONG, Some(LONG_SHORT)),
+    ];
+    let vcx = host(cx, move |_, _| {
+        div()
+            .w(px(900.0))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .child(TabStrip::new(PaneId(0), tabs.clone()).active(1)),
+            )
+            .child(
+                gpui::AnyView::from(counted.clone())
+                    .cached(gpui::StyleRefinement::default().size(px(10.0))),
+            )
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    (vcx, renders)
+}
+
+/// T21 r2: a strip whose width changed draws its own view again, not every window in full: a
+/// cached view beside it is drawn once (a full refresh draws it again, uncached).
+#[gpui::test]
+fn a_strip_width_change_redraws_only_its_view(cx: &mut TestAppContext) {
+    // Another window, drawn before the strip's.
+    let other = Rc::new(Cell::new(0));
+    let o = other.clone();
+    let _other = cx.add_window(move |_, _| Counted(o));
+    cx.run_until_parked();
+    let before = other.get();
+    assert!(before >= 1, "the other window drew");
+    let (vcx, renders) = strip_beside_a_cached_view(cx);
+    // The first frame recorded the strip's width; its follow-up frame planned with it.
+    assert_eq!(
+        vcx.cx.read(hacivat_ui::panes::strip_widths_held),
+        1,
+        "the strip's width is recorded"
+    );
+    assert_eq!(
+        renders.get(),
+        1,
+        "the cached view is drawn once, not refreshed"
+    );
+    assert_eq!(other.get(), before, "the other window is not redrawn");
+}
+
+/// T21 r2: the widths of a closed window's strips, and of a pane its owner no longer draws, go.
+#[gpui::test]
+fn strip_widths_go_with_their_window_and_pane(cx: &mut TestAppContext) {
+    let live = Rc::new(Cell::new(2u32));
+    let shown = live.clone();
+    let vcx = host(cx, move |window, cx| {
+        let n = shown.get();
+        hacivat_ui::panes::keep_strip_widths(window, (0..n).map(PaneId), cx);
+        let mut row = div().w(px(900.0)).flex().flex_col();
+        for pane in 0..n {
+            row = row.child(
+                div().flex().flex_row().child(
+                    TabStrip::new(
+                        PaneId(pane),
+                        vec![script_tab(pane + 1, "a.sql", " · orders-prod", None)],
+                    )
+                    .active(0),
+                ),
+            );
+        }
+        row.into_any_element()
+    });
+    vcx.run_until_parked();
+    assert_eq!(vcx.cx.read(hacivat_ui::panes::strip_widths_held), 2);
+    // Pane 1 closes: its owner draws pane 0 only.
+    live.set(1);
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.cx.read(hacivat_ui::panes::strip_widths_held),
+        1,
+        "the closed pane's width goes"
+    );
+    // The window closes.
+    vcx.update(|window, _| window.remove_window());
+    vcx.run_until_parked();
+    assert_eq!(
+        cx.read(hacivat_ui::panes::strip_widths_held),
+        0,
+        "the closed window's widths go"
+    );
+}
+
+/// T21 r3: the width the strip's plan gives each tab is the width the tab is laid out at
+/// (a two-part title's plan keeps its documented pixel of slack per part, the rounding of its
+/// two labels), for a sample of
+/// tabs: plain and data titles, an environment swatch, the dirty dot, the active tab's close
+/// button, two-part titles active and not.
+#[gpui::test]
+fn the_plans_tab_widths_are_the_laid_out_widths(cx: &mut TestAppContext) {
+    let tabs = vec![
+        TabSpec {
+            title_source: TextSource::Fluent,
+            ..tab(1, "Settings")
+        },
+        TabSpec {
+            env: Some(EnvKind::Production),
+            dirty: true,
+            ..tab(2, "orders.sql")
+        },
+        TabSpec {
+            env: Some(EnvKind::Staging),
+            ..script_tab(3, "orders_report.sql", " · orders-prod", None)
+        },
+        TabSpec {
+            dirty: true,
+            ..script_tab(4, "a.sql", LONG, Some(LONG_SHORT))
+        },
+        tab(5, "scratch.sql"),
+    ];
+    for active in [1usize, 3] {
+        let specs = tabs.clone();
+        let vcx = host(cx, move |_, _| {
+            div()
+                .w(px(2400.0))
+                .flex()
+                .flex_row()
+                .child(TabStrip::new(PaneId(0), specs.clone()).active(active))
+                .into_any_element()
+        });
+        // No tab is hovered (a hovered tab shows its close button, which no plan counts).
+        vcx.simulate_mouse_move(
+            gpui::point(px(10.0), px(300.0)),
+            None,
+            gpui::Modifiers::none(),
+        );
+        vcx.run_until_parked();
+        for (i, spec) in tabs.iter().enumerate() {
+            let selector: &'static str = Box::leak(format!("tab-{}", spec.id.0).into_boxed_str());
+            let laid = f32::from(
+                vcx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} is drawn"))
+                    .size
+                    .width,
+            );
+            let planned = vcx.update(|window, cx| {
+                hacivat_ui::panes::planned_tab_width(spec, i == active, window, cx)
+            });
+            // Never less than laid out; more only by a two-part title's slack (its labels lay
+            // out at whole pixels).
+            let slack = if spec.parts.is_some() { 2.0 } else { 0.0 };
+            assert!(
+                planned >= laid - 0.5 && planned - laid <= slack + 0.5,
+                "{selector} (active {}): planned {planned} (slack {slack}), laid out {laid}",
+                i == active
+            );
+        }
+    }
 }

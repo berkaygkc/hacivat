@@ -26,7 +26,11 @@ pub const EDGE_SLACK_PX: f64 = 1.0;
 // ───────────────────────── Colour science ─────────────────────────
 
 fn srgb_to_linear(c: f64) -> f64 {
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// sRGB (D65) to CIE L*a*b* (D65 white point).
@@ -38,7 +42,11 @@ pub fn srgb_to_lab(rgb: [u8; 3]) -> [f64; 3] {
     const WHITE: [f64; 3] = [0.95047, 1.0, 1.08883];
     let f = |t: f64| {
         const D: f64 = 6.0 / 29.0;
-        if t > D * D * D { t.cbrt() } else { t / (3.0 * D * D) + 4.0 / 29.0 }
+        if t > D * D * D {
+            t.cbrt()
+        } else {
+            t / (3.0 * D * D) + 4.0 / 29.0
+        }
     };
     let (fx, fy, fz) = (f(x / WHITE[0]), f(y / WHITE[1]), f(z / WHITE[2]));
     [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
@@ -104,7 +112,10 @@ pub fn delta_e2000(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 fn de_pixels(a: &Rgba<u8>, b: &Rgba<u8>) -> f64 {
-    delta_e2000(srgb_to_lab([a[0], a[1], a[2]]), srgb_to_lab([b[0], b[1], b[2]]))
+    delta_e2000(
+        srgb_to_lab([a[0], a[1], a[2]]),
+        srgb_to_lab([b[0], b[1], b[2]]),
+    )
 }
 
 // ───────────────────────── Scanlines ─────────────────────────
@@ -133,7 +144,15 @@ pub struct Scanline {
 impl Scanline {
     /// Scans along x, at row `y`, from `from` to `to` (exclusive).
     pub fn x(y: u32, from: u32, to: u32) -> Self {
-        Self { name: String::new(), axis: Axis::X, at: y, from, to, expect_edges_px: vec![], tol_de: None }
+        Self {
+            name: String::new(),
+            axis: Axis::X,
+            at: y,
+            from,
+            to,
+            expect_edges_px: vec![],
+            tol_de: None,
+        }
     }
 }
 
@@ -181,12 +200,20 @@ pub fn match_edges(expected: &[u32], found: &[f64]) -> (Vec<u32>, Vec<f64>) {
     let missing = expected
         .iter()
         .copied()
-        .filter(|e| !found.iter().any(|f| (f - *e as f64).abs() <= EDGE_SLACK_PX + 1e-9))
+        .filter(|e| {
+            !found
+                .iter()
+                .any(|f| (f - *e as f64).abs() <= EDGE_SLACK_PX + 1e-9)
+        })
         .collect();
     let extra = found
         .iter()
         .copied()
-        .filter(|f| !expected.iter().any(|e| (f - *e as f64).abs() <= EDGE_SLACK_PX + 1e-9))
+        .filter(|f| {
+            !expected
+                .iter()
+                .any(|e| (f - *e as f64).abs() <= EDGE_SLACK_PX + 1e-9)
+        })
         .collect();
     (missing, extra)
 }
@@ -213,10 +240,15 @@ pub struct Samples {
 pub fn parse_samples(json: &str) -> Result<Samples> {
     let v: Value = serde_json::from_str(json)?;
     let s = |o: &Value, k: &str| -> Result<String> {
-        Ok(o.get(k).and_then(Value::as_str).with_context(|| format!("missing string `{k}`"))?.to_string())
+        Ok(o.get(k)
+            .and_then(Value::as_str)
+            .with_context(|| format!("missing string `{k}`"))?
+            .to_string())
     };
     let n = |o: &Value, k: &str| -> Result<f64> {
-        o.get(k).and_then(Value::as_f64).with_context(|| format!("missing number `{k}`"))
+        o.get(k)
+            .and_then(Value::as_f64)
+            .with_context(|| format!("missing number `{k}`"))
     };
     let mut colors = vec![];
     for c in v["colors"].as_array().context("colors[]")? {
@@ -321,7 +353,11 @@ pub fn expected_rgb(
     over: Option<&str>,
 ) -> Result<[u8; 3]> {
     let (name, opacity) = match token.split_once('@') {
-        Some((n, op)) => (n, op.parse::<f64>().with_context(|| format!("bad opacity in `{token}`"))?),
+        Some((n, op)) => (
+            n,
+            op.parse::<f64>()
+                .with_context(|| format!("bad opacity in `{token}`"))?,
+        ),
         None => (token, 1.0),
     };
     let fg = token_rgba(tokens, theme, name)?;
@@ -330,7 +366,8 @@ pub fn expected_rgb(
     if alpha >= 1.0 {
         return Ok([0, 1, 2].map(|i| ch(fg, i) as u8));
     }
-    let over = over.with_context(|| format!("translucent token `{token}` needs an `over` backdrop"))?;
+    let over =
+        over.with_context(|| format!("translucent token `{token}` needs an `over` backdrop"))?;
     let bg = token_rgba(tokens, theme, over)?;
     if bg & 0xFF != 0xFF {
         bail!("backdrop `{over}` of `{token}` is not opaque");
@@ -358,7 +395,11 @@ fn parse_args(args: &[String]) -> Result<Args> {
     };
     let mut it = args.iter();
     while let Some(k) = it.next() {
-        let mut val = || it.next().cloned().with_context(|| format!("{k} needs a value"));
+        let mut val = || {
+            it.next()
+                .cloned()
+                .with_context(|| format!("{k} needs a value"))
+        };
         match k.as_str() {
             "--reference" => a.reference = Some(val()?.into()),
             "--candidate" => a.candidate = Some(val()?.into()),
@@ -397,7 +438,9 @@ pub fn png_has_icc_profile(bytes: &[u8]) -> bool {
 }
 
 fn load(p: &Path) -> Result<RgbaImage> {
-    Ok(image::open(p).with_context(|| format!("open {}", p.display()))?.to_rgba8())
+    Ok(image::open(p)
+        .with_context(|| format!("open {}", p.display()))?
+        .to_rgba8())
 }
 
 /// Reference left, candidate right, 8 device px gap. Heights are padded to the taller one.
@@ -407,7 +450,8 @@ pub fn side_by_side(reference: &RgbaImage, candidate: &RgbaImage) -> RgbaImage {
     let h = reference.height().max(candidate.height());
     let mut out = RgbaImage::from_pixel(w, h, Rgba([128, 128, 128, 255]));
     out.copy_from(reference, 0, 0).expect("fits");
-    out.copy_from(candidate, reference.width() + gap, 0).expect("fits");
+    out.copy_from(candidate, reference.width() + gap, 0)
+        .expect("fits");
     out
 }
 
@@ -459,7 +503,11 @@ fn compare(
     check_size(cd, scale, "candidate")?;
     println!(
         "reference {}x{}  candidate {}x{}  scale {}",
-        rf.width(), rf.height(), cd.width(), cd.height(), scale
+        rf.width(),
+        rf.height(),
+        cd.width(),
+        cd.height(),
+        scale
     );
     let colors: Vec<&ColorSample> = samples.colors.iter().filter(|c| c.theme == theme).collect();
 
@@ -480,13 +528,20 @@ fn compare(
         }
     }
     if !mismatches.is_empty() {
-        bail!("reference/token mismatch ({theme}):\n  {}", mismatches.join("\n  "));
+        bail!(
+            "reference/token mismatch ({theme}):\n  {}",
+            mismatches.join("\n  ")
+        );
     }
 
     // 2. Every scanline finds exactly its expected edges in the reference.
     let edges = |img: &RgbaImage, l: &Scanline| {
         let found = logical_edges(
-            &find_edges(img, &scale_line(l, scale), l.tol_de.unwrap_or(EDGE_TOLERANCE_DE)),
+            &find_edges(
+                img,
+                &scale_line(l, scale),
+                l.tol_de.unwrap_or(EDGE_TOLERANCE_DE),
+            ),
             scale,
         );
         let (missing, extra) = match_edges(&l.expect_edges_px, &found);
@@ -503,19 +558,35 @@ fn compare(
         }
     }
     if !bad.is_empty() {
-        bail!("bad expectation: scanlines disagree with the reference:\n  {}", bad.join("\n  "));
+        bail!(
+            "bad expectation: scanlines disagree with the reference:\n  {}",
+            bad.join("\n  ")
+        );
     }
 
     // 3. Grade the candidate.
     let (mut pass, mut fail) = (0, 0);
     for c in &colors {
-        let (pr, pc) = (sample_pixel(rf, c.x, c.y, scale), sample_pixel(cd, c.x, c.y, scale));
+        let (pr, pc) = (
+            sample_pixel(rf, c.x, c.y, scale),
+            sample_pixel(cd, c.x, c.y, scale),
+        );
         let de = de_pixels(&pr, &pc);
         let ok = de <= SAMPLE_TOLERANCE_DE;
         println!(
             "{} color {:<28} ({:>6.1},{:>6.1}) {:<18} ref #{:02X}{:02X}{:02X} cand #{:02X}{:02X}{:02X} dE {:.2}",
-            if ok { "ok  " } else { "FAIL" }, c.name, c.x, c.y, c.token,
-            pr[0], pr[1], pr[2], pc[0], pc[1], pc[2], de
+            if ok { "ok  " } else { "FAIL" },
+            c.name,
+            c.x,
+            c.y,
+            c.token,
+            pr[0],
+            pr[1],
+            pr[2],
+            pc[0],
+            pc[1],
+            pc[2],
+            de
         );
         if ok { pass += 1 } else { fail += 1 }
     }
@@ -525,9 +596,20 @@ fn compare(
         let fmt: Vec<String> = found.iter().map(|f| format!("{f:.1}")).collect();
         println!(
             "{} scan  {:<28} expected {:?} found [{}]{}{}",
-            if ok { "ok  " } else { "FAIL" }, l.name, l.expect_edges_px, fmt.join(", "),
-            if missing.is_empty() { String::new() } else { format!(" missing {missing:?}") },
-            if extra.is_empty() { String::new() } else { format!(" extra {extra:?}") },
+            if ok { "ok  " } else { "FAIL" },
+            l.name,
+            l.expect_edges_px,
+            fmt.join(", "),
+            if missing.is_empty() {
+                String::new()
+            } else {
+                format!(" missing {missing:?}")
+            },
+            if extra.is_empty() {
+                String::new()
+            } else {
+                format!(" extra {extra:?}")
+            },
         );
         if ok { pass += 1 } else { fail += 1 }
     }
@@ -542,7 +624,9 @@ mod tests {
     // Sharma, Wu, Dalal (2005) CIEDE2000 test data, pairs 1, 7, 17 and 34
     #[test]
     fn de2000_sharma_pair_1() {
-        assert!((delta_e2000([50.0, 2.6772, -79.7751], [50.0, 0.0, -82.7485]) - 2.0425).abs() < 1e-4);
+        assert!(
+            (delta_e2000([50.0, 2.6772, -79.7751], [50.0, 0.0, -82.7485]) - 2.0425).abs() < 1e-4
+        );
     }
     #[test]
     fn de2000_sharma_pair_7() {
@@ -554,7 +638,10 @@ mod tests {
     }
     #[test]
     fn de2000_sharma_pair_34() {
-        assert!((delta_e2000([2.0776, 0.0795, -1.1350], [0.9033, -0.0636, -0.5514]) - 0.9082).abs() < 1e-4);
+        assert!(
+            (delta_e2000([2.0776, 0.0795, -1.1350], [0.9033, -0.0636, -0.5514]) - 0.9082).abs()
+                < 1e-4
+        );
     }
     #[test]
     fn srgb_white_is_l100() {
@@ -566,20 +653,31 @@ mod tests {
         Rgba([(hex >> 16) as u8, (hex >> 8) as u8, hex as u8, 255])
     }
     fn synthetic_with_vertical_seam(seam_x: u32, seam: u32, fill: u32) -> RgbaImage {
-        RgbaImage::from_fn(600, 600, |x, _| if x == seam_x { rgb(seam) } else { rgb(fill) })
+        RgbaImage::from_fn(
+            600,
+            600,
+            |x, _| if x == seam_x { rgb(seam) } else { rgb(fill) },
+        )
     }
 
     #[test]
     fn finds_one_px_seam() {
         let img = synthetic_with_vertical_seam(276, 0x2A2E36, 0x1E2127);
-        assert_eq!(find_edges(&img, &Scanline::x(450, 200, 400), 2.0), vec![276, 277]);
+        assert_eq!(
+            find_edges(&img, &Scanline::x(450, 200, 400), 2.0),
+            vec![276, 277]
+        );
     }
 
     #[test]
     fn scaled_seam_collapses_to_logical_edges() {
         // 2x capture: the 1 logical px seam is 2 device px wide.
         let img = RgbaImage::from_fn(800, 100, |x, _| {
-            if (552..554).contains(&x) { rgb(0x2A2E36) } else { rgb(0x1E2127) }
+            if (552..554).contains(&x) {
+                rgb(0x2A2E36)
+            } else {
+                rgb(0x1E2127)
+            }
         });
         let sl = scale_line(&Scanline::x(10, 200, 400), 2.0);
         let found = logical_edges(&find_edges(&img, &sl, 2.0), 2.0);
@@ -628,10 +726,16 @@ mod tests {
 
     #[test]
     fn detects_embedded_icc_profile() {
-        assert!(png_has_icc_profile(&fake_png(&[b"IHDR", b"iCCP", b"IDAT", b"IEND"])));
-        assert!(!png_has_icc_profile(&fake_png(&[b"IHDR", b"IDAT", b"IEND"])));
+        assert!(png_has_icc_profile(&fake_png(&[
+            b"IHDR", b"iCCP", b"IDAT", b"IEND"
+        ])));
+        assert!(!png_has_icc_profile(&fake_png(&[
+            b"IHDR", b"IDAT", b"IEND"
+        ])));
         // iCCP after IDAT is not a valid position and is ignored.
-        assert!(!png_has_icc_profile(&fake_png(&[b"IHDR", b"IDAT", b"iCCP"])));
+        assert!(!png_has_icc_profile(&fake_png(&[
+            b"IHDR", b"IDAT", b"iCCP"
+        ])));
     }
 
     #[test]
@@ -640,10 +744,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("tagged.png");
         std::fs::write(&png, fake_png(&[b"IHDR", b"iCCP", b"IDAT", b"IEND"])).unwrap();
-        let args: Vec<String> = ["--reference", png.to_str().unwrap(), "--candidate", png.to_str().unwrap()]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = [
+            "--reference",
+            png.to_str().unwrap(),
+            "--candidate",
+            png.to_str().unwrap(),
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let err = run_inner(&args).unwrap_err().to_string();
         assert!(err.contains("ICC profile"), "{err}");
     }
@@ -660,19 +769,44 @@ mod tests {
                 .map(|c| c.token.split('@').next().unwrap())
                 .collect();
             for want in [
-                "cp_fill", "ground", "panel", "side", "head", "gutter", "raised", "seam", "seam_strong",
-                "seam_soft", "blue", "blue_tint", "blue_tint_strong", "red", "red_tint", "amber",
-                "green_fill", "text_2", "text_3",
+                "cp_fill",
+                "ground",
+                "panel",
+                "side",
+                "head",
+                "gutter",
+                "raised",
+                "seam",
+                "seam_strong",
+                "seam_soft",
+                "blue",
+                "blue_tint",
+                "blue_tint_strong",
+                "red",
+                "red_tint",
+                "amber",
+                "green_fill",
+                "text_2",
+                "text_3",
             ] {
-                assert!(tokens.contains(&want), "{theme}: no sample for token {want}");
+                assert!(
+                    tokens.contains(&want),
+                    "{theme}: no sample for token {want}"
+                );
             }
         }
         let has_edge = |name: &str, e: u32| {
-            s.scanlines.iter().any(|l| l.name.contains(name) && l.expect_edges_px.contains(&e))
+            s.scanlines
+                .iter()
+                .any(|l| l.name.contains(name) && l.expect_edges_px.contains(&e))
         };
         assert!(has_edge("explorer-editor-seam", 276), "x = 276 seam");
         assert!(has_edge("titlebar", 39), "title-bar seam");
-        let rows = s.scanlines.iter().find(|l| l.name.contains("grid-rows")).expect("grid rows scanline");
+        let rows = s
+            .scanlines
+            .iter()
+            .find(|l| l.name.contains("grid-rows"))
+            .expect("grid rows scanline");
         for e in [483, 504, 525, 546, 567] {
             assert!(rows.expect_edges_px.contains(&e), "row border {e}");
         }
@@ -709,10 +843,17 @@ mod tests {
 
     #[test]
     fn rejects_themes_other_than_dark_and_light() {
-        let args: Vec<String> = ["--theme", "blue", "--reference", "r.png", "--candidate", "c.png"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = [
+            "--theme",
+            "blue",
+            "--reference",
+            "r.png",
+            "--candidate",
+            "c.png",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let err = run_inner(&args).unwrap_err().to_string();
         assert!(err.contains("dark or light"), "{err}");
     }
@@ -724,11 +865,15 @@ mod tests {
         let small = RgbaImage::new(1440, 899);
         let s = frame_samples("ground", vec![276, 277]);
         for (rf, cd) in [(&small, &good), (&good, &small)] {
-            let err = compare(rf, cd, &s, "dark", 1.0, &t).unwrap_err().to_string();
+            let err = compare(rf, cd, &s, "dark", 1.0, &t)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("1440x900"), "{err}");
         }
         // The same frame is too small at scale 2.
-        let err = compare(&good, &good, &s, "dark", 2.0, &t).unwrap_err().to_string();
+        let err = compare(&good, &good, &s, "dark", 2.0, &t)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("2880x1800"), "{err}");
     }
 
@@ -736,9 +881,16 @@ mod tests {
     fn reference_pixels_must_match_their_tokens() {
         let t = crate::tokens::load_repo_sources().unwrap();
         let img = frame(&t);
-        let err = compare(&img, &img, &frame_samples("raised", vec![276, 277]), "dark", 1.0, &t)
-            .unwrap_err()
-            .to_string();
+        let err = compare(
+            &img,
+            &img,
+            &frame_samples("raised", vec![276, 277]),
+            "dark",
+            1.0,
+            &t,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("reference/token mismatch"), "{err}");
     }
 
@@ -746,9 +898,16 @@ mod tests {
     fn reference_scanlines_must_match_expectations() {
         let t = crate::tokens::load_repo_sources().unwrap();
         let img = frame(&t);
-        let err = compare(&img, &img, &frame_samples("ground", vec![300, 301]), "dark", 1.0, &t)
-            .unwrap_err()
-            .to_string();
+        let err = compare(
+            &img,
+            &img,
+            &frame_samples("ground", vec![300, 301]),
+            "dark",
+            1.0,
+            &t,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("bad expectation"), "{err}");
     }
 
@@ -768,10 +927,19 @@ mod tests {
     fn translucent_tokens_composite_over_their_backdrop() {
         let t = crate::tokens::load_repo_sources().unwrap();
         // Chromium renders .row.sel (--blue-a over --panel) as #293140 in dark.
-        assert_eq!(expected_rgb(&t, "dark", "blue_tint", Some("panel")).unwrap(), [41, 49, 64]);
+        assert_eq!(
+            expected_rgb(&t, "dark", "blue_tint", Some("panel")).unwrap(),
+            [41, 49, 64]
+        );
         // `@.6` multiplies the alpha (CSS opacity): text_3 at 60 % over light gutter.
-        assert_eq!(expected_rgb(&t, "light", "text_3@.6", Some("gutter")).unwrap(), [165, 165, 171]);
-        assert!(expected_rgb(&t, "dark", "blue_tint", None).is_err(), "needs a backdrop");
+        assert_eq!(
+            expected_rgb(&t, "light", "text_3@.6", Some("gutter")).unwrap(),
+            [165, 165, 171]
+        );
+        assert!(
+            expected_rgb(&t, "dark", "blue_tint", None).is_err(),
+            "needs a backdrop"
+        );
         assert!(expected_rgb(&t, "dark", "no_such_token", None).is_err());
     }
 

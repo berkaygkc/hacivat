@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use hacivat_net::ssh::HopSecrets;
-use hacivat_proto::{Department, ErrClass};
+use hacivat_proto::{Department, EnvTag, ErrClass};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -57,6 +57,10 @@ use crate::pipeline::{
 use crate::profile::Profile;
 use crate::session::actor::{Reconnector, SessionHooks, SideConnector, spawn_supervised};
 use crate::session::liveness::LivenessPolicy;
+// ## m3b-t12-session-carries
+use crate::session::TxState;
+use crate::session::env::SessionZone;
+use crate::session::liveness::LivenessRole;
 // ## m3a-f1-followups
 use crate::session::liveness::ProfileActivity;
 use crate::session::{
@@ -65,6 +69,8 @@ use crate::session::{
 };
 // ## m3a-t01b-seams
 use crate::session::effective_read_only;
+// ## m3b-t01c-core-seams
+use crate::session::verdict::StatementClassifier;
 
 /// How long a released pooled session stays idle before it closes (HV-SESS-01).
 pub const IDLE_CLOSE: Duration = Duration::from_secs(60);
@@ -267,6 +273,9 @@ fn copy_secrets(s: &SessionSecrets) -> SessionSecrets {
 struct Tracked {
     commands: mpsc::WeakUnboundedSender<Command>,
     state: watch::Receiver<SessionSnapshot>,
+    // ## m3b-t12-session-carries
+    /// What the session is for (`open_transactions` names it).
+    kind: SessionKind,
 }
 
 /// A reset session waiting in the pool.
@@ -314,32 +323,42 @@ struct State {
     /// `ConnectionManager` relays them as `ConnectionEvent::EnforcementGap`; its monitor
     /// already relays the default session's).
     gap_sink: Option<GapSink>,
+    // ## m3b-t12-session-carries (fix round 1, review C1)
+    /// Where a session's loss of a user transaction goes (`relay_losses`).
+    lost_sink: Option<LostSink>,
     // ## m3a-t01b-seams
-    /// The manager-wide session policy (`set_policy`).
-    policy: SessionPolicy,
+    // ## m3b-t01c-core-seams
+    /// The read-only guard's classifier every session started from now on gets (R-M3-83,
+    /// P-M3b-11; `set_classifier`).
+    classifier: Option<Arc<dyn StatementClassifier>>,
+    // ## m3b-t12-session-carries
+    /// The default session's liveness policy (`adopt_default`): every console session the pool
+    /// starts runs its own supervisor with it (C7, R-M3-73).
+    liveness: Option<LivenessPolicy>,
+    /// The settings' time zone every session started from now on gets (C11; `set_time_zone`),
+    /// shared, so one a server refused is sent by none (review m7).
+    time_zone: Option<Arc<SessionZone>>,
 }
 
 impl State {
     // ## m3a-t01b-seams
     /// Whether a session of the current profile is read-only (R-M3-29, P4).
+    // ## m3b-t26-prod-unlock: the profile's own flag alone (the production policy is gone).
     fn effective_read_only(&self) -> bool {
-        effective_read_only(&self.current(), self.policy.production_read_only)
+        effective_read_only(&self.current())
     }
-}
-
-// ## m3a-t01b-seams
-/// What every session of a profile follows besides the profile itself (R-M3-29, P4).
-/// `ConnectionManager` sets it right after `SessionManager::new`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct SessionPolicy {
-    /// Production-tagged profiles get read-only sessions (R-M3-6 REVISED; M3b removes it).
-    pub production_read_only: bool,
 }
 
 // ## m2b-t22-live
 /// Receives a session's enforcement gap (T17 carry: a pooled read-only session's gap reaches
 /// the app as the default session's does).
 pub(crate) type GapSink = Arc<dyn Fn(hacivat_guard::GapReason) + Send + Sync>;
+
+// ## m3b-t12-session-carries (fix round 1, review C1)
+/// Receives what a session lost with its connection when it held, or may have been opening, a
+/// user transaction (`SessionEvent::Lost { open_tx: true }`); the `ConnectionManager` relays it
+/// as `ConnectionEvent::SessionLost`.
+pub(crate) type LostSink = Arc<dyn Fn(crate::session::LostState) + Send + Sync>;
 
 /// A `pooled` request waiting for a released session or a permit, whichever comes first.
 struct Waiter {
@@ -467,6 +486,19 @@ fn closed() -> ConnectError {
     pipeline::error(ErrClass::Cancelled, Phase::PostConnect)
 }
 
+// ## m3b-t12-session-carries (R-M3-73; fix round 1, review I1)
+/// A user transaction a close would roll back (`SessionManager::open_transactions`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpenTransaction {
+    pub session: SessionId,
+    pub kind: SessionKind,
+    /// The snapshot's transaction state (its statements, since when).
+    pub tx: TxState,
+    /// A user request runs on it now: it may be opening a transaction the snapshot does not
+    /// show yet.
+    pub running: bool,
+}
+
 /// One profile's sessions.
 pub struct SessionManager {
     rt: Handle,
@@ -479,6 +511,8 @@ pub struct SessionManager {
     // ## m3a-f1-followups
     /// What every session of the profile reports, for the default's idle disconnect (F1-b).
     activity: Arc<ProfileActivity>,
+    // ## m4-t05-meta (named exception): the metadata connections' per-database cap.
+    meta: crate::meta::MetaPools,
 }
 
 impl fmt::Debug for SessionManager {
@@ -503,7 +537,8 @@ impl SessionManager {
         deps: Arc<ConnectDeps>,
         budget: Arc<Budget>,
     ) -> Arc<SessionManager> {
-        Arc::new_cyclic(|me| SessionManager {
+        let opening_production = profile.environment == Some(EnvTag::Production);
+        let manager = Arc::new_cyclic(|me| SessionManager {
             rt,
             deps,
             budget,
@@ -520,12 +555,22 @@ impl SessionManager {
                 next_waiter: 0,
                 consent_gen: 0,
                 gap_sink: None,
-                policy: SessionPolicy::default(),
+                lost_sink: None,
+                // ## m3b-t01c-core-seams
+                classifier: None,
+                // ## m3b-t12-session-carries
+                liveness: None,
+                time_zone: None,
             }),
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
             activity: Arc::default(),
-        })
+            // ## m4-t05-meta (named exception)
+            meta: crate::meta::MetaPools::default(),
+        });
+        // ## m3b-t26-prod-unlock (fix round 1, A-I1): the live tag starts as the profile's.
+        manager.activity.set_production(opening_production);
+        manager
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -534,15 +579,53 @@ impl SessionManager {
 
     // ## m3a-t01b-seams
 
-    /// Sets the policy every session opened from now on follows (R-M3-29, P4).
-    /// `ConnectionManager` calls it right after `new`, before any session exists.
-    pub fn set_policy(&self, p: SessionPolicy) {
-        self.lock().policy = p;
+    // ## m3b-t01c-core-seams (P-M3b-11)
+    /// Sets the classifier the read-only guard of every session opened from now on asks
+    /// (`ManagerConfig::classifier`, R-M3-83). `ConnectionManager` calls it right after `new`,
+    /// before any session exists; `None` keeps the M2b/M3a layers alone.
+    pub fn set_classifier(&self, c: Option<Arc<dyn StatementClassifier>>) {
+        self.lock().classifier = c;
     }
 
-    /// The policy this manager's sessions follow (fix round 1).
-    pub fn policy(&self) -> SessionPolicy {
-        self.lock().policy
+    // ## m3b-t12-session-carries (C11)
+    /// Sets the time zone (the settings' `ui.time_zone`, shared by the manager's profiles so
+    /// that one a server refused is sent by none) every session opened from now on sends on
+    /// PostgreSQL. `ConnectionManager` calls it right after `new`; `None` keeps the server's.
+    pub fn set_time_zone(&self, zone: Option<Arc<SessionZone>>) {
+        self.lock().time_zone = zone;
+    }
+
+    // ## m3b-t12-session-carries (R-M3-73)
+    /// The user transactions open now on the profile's usable sessions, by session (the
+    /// snapshots' `TxState`: `InTx` or `Failed`, not Hacivat's own), in session order: what
+    /// closing them would roll back, so the UI names each one before it acts (Disconnect,
+    /// quit). The default session's Disconnect closes all of them; any other console's closes
+    /// only its own.
+    ///
+    /// Fix round 1 (review I1): a session that runs a user request is listed too
+    /// (`OpenTransaction::running`): its snapshot moves only when the request ends, while a
+    /// running `BEGIN` or Manual statement has already opened one on the server.
+    pub fn open_transactions(&self) -> Vec<OpenTransaction> {
+        let mut open: Vec<OpenTransaction> = self
+            .lock()
+            .sessions
+            .iter()
+            .filter_map(|(id, t)| {
+                let s = t.state.borrow();
+                let running = matches!(
+                    s.state,
+                    SessionState::Busy { .. } | SessionState::Cancelling { .. }
+                ) && self.activity.holds(*id);
+                (usable(&s.state) && (s.tx.user_open() || running)).then(|| OpenTransaction {
+                    session: *id,
+                    kind: t.kind.clone(),
+                    tx: s.tx.clone(),
+                    running,
+                })
+            })
+            .collect();
+        open.sort_by_key(|o| o.session.0);
+        open
     }
 
     /// The connection budget: `(in use, max)` (R-M3-43: "Waiting for a free connection").
@@ -550,9 +633,10 @@ impl SessionManager {
         (self.budget.in_use(), self.budget.max())
     }
 
-    /// Whether a session of `profile` is read-only under this manager's policy.
+    /// Whether a session of `profile` is read-only (## m3b-t26-prod-unlock: the profile's own
+    /// flag).
     fn read_only_for(&self, profile: &Profile) -> bool {
-        effective_read_only(profile, self.lock().policy.production_read_only)
+        effective_read_only(profile)
     }
 
     fn profile(&self) -> Arc<Profile> {
@@ -608,7 +692,7 @@ impl SessionManager {
         self: &Arc<Self>,
         kind: SessionKind,
     ) -> BoxFuture<'static, Result<PooledSession, ConnectError>> {
-        // ## m3a-t01b-seams: the effective flag, so a production borrow finds its parked
+        // ## m3a-t01b-seams: the effective flag, so a read-only borrow finds its parked
         // read-only session again (P4).
         let read_only = self.lock().effective_read_only();
         if self.single() {
@@ -776,6 +860,14 @@ impl SessionManager {
     /// Replaces the overlay's profile, keeping the consent and the secrets (Q17) while the
     /// profile still names the same destination.
     pub fn update_profile(&self, profile: Arc<Profile>) {
+        // ## m3b-t26-prod-unlock (fix round 1, A-I1): the live tag every session reads for its
+        // startup check; a retag to production closes the idle pooled sessions, so none opened
+        // under the old tag is handed out again (a borrowed one checks its script on its reset).
+        let production = profile.environment == Some(EnvTag::Production);
+        let was = self.activity.set_production(production);
+        if production && !was {
+            self.close_idle();
+        }
         let mut st = self.lock();
         // ## m2b-t17-liveness (T15 R1): connects in flight lose the consent too.
         if takes_consent_back(&st.profile, &profile) {
@@ -843,8 +935,7 @@ impl SessionManager {
         if let Some(handle) = self.default_session() {
             return Ok(serves(handle));
         }
-        // A new default is read-only exactly when the profile is (## m3a-t01b-seams: under the
-        // manager's policy, P4).
+        // A new default is read-only exactly when the profile is (## m3a-t01b-seams, P4).
         if read_only && !self.lock().effective_read_only() {
             return Ok(None);
         }
@@ -892,15 +983,17 @@ impl SessionManager {
             read_only: spec.read_only || self.read_only_for(&profile),
             ..spec
         };
-        match self.register(
-            spec,
-            profile,
-            live,
-            permit,
-            epoch,
-            as_default,
-            Hooked::default(),
-        ) {
+        // ## m3b-t12-session-carries (C7, R-M3-73): a console session runs its own
+        // supervisor with the profile's policy; it never disconnects the profile.
+        let hooked = match spec.kind {
+            SessionKind::Console(_) => Hooked {
+                reconnect: None,
+                liveness: self.lock().liveness,
+                role: LivenessRole::Console,
+            },
+            _ => Hooked::default(),
+        };
+        match self.register(spec, profile, live, permit, epoch, as_default, hooked) {
             Ok(handle) => {
                 // ## m2b-t22-live: no monitor watches this session; its gaps go to the sink.
                 self.forward_gaps(&handle);
@@ -923,13 +1016,31 @@ impl SessionManager {
         ix: Interaction,
         purpose: Purpose,
     ) -> Result<(LiveConnection, Arc<Profile>, u64), ConnectError> {
+        // ## m4-t05-meta (named exception): the body moved to `connect_live_as`.
+        self.connect_live_as(department, read_only, ix, purpose, &|_| {})
+            .await
+    }
+
+    // ## m4-t05-meta (named exception): `connect_live` with the profile adjusted before the
+    // connect (a metadata connection's `application_name` and database; neither changes the
+    // destination its secrets go to, `same_destination`).
+    async fn connect_live_as(
+        &self,
+        department: Department,
+        read_only: bool,
+        ix: Interaction,
+        purpose: Purpose,
+        adjust: &(dyn Fn(&mut Profile) + Send + Sync),
+    ) -> Result<(LiveConnection, Arc<Profile>, u64), ConnectError> {
         let (profile, secrets, consent, epoch, token, consent_gen) = {
             let st = self.lock();
             let (secrets, consent) = st.overlay.as_ref().map_or((None, false), |o| {
                 (Some(copy_secrets(&o.secrets)), o.plaintext_consent)
             });
+            let mut profile = (*st.current()).clone();
+            adjust(&mut profile);
             (
-                st.current(),
+                Arc::new(profile),
                 secrets,
                 consent,
                 st.epoch,
@@ -1012,20 +1123,27 @@ impl SessionManager {
             reconnect: hooked.reconnect,
         };
         // ## m3a-f1-followups: every session reports to the profile's activity (F1-b).
+        // ## m3b-t01c-core-seams: and gets the manager's classifier (P-M3b-11).
+        // ## m3b-t12-session-carries: the supervisor's role (R-M3-73) and the time zone (C11).
+        let kind = spec.kind.clone();
         let handle = spawn_supervised(
             &self.rt,
             spec,
             profile,
             live,
             hooks,
-            hooked.liveness,
+            hooked.liveness.map(|policy| (policy, hooked.role)),
             Some(self.activity.clone()),
+            st.classifier.clone(),
+            st.time_zone.clone(),
         );
         st.sessions.insert(
             handle.id,
             Tracked {
                 commands: handle.commands.downgrade(),
                 state: handle.state(),
+                // ## m3b-t12-session-carries
+                kind,
             },
         );
         if as_default {
@@ -1208,10 +1326,21 @@ impl SideConnector for Side {
 // re-review: R1 (the consent generation) and R2 (`close_all` ends requests still waiting).
 
 /// What the default session gets beyond the others: its reconnects and its liveness.
-#[derive(Default)]
+/// ## m3b-t12-session-carries: a console session gets a liveness too, as `Console` (R-M3-73).
 struct Hooked {
     reconnect: Option<Arc<dyn Reconnector>>,
     liveness: Option<LivenessPolicy>,
+    role: LivenessRole,
+}
+
+impl Default for Hooked {
+    fn default() -> Self {
+        Hooked {
+            reconnect: None,
+            liveness: None,
+            role: LivenessRole::Profile,
+        }
+    }
 }
 
 /// What a request saw when it was made: a `close_all` since then ends it (T15 R2), whether it
@@ -1295,9 +1424,12 @@ impl SessionManager {
             read_only: self.read_only_for(&profile),
             department: Department::Console,
         };
+        // ## m3b-t12-session-carries: the console sessions opened later take the same policy.
+        self.lock().liveness = liveness;
         let hooked = Hooked {
             reconnect,
             liveness,
+            role: LivenessRole::Profile,
         };
         // A fresh manager: `close_all` cannot have run, so the epoch matches; if it did, the
         // permit is already back.
@@ -1313,22 +1445,43 @@ impl SessionManager {
         self.lock().gap_sink = Some(sink);
     }
 
+    // ## m3b-t12-session-carries (fix round 1, review C1)
+    /// Sends every lost user transaction of the sessions this manager starts from now on to
+    /// `sink` (the default session's goes through the manager's own monitor).
+    pub(crate) fn relay_losses(&self, sink: LostSink) {
+        self.lock().lost_sink = Some(sink);
+    }
+
     /// Forwards `handle`'s enforcement gaps to the sink until the session ends. A gap is
     /// emitted before the session publishes `Broken` (T17 I10), so what is still queued when
     /// it ends is drained first.
+    /// ## m3b-t12-session-carries (fix round 1, review C1): and its lost user transaction
+    /// (`Lost { open_tx: true }`, emitted before `Broken` too) to the loss sink.
     fn forward_gaps(&self, handle: &SessionHandle) {
         use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
-        let Some(sink) = self.lock().gap_sink.clone() else {
-            return;
+        let (gaps, losses) = {
+            let st = self.lock();
+            (st.gap_sink.clone(), st.lost_sink.clone())
         };
+        if gaps.is_none() && losses.is_none() {
+            return;
+        }
         let mut events = handle.events();
         let mut state = handle.state();
         self.rt.spawn(async move {
-            let relay = |event: SessionEvent| {
-                if let SessionEvent::EnforcementGap(reason) = event {
-                    sink(reason);
+            let relay = |event: SessionEvent| match event {
+                SessionEvent::EnforcementGap(reason) => {
+                    if let Some(sink) = &gaps {
+                        sink(reason);
+                    }
                 }
+                SessionEvent::Lost(lost) if lost.open_tx => {
+                    if let Some(sink) = &losses {
+                        sink(lost);
+                    }
+                }
+                _ => {}
             };
             loop {
                 tokio::select! {
@@ -1387,6 +1540,77 @@ impl SessionManager {
             )
             .await?;
         Ok((live, profile))
+    }
+}
+
+// ## m4-t05-meta (named exception, M4 Task 5): what the metadata connections (`crate::meta`)
+// take from the manager. A metadata connection is a lease: a permit of the profile's budget at
+// `Priority::Introspection` (none for SQLite's separate `mode=ro` reader, U-6(e)), a headless
+// `Purpose::Probe` connect with `Department::Introspection`, and a token that `close_all`
+// cancels, so no metadata connection outlives the profile's connection.
+impl SessionManager {
+    /// The runtime the manager's tasks run on.
+    pub(crate) fn meta_runtime(&self) -> Handle {
+        self.rt.clone()
+    }
+
+    /// The profile every connect uses now (the overlay's, else the saved one).
+    pub(crate) fn meta_profile(&self) -> Arc<Profile> {
+        self.lock().current()
+    }
+
+    /// This manager, weakly (a metadata connection reconnects through it).
+    pub(crate) fn meta_manager(&self) -> Weak<SessionManager> {
+        self.me.clone()
+    }
+
+    /// The per-database cap of the metadata connections.
+    pub(crate) fn meta_pools(&self) -> &crate::meta::MetaPools {
+        &self.meta
+    }
+
+    /// Single-session mode (`Profile::single_session`, SQLite).
+    pub(crate) fn meta_single(&self) -> bool {
+        self.single()
+    }
+
+    /// A token the next `close_all` cancels (a child of the current epoch's).
+    pub(crate) fn meta_closed_token(&self) -> CancellationToken {
+        self.lock().cancel.child_token()
+    }
+
+    /// A permit at `Priority::Introspection`, unless `close_all` comes first (`None`).
+    pub(crate) async fn meta_permit(&self) -> Option<BudgetPermit> {
+        let gate = self.gate();
+        gate.wait(self.permit(Priority::Introspection)).await.ok()
+    }
+
+    /// A headless `Purpose::Probe` connect for `Department::Introspection`, read-only, with
+    /// `adjust` applied to the profile; the overlay's part is taken as for any connect.
+    pub(crate) async fn meta_connect(
+        &self,
+        adjust: &(dyn Fn(&mut Profile) + Send + Sync),
+    ) -> Result<LiveConnection, ConnectError> {
+        let (live, _, _) = self
+            .connect_live_as(
+                Department::Introspection,
+                true,
+                Interaction::Headless,
+                Purpose::Probe,
+                adjust,
+            )
+            .await?;
+        Ok(live)
+    }
+
+    /// The registered driver of `kind` (SQLite's separate reader connects through it directly:
+    /// the pipeline would harden a read-only connect with the user-facing authorizer,
+    /// R-M4-38).
+    pub(crate) fn meta_driver(
+        &self,
+        kind: hacivat_proto::DbmsKind,
+    ) -> Option<Arc<dyn hacivat_driver::Driver>> {
+        self.deps.drivers.resolve(kind)
     }
 }
 

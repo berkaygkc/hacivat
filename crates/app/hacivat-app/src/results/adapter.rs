@@ -24,6 +24,8 @@
 //!   switch empties the cache.
 
 use std::cell::{Cell, RefCell};
+// ## m3c-t39
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -37,8 +39,8 @@ use hacivat_ui_grid::{
     GridFrame, ModelRow, NULL_MARKER, RowCount, SourceCaps,
 };
 use hacivat_values::valfmt::{
-    BinaryDisplay, ChipKind, ColumnFacts, Display, DisplayKind, DisplaySettings, DisplayZone,
-    Purpose, format_cell, id_like,
+    BinaryDisplay, ChipKind, ColumnFacts, Display, DisplayKind, DisplayMode, DisplaySettings,
+    DisplayZone, Purpose, format_cell, id_like,
 };
 use hacivat_values::{
     CellFlags, ColumnMeta, LenUnit, LogicalType, NativeType, NetKind, ResultSchema, SqliteAffinity,
@@ -56,6 +58,46 @@ pub struct ResultDisplay {
     settings: DisplaySettings,
     zone: DisplayZone,
     engine: DbmsKind,
+    // ## m3c-t39 (named exception: L3's raw setting)
+    /// `settings` in `DisplayMode::Raw`, at the same version: the raw columns' cells.
+    raw_settings: DisplaySettings,
+    /// Which columns show raw.
+    raw: RawColumns,
+}
+
+// ## m3c-t39 (named exception: L3's raw setting, HV-GRID-04 menu)
+/// Which columns show their values raw (`DisplayMode::Raw`: as the server sent them, no digit
+/// grouping): every column under the `grid.raw_display` setting, and a console's own choice
+/// per column (the grid menu's "Raw display · this column"), by column name, which wins over
+/// the setting. Copy is raw whatever this says.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RawColumns {
+    /// `grid.raw_display`.
+    pub all: bool,
+    /// Each named column's own choice.
+    pub columns: Arc<BTreeMap<Arc<str>, bool>>,
+}
+
+impl RawColumns {
+    /// Whether the column named `name` shows raw.
+    pub fn is_raw(&self, name: &str) -> bool {
+        self.columns.get(name).copied().unwrap_or(self.all)
+    }
+
+    /// The same, with the column named `name` raw or not; a choice equal to the setting is no
+    /// choice (the column follows the setting again).
+    pub fn with_column(&self, name: &str, raw: bool) -> RawColumns {
+        let mut columns = (*self.columns).clone();
+        if raw == self.all {
+            columns.remove(name);
+        } else {
+            columns.insert(Arc::from(name), raw);
+        }
+        RawColumns {
+            all: self.all,
+            columns: Arc::new(columns),
+        }
+    }
 }
 
 impl ResultDisplay {
@@ -63,15 +105,48 @@ impl ResultDisplay {
     /// region, `tr-TR`) and a zone already loaded. No I/O: load the zone off the UI thread
     /// (`DisplayZone::load`).
     pub fn new(region_bcp47: &str, zone: DisplayZone, engine: DbmsKind) -> Self {
+        let settings = DisplaySettings::with_zone(region_bcp47, zone.clone());
+        // ## m3c-t39
+        let mut raw_settings = settings.clone();
+        raw_settings.mode = DisplayMode::Raw;
         ResultDisplay {
-            settings: DisplaySettings::with_zone(region_bcp47, zone.clone()),
+            settings,
             zone,
             engine,
+            raw_settings,
+            raw: RawColumns::default(),
         }
     }
 
     pub fn settings(&self) -> &DisplaySettings {
         &self.settings
+    }
+
+    // ## m3c-t39
+    /// The settings column `name`'s cells are shown with: raw ones in `DisplayMode::Raw`.
+    pub fn settings_for(&self, name: &str) -> &DisplaySettings {
+        if self.raw.is_raw(name) {
+            &self.raw_settings
+        } else {
+            &self.settings
+        }
+    }
+
+    /// Which columns show raw.
+    pub fn raw(&self) -> &RawColumns {
+        &self.raw
+    }
+
+    /// The same display with `raw` columns.
+    pub fn with_raw(mut self, raw: RawColumns) -> Self {
+        self.raw = raw;
+        self
+    }
+
+    /// Moves both settings to `version` (the display caches key on it).
+    fn set_version(&mut self, version: u32) {
+        self.settings.version = version;
+        self.raw_settings.version = version;
     }
 
     /// The display zone, for the raw channel.
@@ -114,23 +189,40 @@ struct Target {
     changes: watch::Receiver<(u64, u64)>,
     columns: Arc<[ColumnSpec]>,
     facts: Arc<[ColFacts]>,
+    /// ## m3b-t07-types: a header label came from Fluent.
+    localized: bool,
     /// The adapter's generation: 1 for its first result, one more per retarget.
     generation: u64,
 }
 
 impl Target {
-    fn over(source: Arc<dyn ResultSource>, engine: DbmsKind, generation: u64) -> Target {
+    fn over(
+        source: Arc<dyn ResultSource>,
+        engine: DbmsKind,
+        generation: u64,
+        texts: &Texts,
+    ) -> Target {
         // The order matters (module docs): subscribe, then load.
         let changes = source.changes();
         let snapshot = source.snapshot();
-        let (columns, facts) = columns_of(snapshot.schema(), engine);
+        let cols = columns_of(snapshot.schema(), engine, texts);
         Target {
             source,
             changes,
-            columns,
-            facts,
+            columns: cols.specs,
+            facts: cols.facts,
+            localized: cols.localized,
             generation,
         }
+    }
+
+    /// Rebuilds the columns (a new engine, or a new language for Fluent labels).
+    fn rebuild_columns(&mut self, engine: DbmsKind, texts: &Texts) {
+        let snapshot = self.source.snapshot();
+        let cols = columns_of(snapshot.schema(), engine, texts);
+        self.columns = cols.specs;
+        self.facts = cols.facts;
+        self.localized = cols.localized;
     }
 }
 
@@ -150,6 +242,10 @@ pub struct GridAdapter {
     target: RefCell<Target>,
     display: RefCell<Arc<ResultDisplay>>,
     cache: Rc<RefCell<DisplayCache>>,
+    // ## m3c-t40 fix round 1 (m4)
+    /// The screen-reader texts formatted apart from the display (cells with controls, a cut
+    /// value, a long text), under the display cache's keys.
+    a11y_cache: Rc<RefCell<DisplayCache>>,
     /// The listener was called and no frame has read the adapter since.
     notified: Rc<Cell<bool>>,
     listener: RefCell<Option<Listener>>,
@@ -172,11 +268,16 @@ impl std::fmt::Debug for GridAdapter {
 impl GridAdapter {
     /// An adapter over `source`, shown as `display` says.
     pub fn new(source: Arc<dyn ResultSource>, display: ResultDisplay) -> Rc<Self> {
-        let target = Target::over(source, display.engine, 1);
+        // No `App` here: a Fluent header label is rendered at the first frame (`begin_frame`).
+        let target = Target::over(source, display.engine, 1, &Texts(None));
         Rc::new(GridAdapter {
             target: RefCell::new(target),
             display: RefCell::new(Arc::new(display)),
             cache: Rc::new(RefCell::new(DisplayCache::new())),
+            // ## m3c-t40 fix round 1 (m4)
+            a11y_cache: Rc::new(RefCell::new(DisplayCache::with_capacity(
+                A11Y_CACHE_CAPACITY,
+            ))),
             notified: Rc::new(Cell::new(false)),
             listener: RefCell::new(None),
             watch: RefCell::new(None),
@@ -197,7 +298,7 @@ impl GridAdapter {
     pub fn retarget(&self, source: Arc<dyn ResultSource>, cx: &mut App) {
         let engine = self.display.borrow().engine;
         let generation = self.target.borrow().generation + 1;
-        *self.target.borrow_mut() = Target::over(source, engine, generation);
+        *self.target.borrow_mut() = Target::over(source, engine, generation, &Texts::of(cx));
         self.start_watch(cx);
         self.tell(cx);
     }
@@ -206,25 +307,28 @@ impl GridAdapter {
     /// which this bumps, so no cell formatted under the old settings is shown again.
     pub fn set_display(&self, mut display: ResultDisplay, cx: &mut App) {
         let old = self.display.borrow().settings.version;
-        display.settings.version = old.wrapping_add(1);
+        // ## m3c-t39: both settings, raw and not, move together.
+        display.set_version(old.wrapping_add(1));
+        // ## m3c-t39: the setting's raw flag is the adapter's own (`begin_frame` reads it).
+        display.raw.all = self.display.borrow().raw.all;
         let engine_changed = display.engine != self.display.borrow().engine;
         *self.display.borrow_mut() = Arc::new(display);
         if engine_changed {
             // The ID heuristic depends on the engine.
-            let mut target = self.target.borrow_mut();
-            let snapshot = target.source.snapshot();
             let engine = self.display.borrow().engine;
-            (target.columns, target.facts) = columns_of(snapshot.schema(), engine);
+            self.target
+                .borrow_mut()
+                .rebuild_columns(engine, &Texts::of(cx));
         }
         self.tell(cx);
     }
 
     /// The result's source (the cursor strip's commands and state).
     ///
-    /// Its `raise_cap()` raises the cap without the tab knowing: "Fetch more anyway" goes
-    /// through `ConsoleResults::raise_cap`, which records the raise for the memory banner. A
-    /// raise made here leaves the banner offering the button after a global-budget pause (each
-    /// click pauses again; nothing is fetched past the budget).
+    // ## m3b-t25-results (named exception, doc only; review m11)
+    /// "Fetch more anyway" goes through `ConsoleResults::raise_cap`, which calls its
+    /// `raise_cap()`. The store records the raise (`ResultSource::cap_raised`), and the memory
+    /// banner reads it there, so a raise made here is seen as well.
     pub fn source(&self) -> Arc<dyn ResultSource> {
         self.target.borrow().source.clone()
     }
@@ -243,9 +347,30 @@ impl GridAdapter {
         self.display.borrow().clone()
     }
 
+    // ## m4-m3carry (U-6 b; T39 carry)
+    /// Takes `grid.raw_display` as the settings say now: a change is a new display (a new
+    /// version, so no cell formatted the other way is shown again). Each frame does this
+    /// first; the grid find does it before it compares the display it scanned with this one,
+    /// since the tile syncs the find before the grid draws.
+    pub(crate) fn follow_raw_setting(&self, cx: &App) {
+        let raw_all = raw_display_setting(cx);
+        if self.display.borrow().raw.all != raw_all {
+            let mut display = (**self.display.borrow()).clone();
+            display.raw.all = raw_all;
+            display.set_version(display.settings.version.wrapping_add(1));
+            *self.display.borrow_mut() = Arc::new(display);
+        }
+    }
+
     /// Cells formatted so far (display-cache misses).
     pub fn format_calls(&self) -> u64 {
         self.cache.borrow().formats()
+    }
+
+    // ## m3c-t40 fix round 1 (m4)
+    /// Screen-reader texts formatted so far (their cache's misses).
+    pub fn a11y_format_calls(&self) -> u64 {
+        self.a11y_cache.borrow().formats()
     }
 
     /// Cells the display cache holds.
@@ -301,8 +426,25 @@ struct AdapterFrame {
     facts: Arc<[ColFacts]>,
     display: Arc<ResultDisplay>,
     cache: Rc<RefCell<DisplayCache>>,
+    // ## m3c-t40 fix round 1 (m4)
+    a11y_cache: Rc<RefCell<DisplayCache>>,
     generation: u64,
     texts: Texts,
+}
+
+// ## m3c-t39
+impl AdapterFrame {
+    /// The settings column `col`'s cells are shown with (a raw column's are raw).
+    fn settings_of(&self, col: ColId) -> &DisplaySettings {
+        let raw = self.display.raw();
+        if !raw.all && raw.columns.is_empty() {
+            return self.display.settings();
+        }
+        match self.snapshot.schema().columns.get(col.0 as usize) {
+            Some(meta) => self.display.settings_for(&meta.name),
+            None => self.display.settings(),
+        }
+    }
 }
 
 impl GridFrame for AdapterFrame {
@@ -345,13 +487,73 @@ impl GridFrame for AdapterFrame {
             let shown = format_cell(
                 value,
                 &facts.view(self.display.engine),
-                &self.display.settings,
+                self.settings_of(col), // ## m3c-t39
                 Purpose::Cell,
             );
             cell_content(shown, facts, &self.texts)
         })
     }
+
+    // ## m3c-t40 (named exception): what a screen reader reads (HV-GRID-16 step 2).
+    /// `Purpose::A11y`: control characters spoken as spaces and at most 1,000 graphemes; a
+    /// truncated value's chip is its whole size alone ("5.2 MB": the grid words it). A cell of
+    /// plain characters within that cap reads as the cached cell (no second format).
+    fn a11y_cell(&self, row: ModelRow, col: ColId) -> CellContent {
+        let painted = self.cell(row, col);
+        let plain = !painted
+            .flags
+            .intersects(GridCellFlags::HAS_CONTROLS | GridCellFlags::TRUNCATED);
+        let settled = matches!(
+            painted.kind,
+            CellKind::Placeholder | CellKind::Null | CellKind::Error
+        );
+        if settled || (plain && painted.text.len() <= A11Y_PLAIN_BYTES) {
+            return painted;
+        }
+        let Some(facts) = self.facts.get(col.0 as usize) else {
+            return painted;
+        };
+        // ## m3c-t40 fix round 1 (m4): once per data generation and display settings.
+        let key = DisplayKey {
+            generation: self.generation,
+            row: row.0,
+            col: col.0,
+            settings_version: self.display.settings.version,
+        };
+        self.a11y_cache.borrow_mut().get_or_format(key, || {
+            let value = self.snapshot.cell(row.0, col.0);
+            let spoken = format_cell(
+                value,
+                &facts.view(self.display.engine),
+                self.settings_of(col), // ## m3c-t39
+                Purpose::A11y,
+            );
+            let size = spoken.chip.map(|chip| match chip {
+                ChipKind::Truncated { total, unit } => self.texts.length(total, unit),
+            });
+            let mut content = cell_content(spoken, facts, &self.texts);
+            content.chip = size.map(SharedString::from);
+            content
+        })
+    }
 }
+
+// ## m3c-t39
+/// The `grid.raw_display` setting in effect (off without settings).
+pub(crate) fn raw_display_setting(cx: &App) -> bool {
+    cx.try_global::<crate::AppState>()
+        .is_some_and(|s| s.settings.grid.raw_display)
+}
+
+// ## m3c-t40
+/// A cell text of at most this many bytes has at most as many graphemes: within the screen
+/// reader's 1,000-grapheme cap.
+const A11Y_PLAIN_BYTES: usize = 1_000;
+
+// ## m3c-t40 fix round 1 (m4)
+/// The screen-reader texts kept: a screenful many times over (most cells read the display
+/// cache and never land here).
+const A11Y_CACHE_CAPACITY: usize = 4_096;
 
 impl GridDataSource for GridAdapter {
     fn begin_frame(&self, cx: &App) -> Rc<dyn GridFrame> {
@@ -363,14 +565,30 @@ impl GridDataSource for GridAdapter {
         if self.l10n_generation.replace(generation) != generation {
             // The chips and decode-error texts in the cache are in the old language.
             cache.clear();
+            // ## m3c-t40 fix round 1 (m4): and the screen reader's sizes.
+            self.a11y_cache.borrow_mut().clear();
+            // ## m3b-t07-types: so are Fluent header labels (only rebuilt when there is one).
+            let mut target = self.target.borrow_mut();
+            if target.localized {
+                let engine = self.display.borrow().engine;
+                target.rebuild_columns(engine, &Texts(l10n.clone()));
+            }
         }
         cache.begin_frame();
+        // ## m3c-t40 fix round 1 (m4)
+        self.a11y_cache.borrow_mut().begin_frame();
+        // ## m3c-t39: `grid.raw_display` as the settings say now (a change is a new version,
+        // so no cell formatted the other way is shown again).
+        // ## m4-m3carry (U-6 b): one helper, which the grid find reads through too.
+        self.follow_raw_setting(cx);
         let target = self.target.borrow();
         Rc::new(AdapterFrame {
             snapshot: target.source.snapshot(),
             facts: target.facts.clone(),
             display: self.display.borrow().clone(),
             cache: self.cache.clone(),
+            // ## m3c-t40 fix round 1 (m4)
+            a11y_cache: self.a11y_cache.clone(),
             generation: target.generation,
             texts: Texts(l10n),
         })
@@ -456,15 +674,21 @@ impl Texts {
         }
     }
 
-    /// The chip after a truncated cell: the value's whole size.
-    fn truncated(&self, total: u64, unit: LenUnit) -> SharedString {
-        let size = match unit {
+    // ## m3c-t40 (named exception): the size alone, for the screen reader's chip.
+    /// A value's whole size with its unit (`5.2 MB`, `1,200 characters`).
+    fn length(&self, total: u64, unit: LenUnit) -> String {
+        match unit {
             LenUnit::Bytes => self.size(total),
             LenUnit::Chars => self.tr(
                 ids::hv::GRID_SIZE_CHARS,
                 ids::hv::HvGridSizeChars { n: Count(total) },
             ),
-        };
+        }
+    }
+
+    /// The chip after a truncated cell: the value's whole size.
+    fn truncated(&self, total: u64, unit: LenUnit) -> SharedString {
+        let size = self.length(total, unit);
         self.tr(
             ids::hv::GRID_TRUNCATED,
             ids::hv::HvGridTruncated { size: Text(size) },
@@ -540,19 +764,43 @@ fn cell_content(shown: Display, facts: &ColFacts, texts: &Texts) -> CellContent 
     }
 }
 
+// ## m3c-t37 (named exception): the grid find's whole-result scan (its perf line) formats as
+// the adapter does.
+/// The formatting facts of `schema`'s columns on `engine`, as an adapter keeps them.
+pub(crate) fn col_facts(schema: &ResultSchema, engine: DbmsKind) -> Arc<[ColFacts]> {
+    columns_of(schema, engine, &Texts(None)).facts
+}
+
 /// The grid's columns and the formatting facts of `schema`, in server order: a column's ID is
 /// its ordinal, so duplicate names keep their places.
-fn columns_of(schema: &ResultSchema, engine: DbmsKind) -> (Arc<[ColumnSpec]>, Arc<[ColFacts]>) {
+///
+/// ## m3b-t07-types (fix round 1, review m-9): a MySQL column type code without an SQL name is
+/// labelled through Fluent (`texts`); [`Columns::localized`] says a label came from Fluent, so
+/// the adapter rebuilds the columns when the language changes.
+fn columns_of(schema: &ResultSchema, engine: DbmsKind, texts: &Texts) -> Columns {
     let mut specs = Vec::with_capacity(schema.columns.len());
     let mut facts = Vec::with_capacity(schema.columns.len());
+    let mut localized = false;
     for (ordinal, meta) in schema.columns.iter().enumerate() {
         let (kind, align, class) = column_class(&meta.logical);
         let native_name = native_name(meta);
+        let mut label = type_label(meta, &native_name);
+        if let NativeType::MySql { column_type, .. } = meta.native
+            && label.is_empty()
+        {
+            localized = true;
+            label = texts.tr(
+                ids::hv::RESULTS_TYPE_MYSQL_CODE,
+                ids::hv::HvResultsTypeMysqlCode {
+                    code: Count(u64::from(column_type)),
+                },
+            );
+        }
         specs.push(ColumnSpec {
             id: ColId(u32::try_from(ordinal).unwrap_or(u32::MAX)),
             // Catalog text: shown as is, never translated or case-mapped.
             name: SharedString::from(meta.name.clone()),
-            type_label: type_label(meta, &native_name).into(),
+            type_label: label.into(),
             kind,
             align,
             default_width: class.default_width(),
@@ -566,7 +814,19 @@ fn columns_of(schema: &ResultSchema, engine: DbmsKind) -> (Arc<[ColumnSpec]>, Ar
             align,
         });
     }
-    (specs.into(), facts.into())
+    Columns {
+        specs: specs.into(),
+        facts: facts.into(),
+        localized,
+    }
+}
+
+/// What [`columns_of`] builds.
+struct Columns {
+    specs: Arc<[ColumnSpec]>,
+    facts: Arc<[ColFacts]>,
+    /// A header label came from Fluent (rebuilt when the language changes).
+    localized: bool,
 }
 
 /// A column's kind, alignment and starting width class by its logical type.
@@ -628,6 +888,11 @@ fn native_name(meta: &ColumnMeta) -> String {
 fn type_label(meta: &ColumnMeta, native_name: &str) -> String {
     if matches!(meta.native, NativeType::Sqlite { decl: Some(_), .. }) {
         return native_name.to_string();
+    }
+    // ## m3b-t07-types (ledger 246): a MySQL/MariaDB column is labelled from its definition
+    // (`decimal(14,2)`, `bigint unsigned`, `varchar(40)`), not from the generic logical type.
+    if matches!(meta.native, NativeType::MySql { .. }) {
+        return hacivat_values::valfmt::type_label(&meta.native);
     }
     match &meta.logical {
         LogicalType::Decimal {

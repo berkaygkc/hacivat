@@ -159,6 +159,49 @@ pub struct EditorModel {
     observers: Vec<Box<dyn TransactionObserver>>,
     queue: ObserverQueue,
     next_bracket: u32,
+    // ## m3c-t31-multi: the selection-only history and the commit count.
+    selections: SelectionHistory,
+    commits: u64,
+    // ## m4b-t11-editor (fix round 1, I2)
+    /// Bytes deleted plus inserted by edits applied to `buffer` in place (a prebuilt buffer
+    /// swapped in adds none): the thread that owns the model pays for these.
+    rope_edit_bytes: u64,
+}
+
+// ## m3c-t31-multi
+/// Selection changes kept for `undo_selection`.
+const SELECTION_HISTORY_LEN: usize = 100;
+/// The most ranges the kept selections hold together (100 sets of 1,000 carets).
+const SELECTION_HISTORY_RANGES: usize = 100_000;
+
+/// The selection-only history (`EditorModel::undo_selection`, Task 31): the selection before
+/// each selection-only commit, with the version it is for, mapped through the change log when
+/// it is restored (a set the log no longer reaches is dropped). Text commits add nothing, so a
+/// typing burst is never many entries; the stacks survive them.
+#[derive(Debug, Default)]
+struct SelectionHistory {
+    undo: VecDeque<(u64, SelectionSet)>,
+    redo: Vec<(u64, SelectionSet)>,
+    /// A step is being applied: its own commit is not recorded.
+    stepping: bool,
+    // ## m3c-t31-multi (fix round 1, M2)
+    /// A gesture is open (a pointer drag): `Some(true)` once its first change was recorded,
+    /// so the rest of the gesture adds nothing.
+    gesture: Option<bool>,
+}
+
+impl SelectionHistory {
+    fn push_undo(&mut self, entry: (u64, SelectionSet)) {
+        self.undo.push_back(entry);
+        let mut ranges: usize = self.undo.iter().map(|(_, s)| s.ranges().len()).sum();
+        while self.undo.len() > SELECTION_HISTORY_LEN
+            || (ranges > SELECTION_HISTORY_RANGES && self.undo.len() > 1)
+        {
+            if let Some((_, s)) = self.undo.pop_front() {
+                ranges -= s.ranges().len();
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for EditorModel {
@@ -241,16 +284,67 @@ impl EditorModel {
             observers: Vec::new(),
             queue: ObserverQueue::default(),
             next_bracket: 0,
+            selections: SelectionHistory::default(),
+            commits: 0,
+            rope_edit_bytes: 0,
         }
     }
 
     /// Applies `tr`, then whatever the observers queue (the module docs).
     pub fn dispatch(&mut self, tr: Transaction) -> Result<Committed, Veto> {
-        self.run(tr, Action::Edit)
+        self.run(tr, Action::Edit, None)
     }
 
-    fn run(&mut self, tr: Transaction, action: Action) -> Result<Committed, Veto> {
-        let (first, changes) = match self.commit(tr, action) {
+    // ## m4b-t11-editor (fix round 1, I2; named item)
+    /// [`EditorModel::dispatch`] with `after`, the text `tr.changes` makes from the current
+    /// text, built elsewhere (off the UI thread, from a snapshot of this very version): it is
+    /// swapped in instead of applying the change in place, so the commit costs O(sections), not
+    /// O(bytes changed). The caller builds `after` from this exact version (a snapshot taken at
+    /// the current `version()`) and guarantees its content; the model checks its length, and
+    /// in debug builds its content hash.
+    /// A change the checks or the filters rewrite is applied in place as usual (correct, only
+    /// slower). A wrong length is vetoed (`editor-veto-stale-change`): nothing changes.
+    pub fn dispatch_prebuilt(
+        &mut self,
+        tr: Transaction,
+        after: TextBuffer,
+    ) -> Result<Committed, Veto> {
+        if after.len_bytes() != tr.changes.len_new() {
+            return Err(Veto("editor-veto-stale-change"));
+        }
+        // ## m4b-t11-editor (fix round 2, m-fr1-1): in debug builds, the content too (O(text),
+        // debug only): `after` is the change applied to this exact text.
+        #[cfg(debug_assertions)]
+        if tr.changes.len_old() == self.buffer.len_bytes()
+            && tr.changes.edits().all(|(r, _)| {
+                self.buffer.is_char_boundary(r.start) && self.buffer.is_char_boundary(r.end)
+            })
+        {
+            let mut expected = self.buffer.clone();
+            tr.changes.apply(&mut expected);
+            debug_assert_eq!(
+                expected.content_hash(),
+                after.content_hash(),
+                "a prebuilt text must be the change applied to this exact version"
+            );
+        }
+        self.run(tr, Action::Edit, Some(after))
+    }
+
+    /// Bytes deleted plus inserted by text changes applied in place on this model since it was
+    /// made; [`EditorModel::dispatch_prebuilt`] adds none. The cost the model's thread paid for
+    /// its edits, for tests that bound it.
+    pub fn rope_edit_bytes(&self) -> u64 {
+        self.rope_edit_bytes
+    }
+
+    fn run(
+        &mut self,
+        tr: Transaction,
+        action: Action,
+        prebuilt: Option<TextBuffer>,
+    ) -> Result<Committed, Veto> {
+        let (first, changes) = match self.commit(tr, action, prebuilt) {
             Ok(done) => done,
             Err(v) => {
                 self.queue.pending.clear();
@@ -290,7 +384,7 @@ impl EditorModel {
             if !fits {
                 continue;
             }
-            if let Ok((c, cs)) = self.commit(tr, Action::Edit)
+            if let Ok((c, cs)) = self.commit(tr, Action::Edit, None)
                 && c.buffer_changed
             {
                 applied.push((c.version, cs));
@@ -315,7 +409,14 @@ impl EditorModel {
     }
 
     /// One transaction through steps 1–7; the change set as applied.
-    fn commit(&mut self, tr: Transaction, action: Action) -> Result<(Committed, ChangeSet), Veto> {
+    fn commit(
+        &mut self,
+        tr: Transaction,
+        action: Action,
+        prebuilt: Option<TextBuffer>,
+    ) -> Result<(Committed, ChangeSet), Veto> {
+        // ## m4b-t11-editor: a prebuilt text stands only for the change exactly as given.
+        let given = prebuilt.as_ref().map(|_| tr.changes.desc());
         // Filters judge the change as it will apply, so it is checked and snapped first.
         let mut tr = self.checked(tr)?;
         if !self.filters.is_empty() {
@@ -335,7 +436,25 @@ impl EditorModel {
             return Err(Veto("editor-veto-history-rewritten"));
         }
         let old = self.buffer.clone();
-        tr.changes.apply(&mut self.buffer);
+        // ## m4b-t11-editor (fix round 1, I2): swap in a prebuilt text when the change is the
+        // one it was built for; otherwise apply in place.
+        match prebuilt {
+            Some(after)
+                if self.filters.is_empty()
+                    && given.as_ref() == Some(&tr.changes.desc())
+                    && after.len_bytes() == tr.changes.len_new() =>
+            {
+                self.buffer = after;
+            }
+            _ => {
+                self.rope_edit_bytes += tr
+                    .changes
+                    .edits()
+                    .map(|(r, ins)| (r.len() + ins.len()) as u64)
+                    .sum::<u64>();
+                tr.changes.apply(&mut self.buffer);
+            }
+        }
         let desc = tr.changes.desc();
         let changed = !tr.changes.is_identity();
         let after = fit_selection(
@@ -347,6 +466,18 @@ impl EditorModel {
             &self.buffer,
         );
         let before = std::mem::replace(&mut self.selection, after);
+        // ## m3c-t31-multi: a selection-only change is a step of the selection history.
+        self.commits += 1;
+        if !changed && !self.selections.stepping && before != self.selection {
+            // One gesture is one entry (fix round 1, M2): its first change only.
+            if self.selections.gesture != Some(true) {
+                self.selections.push_undo((self.version, before.clone()));
+            }
+            if self.selections.gesture.is_some() {
+                self.selections.gesture = Some(true);
+            }
+            self.selections.redo.clear();
+        }
         match action {
             Action::Undo => self.history.finish_undo(&old),
             Action::Redo => self.history.finish_redo(&old),
@@ -462,7 +593,7 @@ impl EditorModel {
                 origin: Origin::User,
             },
         };
-        self.run(tr, action).ok()
+        self.run(tr, action, None).ok()
     }
 
     // ## m3a-t25-editor-commands (review round 1, named exception): the Edit menu's labels
@@ -492,6 +623,15 @@ impl EditorModel {
         self.history.seal();
     }
 
+    // ## m4b-t11-editor (named item, R-M4b-38)
+    /// Drops every undo and redo group and seals: the text was read from disk again
+    /// (UI-EDIT-04 step 9), so nothing before it can be undone. The text, the selection, the
+    /// version and the selection history stay; an open bracket stays open, and its next
+    /// transaction starts a new group.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+    }
+
     /// Opens a bracket: every history transaction until the outermost bracket ends forms one
     /// undo group of `kind` (brackets nest).
     pub fn begin_bracket(&mut self, kind: UserEvent) -> BracketId {
@@ -519,5 +659,80 @@ impl EditorModel {
     /// Adds an observer; observers run in the order added, after every commit.
     pub fn add_observer(&mut self, o: Box<dyn TransactionObserver>) {
         self.observers.push(o);
+    }
+
+    // ## m3c-t31-multi (fix round 1, M2)
+    /// Opens a gesture (a pointer press and its drag): until [`EditorModel::end_selection_gesture`]
+    /// its selection changes are one entry of the selection history, the selection before the
+    /// first of them. Opening one ends any still open.
+    pub fn begin_selection_gesture(&mut self) {
+        self.selections.gesture = Some(false);
+    }
+
+    /// Ends the open gesture (nothing when none is open).
+    pub fn end_selection_gesture(&mut self) {
+        self.selections.gesture = None;
+    }
+
+    // ## m3c-t31-multi
+    /// How many commits the model made (text or selection): a cheap key for state derived from
+    /// the selection (the status bar's selected count).
+    pub fn commit_count(&self) -> u64 {
+        self.commits
+    }
+
+    /// `undo_selection` (`redo`: `redo_selection`): the newest stored selection, mapped to the
+    /// current text, becomes the selection in a selection-only commit; the current one goes on
+    /// the other stack. Entries the change log no longer reaches, or equal to the current
+    /// selection, are skipped.
+    pub(crate) fn step_selection(&mut self, redo: bool) -> Option<Committed> {
+        loop {
+            let (at, sel) = if redo {
+                self.selections.redo.pop()?
+            } else {
+                self.selections.undo.pop_back()?
+            };
+            let Some(sel) = self.selection_at_now(at, sel) else {
+                continue;
+            };
+            if sel == self.selection {
+                continue;
+            }
+            let current = (self.version, self.selection.clone());
+            if redo {
+                self.selections.push_undo(current);
+            } else {
+                self.selections.redo.push(current);
+            }
+            let tr = Transaction {
+                changes: ChangeSet::identity(self.buffer.len_bytes()),
+                selection: Some(sel),
+                ann: Annotations {
+                    user_event: UserEvent::Select,
+                    add_to_history: true,
+                    // A selection-only commit: no undo group reads its time.
+                    time: Instant::now(),
+                    origin: Origin::User,
+                },
+            };
+            self.selections.stepping = true;
+            let done = self.dispatch(tr);
+            self.selections.stepping = false;
+            return done.ok();
+        }
+    }
+
+    /// `sel`, a selection of version `at`, mapped through every change since; `None` when the
+    /// log no longer holds them.
+    fn selection_at_now(&self, at: u64, sel: SelectionSet) -> Option<SelectionSet> {
+        if at == self.version {
+            return Some(sel);
+        }
+        let mapped = self
+            .log
+            .descs_since(at)?
+            .fold(sel, |s, d| s.map(d))
+            .snapped_to_graphemes(&self.buffer);
+        Some(fit_selection(mapped, &self.buffer))
     }
 }

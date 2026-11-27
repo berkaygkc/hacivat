@@ -11,6 +11,9 @@ pub struct Colors {
     pub blue_tint: Color,
     pub blue_tint_strong: Color,
     pub cp_fill: Color,
+    pub git_deleted: Color,
+    pub git_modified: Color,
+    pub git_new: Color,
     pub green: Color,
     pub green_fill: Color,
     pub ground: Color,
@@ -40,6 +43,7 @@ pub struct Colors {
     pub text: Color,
     pub text_2: Color,
     pub text_3: Color,
+    pub text_disabled: Color,
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SharedColors {
@@ -344,6 +348,9 @@ const DARK_COLORS: Colors = Colors {
     blue_tint: Color(0x7AA2F71F),
     blue_tint_strong: Color(0x7AA2F738),
     cp_fill: Color(0xCE2C31FF),
+    git_deleted: Color(0xF68C48FF),
+    git_modified: Color(0xDCDC3CFF),
+    git_new: Color(0x2FC7C9FF),
     green: Color(0x98C379FF),
     green_fill: Color(0x98C3798C),
     ground: Color(0x16181DFF),
@@ -373,6 +380,7 @@ const DARK_COLORS: Colors = Colors {
     text: Color(0xC9D1D9FF),
     text_2: Color(0x8B949EFF),
     text_3: Color(0x828A96FF),
+    text_disabled: Color(0x636A76FF),
 };
 const LIGHT_COLORS: Colors = Colors {
     amber: Color(0xA35C00FF),
@@ -382,6 +390,9 @@ const LIGHT_COLORS: Colors = Colors {
     blue_tint: Color(0x3B5FD914),
     blue_tint_strong: Color(0x3B5FD926),
     cp_fill: Color(0xCE2C31FF),
+    git_deleted: Color(0x9A1D1DFF),
+    git_modified: Color(0x744600FF),
+    git_new: Color(0x0F570FFF),
     green: Color(0x1F7A50FF),
     green_fill: Color(0x1F7A506B),
     ground: Color(0xF7F7F8FF),
@@ -411,6 +422,7 @@ const LIGHT_COLORS: Colors = Colors {
     text: Color(0x1B1B1FFF),
     text_2: Color(0x55555EFF),
     text_3: Color(0x6C6C76FF),
+    text_disabled: Color(0xA0A0A8FF),
 };
 pub const DARK: ThemeTokens = ThemeTokens {
     colors: DARK_COLORS,

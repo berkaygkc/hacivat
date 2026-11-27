@@ -112,6 +112,10 @@ pub fn quit_requests(cx: &App) -> u32 {
 const SETTINGS_TAB: &str = "settings";
 
 /// Runs `f` on the window's workspace (nothing when the root view is not one).
+// ## demofix-1 fix round 1 (m5)
+/// How far "Results: larger" / "Results: smaller" move the editor / results seam.
+pub const RESULTS_STEP_PX: f32 = 40.0;
+
 fn on_workspace(
     f: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
 ) -> ActionFn {
@@ -204,6 +208,20 @@ pub fn register_workspace_actions(reg: &mut ActionRegistry) {
             on_workspace(Workspace::toggle_explorer),
             always,
         ),
+        // ## demofix-1 fix round 1 (m5): the editor / results seam from the keyboard.
+        (
+            "workspace.results_larger",
+            ids::hv::CMD_WORKSPACE_RESULTS_LARGER.id,
+            on_workspace(|ws, window, cx| ws.move_results_seam(-RESULTS_STEP_PX, window, cx)),
+            always,
+        ),
+        (
+            "workspace.results_smaller",
+            ids::hv::CMD_WORKSPACE_RESULTS_SMALLER.id,
+            on_workspace(|ws, window, cx| ws.move_results_seam(RESULTS_STEP_PX, window, cx)),
+            always,
+        ),
+        // ## demofix-1
         (
             "workspace.toggle_theme",
             ids::hv::CMD_WORKSPACE_TOGGLE_THEME.id,
@@ -271,6 +289,30 @@ pub fn register_workspace_actions(reg: &mut ActionRegistry) {
         });
     }
 }
+
+// ## inputnav-1
+/// A text-field command is never run from the registry: the focused field resolves its own
+/// keys (`hacivat_ui::input::keys`).
+fn field_only(_: &App) -> bool {
+    false
+}
+
+/// Registers the text-field commands (context `TextInput`) so the keymap's rows name known
+/// commands and a keymap view can title them. They are never enabled: the palette and the
+/// menus never list them, and the dispatcher never runs them (it never sees the context).
+pub fn register_input_commands(reg: &mut ActionRegistry) {
+    use hacivat_ui::input::keys::{INPUT_COMMANDS, TEXT_INPUT_CONTEXT};
+    for (id, title_id, _) in INPUT_COMMANDS {
+        let _ = reg.register(ActionDef {
+            id,
+            title_id,
+            context: TEXT_INPUT_CONTEXT,
+            run: Rc::new(|_, _| {}),
+            enabled: field_only,
+        });
+    }
+}
+// ## inputnav-1
 
 /// Switches between the dark and the light theme and saves the choice.
 fn toggle_theme(cx: &mut App) {

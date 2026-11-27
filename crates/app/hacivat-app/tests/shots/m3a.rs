@@ -129,9 +129,14 @@ pub(super) enum M3a {
     CopyCopied,
     CopyCopying,
     CopyTooMuch,
+    // ## m3b-t29-shots: the M3b states that Tasks 21–27 parked here moved to `shots/m3b.rs`.
 }
 
-pub(super) const M3A: [M3a; 68] = [
+// ## m3b-t22-tx-ui (named exception); ## m3b-t29-shots: the M3b states are `m3b::M3B`.
+/// The single-session connection (surface 12).
+pub(super) const SHARED: &str = "orders-shared";
+
+pub(super) const M3A: [M3a; 70] = [
     M3a::ConsoleEditor,
     M3a::ConsoleSelection,
     M3a::ConsoleUnfocused,
@@ -192,6 +197,9 @@ pub(super) const M3A: [M3a; 68] = [
     M3a::Results(ResultsShot::MoreResultSets),
     M3a::Results(ResultsShot::RunLog),
     M3a::Results(ResultsShot::EventsDropped),
+    // ## demofix-1 fix round 1 (m8): the bounded Run-as-script Output and the paused log.
+    M3a::Results(ResultsShot::ScriptCounted),
+    M3a::Results(ResultsShot::LogPaused),
     M3a::GridRange,
     M3a::PromptClose,
     M3a::PromptQuit,
@@ -210,7 +218,7 @@ pub(super) const PROD: &str = "orders-prod";
 pub(super) const SHOP: &str = "shop-dev";
 
 /// A three-statement script with Turkish identifiers and strings (INV-3: lexed as written).
-const SCRIPT: &str = "-- Siparişler, İzmir şubesi\nSELECT o.id, c.\"müşteri adı\", o.total\n  FROM orders o\n  JOIN customers c ON c.id = o.customer_id\n WHERE c.city = 'İzmir'\n ORDER BY o.created_at DESC;\n\nUPDATE orders SET status = 'shipped' WHERE id = 1042;\n\nSELECT count(*) FROM order_lines WHERE note = 'Şanlıurfa';\n";
+pub(super) const SCRIPT: &str = "-- Siparişler, İzmir şubesi\nSELECT o.id, c.\"müşteri adı\", o.total\n  FROM orders o\n  JOIN customers c ON c.id = o.customer_id\n WHERE c.city = 'İzmir'\n ORDER BY o.created_at DESC;\n\nUPDATE orders SET status = 'shipped' WHERE id = 1042;\n\nSELECT count(*) FROM order_lines WHERE note = 'Şanlıurfa';\n";
 
 /// Two statements on one line.
 const TWO_ON_LINE: &str = "SELECT 1; SELECT o.id FROM orders o WHERE o.total > 100;\n";
@@ -226,7 +234,7 @@ const UNCERTAIN: &str = "SELECT 1 /*! ; */ ;\nSELECT 2;\n";
 const MYSQL: &str = "/*!40101 SET NAMES utf8mb4 */;\nSELECT p.sku, p.`ürün adı` FROM products p WHERE p.city = 'İzmir';\n";
 
 /// Four statements, one per line, for the marks.
-const MARKS: &str = "SELECT o.id, o.total FROM orders o;\nUPDATE orders SET status = 'shipped' WHERE id = 1042;\nSELECT count(*) FROM order_lines;\nSELECT c.\"müşteri adı\" FROM customers c;\n";
+pub(super) const MARKS: &str = "SELECT o.id, o.total FROM orders o;\nUPDATE orders SET status = 'shipped' WHERE id = 1042;\nSELECT count(*) FROM order_lines;\nSELECT c.\"müşteri adı\" FROM customers c;\n";
 
 /// Two statements on one row, for "two marks on one row".
 const MARKS_ROW: &str = "SELECT 1; SELECT * FROM order_lines_archive;\n";
@@ -266,12 +274,12 @@ fn large() -> &'static str {
 }
 
 /// The byte offset just after the first `needle` in `text`.
-fn after(text: &str, needle: &str) -> usize {
+pub(super) fn after(text: &str, needle: &str) -> usize {
     text.find(needle).expect("the needle is in the text") + needle.len()
 }
 
 /// The byte offset of the first `needle` in `text`.
-fn at(text: &str, needle: &str) -> usize {
+pub(super) fn at(text: &str, needle: &str) -> usize {
     text.find(needle).expect("the needle is in the text")
 }
 
@@ -284,11 +292,11 @@ fn range_of(text: &str, stmt: &str) -> std::ops::Range<usize> {
 // ---- markers and checks ---------------------------------------------------------------------
 
 const TOOLBAR: &str = "hacivat-app/src/console/toolbar.rs:";
-const MARKS_RS: &str = "hacivat-ui-editor/src/marks.rs:";
+pub(super) const MARKS_RS: &str = "hacivat-ui-editor/src/marks.rs:";
 const MENU: &str = "hacivat-ui/src/menu.rs:";
-const DIALOG: &str = "hacivat-ui/src/dialog.rs:";
-const TOAST: &str = "hacivat-ui/src/toast.rs:";
-const STRIP: &str = "hacivat-app/src/results/strip.rs:";
+pub(super) const DIALOG: &str = "hacivat-ui/src/dialog.rs:";
+pub(super) const TOAST: &str = "hacivat-ui/src/toast.rs:";
+pub(super) const STRIP: &str = "hacivat-app/src/results/strip.rs:";
 const OUTPUT: &str = "hacivat-app/src/results/output_view.rs:";
 /// A grid header's record path (data, the same in every locale).
 pub(super) const GRID_HEADER: &str = "hacivat-ui-grid/src/element/layers.rs#header";
@@ -413,10 +421,6 @@ impl M3a {
     /// transaction and cursor never collapse): each group lists the label ids (`#id`) of which
     /// one must be visible and painted.
     pub(super) fn required(self) -> &'static [&'static [&'static str]] {
-        const PROD_NOTICE: &[&str] = &[
-            "#button-label-console-prod-notice",
-            "#button-label-console-prod-short",
-        ];
         const ENV: &[&str] = &["#status-env-label"];
         const TX: &[&str] = &["#status-tx-open"];
         const TX_FAILED: &[&str] = &["#status-tx-failed"];
@@ -427,14 +431,31 @@ impl M3a {
         // has no room (960 px in the pseudo-locales) the result tile's toolbar, which says the
         // same, must still show it: the surface never loses the count.
         const ROWS: &[&str] = &["#status-rows", "#results-rows-timing"];
+        // ## m3b-t22-tx-ui (named exception): the transaction badge is a trust signal too
+        // (NOTES M3b cross-cutting #7); ## m3b-t29-shots: the chip's states moved to `m3b.rs`.
+        const BADGE: &[&str] = &["#tx-badge-text"];
+        const BADGE_FAILED: &[&str] = &["#tx-badge-failed"];
+        const CHIP: &[&str] = &["#tx-chip-mode"];
+        // ## m3c-t41-chrome (F2 review N2): the wait's Cancel never hides (NOTES surface 2).
+        const CANCEL: &[&str] = &["#button-label-console-waiting-cancel"];
         match self {
-            M3a::ConsoleProduction | M3a::ToolbarProductionWaiting | M3a::MarksDenied => {
-                &[PROD_NOTICE, ENV]
-            }
+            M3a::StatusTxOpen => &[TX, BADGE],
+            M3a::StatusTxFailed => &[TX_FAILED, BADGE_FAILED],
+            // ## m3b-t26-prod-unlock (R-M3-81): the production read-only notice is gone; a
+            // production console's trust signals are its environment and, with a session, the
+            // transaction mode chip (Manual, D-036).
+            M3a::ConsoleProduction => &[ENV, CHIP],
+            // ## m3b-t29-shots (fix round 1, m2): their live console draws the Manual chip.
+            // ## m3c-t41-chrome (F2 review N2): and the wait's Cancel.
+            M3a::ToolbarProductionWaiting => &[ENV, CHIP, CANCEL],
+            M3a::ToolbarWaiting => &[CANCEL],
+            M3a::MarksDenied => &[ENV, CHIP],
             M3a::StatusProductionResult => &[ENV],
             M3a::ToolbarRunning => &[CLOCK],
-            M3a::StatusTxOpen | M3a::PromptClose | M3a::PromptQuit => &[TX],
-            M3a::StatusTxFailed | M3a::PromptFailed | M3a::PromptFailedQuit => &[TX_FAILED],
+            // ## m3b-t22-tx-ui (named exception): `StatusTxOpen` / `StatusTxFailed` moved up,
+            // with the badge.
+            M3a::PromptClose | M3a::PromptQuit => &[TX],
+            M3a::PromptFailed | M3a::PromptFailedQuit => &[TX_FAILED],
             M3a::StatusCursorOpen => &[CURSOR],
             M3a::StatusEverything => &[TX, CURSOR, ROWS],
             _ => &[],
@@ -445,7 +466,11 @@ impl M3a {
     pub(super) fn shows_production(self) -> bool {
         matches!(
             self,
-            M3a::ConsoleProduction | M3a::ToolbarProductionWaiting | M3a::MarksDenied
+            M3a::ConsoleProduction
+                | M3a::ToolbarProductionWaiting
+                | M3a::MarksDenied
+                // ## m3b-t29-shots (fix round 1): connected, the capsule shows production.
+                | M3a::StatusProductionResult
         )
     }
 
@@ -711,14 +736,15 @@ impl M3a {
                 s
             }
             MarksDenied => {
-                // A read-only console never starts a transaction: not sent (DenyLayer::
-                // Transaction). (An UPDATE is sent and refused by the server, 25006: a failure
-                // with its chip, as surface 5's Failed row shows.)
-                let text = "BEGIN;\nUPDATE orders SET status = 'shipped' WHERE id = 1042;\n";
+                // ## m3b-t26-prod-unlock (R-M3-81): a production console writes since Task 26,
+                // so its denial is the gate's: a `DROP SCHEMA` of two names asks for no single
+                // name to type (typing one must never approve the other), so it is not sent.
+                // (Before Task 26 a read-only production console refused a `BEGIN`.)
+                let text = "DROP SCHEMA staging, archive;\nSELECT 1;\n";
                 let mut s = live(PROD, text, 2..2, Expect::Band(BandStyle::Run));
                 // Run asks (the statement, or the whole script); Enter runs the statement.
                 s.push(run_to_chooser());
-                s.push(run_denied());
+                s.push(run_refused());
                 s
             }
             StatusTxOpen => {
@@ -763,7 +789,23 @@ impl M3a {
                 s.push(suspended_tab());
                 s
             }
-            StatusProductionResult => results(ResultsShot::Rows, Some(EnvTag::Production)),
+            // ## m3b-t29-shots (fix round 1, T29 review m1): the production connection is
+            // connected, as a console showing a result is: its status bar then says what the
+            // live connection is (read-write since Task 26). Never connected, a result's
+            // context fails closed to "read-only (guarded)" (`results::context`), which drew a
+            // pre-T26 picture.
+            StatusProductionResult => {
+                let mut s = vec![connect(PROD)];
+                s.push(step(
+                    |window, cx| {
+                        let id = profile_named(cx, PROD);
+                        open_results_shot(ResultsShot::Rows, id, window, cx)
+                            .expect("the results fixture opens");
+                    },
+                    |_, _| true,
+                ));
+                s
+            }
             NoticeReducedMode => vec![
                 save_only(DEV, EnvTag::Dev),
                 step(
@@ -968,11 +1010,12 @@ impl M3a {
             ConsoleUnfocused => !focused && selected,
             ConsoleLongLine | ConsoleManyLines => focused && caret_on_screen,
             ConsoleEmpty => text().is_empty(),
+            // ## m3b-t26-prod-unlock: read-write in Manual mode (D-036), no read-only notice.
             ConsoleProduction => {
-                session
-                    .as_ref()
-                    .is_some_and(|s| s.state().borrow().read_only)
-                    && band().is_some_and(|b| b.style == BandStyle::Run)
+                session.as_ref().is_some_and(|s| {
+                    let snap = s.state().borrow().clone();
+                    !snap.read_only && snap.tx.mode == hacivat_session::session::TxMode::Manual
+                }) && band().is_some_and(|b| b.style == BandStyle::Run)
             }
             ConsoleMysql => text().contains("/*!40101"),
             ToolbarRunning => toolbar().is_some_and(|t| matches!(t.run, Some(RunUx::Running(3)))),
@@ -1023,7 +1066,9 @@ impl M3a {
                     // ## m3a-f2-visual (fix round 1, M2): at 1280 the bar has room for its own
                     // rows · timing cell; only at 960 (in the pseudo-locales) may the tile's
                     // count stand in for it (`required`).
-                    && (f32::from(viewport.width) < 1280.0
+                    // ## m3c-t41-chrome (F2 review N1): only in the pseudo-locales, as the
+                    // comment says; at 960 in English and Turkish the bar draws its own.
+                    && ((f32::from(viewport.width) < 1280.0 && pseudo_locale(cx))
                         || frame.iter().any(|r| {
                             r.visible && r.painted_px > 0.0 && r.path.ends_with("#status-rows")
                         }))
@@ -1061,8 +1106,20 @@ impl M3a {
     }
 }
 
+// ## m3c-t41-chrome (F2 review N1)
+/// Whether the shot's UI language is a pseudo-locale (en-XA, tr-XT).
+fn pseudo_locale(cx: &App) -> bool {
+    cx.try_global::<hacivat_app::l10n_global::L10nGlobal>()
+        .and_then(|g| g.l10n.snapshot().ui_chain.first().map(|l| l.to_string()))
+        .is_some_and(|l| l.ends_with("-XA") || l.ends_with("-XT"))
+}
+
 /// The message `id` with `args`, as the app renders it in the shot's locale.
-fn message(cx: &App, id: &str, args: Vec<(&'static str, hacivat_l10n::ArgValue)>) -> String {
+pub(super) fn message(
+    cx: &App,
+    id: &str,
+    args: Vec<(&'static str, hacivat_l10n::ArgValue)>,
+) -> String {
     let text = cx
         .global::<hacivat_app::l10n_global::L10nGlobal>()
         .l10n
@@ -1071,15 +1128,61 @@ fn message(cx: &App, id: &str, args: Vec<(&'static str, hacivat_l10n::ArgValue)>
 }
 
 /// Whether the frame shows (visible and painted) a label of `file` reading exactly `text`.
-fn shows_label(frame: &[RenderedText], file: &str, text: &str) -> bool {
+pub(super) fn shows_label(frame: &[RenderedText], file: &str, text: &str) -> bool {
     frame.iter().any(|r| {
         r.visible && r.painted_px > 0.0 && r.path.contains(file) && super::strip(&r.text) == text
     })
 }
 
 /// Whether a toast shows `text` (its title or body).
-fn shows_toast(frame: &[RenderedText], text: &str) -> bool {
+pub(super) fn shows_toast(frame: &[RenderedText], text: &str) -> bool {
     shows_label(frame, TOAST, text)
+}
+
+// ## m3b-t23-escalation (named exception)
+/// Whether the frame shows (visible and painted) the label with element ID `id`.
+pub(super) fn drawn(frame: &[RenderedText], id: &str) -> bool {
+    let needle = format!("#{id}");
+    frame
+        .iter()
+        .any(|r| r.visible && r.painted_px > 0.0 && r.path.ends_with(&needle))
+}
+
+// ## m3b-t22-tx-ui (named exception)
+/// Which transaction menu a state opens.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TxMenu {
+    Chip,
+    Isolation,
+    Segment,
+}
+
+/// Opens the active console's transaction menu (from its chip or its status segment) or its
+/// isolation menu, and waits for the menu layer.
+pub(super) fn tx_menu(which: TxMenu) -> Step {
+    step(
+        move |window, cx| {
+            let console = active_console(window, cx).expect("a console");
+            match which {
+                TxMenu::Chip => hacivat_app::console::tx_chip::open_chip_menu(console, window, cx),
+                TxMenu::Isolation => {
+                    hacivat_app::console::tx_chip::open_isolation_menu(console, window, cx);
+                }
+                TxMenu::Segment => {
+                    hacivat_app::console::tx_chip::open_segment_menu(console, window, cx);
+                }
+            }
+        },
+        |window, cx| menu_open(window, cx),
+    )
+}
+
+/// Whether a popup menu is the window's top layer.
+pub(super) fn menu_open(window: &mut Window, cx: &App) -> bool {
+    window
+        .root::<Workspace>()
+        .flatten()
+        .is_some_and(|ws| ws.read(cx).layer_ids().last() == Some(&"menu"))
 }
 
 /// Whether the first fixture mark is stale and the second is not (`marks-stale`, M9).
@@ -1092,7 +1195,7 @@ fn stale_first(editor: Option<&Entity<EditorView>>, cx: &App) -> bool {
     })
 }
 
-fn results_name(r: ResultsShot) -> &'static str {
+pub(super) fn results_name(r: ResultsShot) -> &'static str {
     match r {
         ResultsShot::FirstRows => "results-first-rows",
         ResultsShot::Rows => "results-rows",
@@ -1113,10 +1216,15 @@ fn results_name(r: ResultsShot) -> &'static str {
         ResultsShot::MoreResultSets => "strip-more-result-sets",
         ResultsShot::RunLog => "output-run-log",
         ResultsShot::EventsDropped => "output-events-dropped",
+        // ## demofix-1 fix round 1 (m8)
+        ResultsShot::ScriptCounted => "output-script-counted",
+        ResultsShot::LogPaused => "output-paused",
+        // ## m3b-t25-results (named exception); ## m3b-t29-shots: Task 25's states are M3b's.
+        r => super::m3b::results_name(r),
     }
 }
 
-fn results_marker(r: ResultsShot) -> (&'static str, Option<&'static str>) {
+pub(super) fn results_marker(r: ResultsShot) -> (&'static str, Option<&'static str>) {
     match r {
         // Surface 10's grid: a header it drew (data).
         ResultsShot::Rows | ResultsShot::TwoResults => (GRID_HEADER, Some("customer")),
@@ -1134,6 +1242,11 @@ fn results_marker(r: ResultsShot) -> (&'static str, Option<&'static str>) {
         | ResultsShot::Error
         | ResultsShot::RunLog
         | ResultsShot::EventsDropped => (OUTPUT, None),
+        // ## demofix-1 fix round 1 (m8)
+        ResultsShot::ScriptCounted => (OUTPUT, None),
+        ResultsShot::LogPaused => ("#button-label-results-log-end", None),
+        // ## m3b-t25-results (named exception); ## m3b-t29-shots: Task 25's states are M3b's.
+        r => super::m3b::results_marker(r),
     }
 }
 
@@ -1150,7 +1263,7 @@ pub(super) struct Step {
     pub(super) ready: Ready,
 }
 
-fn step(
+pub(super) fn step(
     act: impl Fn(&mut Window, &mut App) + 'static,
     ready: impl Fn(&mut Window, &mut App) -> bool + 'static,
 ) -> Step {
@@ -1161,13 +1274,13 @@ fn step(
 }
 
 /// A step that is done once the app is parked.
-fn instant(act: impl Fn(&mut Window, &mut App) + 'static) -> Step {
+pub(super) fn instant(act: impl Fn(&mut Window, &mut App) + 'static) -> Step {
     step(act, |_, _| true)
 }
 
 /// What the band must show before the shot is taken.
 #[derive(Debug, Clone, Copy)]
-enum Expect {
+pub(super) enum Expect {
     /// Nothing to wait for (an empty console has no band and no sentence).
     Any,
     Band(BandStyle),
@@ -1181,7 +1294,7 @@ enum Expect {
 
 /// A live console of `name` over `text`, the selection `sel`, the editor focused; the band as
 /// `expect` says.
-fn live(
+pub(super) fn live(
     name: &'static str,
     text: &'static str,
     sel: std::ops::Range<usize>,
@@ -1311,9 +1424,10 @@ fn run_to_chooser() -> Step {
     )
 }
 
-/// Enter in the open chooser runs the preselected `BEGIN` on a production console: nothing is
-/// sent; the mark says why.
-fn run_denied() -> Step {
+// ## m3b-t26-prod-unlock
+/// Enter in the open chooser runs the preselected statement, which the gate refuses on a
+/// production console: nothing is sent; the mark says why.
+fn run_refused() -> Step {
     step(
         |window, cx| {
             window.dispatch_keystroke(Keystroke::parse("enter").expect("a keystroke"), cx);
@@ -1371,7 +1485,10 @@ fn toast(push: fn(&mut App)) -> Step {
 }
 
 /// A live console over `text` with marks over each `(statement, status)`.
-fn marks(text: &'static str, units: Vec<(&'static str, (UnitStatus, Duration))>) -> Vec<Step> {
+pub(super) fn marks(
+    text: &'static str,
+    units: Vec<(&'static str, (UnitStatus, Duration))>,
+) -> Vec<Step> {
     let mut s = live(DEV, text, text.len()..text.len(), Expect::Nothing);
     s.push(show_marks(
         units
@@ -1402,14 +1519,14 @@ fn show_marks(units: Vec<(std::ops::Range<usize>, (UnitStatus, Duration))>) -> S
     )
 }
 
-fn rows(n: u64) -> RowsOutcome {
+pub(super) fn rows(n: u64) -> RowsOutcome {
     RowsOutcome::Fetched {
         rows: n,
         more: false,
     }
 }
 
-fn succeeded(ms: u64, rows: Option<RowsOutcome>) -> (UnitStatus, Duration) {
+pub(super) fn succeeded(ms: u64, rows: Option<RowsOutcome>) -> (UnitStatus, Duration) {
     (
         UnitStatus::Succeeded(UnitSummary {
             rows,
@@ -1437,6 +1554,8 @@ fn failed(code: &str, server: &str) -> (UnitStatus, Duration) {
             server_text: Some(server.into()),
             hint_id: None,
             doc_offset: None,
+            // ## m3b-t25-results (named exception)
+            vendor_code: None,
         }),
         Duration::from_millis(9),
     )
@@ -1444,15 +1563,19 @@ fn failed(code: &str, server: &str) -> (UnitStatus, Duration) {
 
 // ---- transactions, cursors and prompts ------------------------------------------------------
 
-const UPD1: &str = "UPDATE orders SET status = 'shipped' WHERE id = 1042";
-const UPD2: &str = "UPDATE orders SET status = 'shipped' WHERE id = 1043";
-const UPD3: &str = "UPDATE order_lines SET qty = qty - 1 WHERE order_id = 1042";
+pub(super) const UPD1: &str = "UPDATE orders SET status = 'shipped' WHERE id = 1042";
+pub(super) const UPD2: &str = "UPDATE orders SET status = 'shipped' WHERE id = 1043";
+pub(super) const UPD3: &str = "UPDATE order_lines SET qty = qty - 1 WHERE order_id = 1042";
 /// A statement the fake fails, leaving the transaction failed (as PostgreSQL does).
-const FAILS: &str = "UPDATE inventory SET qty = qty - 1 WHERE sku = 'TR-1042'";
+pub(super) const FAILS: &str = "UPDATE inventory SET qty = qty - 1 WHERE sku = 'TR-1042'";
 
 /// Sends `sqls` on the active console's session as the user's statements, in order; waits for
 /// its user transaction (`statements`, or failed).
-fn user_tx(sqls: &'static [&'static str], statements: Option<u32>, failed: bool) -> Step {
+pub(super) fn user_tx(
+    sqls: &'static [&'static str],
+    statements: Option<u32>,
+    failed: bool,
+) -> Step {
     step(
         move |window, cx| {
             let session = session_in(window, cx).expect("the console's session");
@@ -1497,16 +1620,19 @@ fn open_cursor() -> Step {
             let run = RunId(0xC0FFEE);
             let _ticket = session.run(RunSpec {
                 run,
-                units: vec![RunUnit {
-                    id: UnitId { run, ordinal: 0 },
-                    sql: BIG.into(),
-                    protocol: Protocol::Extended,
-                    suspendable: true,
-                }]
+                units: vec![RunUnit::plain(
+                    UnitId { run, ordinal: 0 },
+                    BIG.into(),
+                    Protocol::Extended,
+                    true,
+                )]
                 .into(),
                 policy: ErrorPolicy::StopOnError,
                 fetch: FetchPolicy::default(),
                 observer: ObserverRef(Arc::new(Stores::default())),
+                // ## m3b-t01c-core-seams
+                confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
+                context_generation: None,
             });
         },
         |window, cx| session_in(window, cx).is_some_and(|s| s.state().borrow().cursor.is_some()),
@@ -1544,7 +1670,8 @@ impl FetchControl for Inert {
 
 /// Gives the active console a suspended 10,000-row result, timed 12 ms + 119 ms, active (the
 /// status bar's rows and timing).
-fn suspended_tab() -> Step {
+// ## m3c-t43b-fix (review I3): `pub(super)` for `narrow-strip`.
+pub(super) fn suspended_tab() -> Step {
     step(
         |window, cx| {
             let console = active_console(window, cx).expect("a console");
@@ -1606,12 +1733,12 @@ fn suspended_tab() -> Step {
 // ---- results --------------------------------------------------------------------------------
 
 /// Task 30's results fixture `shot`, on a console of a saved profile in `env`.
-fn results(shot: ResultsShot, env: Option<EnvTag>) -> Vec<Step> {
+pub(super) fn results(shot: ResultsShot, env: Option<EnvTag>) -> Vec<Step> {
     let name = match env {
         Some(EnvTag::Production) => PROD,
         _ => DEV,
     };
-    vec![
+    let mut steps = vec![
         save_only(name, EnvTag::Dev),
         step(
             move |window, cx| {
@@ -1620,7 +1747,32 @@ fn results(shot: ResultsShot, env: Option<EnvTag>) -> Vec<Step> {
             },
             |_, _| true,
         ),
-    ]
+    ];
+    // ## demofix-1 fix round 1 (m8): the user scrolled the Output up: it is paused.
+    if shot == ResultsShot::LogPaused {
+        steps.push(step(
+            |_, cx| {
+                for host in hosts(cx) {
+                    let lists: Vec<_> = Consoles::ids(cx)
+                        .into_iter()
+                        .filter_map(|c| host.read(cx).log_list(c))
+                        .collect();
+                    for list in lists {
+                        list.update(cx, |l, cx| l.scroll_px(-21.0 * 120.0, cx));
+                    }
+                }
+            },
+            |_, cx| {
+                hosts(cx).into_iter().any(|h| {
+                    Consoles::ids(cx)
+                        .into_iter()
+                        .filter_map(|c| h.read(cx).log_list(c))
+                        .any(|l| l.read(cx).paused())
+                })
+            },
+        ));
+    }
+    steps
 }
 
 /// Selects a 3 × 2 range in the shown grid through the grid's commands (from row 2, column 2).
@@ -1757,7 +1909,7 @@ pub(super) fn connections(paths: &LocalPaths) -> ConnectionsBoot {
 
 /// The profile `name`: `orders-dev` (dev), `orders-prod` (production) on PostgreSQL,
 /// `shop-dev` (dev) on MySQL; IP literals, so nothing resolves.
-fn profile(name: &str) -> Profile {
+pub(super) fn profile(name: &str) -> Profile {
     let (env, engine) = match name {
         PROD => (EnvTag::Production, DbmsKind::Postgres),
         SHOP => (EnvTag::Dev, DbmsKind::MySql),
@@ -1767,6 +1919,10 @@ fn profile(name: &str) -> Profile {
         name: name.to_string(),
         engine,
         environment: Some(env),
+        // ## m3b-t22-tx-ui (named exception): the single-session connection.
+        single_session: name == SHARED,
+        // ## m3b-t29-shots: the read-only connection (its chip is Auto-commit, disabled).
+        read_only: name == super::m3b::READ_ONLY,
         endpoint: ProfileEndpoint::Server {
             host: "10.0.4.12".to_string(),
             port: None,
@@ -1807,21 +1963,21 @@ fn profile_named(cx: &App, name: &str) -> Option<ProfileId> {
 }
 
 /// The console of the focused pane's active tab.
-fn active_console(window: &mut Window, cx: &App) -> Option<ConsoleId> {
+pub(super) fn active_console(window: &mut Window, cx: &App) -> Option<ConsoleId> {
     let ws = window.root::<Workspace>().flatten()?;
     let tab = ws.read(cx).active_tab()?;
     Consoles::by_tab(cx, tab)
 }
 
 /// The active console's editor.
-fn editor_in(window: &mut Window, cx: &App) -> Option<Entity<EditorView>> {
+pub(super) fn editor_in(window: &mut Window, cx: &App) -> Option<Entity<EditorView>> {
     Consoles::get(cx, active_console(window, cx)?)?
         .editor
         .clone()
 }
 
 /// The active console's session.
-fn session_in(window: &mut Window, cx: &App) -> Option<SessionHandle> {
+pub(super) fn session_in(window: &mut Window, cx: &App) -> Option<SessionHandle> {
     Consoles::get(cx, active_console(window, cx)?)?
         .session
         .clone()

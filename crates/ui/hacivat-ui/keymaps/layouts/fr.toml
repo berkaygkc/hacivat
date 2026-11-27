@@ -22,3 +22,19 @@ chord = "cmd-shift-."
 command = "exec.cancel"
 context = "Console"
 platforms = ["macos"]
+
+## m3b-t01b-seams
+# Toggle comment (Task 34): `/` needs Shift on this layout, so `cmd-/` and `ctrl-/` become
+# `cmd-shift-/` and `ctrl-shift-/` (the M3a `cmd-shift-.` precedent).
+
+[[binding]]
+chord = "cmd-shift-/"
+command = "editor.toggle_comment"
+context = "Editor"
+platforms = ["macos"]
+
+[[binding]]
+chord = "ctrl-shift-/"
+command = "editor.toggle_comment"
+context = "Editor"
+platforms = ["windows", "linux"]

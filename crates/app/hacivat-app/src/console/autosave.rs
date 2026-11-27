@@ -35,6 +35,14 @@ pub const AUTOSAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(1
 /// The largest saved console that opens (T1's limit; no T2 tier until M4b, R-M3-49).
 pub const RESTORE_MAX_BYTES: u64 = 20 << 20;
 
+// ## m4b-t14-tabs (named exception, R-M4b-5)
+/// Whether a console autosaves into the consoles folder: never a script tab's
+/// (`ConsoleSource::Script`), whose text belongs to its library and is copied for recovery
+/// only, outside both (`scripts::tabs`).
+pub fn allowed(script: bool) -> bool {
+    !script
+}
+
 /// The file of console `n` bound to `profile`.
 pub fn console_path(paths: &LocalPaths, profile: ProfileId, n: u32) -> PathBuf {
     paths

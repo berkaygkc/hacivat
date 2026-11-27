@@ -4,6 +4,11 @@
 //! UX state.
 //!
 //! Types since M3a Task 1b; bodies since Task 23 (ADR 0006 `m3a-t23`).
+//!
+//! M3b (Task 1c seams; ADR 0006 `m3b-t01c`): the classifier pool, parameter preparation, the
+//! exec gate and its confirmation port, the D-062 wrap, "don't ask again", the auditor chain,
+//! "Count rows" and the history store. Every one is a fail-closed stub until its task, and
+//! none is wired into Run before Task 24 (R-M3-52).
 
 pub mod log;
 mod observer;
@@ -13,6 +18,15 @@ pub mod status;
 mod titles;
 pub mod units;
 pub mod ux;
+// ## m3b-t01c-core-seams
+pub mod audit;
+pub mod classify_pool;
+pub mod count;
+pub mod explain_wrap;
+pub mod gate;
+pub mod history;
+pub mod params;
+pub mod suppress;
 
 pub use log::{
     LogArg, LogLine, LogMsg, SessionLog, Severity, UnitMsg, copy_invariant, duration_message,
@@ -30,3 +44,65 @@ pub use units::{
 pub use ux::{CancelUx, ConsoleUx, TxBadge, console_ux};
 // ## m3a-t33-exec-ui (named exception)
 pub use ux::session_live;
+// ## m3b-t01c-core-seams
+pub use audit::{AuditorChain, SINK_CAPACITY, SyncAuditor};
+pub use classify_pool::ClassifyPool;
+pub use count::count_sql;
+// ## m3b-t16-run-service (fix round 1, named exception: re-export)
+pub use count::count_prepared;
+pub use explain_wrap::explain_analyze_inner;
+pub use gate::{
+    CommitQuestion, ConfirmAnswer, ConfirmPort, ConfirmQuestion, ConnSafety, GateDecision,
+    GateItem, GatePlan, GateReason, gate,
+};
+// ## m3b-t15-gate (fix round 1: the MySQL implicit-commit list, I5; the one SessionEffects
+// mapping, M8)
+pub use gate::{reads_only, session_effects_of};
+pub mod implicit_commit;
+pub use history::{
+    HistoryConfig, HistoryError, HistoryHit, HistoryMeta, HistoryOrigin, HistoryQuery,
+    HistoryRecord, HistoryStore, Outcome,
+};
+pub use params::{OffsetMap, ParamPrompt, ParamValueStore, Prepared, PreparedUnit, prepare_units};
+pub use params::{ParamAnswers, mask_secrets, param_diag_message_id, prepare_units_with};
+pub use suppress::SuppressSet;
+pub use units::{apply_read_verdicts, expect_for, protocol_for, suspendable_for};
+// Ruling I2 (m3b-t01c): the app takes no `sql-safety` dependency; the classifier's types it
+// builds or passes on (Task 24's `ClassifyCtx`/`Expect` for the pool, the reports it hands to
+// `gate`, the class a `GateItem` carries, the reasons a view names) come through here.
+pub use sql_safety::{
+    ClassifyCtx, Expect, FnCatalog, GateClass, Limits, Reason, ReasonCode, SafetyReport,
+};
+// The session's answers the run service's callers name with these (Tasks 21, 23, 24).
+pub use hacivat_session::session::{CommitAnswer, ErrorPolicy, RunChoice};
+// ## m3b-t16-run-service (named exception: re-exports only)
+pub use log::span_message;
+pub use service::{
+    COUNT_TIMEOUT, CountError, CountRequest, CountTicket, SKIPPED_BY_USER, apply_answer,
+};
+pub use titles::{TITLE_GRAPHEMES, TITLE_MAX_GRAPHEMES, comment_title, short_title};
+// ## m3b-t24-exec-ui (named exception: re-exports only)
+pub use classify_pool::{ClassifyHook, run_ctx_in};
+pub use sql_safety::changes_context;
+// ## m3b-t24-exec-ui (fix round 2)
+pub use sql_safety::carried_switches;
+pub use units::resolve_units_in;
+// ## m4-t27-refresh-ui (named exception: re-exports only; ruling I2: the reports a run hands its
+// refresh coordinator come through here)
+pub use service::CatalogRun;
+pub use sql_safety::{StmtKind, StmtReport};
+// ## m4b-t01a-seams: "Run as script" (Task 12; a fail-closed stub until then).
+pub mod script_run;
+pub use script_run::{
+    ChunkError, RefuseReason as ScriptRefuseReason, ScriptChunks, ScriptRunOutcome,
+    ScriptRunRequest, ScriptRunSummary, ScriptRunner, StopReason as ScriptStopReason, run_file,
+};
+// ## m4b-t12-script-run: the filled seam's further types (re-exports only).
+pub use script_run::{
+    SCRIPT_CHUNK_BYTES, ScriptGate, ScriptHistory, ScriptPhase, ScriptPosition, ScriptProgress,
+    ScriptRefusal, ScriptStop,
+};
+// ## m4b-t18-run-as-script: the app's database check between the passes (re-export only).
+pub use script_run::DatabaseCheck;
+// ## demofix-1 (PO demo F6): the bounds of a streamed run's log (re-export only).
+pub use script_run::{SCRIPT_QUIET_EVERY, SCRIPT_SLOW_MS, SCRIPT_TAIL_STATEMENTS};

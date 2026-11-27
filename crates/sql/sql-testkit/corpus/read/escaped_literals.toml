@@ -1,0 +1,120 @@
+# owner: Task 14 (fix round 2, R1-I1): honest statements holding escaped literals, backslashes
+# and double quotes, which the lexing modes (PostgreSQL `standard_conforming_strings`,
+# MySQL/MariaDB `NO_BACKSLASH_ESCAPES`, `ANSI_QUOTES`) can read differently. `classify` with
+# unknown modes must allow every `read` row on a read-only profile and must not deny any row
+# under the `Admin` profile. Hacivat-authored rows; `dialect` is `pg`, `my`, `ma` or `sl`.
+
+[[row]]
+dialect = "pg"
+kind = "read"
+sql = '''SELECT * FROM t WHERE a ~ '\d+''''
+
+[[row]]
+dialect = "pg"
+kind = "read"
+sql = '''SELECT regexp_replace(a, '\s+', ' ', 'g') FROM t'''
+
+[[row]]
+dialect = "pg"
+kind = "read"
+sql = '''SELECT * FROM t WHERE a LIKE 'a\_b%''''
+
+[[row]]
+dialect = "pg"
+kind = "read"
+sql = '''SELECT 'C:\Users\x' FROM t'''
+
+[[row]]
+dialect = "pg"
+kind = "read"
+sql = '''SELECT * FROM t WHERE path LIKE 'C:\Users\%' ESCAPE '!''''
+
+[[row]]
+dialect = "pg"
+kind = "read"
+sql = '''SELECT E'\n', E'\\d' FROM t'''
+
+[[row]]
+dialect = "pg"
+kind = "read"
+sql = '''SELECT '{"a":"b\"c"}'::jsonb'''
+
+[[row]]
+dialect = "pg"
+kind = "read"
+sql = '''SELECT a & b FROM t'''
+
+[[row]]
+dialect = "pg"
+kind = "write"
+sql = '''UPDATE t SET a = '\d' WHERE id = 1'''
+
+[[row]]
+dialect = "my"
+kind = "read"
+sql = '''SELECT * FROM t WHERE name = 'O\'Brien''''
+
+[[row]]
+dialect = "my"
+kind = "read"
+sql = '''SELECT * FROM t WHERE path = 'C:\\Users''''
+
+[[row]]
+dialect = "my"
+kind = "read"
+sql = '''SELECT * FROM t WHERE a LIKE 'a\_%''''
+
+[[row]]
+dialect = "my"
+kind = "read"
+sql = '''SELECT * FROM t WHERE a REGEXP '\\d+''''
+
+[[row]]
+dialect = "my"
+kind = "read"
+sql = '''SELECT * FROM t WHERE name = "O'Brien"'''
+
+[[row]]
+dialect = "my"
+kind = "read"
+sql = '''SELECT * FROM t WHERE name = "a\"b"'''
+
+[[row]]
+dialect = "my"
+kind = "read"
+sql = '''SELECT JSON_EXTRACT(doc, '$."key"') FROM t'''
+
+[[row]]
+dialect = "my"
+kind = "read"
+sql = '''SELECT CONCAT('a\tb', "c\nd") FROM t'''
+
+[[row]]
+dialect = "my"
+kind = "write"
+sql = '''INSERT INTO t VALUES ('it\'s')'''
+
+[[row]]
+dialect = "my"
+kind = "write"
+sql = '''UPDATE t SET a = 'x\'y' WHERE id = 1'''
+
+[[row]]
+dialect = "ma"
+kind = "read"
+sql = '''SELECT * FROM t WHERE name = 'O\'Brien''''
+
+[[row]]
+dialect = "ma"
+kind = "read"
+sql = '''SELECT * FROM t WHERE name = "a\"b"'''
+
+[[row]]
+dialect = "ma"
+kind = "write"
+sql = '''INSERT INTO t VALUES ('it\'s', "x\"y")'''
+
+[[row]]
+dialect = "sl"
+kind = "read"
+sql = '''SELECT * FROM t WHERE a LIKE 'a\_%' ESCAPE '\''''

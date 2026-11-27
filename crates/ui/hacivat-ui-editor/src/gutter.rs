@@ -10,22 +10,44 @@
 //! [`Overlay`] is what the gutter, the marks and their end-of-line statuses take from one
 //! frame's layout: the painted rows (their tops and where their text ends), the text area's
 //! right edge, and the band's bars and hints. The element builds it in prepaint ([`prepaint`]).
+//!
+//! ## m3c-t34-editor (NOTES surface 17, M3c-15): the gutter ▶. On the first row of each statement
+//! in view, under the pointer (or on every such row while a gutter button has the focus), a
+//! 16 × 18 button in the mark column runs that statement through Run's own request
+//! (`EditorEvent::ExecuteRequested`, a caret at its first code byte). It shows only while the
+//! host's [`RunGate`] says Run would be enabled, never over a mark that needs the user or is
+//! still going, and takes a finished mark's glyph slot (its status stays). Its tooltip lists
+//! the statement's last three runs. In "Tab moves focus" mode the ▶ and the fold chevrons are
+//! tab stops and AccessKit buttons (controller ruling 3); the tab order runs down the ▶ column,
+//! then the fold column.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 
 use hacivat_text::Snapshot;
-use hacivat_text::display::ScrollAnchor;
+use hacivat_text::display::{HeightMap, ScrollAnchor};
+use hacivat_ui::icon::{Icon, IconName, IconSize};
+use hacivat_ui::l10n::UiArg;
+use hacivat_ui::popover::{A11yDecl, Declare as _};
+use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
-    App, BorderStyle, Bounds, Corners, Edges, Hsla, Pixels, Point, Window, fill, point, px, quad,
+    AnyElement, AnyView, App, AppContext as _, AvailableSpace, BorderStyle, Bounds, Context,
+    Corners, CursorStyle, Div, Edges, Entity, FocusHandle, Hsla, InteractiveElement as _,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels, Point, Render, Role,
+    Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, fill, point, px, quad,
     size,
 };
-use hacivat_ui_core::theme::{Theme, ThemeMode};
+use hacivat_ui_core::theme::{Theme, ThemeMode, popover_surface};
 use smallvec::SmallVec;
 
 use crate::element::FrameLayout;
 use crate::layout_cache::paint_line_number;
-use crate::marks::MarkStore;
+use crate::marks::{MarkKey, MarkStore};
 use crate::preview::{self, BandState, BandStyle, GutterBar, PreviewHint};
+use crate::service::{ExecAction, ExecAt, ExecRequest};
+use crate::view::{EditorEvent, EditorView};
 
 /// The numbers' right padding.
 pub(crate) const NUMBER_PAD: f32 = 14.0;
@@ -56,7 +78,13 @@ pub struct GutterCtx<'a> {
 }
 
 impl GutterCtx<'_> {
-    /// The top of `line`'s row, in window coordinates (rows are uniform in M3a).
+    // ## m3c-t32-fold (named exception)
+    /// The bottom of the row `line` is drawn on (a hidden line: its fold's header row).
+    pub fn bottom_of(&self, line: u32) -> Pixels {
+        self.top_of(line) + self.line_height
+    }
+
+    /// The top of `line`'s row, in window coordinates (a hidden line: its fold's header row).
     pub fn top_of(&self, line: u32) -> Pixels {
         self.overlay.top_of(line).unwrap_or_else(|| {
             let lh = f64::from(f32::from(self.line_height));
@@ -72,8 +100,11 @@ impl GutterCtx<'_> {
 pub struct OverlayRow {
     pub line: u32,
     pub top: Pixels,
-    /// The window x where the row's text ends.
+    /// The window x where the row's text ends (a folded header's: its inlay's end).
     pub text_end: Pixels,
+    // ## m3c-t32-fold (named exception)
+    /// The last line the row covers (a folded header: the fold's last line).
+    pub last: u32,
 }
 
 /// What the gutter, the marks and the end-of-line statuses take from one frame's layout.
@@ -86,22 +117,50 @@ pub struct Overlay {
     pub text_area: Bounds<Pixels>,
     /// The band's gutter bars and end-of-line hints.
     pub band: preview::BandFrame,
+    // ## m3c-t32-fold (named exception)
+    /// The frame's height map (folded lines take no row); `None`: uniform rows.
+    pub map: Option<HeightMap>,
+    // ## m3c-t34-editor
+    /// The rows whose gutter ▶ shows (a finished mark leaves its glyph slot to it).
+    pub play_rows: Vec<u32>,
 }
 
 impl Overlay {
-    /// The top of `line`, extrapolated from the painted rows; `None` when nothing was painted.
+    /// The top of `line`'s row, extrapolated from the painted rows through the height map (a
+    /// hidden line: its fold's header row); `None` when nothing was painted.
     pub fn top_of(&self, line: u32) -> Option<Pixels> {
         let first = self.rows.first()?;
-        let rel =
-            (f64::from(line) - f64::from(first.line)) * f64::from(f32::from(self.line_height));
+        let rel = match &self.map {
+            // ## m3c-t32-fold (named exception)
+            Some(m) => m.y_of(m.visible_line(line)) - m.y_of(first.line),
+            None => {
+                (f64::from(line) - f64::from(first.line)) * f64::from(f32::from(self.line_height))
+            }
+        };
         Some(first.top + px(rel as f32))
     }
 
-    /// The painted row of `line`.
+    /// The painted row of `line` (`None` for a hidden line).
     pub fn row(&self, line: u32) -> Option<&OverlayRow> {
-        let first = self.rows.first()?.line;
-        let row = self.rows.get(line.checked_sub(first)? as usize)?;
-        (row.line == line).then_some(row)
+        let i = self.rows.binary_search_by_key(&line, |r| r.line).ok()?;
+        self.rows.get(i)
+    }
+
+    // ## m3c-t32-fold (named exception)
+    /// The row `line` is drawn on: its own, or its fold's header's.
+    pub fn row_showing(&self, line: u32) -> Option<&OverlayRow> {
+        let i = self
+            .rows
+            .partition_point(|r| r.line <= line)
+            .checked_sub(1)?;
+        let row = self.rows.get(i)?;
+        (line <= row.last).then_some(row)
+    }
+
+    /// The painted rows' lines, the last one's fold included (`None` when nothing was
+    /// painted).
+    pub fn covered(&self) -> Option<(u32, u32)> {
+        Some((self.rows.first()?.line, self.rows.last()?.last))
     }
 }
 
@@ -119,7 +178,11 @@ pub fn prepaint(
         .map(|r| OverlayRow {
             line: r.line,
             top: r.top,
-            text_end: px((layout.origin_x + f64::from(r.width)) as f32),
+            // ## m3c-t32-fold (named exception): a folded header's text ends after its inlay.
+            text_end: px((layout.origin_x
+                + f64::from(r.fold.map_or(r.width, |f| f.inlay_x + f.inlay_w)))
+                as f32),
+            last: r.fold.map_or(r.line, |f| f.last_line),
         })
         .collect();
     Overlay {
@@ -127,6 +190,10 @@ pub fn prepaint(
         line_height: layout.rows().line_height,
         text_area: layout.rows().bounds,
         band: preview::layout(band, marks, layout, snap),
+        // ## m3c-t32-fold (named exception)
+        map: Some(layout.map.clone()),
+        // ## m3c-t34-editor: set by the element from `prepaint_buttons`.
+        play_rows: Vec::new(),
     }
 }
 
@@ -223,13 +290,14 @@ pub fn paint(g: &GutterCtx<'_>, window: &mut Window, cx: &mut App) {
 /// One of the band's bars: over its lines, inset 1 px at each end of a unit of several (the
 /// 2 px gap between neighbours), at x = 2 or 4 alike (review round 1, Minor 4).
 fn paint_bar(g: &GutterCtx<'_>, bar: &GutterBar, inks: &Inks, window: &mut Window) {
-    let lh = g.line_height;
     let top = g.top_of(bar.lines.start);
-    let rows = bar.lines.end.saturating_sub(bar.lines.start) as f32;
+    // ## m3c-t32-fold (named exception): a bar over folded lines collapses onto their header's
+    // row.
+    let span = g.bottom_of(bar.lines.end.saturating_sub(1).max(bar.lines.start)) - top;
     let (top, height) = if bar.gap {
-        (top + px(1.0), lh * rows - px(2.0))
+        (top + px(1.0), span - px(2.0))
     } else {
-        (top, lh * rows)
+        (top, span)
     };
     // Clip to the gutter (a bar of a unit that runs past the view).
     let y0 = top.max(g.bounds.top());
@@ -259,5 +327,706 @@ pub(crate) fn hint_text(h: PreviewHint) -> (&'static str, Option<(usize, usize)>
         PreviewHint::Offline => ("hv-editor-preview-offline", None),
         // ## m3a-t33-exec-ui (named exception): its `n` is passed by `marks::hint_message`.
         PreviewHint::Choices { .. } => ("hv-editor-preview-choices", None),
+        // ## m3c-t34-editor: its `n` too.
+        PreviewHint::AsOne { .. } => ("hv-editor-preview-as-one", None),
+    }
+}
+
+// ## m3c-t34-editor
+// ---- the gutter's buttons: ▶ (run the row's statement), focus, the last runs (NOTES 17) ----
+
+/// Whether Run would be enabled now (the host's answer: not while a statement runs, waits for
+/// an answer, is cancelling or waits for a connection). The ▶ shows only while it says so.
+pub type RunGate = Rc<dyn Fn(&App) -> bool>;
+
+/// A button in the gutter, by its row's line (0-based).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GutterButton {
+    /// ▶: runs the statement whose first row it is.
+    Run(u32),
+    /// A fold chevron.
+    Fold(u32),
+}
+
+/// The gutter buttons' state in `EditorView` (P11): the host's Run gate and, in "Tab moves
+/// focus" mode, each button's focus handle (kept while its row is painted or it has the focus).
+#[derive(Default)]
+pub struct GutterUi {
+    pub(crate) gate: Option<RunGate>,
+    handles: RefCell<HashMap<GutterButton, FocusHandle>>,
+    // ## m3c-po (PO M3c-04)
+    /// The line of the button last focused in the ▶ column and in the chevron column: each
+    /// column's one tab stop goes back to it while it is painted.
+    last_run: std::cell::Cell<Option<u32>>,
+    last_fold: std::cell::Cell<Option<u32>>,
+    // ## m3c-gutter-no-run
+    /// The rows whose ▶ the last frame drew (`ButtonFrame::rows`).
+    pub(crate) shown: Vec<u32>,
+}
+
+impl std::fmt::Debug for GutterUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GutterUi")
+            .field("gate", &self.gate.is_some())
+            .field("handles", &self.handles.borrow().len())
+            .finish()
+    }
+}
+
+/// The ▶'s width, its x in the gutter (its 16 px straddle the 12 px mark slot at x = 8).
+const PLAY_W: f32 = 16.0;
+const PLAY_X: f32 = 6.0;
+/// The last runs tooltip's width.
+const RUN_TIP_W: f32 = 300.0;
+
+/// The focus handle of `button` (made on first use).
+pub(crate) fn handle_of(v: &EditorView, button: GutterButton, cx: &mut App) -> FocusHandle {
+    v.gutter_ui
+        .handles
+        .borrow_mut()
+        .entry(button)
+        .or_insert_with(|| cx.focus_handle().tab_stop(true))
+        .clone()
+}
+
+/// The gutter button that has the focus, if one has.
+pub(crate) fn focused_button(v: &EditorView, window: &Window) -> Option<GutterButton> {
+    v.gutter_ui
+        .handles
+        .borrow()
+        .iter()
+        .find(|(_, h)| h.is_focused(window))
+        .map(|(b, _)| *b)
+}
+
+// ## m3c-po (PO M3c-04): each gutter column is ONE tab stop ("Tab moves focus" mode), a
+// roving one: ↑/↓ move the focus along the column, Escape gives it back to the editor.
+
+impl GutterButton {
+    /// The button's line.
+    pub fn line(self) -> u32 {
+        match self {
+            GutterButton::Run(l) | GutterButton::Fold(l) => l,
+        }
+    }
+
+    /// The button of the same column on `line`.
+    fn on_line(self, line: u32) -> Self {
+        match self {
+            GutterButton::Run(_) => GutterButton::Run(line),
+            GutterButton::Fold(_) => GutterButton::Fold(line),
+        }
+    }
+
+    fn same_column(self, other: GutterButton) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+}
+
+/// The line a column's one tab stop sits on, among its painted `lines` (top to bottom): the
+/// focused button, else the one last focused, else the last one on or above the caret's line,
+/// else the first.
+pub(crate) fn tab_stop_line(
+    lines: &[u32],
+    focused: Option<u32>,
+    remembered: Option<u32>,
+    caret_line: u32,
+) -> Option<u32> {
+    let painted = |l: &u32| lines.contains(l);
+    focused
+        .filter(painted)
+        .or(remembered.filter(painted))
+        .or_else(|| lines.iter().copied().rfind(|l| *l <= caret_line))
+        .or_else(|| lines.first().copied())
+}
+
+fn last_cell(v: &EditorView, column: GutterButton) -> &std::cell::Cell<Option<u32>> {
+    match column {
+        GutterButton::Run(_) => &v.gutter_ui.last_run,
+        GutterButton::Fold(_) => &v.gutter_ui.last_fold,
+    }
+}
+
+/// The tab stop of `column`'s painted `lines` this frame (see [`tab_stop_line`]); a focused
+/// button of the column is remembered as its last.
+pub(crate) fn column_stop(
+    v: &EditorView,
+    column: GutterButton,
+    lines: &[u32],
+    window: &Window,
+) -> Option<u32> {
+    let focused = focused_button(v, window)
+        .filter(|b| b.same_column(column))
+        .map(GutterButton::line);
+    let last = last_cell(v, column);
+    if focused.is_some() {
+        last.set(focused);
+    }
+    let buf = v.model.buffer();
+    let caret = v
+        .model
+        .selection()
+        .main()
+        .range()
+        .start
+        .min(buf.len_bytes());
+    let caret_line = u32::try_from(buf.byte_to_line(caret)).unwrap_or(u32::MAX);
+    tab_stop_line(lines, focused, last.get(), caret_line)
+}
+
+/// A key on the focused gutter button `button`: ↑/↓ focus the previous / next button of its
+/// column (none past an end), Escape gives the focus back to the editor. `true` when it took
+/// the key (the caller stops it there, so the arrows never reach the editor).
+pub(crate) fn on_button_key(
+    v: &mut EditorView,
+    button: GutterButton,
+    ev: &KeyDownEvent,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
+) -> bool {
+    let k = &ev.keystroke;
+    if k.modifiers.modified() {
+        return false;
+    }
+    let up = match k.key.as_str() {
+        "escape" => {
+            last_cell(v, button).set(Some(button.line()));
+            window.focus(&v.focus, cx);
+            cx.notify();
+            return true;
+        }
+        "up" => true,
+        "down" => false,
+        _ => return false,
+    };
+    let mut lines: Vec<u32> = v
+        .gutter_ui
+        .handles
+        .borrow()
+        .keys()
+        .filter(|b| b.same_column(button))
+        .map(|b| b.line())
+        .collect();
+    lines.sort_unstable();
+    let at = lines.binary_search(&button.line()).ok();
+    let target = at
+        .and_then(|i| {
+            if up {
+                i.checked_sub(1)
+            } else {
+                i.checked_add(1)
+            }
+        })
+        .and_then(|i| lines.get(i).copied());
+    if let Some(line) = target {
+        let to = button.on_line(line);
+        let handle = handle_of(v, to, cx);
+        last_cell(v, button).set(Some(line));
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+    true
+}
+
+/// Adds the column keys ([`on_button_key`]) to gutter button `button`'s element.
+pub(crate) fn with_column_keys(
+    el: Stateful<Div>,
+    view: Entity<EditorView>,
+    button: GutterButton,
+) -> Stateful<Div> {
+    el.on_key_down(move |ev: &KeyDownEvent, window, cx| {
+        if view.update(cx, |v, cx| on_button_key(v, button, ev, window, cx)) {
+            cx.stop_propagation();
+        }
+    })
+}
+
+/// What one frame paints of the ▶ buttons (laid out in [`prepaint_buttons`]).
+#[derive(Default)]
+pub(crate) struct ButtonFrame {
+    elements: RefCell<Vec<AnyElement>>,
+    /// The rows whose ▶ shows (the marks leave their glyph slot to it).
+    pub rows: Vec<u32>,
+}
+
+impl std::fmt::Debug for ButtonFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ButtonFrame")
+            .field("rows", &self.rows)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Asks the host to run the statement whose header is `header` (Run's own path: the same
+/// resolve, preview and gate as ⌘↵; the history is sealed as Run seals it).
+fn run_row(
+    v: &mut EditorView,
+    header: usize,
+    version: u64,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
+) {
+    // ## fix round 1 (I1): a ▶ run from the keyboard gives the focus back to the editor (as
+    // DataGrip does): the ▶ leaves while the statement runs, and Stop and the editor's keys
+    // must still have a focused path.
+    if focused_button(v, window).is_some() {
+        window.focus(&v.focus, cx);
+    }
+    // ## fix round 1 (M2): a ▶ painted over another text runs nothing (its caret would point
+    // into other text); the next frame paints the current one.
+    if v.model.version() != version {
+        cx.notify();
+        return;
+    }
+    if v.ime.is_composing() || !run_allowed(v, cx) {
+        return;
+    }
+    v.model.seal_history();
+    let snapshot = v.model.snapshot();
+    cx.emit(EditorEvent::ExecuteRequested(ExecRequest {
+        doc: v.doc,
+        action: ExecAction::Execute1,
+        at: ExecAt::Carets(smallvec::smallvec![header]),
+        snapshot,
+    }));
+}
+
+/// The host says Run would be enabled.
+fn run_allowed(v: &EditorView, cx: &App) -> bool {
+    v.gutter_ui.gate.as_ref().is_some_and(|g| g(cx))
+}
+
+/// Lays out the frame's ▶ buttons (prepaint): on the first row of each statement in view,
+/// while Run would be enabled, never over a mark that needs the user or is still going. One
+/// shows on the row under the pointer, or on every such row while a gutter button has the
+/// focus; in "Tab moves focus" mode the hidden ones are still there, as focusable buttons
+/// (ruling 3). ## m3c-po (PO M3c-04): the column is one tab stop ([`column_stop`]); ↑/↓ move
+/// along it and Escape returns to the editor ([`on_button_key`]).
+pub(crate) fn prepaint_buttons(
+    v: &mut EditorView,
+    gutter: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
+) -> ButtonFrame {
+    let mut out = ButtonFrame::default();
+    let tab = v.commands.tab_moves_focus;
+    let focused = focused_button(v, window).is_some();
+    let Some(layout) = v.layout.as_ref() else {
+        return out;
+    };
+    // Nothing to show: no frame cost while typing (no statement lookup, no host question).
+    if !tab && !focused && !v.fold.gutter_hovered {
+        prune_runs(v, &[], window);
+        return out;
+    }
+    if !run_allowed(v, cx) {
+        if !tab {
+            v.gutter_ui
+                .handles
+                .borrow_mut()
+                .retain(|b, h| !matches!(b, GutterButton::Run(_)) || h.is_focused(window));
+        }
+        return out;
+    }
+    let lh = layout.rows().line_height;
+    let rows: Vec<(u32, Pixels)> = layout.lines.iter().map(|r| (r.line, r.top)).collect();
+    let (Some(&(first, _)), Some(last)) = (rows.first(), layout.lines.last()) else {
+        return out;
+    };
+    let last = last.fold.map_or(last.line, |f| f.last_line);
+    let snap = v.model.snapshot();
+    let buf = &snap.buffer;
+    let vis = buf.line_to_byte(first as usize)..buf.line_range(last as usize, true).end;
+    let spans = v.service.statements(v.doc, snap.version, vis);
+    let hover = v.fold.gutter_hovered.then_some(v.fold.hover_line).flatten();
+    let inks = Inks::of(cx);
+    let theme = cx
+        .try_global::<Theme>()
+        .copied()
+        .unwrap_or_else(|| Theme::new(ThemeMode::Dark));
+    let hover_fill = theme.tokens.colors.hover.to_hsla();
+    let view = cx.entity();
+    let mut painted = Vec::new();
+    // ## m3c-po (PO M3c-04): the rows that get a ▶ first (one per line), so the column's one
+    // tab stop is known before the buttons are laid out.
+    let mut cands: Vec<(usize, u32, Pixels)> = Vec::new();
+    for span in spans.iter() {
+        let line =
+            u32::try_from(buf.byte_to_line(span.header.min(buf.len_bytes()))).unwrap_or(u32::MAX);
+        let Some(&(_, top)) = rows.iter().find(|(l, _)| *l == line) else {
+            continue;
+        };
+        if v.marks.busy_on(buf, line) || cands.iter().any(|c| c.1 == line) {
+            continue;
+        }
+        let shown = focused || hover == Some(line);
+        if !shown && !tab {
+            continue;
+        }
+        cands.push((span.header, line, top));
+    }
+    let stop = if tab {
+        let lines: Vec<u32> = cands.iter().map(|c| c.1).collect();
+        column_stop(v, GutterButton::Run(0), &lines, window)
+    } else {
+        None
+    };
+    for (header, line, top) in cands {
+        let shown = focused || hover == Some(line);
+        let button = GutterButton::Run(line);
+        let key = v.marks.at_header(header);
+        // ## m4b-t17-secrets-ui fix round 1 (I1, R-T17-2; named lines): a shown ▶ takes the
+        // slot of the row's host line marks (as it takes a finished execution mark's), so
+        // their labels join its tooltip and its accessible name.
+        let marked = crate::line_marks::on_line(&v.line_marks, buf, line, cx);
+        let tip = RunTip {
+            runs: key.map(|k| v.marks.run_rows(k, cx)).unwrap_or_default(),
+            marks: marked.clone(),
+        };
+        // ## fix round 1 (M7): the name says which statement ("Run the statement at line 12").
+        let mut name = crate::commands::message(
+            cx,
+            "hv-gutter-run-line",
+            &[("line", UiArg::Count(u64::from(line) + 1))],
+        );
+        if let Some(covered) = &marked {
+            let mut joined = name.to_string();
+            for label in &covered.labels {
+                joined.push_str(" · ");
+                joined.push_str(label);
+            }
+            name = joined.into();
+        }
+        let version = snap.version;
+        let target = view.clone();
+        let mut el = div()
+            .id(("hv-gutter-run", u64::from(line)))
+            .w(px(PLAY_W))
+            .h(lh)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.0))
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, window, cx| {
+                target.update(cx, |v, cx| run_row(v, header, version, window, cx));
+            });
+        if tab {
+            // ## m3c-po (PO M3c-04): one tab stop for the column; ↑/↓ and Escape here.
+            let handle = handle_of(v, button, cx).tab_stop(stop == Some(line));
+            let has_focus = handle.is_focused(window);
+            el = el.track_focus(&handle);
+            el = with_column_keys(el, view.clone(), button);
+            if has_focus {
+                el = el.border_1().border_color(inks.blue);
+            }
+        }
+        if shown {
+            el = el
+                .hover(move |s| s.bg(hover_fill))
+                .child(Icon::new(IconName::Play).size(IconSize::Chrome).color(
+                    if hover == Some(line) {
+                        inks.text
+                    } else {
+                        inks.text_2
+                    },
+                ))
+                .tooltip(move |_, cx| tip.clone().view(cx));
+            out.rows.push(line);
+        }
+        let mut el = el
+            .declare_full(A11yDecl::new(Role::Button, name))
+            .into_any_element();
+        el.prepaint_as_root(
+            point(gutter.left() + px(PLAY_X), top),
+            size(
+                AvailableSpace::Definite(px(PLAY_W)),
+                AvailableSpace::Definite(lh),
+            ),
+            window,
+            cx,
+        );
+        out.elements.borrow_mut().push(el);
+        painted.push(button);
+    }
+    if !tab {
+        // Outside the mode only a focused button keeps its handle.
+        painted.clear();
+    }
+    prune_runs(v, &painted, window);
+    out
+}
+
+/// Forgets the ▶ handles not painted this frame (the chevrons' are `fold_gutter`'s).
+fn prune_runs(v: &EditorView, painted: &[GutterButton], window: &Window) {
+    v.gutter_ui.handles.borrow_mut().retain(|b, h| {
+        !matches!(b, GutterButton::Run(_)) || painted.contains(b) || h.is_focused(window)
+    });
+}
+
+/// Forgets the chevrons' handles not painted this frame (`fold_gutter::prepaint`).
+pub(crate) fn prune_folds(v: &EditorView, painted: &[GutterButton], window: &Window) {
+    v.gutter_ui.handles.borrow_mut().retain(|b, h| {
+        !matches!(b, GutterButton::Fold(_)) || painted.contains(b) || h.is_focused(window)
+    });
+}
+
+/// Paints the ▶ buttons.
+pub(crate) fn paint_buttons(f: &ButtonFrame, window: &mut Window, cx: &mut App) {
+    for el in f.elements.borrow_mut().iter_mut() {
+        el.paint(window, cx);
+    }
+}
+
+/// The ▶'s tooltip (NOTES 17, the gutter tooltip anatomy at 300 px): "Run this statement" with
+/// Run's key, "Last runs" and up to three rows, then "Runs through the same checks as Run."; a
+/// statement never run says "Not run yet."
+#[derive(Clone)]
+struct RunTip {
+    runs: Vec<crate::marks::RunRow>,
+    // ## m4b-t17-secrets-ui fix round 1 (I1; named item): the row's host line marks (their
+    // icon and labels), which the shown ▶ covers.
+    // ## m4b-t21-shots (T17 re-review n1): and the first mark's other lines (its hint).
+    marks: Option<crate::line_marks::Covered>,
+}
+
+impl RunTip {
+    fn view(self, cx: &mut App) -> AnyView {
+        cx.new(|_| self).into()
+    }
+}
+
+impl Render for RunTip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *Theme::get(cx);
+        let t = theme.tokens;
+        // On the popover (a raised surface) the dim ink is `text_2` (the Raised Ink Rule).
+        let (ink, dim) = (t.colors.text.to_hsla(), t.colors.text_2.to_hsla());
+        let msg = |cx: &App, id: &'static str| crate::commands::message(cx, id, &[]);
+        let key = cx
+            .try_global::<crate::commands::ShortcutHints>()
+            .cloned()
+            .and_then(|h| (h.0)(cx, "editor.run"));
+        let mut title = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(Label::new(
+                msg(cx, "hv-gutter-run"),
+                TextSource::Fluent,
+                t.type_ramp.body_sm,
+                ink,
+            ));
+        if let Some(key) = key {
+            title = title.child(Label::new(
+                key,
+                TextSource::Shortcut,
+                t.type_ramp.mono_kbd,
+                dim,
+            ));
+        }
+        let mut col = popover_surface(&theme)
+            .w(px(RUN_TIP_W))
+            .px(px(8.0))
+            .py(px(6.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(title);
+        // ## m4b-t17-secrets-ui fix round 1 (I1): the covered line marks, under the title.
+        if let Some(crate::line_marks::Covered {
+            icon,
+            labels,
+            detail,
+        }) = &self.marks
+        {
+            for label in labels {
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .pt(px(2.0))
+                                .child(Icon::new(*icon).size(IconSize::Chrome).color(dim)),
+                        )
+                        // A long label (a long locale) wraps, never clips.
+                        .child(div().flex_1().min_w(px(0.0)).child(paragraph(
+                            label.clone(),
+                            TextSource::Fluent,
+                            t.type_ramp.body_sm,
+                            ink,
+                        ))),
+                );
+            }
+            // ## m4b-t21-shots (T17 re-review n1): the hint the key's own tooltip shows, so
+            // the ▶ that covers the key hides nothing (`text_2` on the popover, wrapping).
+            for line in detail {
+                col = col.child(paragraph(
+                    line.clone(),
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    dim,
+                ));
+            }
+        }
+        if self.runs.is_empty() {
+            col = col.child(Label::new(
+                msg(cx, "hv-gutter-never-run"),
+                TextSource::Fluent,
+                t.type_ramp.body_sm,
+                dim,
+            ));
+        } else {
+            col = col.child(Label::new(
+                msg(cx, "hv-gutter-last-runs"),
+                TextSource::Fluent,
+                t.type_ramp.caption,
+                dim,
+            ));
+            for r in &self.runs {
+                let mut row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(Icon::new(r.icon).size(IconSize::Chrome).color(r.ink));
+                if let Some(when) = r.when.clone() {
+                    row = row.child(Label::new(
+                        when,
+                        TextSource::Fluent,
+                        t.type_ramp.mono_micro,
+                        dim,
+                    ));
+                }
+                if let Some(text) = r.text.clone() {
+                    row = row.child(
+                        Label::new(text, TextSource::Fluent, t.type_ramp.body_sm, ink)
+                            .truncate(true),
+                    );
+                }
+                if let Some(code) = r.sqlstate.clone() {
+                    row = row.child(
+                        div()
+                            .flex_none()
+                            .border_1()
+                            .border_color(t.colors.seam_strong.to_hsla())
+                            .rounded(px(3.0))
+                            .px(px(4.0))
+                            .child(Label::new(
+                                code,
+                                TextSource::Data,
+                                t.type_ramp.mono_micro,
+                                ink,
+                            )),
+                    );
+                }
+                col = col.child(row);
+            }
+        }
+        // ## m3c-shotfix F2: the last line is prose; it wraps in the 300 px card.
+        col.child(
+            paragraph(
+                msg(cx, "hv-gutter-same-path"),
+                TextSource::Fluent,
+                t.type_ramp.caption,
+                dim,
+            )
+            .id("gutter-run-tip-same-path"),
+        )
+    }
+}
+
+impl EditorView {
+    /// Installs the host's Run gate: the gutter ▶ shows only while it says Run would be
+    /// enabled (`None`: never).
+    pub fn set_gutter_run(&mut self, gate: Option<RunGate>, cx: &mut Context<Self>) {
+        self.gutter_ui.gate = gate;
+        cx.notify();
+    }
+
+    /// Sets when mark `key`'s run ended (the app's time text, for the ▶'s "Last runs").
+    pub fn set_exec_when(&mut self, key: MarkKey, when: Option<TextFn>, cx: &mut Context<Self>) {
+        crate::marks::set_when(&mut self.marks, key, when);
+        cx.notify();
+    }
+
+    /// The gutter button that has the keyboard focus, if one has.
+    pub fn gutter_focus(&self, window: &Window) -> Option<GutterButton> {
+        focused_button(self, window)
+    }
+
+    // ## m3c-gutter-no-run (named exception)
+    /// The lines (0-based) whose ▶ the last painted frame drew, in order. A host's frame may
+    /// draw the play glyph elsewhere (the console toolbar's Run), so its icons cannot say this.
+    pub fn gutter_play_rows(&self) -> &[u32] {
+        &self.gutter_ui.shown
+    }
+}
+
+// ## m3c-t32-fold
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lines 1–3 folded under line 0: a hidden line is drawn on its header's row, a bar over
+    /// folded lines collapses onto it, and the painted rows cover the fold's lines.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init, reason = "a line range as data")]
+    fn hidden_lines_sit_on_their_headers_row() {
+        let lh = px(18.0);
+        let ov = Overlay {
+            rows: vec![
+                OverlayRow {
+                    line: 0,
+                    top: px(100.0),
+                    text_end: px(0.0),
+                    last: 3,
+                },
+                OverlayRow {
+                    line: 4,
+                    top: px(118.0),
+                    text_end: px(0.0),
+                    last: 4,
+                },
+            ],
+            line_height: lh,
+            map: Some(HeightMap::chunked(10, 18.0, &[1..4])),
+            ..Overlay::default()
+        };
+        assert_eq!(ov.top_of(0), Some(px(100.0)));
+        assert_eq!(ov.top_of(2), Some(px(100.0)));
+        assert_eq!(ov.top_of(4), Some(px(118.0)));
+        assert_eq!(ov.top_of(6), Some(px(154.0)), "extrapolated past the rows");
+        assert!(ov.row(2).is_none());
+        assert_eq!(ov.row_showing(2).map(|r| r.line), Some(0));
+        assert_eq!(ov.row_showing(4).map(|r| r.line), Some(4));
+        assert_eq!(ov.covered(), Some((0, 4)));
+        // Without a map (M3a's uniform rows), as before.
+        let flat = Overlay {
+            map: None,
+            ..ov.clone()
+        };
+        assert_eq!(flat.top_of(2), Some(px(136.0)));
+    }
+
+    // ## m3c-po (PO M3c-04)
+    /// A column's one tab stop: the focused button, else the last focused while it is still
+    /// painted, else the caret's (on or above its line), else the first; none without buttons.
+    #[test]
+    fn a_columns_tab_stop() {
+        let lines = [2, 5, 9];
+        assert_eq!(tab_stop_line(&lines, Some(9), Some(2), 0), Some(9));
+        assert_eq!(tab_stop_line(&lines, None, Some(2), 7), Some(2));
+        assert_eq!(tab_stop_line(&lines, None, Some(4), 7), Some(5));
+        assert_eq!(tab_stop_line(&lines, None, None, 5), Some(5));
+        assert_eq!(tab_stop_line(&lines, None, None, 1), Some(2));
+        assert_eq!(tab_stop_line(&lines, None, None, 100), Some(9));
+        assert_eq!(tab_stop_line(&[], None, Some(2), 3), None);
     }
 }

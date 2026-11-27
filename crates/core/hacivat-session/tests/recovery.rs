@@ -43,7 +43,7 @@ fn lost_state_from_tracked() {
         "SET work_mem = '1MB'",
         "SELECT pg_advisory_lock(1)",
     ] {
-        track_statement(&mut t, s);
+        track_statement(&mut t, s, None);
     }
     t.tx = TxStatus::InTx;
     assert_eq!(
@@ -102,7 +102,7 @@ fn the_scan_reads_the_first_keyword_only_and_ignores_transaction_scoped_state() 
     let scan = |statements: &[&str]| {
         let mut t = Tracked::default();
         for s in statements {
-            track_statement(&mut t, s);
+            track_statement(&mut t, s, None);
         }
         lost_state(&t)
     };
@@ -150,7 +150,7 @@ fn the_scan_reads_the_first_keyword_only_and_ignores_transaction_scoped_state() 
         "PREPARE b AS SELECT 2",
         "DEALLOCATE ALL",
     ] {
-        track_statement(&mut t, s);
+        track_statement(&mut t, s, None);
     }
     assert_eq!(t.prepared, 0);
     // A failed transaction is an open one.
@@ -165,17 +165,21 @@ fn the_scan_reads_the_first_keyword_only_and_ignores_transaction_scoped_state() 
 fn the_scan_errs_toward_reporting_when_it_cannot_be_sure() {
     // Review M5. PostgreSQL's `#>>` is an operator, not a MySQL comment.
     let mut t = Tracked::default();
-    track_statement(&mut t, "SELECT data #>> '{a}', pg_advisory_lock(1) FROM t");
+    track_statement(
+        &mut t,
+        "SELECT data #>> '{a}', pg_advisory_lock(1) FROM t",
+        None,
+    );
     assert!(t.locks_seen);
     // A MySQL backslash escape: where the string ends is unsure, so quotes are read too.
     let mut t = Tracked::default();
-    track_statement(&mut t, "SELECT 'it\\'s', GET_LOCK('job', 10)");
+    track_statement(&mut t, "SELECT 'it\\'s', GET_LOCK('job', 10)", None);
     assert!(t.locks_seen);
     // `CREATE OR REPLACE TEMP VIEW`.
     let mut t = Tracked::default();
-    track_statement(&mut t, "CREATE OR REPLACE TEMP VIEW v AS SELECT 1");
+    track_statement(&mut t, "CREATE OR REPLACE TEMP VIEW v AS SELECT 1", None);
     assert!(t.temp_created);
     let mut t = Tracked::default();
-    track_statement(&mut t, "CREATE OR REPLACE VIEW v AS SELECT 'temp'");
+    track_statement(&mut t, "CREATE OR REPLACE VIEW v AS SELECT 'temp'", None);
     assert!(!t.temp_created);
 }

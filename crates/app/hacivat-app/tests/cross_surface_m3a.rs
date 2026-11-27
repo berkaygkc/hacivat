@@ -6,9 +6,11 @@
 //!
 //! - run → rows → copy: the grid shows the rows; Copy puts raw TSV on the clipboard (NULL as
 //!   an empty cell, numbers ungrouped) and says so;
-//! - a production console's INSERT: read-only session, the server refuses it inside the
-//!   guard's read-only transaction; the Output log says so (the server's text and its SQLSTATE)
-//!   and the gutter marks it Failed; nothing is committed;
+//! - a production console's INSERT (## m3b-t26-prod-unlock: was refused on a read-only
+//!   session): the session is read-write in Manual mode; the INSERT runs in the user's
+//!   transaction under the savepoint and nothing is kept before the Keep/Undo answer (Escape
+//!   undoes it); an unbounded DELETE asks with the typed name before anything is sent (Escape
+//!   cancels, nothing sent); nothing is committed;
 //! - the chooser: Run asks, hovering (↓) previews the whole script in the band, ↑ goes back,
 //!   Enter runs exactly the highlighted statement;
 //! - stop fetching: a result streaming its rows is stopped with `exec.cancel`; the strip says
@@ -20,14 +22,13 @@ mod support;
 
 use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
 use hacivat_app::console::{ConsoleId, Consoles};
-use hacivat_app::results::ActiveResult;
 use hacivat_app::results::view::hosts;
+use hacivat_driver::TxStatus;
 use hacivat_driver::fake::{FakeDriver, FakeQuery, FakeResultSet, FakeRows, FakeTypedCall};
-use hacivat_driver::{RawError, RawErrorKind, ServerMessage, TxStatus};
 use hacivat_exec::LogMsg;
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_session::LiveState;
-use hacivat_session::session::{DenyLayer, TxOwner};
+use hacivat_session::session::TxOwner;
 use hacivat_ui_editor::{EditorView, ExecMarkState, preview};
 use hacivat_ui_grid::GridView;
 use hacivat_values::{LogicalType, Value};
@@ -190,14 +191,17 @@ fn run_rows_then_copy_puts_raw_tsv_on_the_clipboard(cx: &mut TestAppContext) {
                 .find_map(|h| h.read(cx).grid_of(id, 0, cx))
         })
         .expect("the grid");
-    refresh(vcx);
-    let cells: Vec<String> = registry_frame(vcx)
-        .into_iter()
-        .filter(|r| r.path.ends_with("#cell"))
-        .map(|r| r.text.to_string())
-        .collect();
-    assert!(cells.iter().any(|t| t == "İzmir"), "{cells:?}");
-    assert!(cells.iter().any(|t| t == "Şanlıurfa"), "{cells:?}");
+    // ## m4-t32-shots (named exception; carries-w4 flake): under load the first frames can be
+    // the grid's empty one; wait until the grid has drawn its cell text.
+    wait_until(vcx, "the grid draws its cells", |vcx| {
+        refresh(vcx);
+        let cells: Vec<String> = registry_frame(vcx)
+            .into_iter()
+            .filter(|r| r.path.ends_with("#cell"))
+            .map(|r| r.text.to_string())
+            .collect();
+        cells.iter().any(|t| t == "İzmir") && cells.iter().any(|t| t == "Şanlıurfa")
+    });
     // Copy all: raw values, NULL as an empty cell, the number ungrouped.
     in_window(vcx, |window, cx| {
         let handle = grid.read(cx).focus_handle(cx);
@@ -228,164 +232,189 @@ fn run_rows_then_copy_puts_raw_tsv_on_the_clipboard(cx: &mut TestAppContext) {
     stop_core_runtime_test(cx);
 }
 
-// ---- a production console refuses a write ----------------------------------------------------
+// ---- a production console confirms a write ---------------------------------------------------
 
+// ## m3b-t26-prod-unlock: was `a_production_insert_is_refused_logged_and_marked_failed` (a
+// read-only production session refused the INSERT and the writable CTE before anything was
+// sent). Since Task 26 the production console writes, and every write is confirmed with the
+// same strength: nothing is kept (the DML in its savepoint) or sent (a statement that asks
+// first) before the user's answer, the safe answer keeps nothing, and nothing is committed.
 #[gpui::test]
-fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppContext) {
-    // ## m3a-f5-demo (DEMO-7): a plain INSERT is refused before anything is sent (the client
-    // layer); a write its first keyword does not show (a writable CTE) still meets the
-    // guard's read-only transaction, where the server refuses it (what PostgreSQL answers a
-    // write inside `BEGIN … READ ONLY`).
+fn a_production_insert_is_confirmed_before_it_is_kept(cx: &mut TestAppContext) {
     let cte =
         "WITH a AS (INSERT INTO audit (note) VALUES ('İzmir') RETURNING note) SELECT * FROM a";
-    let refused = FakeQuery {
-        prefix: "WITH a AS (INSERT INTO audit",
-        // The error comes with the first event (a set whose rows never arrive).
-        sets: vec![FakeResultSet {
-            columns: vec![("note", text())],
-            rows: FakeRows::Literal(vec![vec![Value::Text("x".into())]]),
-        }],
-        fail_after: Some((
-            0,
-            RawError {
-                kind: RawErrorKind::Db,
-                server: Some(ServerMessage {
-                    sqlstate: Some("25006".to_string()),
-                    vendor_code: None,
-                    severity: Some("ERROR".to_string()),
-                    text: "cannot execute INSERT in a read-only transaction".to_string(),
-                    detail: None,
-                    hint: None,
-                    lang_hint: None,
-                    position: None,
-                }),
-            },
-        )),
-        ..Default::default()
-    };
-    let (vcx, id) = connected(cx, PROD, EnvTag::Production, vec![refused]);
+    let (vcx, id) = connected(cx, PROD, EnvTag::Production, Vec::new());
     let session = vcx
         .cx
         .read(|cx| Consoles::get(cx, id).and_then(|s| s.session.clone()))
         .expect("a session");
     assert!(
-        session.state().borrow().read_only,
-        "a production console's session is read-only (R-M3-6)"
+        !session.state().borrow().read_only,
+        "a production console's session is read-write since Task 26"
+    );
+    assert_eq!(
+        session.state().borrow().tx.mode,
+        hacivat_session::session::TxMode::Manual,
+        "D-036"
     );
     let editor = editor_of(vcx, id);
-    // The PO's demo statement (Turkish identifiers).
-    let sent_before = fake(vcx).call_log().len();
-    type_script(vcx, &editor, "INSERT INTO müşteri VALUES (9, 'x', 1);\n", 3);
-    editor_command(vcx, &editor, "editor.run");
-    wait_until(vcx, "the denied mark", |vcx| {
-        matches!(
-            marks(vcx, id).as_slice(),
-            [ExecMarkState::Failed { sqlstate: None }]
-        )
-    });
-    let lines = log(vcx, id);
-    assert!(
-        lines
-            .iter()
-            .any(|m| matches!(m, LogMsg::ReadOnlyDenied(DenyLayer::Input))),
-        "{lines:?}"
-    );
-    // Nothing was sent for it: not the INSERT, not even the guard's transaction.
-    let calls = fake(vcx).call_log();
-    assert_eq!(calls.len(), sent_before, "{:?}", &calls[sent_before..]);
-    enable_registry(vcx);
-    refresh(vcx);
-    let drawn: Vec<String> = registry_frame(vcx)
-        .into_iter()
-        .map(|r| r.text.to_string())
-        .collect();
-    assert!(
-        drawn.iter().any(|t| t == "not sent: read-only"),
-        "{drawn:?}"
-    );
-    vcx.cx.update(|cx| {
-        let results = Consoles::get(cx, id)
-            .and_then(|s| s.results.clone())
-            .expect("the console's results");
-        results.update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
-    });
-    refresh(vcx);
-    let output = |vcx: &VisualTestContext| -> Vec<String> {
-        registry_frame(vcx)
-            .into_iter()
-            .filter(|r| r.path.contains("hacivat-app/src/results/output_view.rs"))
-            .map(|r| r.text.to_string())
-            .collect()
+    let commit_open = |vcx: &VisualTestContext| {
+        layer_ids(vcx).contains(&hacivat_app::exec_ui::commit_prompt::COMMIT_LAYER_ID)
     };
-    let out = output(vcx);
-    assert!(
-        out.iter().any(|t| t.contains(
-            "Not sent: this console is read-only, and the statement can change data or schema."
-        )),
-        "{out:?}"
-    );
-
-    // The server layer behind it.
-    type_script(vcx, &editor, &format!("{cte};\n"), 3);
+    // The PO's demo statement (Turkish identifiers), then a writable CTE: each runs in the
+    // user's transaction under the savepoint and waits for Keep/Undo.
+    for (undone, sql) in ["INSERT INTO müşteri VALUES (9, 'x', 1)", cte]
+        .into_iter()
+        .enumerate()
+    {
+        let sent_before = fake(vcx).call_log().len();
+        type_script(vcx, &editor, &format!("{sql};\n"), 3);
+        editor_command(vcx, &editor, "editor.run");
+        wait_until(vcx, "the Keep/Undo prompt", commit_open);
+        // ## m3b-t26-prod-unlock (fix round 1, A-M5): the gutter shows it running while the
+        // answer is awaited.
+        // ## m3c-t34-editor (named exception; T32 ruling 5): as its own state, the awaiting stamp
+        // (set by the question's follower, which may land just after the prompt opens).
+        wait_until(vcx, "the awaiting mark", |vcx| {
+            matches!(marks(vcx, id).as_slice(), [ExecMarkState::Awaiting])
+        });
+        let calls = fake(vcx).call_log()[sent_before..].to_vec();
+        assert!(
+            calls.iter().any(|c| matches!(c,
+                hacivat_driver::fake::FakeCall::Statement(s) if s == "SAVEPOINT hv_confirm")),
+            "{sql}: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| matches!(c,
+                hacivat_driver::fake::FakeCall::Typed(FakeTypedCall::Query(q)) if q == sql)),
+            "{sql}: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| matches!(c,
+                hacivat_driver::fake::FakeCall::Statement(s)
+                    if s.contains("COMMIT") || s.starts_with("RELEASE"))),
+            "{sql}: nothing kept before the answer: {calls:?}"
+        );
+        // Escape answers the safe value: Undo.
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        wait_until(vcx, "the Undo", |vcx| {
+            fake(vcx).call_log()[sent_before..].iter().any(|c| {
+                matches!(c,
+                hacivat_driver::fake::FakeCall::Statement(s)
+                    if s == "ROLLBACK TO SAVEPOINT hv_confirm")
+            })
+        });
+        wait_until(vcx, "the prompt to close", |vcx| !commit_open(vcx));
+        // ## m3b-t26-prod-unlock (fix round 1, A-M5): the log says it was undone, and the gutter
+        // no longer shows it running.
+        wait_until(vcx, "the undo's log line", |vcx| {
+            log(vcx, id)
+                .iter()
+                .filter(|m| m.fluent_id() == "exec-confirm-undone")
+                .count()
+                == undone + 1
+        });
+        // ## m3c-t34-editor (named exception; the T24/T29 carry): an undone statement ends
+        // rolled back (the undo glyph), no longer failed.
+        wait_until(vcx, "the settled mark", |vcx| {
+            !matches!(
+                marks(vcx, id).as_slice(),
+                [ExecMarkState::Running { .. } | ExecMarkState::Awaiting]
+            )
+        });
+        assert!(
+            matches!(marks(vcx, id).as_slice(), [ExecMarkState::RolledBack]),
+            "{sql}: {:?}",
+            marks(vcx, id)
+        );
+    }
+    // An unbounded DELETE asks with the typed name before anything is sent; Escape cancels.
+    let sent_before = fake(vcx).call_log().len();
+    type_script(vcx, &editor, "DELETE FROM müşteri;\n", 3);
     editor_command(vcx, &editor, "editor.run");
-    wait_until(vcx, "the Failed mark", |vcx| {
-        matches!(
-            marks(vcx, id).as_slice(),
-            [ExecMarkState::Failed { sqlstate: Some(code) }] if code.as_ref() == "25006"
-        )
+    wait_until(vcx, "the confirmation", |vcx| {
+        vcx.cx.read(hacivat_app::exec_ui::confirm::confirm_open)
+    });
+    let calls = fake(vcx).call_log();
+    assert!(
+        !calls[sent_before..].iter().any(|c| matches!(c,
+            hacivat_driver::fake::FakeCall::Typed(FakeTypedCall::Query(q)) if q.starts_with("DELETE"))),
+        "nothing sent before the answer: {:?}",
+        &calls[sent_before..]
+    );
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    wait_until(vcx, "the confirmation to close", |vcx| {
+        !vcx.cx.read(hacivat_app::exec_ui::confirm::confirm_open)
     });
     let lines = log(vcx, id);
     assert!(
         lines.iter().any(|m| matches!(
             m,
-            LogMsg::Error { view, .. }
-                if view.code.as_deref() == Some("25006")
-                    && view.server_text.as_deref()
-                        == Some("cannot execute INSERT in a read-only transaction")
+            LogMsg::RunUi {
+                id: "exec-confirm-cancelled",
+                ..
+            }
         )),
         "{lines:?}"
     );
-    // Fix round 1 (M8): the session's read-only wrapper reached the server before the
-    // statement did (the 25006 is the fake's script; what the product sent is not).
+    // ## m3b-t26-prod-unlock (fix round 1, B-M5): nothing of it in the whole call log (typed,
+    // simple, batch and execute calls alike).
     let calls = fake(vcx).call_log();
-    let write = calls
-        .iter()
-        .position(|c| {
-            matches!(c, hacivat_driver::fake::FakeCall::Typed(FakeTypedCall::Query(q))
-                if q.starts_with("WITH a AS (INSERT INTO audit"))
-        })
-        .expect("the CTE reached the fake");
     assert!(
-        calls[..write].iter().any(|c| matches!(
-            c,
-            hacivat_driver::fake::FakeCall::Statement(sql)
-                if sql.contains("READ ONLY") || sql.contains("default_transaction_read_only = on")
-        )),
-        "{calls:?}"
+        !calls[sent_before..]
+            .iter()
+            .any(|c| format!("{c:?}").contains("DELETE")),
+        "{:?}",
+        &calls[sent_before..]
     );
-    // Nothing is left open or committed: the guard's read-only transaction ended.
-    let tx = session.state().borrow().tx.clone();
-    assert_eq!(tx.status, TxStatus::Idle, "{tx:?}");
-    refresh(vcx);
-    // Fix round 1 (M8): the status bar says production and read-only.
-    let env = text_of(vcx, "status-env-label").unwrap_or_default();
-    assert!(
-        env.contains("production") && env.contains("read-only"),
-        "{env:?}"
-    );
-    // The Output tab says it: the server's text verbatim, on its own row.
+    // ## m3b-t26-prod-unlock (fix round 1, A-M5): a run cancelled before it was sent leaves no
+    // gutter mark (no run started), and the Output tab says what happened to each statement:
+    // the two undone, the DELETE cancelled.
+    assert!(marks(vcx, id).is_empty(), "{:?}", marks(vcx, id));
+    enable_registry(vcx);
     vcx.cx.update(|cx| {
         let results = Consoles::get(cx, id)
             .and_then(|s| s.results.clone())
             .expect("the console's results");
-        results.update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
+        results.update(cx, |r, cx| {
+            r.set_active(hacivat_app::results::ActiveResult::Output, cx)
+        });
     });
     refresh(vcx);
-    let out = output(vcx);
+    let out: Vec<String> = registry_frame(vcx)
+        .into_iter()
+        .filter(|r| r.path.contains("hacivat-app/src/results/output_view.rs"))
+        .map(|r| r.text.to_string())
+        .collect();
+    assert_eq!(
+        out.iter()
+            .filter(|t| t.contains("Undone: the confirmed statement was rolled back"))
+            .count(),
+        2,
+        "{out:?}"
+    );
     assert!(
         out.iter()
-            .any(|t| t.contains("cannot execute INSERT in a read-only transaction")),
+            .any(|t| t.contains("Nothing was sent: you cancelled at statement")),
         "{out:?}"
+    );
+    // Nothing was committed; the user's transaction is still open (Manual).
+    assert!(
+        !fake(vcx).executed().iter().any(|s| s.contains("COMMIT")),
+        "{:?}",
+        fake(vcx).executed()
+    );
+    let tx = session.state().borrow().tx.clone();
+    assert_eq!(tx.status, TxStatus::InTx, "{tx:?}");
+    assert_eq!(tx.owner, TxOwner::User, "{tx:?}");
+    refresh(vcx);
+    // Fix round 1 (M8): the status bar says production (and, since Task 26, read-write).
+    let env = text_of(vcx, "status-env-label").unwrap_or_default();
+    assert!(
+        env.contains("production") && env.contains("read-write"),
+        "{env:?}"
     );
     stop_core_runtime_test(cx);
 }

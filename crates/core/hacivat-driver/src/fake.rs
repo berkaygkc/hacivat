@@ -38,9 +38,15 @@
 //! `Unsupported`; PostgreSQL runs a statement while the query is suspended (the canary). A
 //! cancel (latched like M10) or a scripted `fail_after` error inside a PostgreSQL transaction
 //! leaves it `Failed`, as the server does. `typed_log` records every typed call; `call_log`
-//! every statement, typed call and reset in order. `tracks_transactions` makes connections set
-//! their status from the leading keywords of `execute`/`batch` text (`BEGIN`, `COMMIT`, ...)
-//! when no script entry says otherwise.
+//! every statement, typed call and reset in order. M3b (Task 1c): a query with binds logs
+//! `FakeTypedCall::Binds` right after its `Query` (`binds_seen` keeps every query's), its
+//! scripted `notices` come first as `QueryEvent::Notice`, and its scripted `warnings` are what
+//! `RawConn::warnings` answers once it is `Done` (counted in `QueryDone::warnings`).
+//! `tracks_transactions` makes connections set their status from the leading keywords of
+//! `execute`/`batch` text (`BEGIN`, `COMMIT`, ...) when no script entry says otherwise.
+//! M3b (Task 11, named exception): a typed query with `Protocol::Simple` ("run as one") answers
+//! its scripted sets and never suspends; in a failed PostgreSQL transaction a typed query that
+//! ends or recovers it (`ROLLBACK`, `ABORT`, `COMMIT`, `END`) is taken, any other answers 25P02.
 //!
 //! M3a (Task 12 fix round 1, the PostgreSQL driver's behaviour, pinned by its Docker tests):
 //! - a PostgreSQL batch that returns exactly its limit suspends even when no row is left; the
@@ -96,6 +102,9 @@ use crate::server::ServerInfo;
 // ## m3a-t01b-seams
 use crate::typed::{CloseHow, Closed, QueryDone, QueryEvent, QuerySpec, ResultEnd, TypedCaps};
 use hacivat_values::{Chunk, ColumnMeta, LogicalType, NativeType, ResultSchema, Value};
+// ## m3b-t01c-core-seams
+use crate::typed::Notice;
+use hacivat_values::BindValue;
 
 // ## m2b-t01-interfaces
 /// One scripted statement (Q23): used once, by the first statement starting with `prefix`.
@@ -120,6 +129,13 @@ struct ExecState {
     queries: Mutex<Vec<Option<FakeQuery>>>,
     typed: Mutex<Vec<FakeTypedCall>>,
     calls: Mutex<Vec<FakeCall>>,
+    // ## m3b-t01c-core-seams
+    /// Every typed query's bind values, in order (`binds_seen`).
+    binds: Mutex<Vec<Vec<BindValue>>>,
+    // ## demofix-1 (PO demo F6)
+    /// `unrecorded`: the texts of statements and typed calls are not kept, so a memory
+    /// measurement of a long streamed run sees the app's memory, not the fake's log.
+    unrecorded: std::sync::atomic::AtomicBool,
 }
 
 impl ExecState {
@@ -137,12 +153,18 @@ impl ExecState {
 
     /// Logs an `execute`/`batch` text (in `executed` and the call log).
     fn log_statement(&self, sql: &str) {
+        if self.unrecorded.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         lock(&self.executed).push(sql.to_string());
         lock(&self.calls).push(FakeCall::Statement(sql.to_string()));
     }
 
     /// Logs a typed call (in `typed_log` and the call log).
     fn log_typed(&self, call: FakeTypedCall) {
+        if self.unrecorded.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         lock(&self.typed).push(call.clone());
         lock(&self.calls).push(FakeCall::Typed(call));
     }
@@ -249,6 +271,17 @@ pub struct FakeQuery {
     /// `Err(Io(TimedOut))`, and the connection is lost (every later call answers
     /// `Io(NotConnected)`), as the real driver abandons it.
     pub kill_ignored: bool,
+    // ## m3b-t01c-core-seams (R-M3-77)
+    /// Server notices, sent as `QueryEvent::Notice` in order before the first other event.
+    pub notices: Vec<Notice>,
+    /// What `RawConn::warnings` answers once the query is `Done` (its `QueryDone::warnings`
+    /// counts them), until the next query.
+    pub warnings: Vec<Notice>,
+    // ## m3b-t19-confirm-tx (named exception, fix round 1, I1)
+    /// The connection's transaction status after the query fails (an error or a cancel): an
+    /// engine that rolls back the whole transaction (a SQLite interrupt, a MySQL deadlock)
+    /// leaves `Idle`. `None`: PostgreSQL fails an open transaction, other engines keep it.
+    pub tx_after_error: Option<TxStatus>,
 }
 
 /// A typed call, as `typed_log` records it.
@@ -257,6 +290,9 @@ pub enum FakeTypedCall {
     Query(String),
     FetchMore(u32),
     Close(CloseHow),
+    // ## m3b-t01c-core-seams
+    /// A query's bind values, logged right after its `Query` when it has any.
+    Binds(Vec<BindValue>),
 }
 
 /// Every call on a fake connection that touches the server, in order (`call_log`).
@@ -291,18 +327,19 @@ const FIRST_THREAD_ID: u64 = 1_000;
 
 /// What a fake connection's typed path reports unless `with_typed_caps` says otherwise: the
 /// real drivers' shapes (MySQL: a kill to close early, `net_write_timeout` − 15 s at the
-/// server default).
+/// server default). ## m3b-t11-session-runs (fix round 1, named exception): every engine binds
+/// (`binds: true`, as Task 13's drivers report).
 fn default_typed_caps(kind: DbmsKind) -> TypedCaps {
     match kind {
         DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb => TypedCaps {
             suspend: true,
-            binds: false,
+            binds: true,
             close_needs_kill: true,
             idle_bound: Some(Duration::from_secs(45)),
         },
         _ => TypedCaps {
             suspend: true,
-            binds: false,
+            binds: true,
             close_needs_kill: false,
             idle_bound: None,
         },
@@ -369,6 +406,9 @@ struct TypedRun {
     /// PostgreSQL ended the transaction under this suspended portal: the run is kept (still the
     /// connection's one open query, as the real driver keeps it) but the server has no portal.
     gone: bool,
+    // ## m3b-t01c-core-seams
+    /// The scripted notices not sent yet.
+    notices: VecDeque<Notice>,
 }
 
 /// The result set a typed query is delivering.
@@ -396,8 +436,12 @@ impl TypedRun {
             0 => chunk_rows,
             n => u64::from(n),
         };
-        let suspends = spec.suspendable && can_suspend && single;
+        // ## m3b-t11-session-runs: nor does a query run "as one" (`Protocol::Simple`).
+        let suspends =
+            spec.suspendable && can_suspend && single && spec.protocol != Protocol::Simple;
+        let notices = script.notices.iter().cloned().collect();
         TypedRun {
+            notices,
             savepoint_depth: 0,
             sets,
             skipped,
@@ -588,6 +632,15 @@ pub struct FakeDriver {
     // ## m3a-t01b-seams
     tracks_tx: bool,
     typed_caps: Option<TypedCaps>,
+    // ## m3b-t12-session-carries (named exception)
+    /// What every `RawConn::take_notices_dropped` answers (`notices_dropped`).
+    notices_dropped: u32,
+    // ## m3b-t18-safe06 (named exception)
+    /// What every connection's `RawConn::session_settings` answers (`session_settings`).
+    session_settings: crate::driver::SessionSettings,
+    // ## m4-pgcancel (named exception)
+    /// Every cancel answers `Err(Timeout)` and ends nothing (`cancel_times_out`).
+    cancel_times_out: bool,
 }
 
 impl FakeDriver {
@@ -637,6 +690,12 @@ impl FakeDriver {
             autocommit: None,
             tracks_tx: false,
             typed_caps: None,
+            // ## m3b-t12-session-carries
+            notices_dropped: 0,
+            // ## m3b-t18-safe06
+            session_settings: crate::driver::SessionSettings::default(),
+            // ## m4-pgcancel
+            cancel_times_out: false,
         }
     }
 
@@ -818,6 +877,13 @@ impl FakeDriver {
         lock(&self.exec.calls).clone()
     }
 
+    // ## m3b-t01c-core-seams
+    /// The bind values of every typed `query`, in order (an empty list for a query without
+    /// binds).
+    pub fn binds_seen(&self) -> Vec<Vec<BindValue>> {
+        lock(&self.exec.binds).clone()
+    }
+
     /// Connections set their transaction status from the leading keywords of `execute` and
     /// `batch` text (`BEGIN`/`START` → in a transaction; `COMMIT`/`END`/`ROLLBACK` → idle;
     /// `ROLLBACK TO` keeps it and recovers a failed one), unless a script entry's `tx_after`
@@ -828,9 +894,43 @@ impl FakeDriver {
         self
     }
 
+    // ## demofix-1 (PO demo F6)
+    /// Keeps no log of statements or typed calls (`executed`, `typed_log` and `call_log` stay
+    /// empty), for memory measurements of long streamed runs.
+    pub fn unrecorded(self) -> Self {
+        self.exec
+            .unrecorded
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
     /// What every connection's `typed_caps` reports (else the engine's shape).
     pub fn with_typed_caps(mut self, caps: TypedCaps) -> Self {
         self.typed_caps = Some(caps);
+        self
+    }
+
+    // ## m3b-t12-session-carries (named exception; the T13 carry)
+    /// Every `RawConn::take_notices_dropped` answers `n`: as if the driver had dropped `n`
+    /// notices past its own cap since the last call (the session takes them after `Done`).
+    pub fn notices_dropped(mut self, n: u32) -> Self {
+        self.notices_dropped = n;
+        self
+    }
+
+    // ## m4-pgcancel (named exception)
+    /// Every cancel answers `Err(Timeout)` at once and ends nothing: a protocol cancel whose
+    /// bound ran out before the server was seen to act on it, so it may still land later.
+    pub fn cancel_times_out(mut self) -> Self {
+        self.cancel_times_out = true;
+        self
+    }
+
+    // ## m3b-t18-safe06 (named exception)
+    /// What every connection's `RawConn::session_settings` answers: the settings a real
+    /// driver reads at connect (the lexing modes, PostgreSQL's `search_path`).
+    pub fn session_settings(mut self, settings: crate::driver::SessionSettings) -> Self {
+        self.session_settings = settings;
         self
     }
 
@@ -881,6 +981,8 @@ impl Driver for FakeDriver {
             exec: self.exec.clone(),
             tx: TxStatus::Idle,
             born: self.counters.killed.load(Ordering::SeqCst),
+            // ## m3b-t01c-core-seams
+            warnings: Vec::new(),
             cancel: Arc::default(),
             ignores_cancel: self.ignores_cancel,
             reset_fails: self.reset_fails,
@@ -897,6 +999,12 @@ impl Driver for FakeDriver {
             typed: None,
             savepoints: Vec::new(),
             lost: false,
+            // ## m3b-t12-session-carries
+            notices_dropped: self.notices_dropped,
+            // ## m3b-t18-safe06
+            session_settings: self.session_settings.clone(),
+            // ## m4-pgcancel
+            cancel_times_out: self.cancel_times_out,
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -977,6 +1085,9 @@ struct FakeConn {
     tx: TxStatus,
     /// `Counters::killed` when the connection was made.
     born: u64,
+    // ## m3b-t01c-core-seams
+    /// The last finished query's scripted warnings (`RawConn::warnings` takes them).
+    warnings: Vec<Notice>,
     cancel: Arc<CancelLatch>,
     ignores_cancel: bool,
     reset_fails: bool,
@@ -996,6 +1107,15 @@ struct FakeConn {
     /// An `AfterKill` ran out (`kill_ignored`): the connection is gone, as the real MySQL
     /// driver abandons it; every later call answers `Io(NotConnected)`.
     lost: bool,
+    // ## m3b-t12-session-carries (named exception)
+    /// What `take_notices_dropped` answers (`FakeDriver::notices_dropped`).
+    notices_dropped: u32,
+    // ## m3b-t18-safe06 (named exception)
+    /// What `session_settings` answers (`FakeDriver::session_settings`).
+    session_settings: crate::driver::SessionSettings,
+    // ## m4-pgcancel (named exception)
+    /// `FakeDriver::cancel_times_out`.
+    cancel_times_out: bool,
 }
 
 impl FakeConn {
@@ -1190,11 +1310,22 @@ impl CancelLatch {
 struct FakeCancel {
     latch: Arc<CancelLatch>,
     counters: Arc<Counters>,
+    // ## m4-pgcancel
+    times_out: bool,
 }
 
 impl CancelHandle for FakeCancel {
     fn cancel(&self) -> BoxFuture<'static, Result<(), RawError>> {
         self.counters.cancel.fetch_add(1, Ordering::SeqCst);
+        // ## m4-pgcancel: a cancel that timed out ends nothing here.
+        if self.times_out {
+            return Box::pin(async {
+                Err(RawError {
+                    kind: RawErrorKind::Timeout,
+                    server: None,
+                })
+            });
+        }
         if self.latch.running.load(Ordering::SeqCst) {
             self.latch.latched.store(true, Ordering::SeqCst);
         }
@@ -1261,6 +1392,8 @@ impl RawConn for FakeConn {
         Some(Arc::new(FakeCancel {
             latch: self.cancel.clone(),
             counters: self.counters.clone(),
+            // ## m4-pgcancel
+            times_out: self.cancel_times_out,
         }))
     }
 
@@ -1321,12 +1454,35 @@ impl RawConn for FakeConn {
     fn query<'a>(&'a mut self, spec: QuerySpec<'a>) -> BoxFuture<'a, Result<(), RawError>> {
         self.exec
             .log_typed(FakeTypedCall::Query(spec.sql.to_string()));
+        // ## m3b-t01c-core-seams: the binds, right after the query (only when it has any, so
+        // a query without binds logs as in M3a).
+        if !spec.binds.is_empty() {
+            self.exec
+                .log_typed(FakeTypedCall::Binds(spec.binds.to_vec()));
+        }
+        lock(&self.exec.binds).push(spec.binds.to_vec());
         let started = self.start_query(&spec);
         Box::pin(async move { started })
     }
 
+    // ## m3b-t01c-core-seams
+    fn warnings(&mut self) -> BoxFuture<'_, Result<Vec<Notice>, RawError>> {
+        let answered = self.alive().map(|()| std::mem::take(&mut self.warnings));
+        Box::pin(async move { answered })
+    }
+
     fn next_event(&mut self) -> BoxFuture<'_, Result<QueryEvent, RawError>> {
         Box::pin(self.next_typed_event())
+    }
+
+    // ## m3b-t12-session-carries (named exception)
+    fn take_notices_dropped(&mut self) -> u32 {
+        self.notices_dropped
+    }
+
+    // ## m3b-t18-safe06 (named exception)
+    fn session_settings(&self) -> crate::driver::SessionSettings {
+        self.session_settings.clone()
     }
 
     fn fetch_more(&mut self, rows: u32) -> BoxFuture<'_, Result<(), RawError>> {
@@ -1484,11 +1640,11 @@ impl FakeConn {
         if self.typed.is_some() {
             return Err(unsupported());
         }
-        // Fix round 1: M3a's drivers speak the extended protocol only (`typed.rs`).
-        if spec.protocol == Protocol::Simple {
-            return Err(unsupported());
-        }
-        if pg_wire(self.kind) && self.tx == TxStatus::Failed {
+        // ## m3b-t11-session-runs (named exception): `Protocol::Simple` is "run as one"
+        // (R-M3-60), which the M3b drivers take (Task 13): the scripted sets, never suspended.
+        // A failed PostgreSQL transaction takes the statements that end or recover it
+        // (`ROLLBACK`, its synonym `ABORT`, R-M3-74), as the server does on either protocol.
+        if pg_wire(self.kind) && self.tx == TxStatus::Failed && !ends_or_recovers_tx(spec.sql) {
             return Err(in_failed_transaction());
         }
         // P5: a portal outside a transaction block would end at its Sync.
@@ -1496,6 +1652,8 @@ impl FakeConn {
             return Err(unsupported());
         }
         let script = self.exec.take_query(spec.sql).unwrap_or_default();
+        // ## m3b-t01c-core-seams: warnings belong to the last statement.
+        self.warnings.clear();
         let mut run = TypedRun::new(spec, script, self.caps.suspend);
         run.savepoint_depth = self.savepoints.len();
         self.typed = Some(run);
@@ -1511,8 +1669,15 @@ impl FakeConn {
 
     /// Ends the open run with `err`; inside a PostgreSQL transaction the server fails it.
     fn fail_typed(&mut self, err: RawError) -> RawError {
+        // ## m3b-t19-confirm-tx (named exception): a scripted status after a failure.
+        let after = self
+            .typed
+            .as_ref()
+            .and_then(|run| run.script.tx_after_error);
         self.end_typed();
-        if pg_wire(self.kind) && self.tx == TxStatus::InTx {
+        if let Some(tx) = after {
+            self.tx = tx;
+        } else if pg_wire(self.kind) && self.tx == TxStatus::InTx {
             self.tx = TxStatus::Failed;
         }
         err
@@ -1587,6 +1752,10 @@ impl FakeConn {
             return Err(unsupported());
         };
         run.started = true;
+        // ## m3b-t01c-core-seams: the scripted notices come first.
+        if let Some(notice) = run.notices.pop_front() {
+            return Ok(QueryEvent::Notice(notice));
+        }
         let Some(open) = run.current.as_mut() else {
             if let Some(set) = run.sets.pop_front() {
                 let schema = set.schema();
@@ -1604,10 +1773,14 @@ impl FakeConn {
             if let Some(tx) = run.script.tx_after {
                 self.tx = tx;
             }
+            // ## m3b-t01c-core-seams: the scripted warnings, counted in `Done`.
+            let warnings = run.script.warnings.clone();
+            let count = u16::try_from(warnings.len()).unwrap_or(u16::MAX);
+            self.warnings = warnings;
             self.end_typed();
             return Ok(QueryEvent::Done(QueryDone {
                 tx: self.tx,
-                warnings: 0,
+                warnings: count,
                 skipped_result_sets: skipped,
             }));
         };

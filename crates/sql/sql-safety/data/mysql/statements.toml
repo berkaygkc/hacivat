@@ -1,0 +1,104 @@
+# owner: Task 10 (the interim backend's statement table; MySQL and MariaDB, R-M3-54).
+#
+# One row per `sqlparser` 0.64.0 `Statement` variant (its name as `Debug` prints it) the
+# interim backend accepts on MySQL and MariaDB: the statement's kind and its base effects
+# (`alg/13` SQL-SAFE-02, the MySQL/MariaDB statement table). The backend's deep walk adds what
+# the tree shows (locking clauses, `INTO`, function calls, nested statements, destructive
+# patterns); the lexer pre-scan adds what the tree may hide. A variant without a row is
+# `UNKNOWN` with `EffectsUnknown` (fail closed): a new `sqlparser` variant is never a read.
+#
+# `kind` names a `StmtKind` variant (`Explain` is `Explain { analyze: false }`; the walk sets
+# `analyze`). `effects` names `EffectSet` flags; `reasons` names `ReasonCode`s; `flags` names
+# `RiskFlags`. Every name is checked by `tests/interim.rs` (`statement_tables_load`).
+version = 1
+rows = [
+  # Reads.
+  { variant = "Query", kind = "Select", effects = ["READ"] },
+  { variant = "ExplainTable", kind = "Show", effects = ["READ"] },
+  { variant = "Explain", kind = "Explain", effects = ["READ"] },
+  { variant = "ShowFunctions", kind = "Show", effects = ["READ"] },
+  { variant = "ShowVariable", kind = "Show", effects = ["READ"] },
+  { variant = "ShowStatus", kind = "Show", effects = ["READ"] },
+  { variant = "ShowVariables", kind = "Show", effects = ["READ"] },
+  { variant = "ShowCreate", kind = "Show", effects = ["READ"] },
+  { variant = "ShowColumns", kind = "Show", effects = ["READ"] },
+  { variant = "ShowDatabases", kind = "Show", effects = ["READ"] },
+  { variant = "ShowProcessList", kind = "Show", effects = ["READ"] },
+  { variant = "ShowSchemas", kind = "Show", effects = ["READ"] },
+  { variant = "ShowCharset", kind = "Show", effects = ["READ"] },
+  { variant = "ShowTables", kind = "Show", effects = ["READ"] },
+  { variant = "ShowViews", kind = "Show", effects = ["READ"] },
+  { variant = "ShowCollation", kind = "Show", effects = ["READ"] },
+  # Data changes. `REPLACE` and `INSERT … ON DUPLICATE KEY UPDATE` are `Insert`.
+  { variant = "Insert", kind = "Insert", effects = ["WRITE_DATA"] },
+  { variant = "Update", kind = "Update", effects = ["WRITE_DATA"] },
+  { variant = "Delete", kind = "Delete", effects = ["WRITE_DATA"] },
+  { variant = "Merge", kind = "Merge", effects = ["WRITE_DATA"] },
+  { variant = "LoadData", kind = "Insert", effects = ["WRITE_DATA", "EXTERNAL_IO"], reasons = ["ExternalFile"] },
+  # Schema changes. `TRUNCATE` writes data and is DDL (implicit commit).
+  { variant = "Truncate", kind = "Truncate", effects = ["WRITE_DATA", "DDL"] },
+  { variant = "CreateTable", kind = "CreateTable", effects = ["DDL"] },
+  { variant = "CreateView", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "CreateIndex", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "CreateSchema", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "CreateDatabase", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "CreateFunction", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "CreateProcedure", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "CreateTrigger", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "CreateSequence", kind = "CreateOther", effects = ["DDL"] },
+  { variant = "AlterTable", kind = "Alter", effects = ["DDL"] },
+  { variant = "AlterView", kind = "Alter", effects = ["DDL"] },
+  { variant = "AlterSchema", kind = "Alter", effects = ["DDL"] },
+  { variant = "AlterIndex", kind = "Alter", effects = ["DDL"] },
+  { variant = "AlterFunction", kind = "Alter", effects = ["DDL"] },
+  { variant = "RenameTable", kind = "Alter", effects = ["DDL"] },
+  { variant = "Comment", kind = "Alter", effects = ["DDL"] },
+  { variant = "Drop", kind = "Drop", effects = ["DDL"] },
+  { variant = "DropFunction", kind = "Drop", effects = ["DDL"] },
+  { variant = "DropProcedure", kind = "Drop", effects = ["DDL"] },
+  { variant = "DropTrigger", kind = "Drop", effects = ["DDL"] },
+  # `ANALYZE TABLE` and `OPTIMIZE TABLE` rewrite statistics or tables (`alg/13`: DDL).
+  { variant = "Analyze", kind = "Other", effects = ["DDL"], reasons = ["SchemaChange"] },
+  { variant = "OptimizeTable", kind = "Other", effects = ["DDL"], reasons = ["SchemaChange"] },
+  # Privileges and accounts.
+  { variant = "Grant", kind = "Grant", effects = ["PRIVILEGE"], reasons = ["PrivilegeGrant"] },
+  { variant = "GrantRole", kind = "Grant", effects = ["PRIVILEGE"], reasons = ["PrivilegeGrant"] },
+  { variant = "Revoke", kind = "Revoke", effects = ["PRIVILEGE"], reasons = ["PrivilegeGrant"] },
+  { variant = "RevokeRole", kind = "Revoke", effects = ["PRIVILEGE"], reasons = ["PrivilegeGrant"] },
+  { variant = "CreateUser", kind = "Grant", effects = ["PRIVILEGE"], reasons = ["PrivilegeGrant"] },
+  { variant = "AlterUser", kind = "Grant", effects = ["PRIVILEGE"], reasons = ["PrivilegeGrant"] },
+  { variant = "CreateRole", kind = "Grant", effects = ["PRIVILEGE"], reasons = ["PrivilegeGrant"] },
+  { variant = "AlterRole", kind = "Grant", effects = ["PRIVILEGE"], reasons = ["PrivilegeGrant"] },
+  # Session state. `SET` targets come from the lexer's `SET` grammar (`prescan`).
+  { variant = "Set", kind = "Set", effects = ["SESSION_STATE"] },
+  { variant = "Use", kind = "Use", effects = ["SESSION_STATE"] },
+  { variant = "Deallocate", kind = "Prepare", effects = ["PREPARE"] },
+  # Transaction control.
+  { variant = "StartTransaction", kind = "Begin", effects = ["TXN_CONTROL"] },
+  { variant = "Commit", kind = "Commit", effects = ["TXN_CONTROL"] },
+  { variant = "Rollback", kind = "Rollback", effects = ["TXN_CONTROL"] },
+  { variant = "Savepoint", kind = "Savepoint", effects = ["TXN_CONTROL"] },
+  { variant = "ReleaseSavepoint", kind = "Savepoint", effects = ["TXN_CONTROL"] },
+  # Table locks (implicit commit on MySQL; `alg/13` M5).
+  { variant = "LockTables", kind = "Lock", effects = ["LOCK_TABLE"] },
+  { variant = "UnlockTables", kind = "Lock", effects = ["LOCK_TABLE"] },
+  # Routines and dynamic SQL: the body is opaque.
+  { variant = "Call", kind = "Call", effects = ["ROUTINE_CALL"] },
+  { variant = "Prepare", kind = "Prepare", effects = ["PREPARE"], reasons = ["DynamicSql"], flags = ["DYNAMIC_SQL"] },
+  { variant = "Execute", kind = "Execute", effects = ["UNKNOWN"], reasons = ["DynamicSql"], flags = ["DYNAMIC_SQL"] },
+  # Server administration.
+  { variant = "Kill", kind = "Other", effects = ["ADMIN"], reasons = ["AdminControl"] },
+  { variant = "Flush", kind = "Other", effects = ["ADMIN"], reasons = ["AdminControl"] },
+  { variant = "Reset", kind = "Other", effects = ["ADMIN"], reasons = ["AdminControl"] },
+  { variant = "Install", kind = "Other", effects = ["ADMIN", "PROCESS_EXEC"], reasons = ["ProcessExec"] },
+  # Procedural statements outside a routine body.
+  { variant = "Declare", kind = "Other", effects = ["UNKNOWN"], reasons = ["ProceduralCode"] },
+  { variant = "Case", kind = "Other", effects = ["UNKNOWN"], reasons = ["ProceduralCode"] },
+  { variant = "If", kind = "Other", effects = ["UNKNOWN"], reasons = ["ProceduralCode"] },
+  { variant = "While", kind = "Other", effects = ["UNKNOWN"], reasons = ["ProceduralCode"] },
+  { variant = "Raise", kind = "Other", effects = ["UNKNOWN"], reasons = ["ProceduralCode"] },
+  { variant = "Return", kind = "Other", effects = ["UNKNOWN"], reasons = ["ProceduralCode"] },
+  { variant = "Open", kind = "Other", effects = ["UNKNOWN"], reasons = ["ProceduralCode"] },
+  { variant = "Close", kind = "Other", effects = ["UNKNOWN"], reasons = ["ProceduralCode"] },
+  { variant = "Fetch", kind = "Other", effects = ["UNKNOWN"], reasons = ["ProceduralCode"] },
+]

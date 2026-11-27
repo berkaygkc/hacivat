@@ -828,7 +828,8 @@ fn grid_node_is_the_focused_element(cx: &mut TestAppContext) {
     });
     assert_eq!(role, Some(Role::Grid));
     assert_eq!(node.label(), Some("Result 1"));
-    assert_eq!(node.row_count(), Some(7));
+    // ## m3c-t40 (named exception): the header row counts too (it is row 0).
+    assert_eq!(node.row_count(), Some(8));
     assert_eq!(node.column_count(), Some(4));
     // Without assistive technology nothing is declared and the label is never read.
     let reads = view.read_with(vcx, |v, _| v.a11y_label_reads());

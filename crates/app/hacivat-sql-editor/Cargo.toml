@@ -6,6 +6,11 @@ license.workspace = true
 publish.workspace = true
 description = "The SQL language service of the console editor: off-thread analysis, lexical highlighting, the Run preview, token words"
 
+[features]
+# ## m3c-t44 (named exception: feature-only, M3a T36 precedent): the worker's relex and
+# analysis timer read by the real-app B3 bench (R-M3-9); only `hacivat-app/bench` enables it.
+bench = []
+
 # App layer: it joins the editor (Ui) and the SQL text crates (Core). The worker runs on the
 # GPUI background executor and hands results back over a `tokio::sync::watch` (P6).
 [dependencies]

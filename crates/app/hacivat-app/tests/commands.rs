@@ -94,6 +94,9 @@ fn enabled_action_count(vcx: &VisualTestContext) -> usize {
             .all()
             .iter()
             .filter(|d| (d.enabled)(cx))
+            // ## m3c-t40 fix round 1 (m6, named exception): Tab's grid commands keep their
+            // keys but are no palette rows.
+            .filter(|d| !hacivat_ui_grid::commands::hidden_in_palette(d.id))
             .count()
     })
 }
@@ -412,21 +415,31 @@ fn every_action_title_exists_in_en() {
 /// `connections::install` registration). The M2a pending list was emptied at the gate (T22);
 /// the M3a pending list (the editor, grid and console rows Task 1b bound before their
 /// commands existed) was emptied by Tasks 30, 32 and 33 and deleted at the M3a gate (Task 37).
-/// Commands the app registers on macOS only (`console::commands`, F4 row 6b).
-const MACOS_ONLY_COMMANDS: &[&str] = &["app.character_palette"];
-
 #[gpui::test]
 fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     let reg = cx.update(|cx| {
         hacivat_app::init(cx);
         cx.global::<ActionRegistry>().clone()
     });
+    // ## m3b-ci (controller): a command `init` registers only on its own host (Edit > Emoji &
+    // Symbols is macOS-only, F4 6b) is checked against that platform's keymap only when the
+    // test runs on that host. CI's Linux and Windows runners load the macOS keymap too.
+    const HOST_ONLY: [(&str, KeymapPlatform); 1] =
+        [("app.character_palette", KeymapPlatform::MacOs)];
+    let host = if cfg!(target_os = "macos") {
+        KeymapPlatform::MacOs
+    } else if cfg!(target_os = "windows") {
+        KeymapPlatform::Windows
+    } else {
+        KeymapPlatform::Linux
+    };
     for p in ALL_PLATFORMS {
         for preset in PRESETS {
             for b in load(p, preset, None).0.bindings() {
-                // ## m3a-f4-ime: `app.character_palette` is registered on macOS only (its row
-                // lives in the macOS keymap); off macOS the registry has no such command.
-                if !cfg!(target_os = "macos") && MACOS_ONLY_COMMANDS.contains(&b.command.as_str()) {
+                let host_only = HOST_ONLY
+                    .iter()
+                    .any(|(id, only)| b.command == *id && *only == p && *only != host);
+                if host_only {
                     continue;
                 }
                 assert!(reg.get(&b.command).is_some(), "{}", b.command);
@@ -788,11 +801,11 @@ fn restart_asks_the_platform_to_restart(cx: &mut TestAppContext) {
 fn restart_flushes_pending_writes_before_restarting(cx: &mut TestAppContext) {
     use hacivat_app::shell::update_settings;
     use hacivat_settings::ThemePref;
-    let root = tempfile::tempdir().unwrap();
-    let vcx = shell_at(cx, root.path(), "en");
+    let root = temp_root();
+    let vcx = shell_at(cx, root.as_path(), "en");
     let mut restarted = vcx.cx.expect_restart();
-    let settings = root.path().join("config/settings.toml");
-    let layout_file = root.path().join("data/workspace.json");
+    let settings = root.as_path().join("config/settings.toml");
+    let layout_file = root.as_path().join("data/workspace.json");
     assert!(!layout_file.exists());
     let ws = workspace(vcx);
     let written_at_restart = in_window(vcx, |window, cx| {
@@ -926,6 +939,9 @@ fn show_menu_is_the_only_platform_gated_action() {
             "workspace.split_down",
             "workspace.focus_next_pane",
             "workspace.toggle_explorer",
+            // ## demofix-1 fix round 1 (named exception, review m5): the editor / results seam.
+            "workspace.results_larger",
+            "workspace.results_smaller",
             "workspace.toggle_theme",
             "workspace.next_language",
             "workspace.reload_translations",

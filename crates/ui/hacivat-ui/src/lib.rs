@@ -10,6 +10,8 @@ pub mod choice_list;
 pub mod dialog;
 pub mod disclosure;
 pub mod explain;
+// ## m4-t33d-fr1 (ruling R-T33d-5): a focused control that stops being drawn hands the focus on.
+pub mod focus_home;
 // ## m2b-t24-shots (fix round 1, I2): scroll containers that follow the focus.
 pub mod follow;
 pub mod form;
@@ -20,6 +22,8 @@ pub mod input;
 pub mod keymaps;
 pub mod l10n;
 pub mod menu;
+// ## m3c-t41-chrome
+pub mod metrics;
 pub mod notice;
 pub mod palette;
 pub mod panes;
@@ -33,3 +37,5 @@ pub mod titlebar;
 pub mod toast;
 // ## m3a-t01b-seams: the Overflow Rule toolbar (Task 21).
 pub mod toolbar;
+// ## m4-t01b-seams: the virtualized tree (Task 8 filled it; m4-t08 named exception: this line).
+pub mod tree;

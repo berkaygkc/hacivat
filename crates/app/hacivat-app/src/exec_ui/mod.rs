@@ -18,6 +18,16 @@
 pub mod cancel;
 pub mod chooser;
 pub mod close_prompt;
+// ## m3b-t01b-seams: the M3b run UI (stubs that draw nothing and answer the safe value):
+// confirmation and confirm-in-transaction (Task 21), cancel escalation and the error-policy bar
+// (Task 23), the parameter prompt and the run-policy popover (Task 24). Task 1c's types come
+// from `hacivat_exec` (ruling I2).
+pub mod commit_prompt;
+pub mod confirm;
+pub mod error_bar;
+pub mod escalation;
+pub mod params_prompt;
+pub mod policy_popover;
 // ## m3a-t33-exec-ui (fix round 1): the SQL context, known or unknown.
 pub mod context;
 // ## m3a-t35-shots (named exception): the gutter marks' shots fixtures.
@@ -32,7 +42,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_exec::{ExecService, ExecUnit, SplitOracle};
-use hacivat_results::MemoryBudget;
+use hacivat_results::{FetchPolicy, MemoryBudget};
 use hacivat_session::session::{RunId, SessionHandle, UnitId};
 use hacivat_ui::menu::PopupMenu;
 use hacivat_ui_core::gpui_surface::{
@@ -42,6 +52,9 @@ use hacivat_ui_editor::{EditorView, MarkKey};
 use sql_split::exec_range::{CandidateKind, TextRange};
 
 pub use orchestrator::{agrees, attach, handle_results_event, rebind, resolve_for_run};
+// ## m3b-t01b-seams
+pub use confirm::AppConfirmPort;
+pub use error_bar::{ErrorAsk, on_choice};
 
 use crate::console::ConsoleId;
 use crate::shell::{Workspace, set_quit_guard, set_tab_close_guard};
@@ -136,6 +149,9 @@ pub(crate) struct ActiveRun {
     pub(crate) cancel_asked: bool,
     /// The run's status (`exec.cancel` reads which unit is in flight).
     pub(crate) status: tokio::sync::watch::Receiver<hacivat_exec::RunStatus>,
+    // ## m3b-t24-exec-ui (fix round 2)
+    /// The error policy the run was sent with (`last_run_policy`).
+    pub(crate) policy: hacivat_session::session::ErrorPolicy,
     pub(crate) _tasks: Vec<Task<()>>,
 }
 
@@ -164,12 +180,32 @@ pub(crate) fn exec_service(cx: &mut App) -> Arc<ExecService> {
     }
     let budget = MemoryBudget::from_ram(hacivat_ui_core::platform::physical_memory_bytes());
     let mut service = ExecService::new(budget);
+    // ## m3b-t26-prod-unlock (fix round 1, A-M2): the error bar's plan-less test seam
+    // (`error_bar::run_asking`) runs only in a `test-support` build; the product refuses any
+    // plan-less request.
+    #[cfg(feature = "test-support")]
+    {
+        service = service.with_plan_less_runs();
+    }
     if let Some(m) = cx.try_global::<crate::connections::ConnectionsModel>() {
         service = service.with_runtime(m.runtime());
     }
+    // ## m3b-t24-exec-ui (named exception): Run classifies on the app's one classifier pool
+    // (R-M3-53; the read-only guard's too), and the runs' history records go to the store once
+    // it has opened (`orchestrator::open_history`).
+    service = service
+        .with_classifier(orchestrator::classifier(cx))
+        .with_history_sink(orchestrator::history_sink(cx));
     let service = Arc::new(service);
     cx.default_global::<ExecUi>().service = Some(service.clone());
     service
+}
+
+// ## m3b-t24-exec-ui (named exception)
+/// Drops the app's run service, so the next run builds it again (with the classifier pool
+/// installed since: `orchestrator::install_classifier`).
+pub(crate) fn reset_service(cx: &mut App) {
+    cx.default_global::<ExecUi>().service = None;
 }
 
 /// The marks of console `console`'s latest run, in unit order (`None` for a mark that is gone):
@@ -178,6 +214,11 @@ pub fn last_run_marks(
     console: ConsoleId,
     cx: &App,
 ) -> Vec<Option<hacivat_ui_editor::ExecMarkState>> {
+    // ## m3b-t24-exec-ui (named exception): a Run still being prepared shows nothing yet, and a
+    // refused one its refused units' marks.
+    if let Some(marks) = orchestrator::latest_marks_override(console, cx) {
+        return marks;
+    }
     let Some(exec) = console_exec(cx, console) else {
         return Vec::new();
     };
@@ -194,6 +235,18 @@ pub fn last_run_ended(console: ConsoleId, cx: &App) -> bool {
     console_exec(cx, console)
         .and_then(|e| e.run.as_ref())
         .is_some_and(|r| r.ended)
+}
+
+// ## m3b-t24-exec-ui (fix round 2)
+/// The error policy console `console`'s last run was sent with: `Ask` offers the error bar
+/// after a failure (Ignore, Skip, Retry), `StopOnError` never does.
+pub fn last_run_policy(
+    console: ConsoleId,
+    cx: &App,
+) -> Option<hacivat_session::session::ErrorPolicy> {
+    console_exec(cx, console)
+        .and_then(|e| e.run.as_ref())
+        .map(|r| r.policy)
 }
 
 /// The workspace window (the active one first).
@@ -228,8 +281,9 @@ pub fn sql_context(console: ConsoleId, cx: &App) -> context::SqlContext {
 }
 
 // ## m3a-t33-exec-ui (fix round 1, Task 32 contract): pending read-only.
-/// The consoles Task 32 marked `pending_read_only`: a production-tagged console waiting for the
-/// user's open transaction to end before it reconnects read-only.
+/// The consoles Task 32 marked `pending_read_only`: a console whose profile was marked
+/// read-only, waiting for the user's open transaction to end before it reconnects read-only
+/// (## m3b-t26-prod-unlock: a production tag no longer does this, R-M3-78).
 #[derive(Default)]
 struct PendingReadOnly(std::collections::HashSet<ConsoleId>);
 
@@ -252,6 +306,38 @@ pub fn connected(console: ConsoleId, cx: &App) -> bool {
         && orchestrator::live_session(cx, console).is_some()
 }
 
+// ## m3b-t01b-seams
+
+/// The fetch policy of console `console`'s next run (Task 24 calls it when it builds the run;
+/// P-M3b-17): M3a's numbers with `results.max_value_bytes` as the cell cap (R-M3-82; the
+/// default 1 MiB without settings).
+pub fn fetch_policy_for(console: ConsoleId, cx: &App) -> FetchPolicy {
+    // ## m3b-t25-results
+    let _ = console;
+    let limit = cx
+        .try_global::<crate::shell::AppState>()
+        .map_or_else(hacivat_settings::ValueLimit::default, |s| {
+            s.settings.results.max_value_bytes
+        });
+    FetchPolicy::default().with_cell_cap(limit.get())
+}
+
+// ## m3b-t25-results
+// The settings' value-size range and the store's cell-cap range are one range (T8 M8):
+// `hacivat-results` cannot name `ValueLimit` (no manifest edge), so the two are checked here.
+const _: () = assert!(
+    hacivat_results::window::MIN_CELL_CAP == hacivat_settings::ValueLimit::MIN
+        && hacivat_results::window::MAX_CELL_CAP == hacivat_settings::ValueLimit::MAX
+);
+
+/// A receiver that already holds `answer` (the M3b stubs' answers).
+pub(crate) fn answered<T>(answer: T) -> tokio::sync::oneshot::Receiver<T> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // The receiver is alive here, so the send cannot fail.
+    let _ = tx.send(answer);
+    rx
+}
+
 /// Sets or clears console `console`'s pending read-only flag (Task 32's seam).
 pub fn set_pending_read_only(console: ConsoleId, pending: bool, cx: &mut App) {
     let set = &mut cx.default_global::<PendingReadOnly>().0;
@@ -260,4 +346,25 @@ pub fn set_pending_read_only(console: ConsoleId, pending: bool, cx: &mut App) {
     } else {
         set.remove(&console);
     }
+}
+
+// ## m3b-t27-history (named exception): the history dialog's Insert.
+/// Replaces console `console`'s editor selection with `text` (the caret after it) as one undo
+/// group, through the editor's own edit path (`ImeCore::dispatch` + `apply_committed`,
+/// `EditorView::replace_selection`). `false`, with nothing changed, while an IME composition is
+/// open (never queued: the M3a T27 rule), without an editor, on a read-only editor or past the
+/// document size limit.
+pub fn insert_at_caret(console: ConsoleId, text: &str, cx: &mut App) -> bool {
+    inserted_at_caret(console, text, cx).is_some()
+}
+
+// ## m3b-t27-history (named exception)
+/// [`insert_at_caret`], answering the bytes the text now covers (Insert and run selects them).
+pub(crate) fn inserted_at_caret(
+    console: ConsoleId,
+    text: &str,
+    cx: &mut App,
+) -> Option<std::ops::Range<usize>> {
+    let editor = crate::console::Consoles::get(cx, console)?.editor.clone()?;
+    editor.update(cx, |v, cx| v.replace_selection(text, cx))
 }

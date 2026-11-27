@@ -221,8 +221,9 @@ impl Tile {
     }
 
     fn redraw(&self) {
-        in_window(self.vcx, |window, _| window.refresh());
-        self.vcx.run_until_parked();
+        // ## m4-t33d (T33 flaky3 follow-up): the last frame renders every view (a frame
+        // after `run_until_parked` may reuse a cached view, which records no texts).
+        redraw_full(self.vcx);
     }
 
     fn host(&self) -> Entity<ResultsHost> {
@@ -468,6 +469,129 @@ fn suspended_strip_buttons_reach_the_source(cx: &mut TestAppContext) {
     );
 }
 
+// ## m4-t33d (R-T33-1, M3a NOTES surface 11 "Keyboard": the strip's buttons are in the results
+// tile's Tab order after the grid): Tab from the grid reaches Close cursor, Fetch more and
+// Fetch all, in visual order.
+#[gpui::test]
+fn the_strip_buttons_follow_the_grid_in_the_tab_order(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    let control = Arc::new(Control::default());
+    t.apply(&[tab(
+        1,
+        source(
+            store_of(10, 1, Completeness::Suspended(cursor())),
+            control.clone(),
+        ),
+    )]);
+    let more = handle_of(t.vcx, "button-strip-fetch-more");
+    let all = handle_of(t.vcx, "button-strip-fetch-all");
+    let close = handle_of(t.vcx, "button-strip-close-cursor");
+    let grid = grid_of(t.vcx, t.console, 0);
+    let grid = t.vcx.cx.read(|cx| grid.read(cx).focus_handle(cx));
+    let order = tab_order(t.vcx);
+    assert_consecutive(
+        &order,
+        &[
+            ("Close cursor", &close),
+            ("Fetch more", &more),
+            ("Fetch all", &all),
+        ],
+    );
+    // The grid is no Tab stop of its own (⌘3 focuses the tile); Tab in it leaves for the strip.
+    assert_not_a_stop(&order, "the grid", &grid);
+    in_window(t.vcx, |window, cx| window.focus(&grid, cx));
+    t.vcx.simulate_keystrokes("tab");
+    t.vcx.run_until_parked();
+    assert_eq!(
+        focused(t.vcx),
+        Some(close),
+        "Tab from the grid is Close cursor"
+    );
+    assert!(control.closes.lock().unwrap().is_empty(), "nothing clicked");
+}
+
+// ## m4-t33d-fr1 (T33d review I2, hostile test H3): with the record inspector open (its ▲ ▼,
+// drawn between the grid and the strip), Tab from the grid is still Close cursor.
+#[gpui::test]
+fn with_the_inspector_open_tab_from_the_grid_is_still_close_cursor(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    t.apply(&[tab(
+        1,
+        source(
+            store_of(10, 1, Completeness::Suspended(cursor())),
+            Arc::default(),
+        ),
+    )]);
+    in_window(t.vcx, hacivat_app::results::views::toggle_record);
+    t.redraw();
+    assert!(
+        t.vcx.debug_bounds("button-record-next").is_some(),
+        "the inspector is open"
+    );
+    let close = handle_of(t.vcx, "button-strip-close-cursor");
+    let grid = grid_of(t.vcx, t.console, 0);
+    let grid = t.vcx.cx.read(|cx| grid.read(cx).focus_handle(cx));
+    in_window(t.vcx, |window, cx| window.focus(&grid, cx));
+    t.vcx.simulate_keystrokes("tab");
+    t.vcx.run_until_parked();
+    assert_focus_on(t.vcx, "Close cursor (Tab from the grid)", &close);
+}
+
+/// A suspended result whose writer the test keeps, to finish it as the session would.
+fn suspended(control: Arc<Control>) -> (Arc<dyn ResultSource>, hacivat_results::ResultWriter) {
+    let budget = hacivat_results::MemoryBudget::new(u64::MAX, u64::MAX);
+    let (store, mut writer) = ResultStore::new(ResultId(7), schema(1), budget, 0);
+    writer.set_state(Completeness::Suspended(cursor()));
+    (source(store, control), writer)
+}
+
+/// The shown grid's focus.
+fn grid_focus(t: &Tile) -> gpui::FocusHandle {
+    let grid = grid_of(t.vcx, t.console, 0);
+    t.vcx.cx.read(|cx| grid.read(cx).focus_handle(cx))
+}
+
+// ## m4-t33d-fr1 (ruling R-T33d-5): Enter on Close cursor closes it; once the session closed
+// the cursor, the strip's buttons go, and the focus lands on the grid (the results tile's
+// primary) instead of staying on a handle no frame draws.
+#[gpui::test]
+fn closing_the_cursor_by_keyboard_lands_the_focus_on_the_grid(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    let control = Arc::new(Control::default());
+    let (source, mut writer) = suspended(control.clone());
+    t.apply(&[tab(1, source)]);
+    let close = handle_of(t.vcx, "button-strip-close-cursor");
+    press_key(t.vcx, "enter");
+    assert_eq!(
+        control.closes.lock().unwrap().as_slice(),
+        &[CloseReason::UserClosed],
+        "Enter closed the cursor"
+    );
+    writer.set_state(Completeness::Closed {
+        reason: CloseReason::UserClosed,
+    });
+    t.redraw();
+    assert!(t.vcx.debug_bounds("button-strip-close-cursor").is_none());
+    assert_ne!(focused(t.vcx), Some(close));
+    assert_focus_on(t.vcx, "the grid", &grid_focus(&t));
+}
+
+// ## m4-t33d-fr1 (ruling R-T33d-5): the same for Fetch all, once the result is complete.
+#[gpui::test]
+fn fetching_all_by_keyboard_lands_the_focus_on_the_grid(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    let control = Arc::new(Control::default());
+    let (source, mut writer) = suspended(control.clone());
+    t.apply(&[tab(1, source)]);
+    let _all = handle_of(t.vcx, "button-strip-fetch-all");
+    press_key(t.vcx, "enter");
+    assert_eq!(*control.fetch_alls.lock().unwrap(), 1, "Enter fetched all");
+    writer.set_state(Completeness::Complete);
+    t.redraw();
+    assert!(t.vcx.debug_bounds("button-strip-fetch-all").is_none());
+    assert_focus_on(t.vcx, "the grid", &grid_focus(&t));
+}
+
 #[gpui::test]
 fn rerun_names_the_unit(cx: &mut TestAppContext) {
     let mut t = tile(cx, "en", None);
@@ -528,8 +652,15 @@ fn zero_rows_keep_the_header_and_say_so(cx: &mut TestAppContext) {
         source(store_of(0, 3, Completeness::Complete), Arc::default()),
     )]);
     assert_eq!(t.text("strip-sentence").as_deref(), Some("0 rows"));
-    let drawn = texts_drawn_by(t.vcx, "hacivat-ui-grid/src/view.rs");
-    assert!(drawn.iter().any(|s| s == "No rows"), "{drawn:?}");
+    // ## m4-t32-shots (named exception; carries-w4 flake): under load the first frame after
+    // `apply` can be the grid's empty one; wait until the grid has drawn its text.
+    wait_until(t.vcx, "the grid draws No rows", |vcx| {
+        in_window(vcx, |window, _| window.refresh());
+        vcx.run_until_parked();
+        texts_drawn_by(vcx, "hacivat-ui-grid/src/view.rs")
+            .iter()
+            .any(|s| s == "No rows")
+    });
 }
 
 // ---- the output log -------------------------------------------------------------------------
@@ -556,6 +687,8 @@ fn error_line(log: &SessionLog, n: u32, range: Range<usize>) {
                 server_text: Some("relation \"Statement 3 failed\" does not exist".into()),
                 hint_id: None,
                 doc_offset: None,
+                // ## m3b-t25-results (named exception)
+                vendor_code: None,
             },
         },
         Some(range),
@@ -675,10 +808,22 @@ fn ten_thousand_log_lines_render_at_constant_cost(cx: &mut TestAppContext) {
     let shown = visible.end - visible.start;
     assert!((1..=60).contains(&shown), "{visible:?}");
     // A frame builds the visible rows only, wherever the list is scrolled.
+    // ## m4-t33d: one frame exactly (`redraw` draws two since T33d).
+    t.vcx.run_until_parked();
     t.vcx.read(|cx| list.read(cx).rows().reset_built());
-    t.redraw();
+    in_window(t.vcx, |window, _| window.refresh());
     let built = t.vcx.read(|cx| list.read(cx).rows().built());
-    assert!(built <= shown + 1, "built {built} rows for {shown} visible");
+    // ## m4-t32-shots (named exception; carries-w4, Windows CI 44629840018): Windows may lay a
+    // frame out twice, so there a frame builds the visible rows at most once per layout pass:
+    // still a constant cost, never the 10,000 rows. Fix round 1 (review N-2): Windows only.
+    const MAX_LAYOUT_PASSES: u64 = if cfg!(windows) { 2 } else { 1 };
+    // ## m4-t33d-fr1 (T33d review m4): the frame drew the list (a reused cached view would
+    // build nothing and pass the bound below unseen).
+    assert!(built >= shown, "built {built} rows for {shown} visible");
+    assert!(
+        built <= MAX_LAYOUT_PASSES * (shown + 1),
+        "built {built} rows for {shown} visible"
+    );
 }
 
 // ---- named design rules ---------------------------------------------------------------------
@@ -1070,6 +1215,8 @@ fn server_text_controls_are_shown_not_obeyed(cx: &mut TestAppContext) {
                 server_text: Some("near 'a\nb\u{202E}cd' at line 1".into()),
                 hint_id: None,
                 doc_offset: None,
+                // ## m3b-t25-results (named exception)
+                vendor_code: None,
             },
         },
         Some(0..4),
@@ -1158,6 +1305,8 @@ fn a_run_without_a_result_shows_the_output(cx: &mut TestAppContext) {
                 server_text: Some("relation \"nope\" does not exist".into()),
                 hint_id: None,
                 doc_offset: None,
+                // ## m3b-t25-results (named exception)
+                vendor_code: None,
             },
         },
         Some(0..4),
@@ -1311,4 +1460,51 @@ fn rerun_from_a_result_tab_resends_that_tabs_unit(cx: &mut TestAppContext) {
         ]
     );
     stop_core_runtime_test(cx);
+}
+
+// ## m3c-t35 (named exception): the strip counts a selection of several ranges (NOTES M3c-22).
+#[gpui::test]
+fn the_strip_counts_the_ranges_of_a_multi_range_selection(cx: &mut TestAppContext) {
+    use hacivat_ui_grid::GridCommand;
+    use hacivat_ui_grid::model::Dir;
+
+    let t = tile(cx, "en", None);
+    t.apply(&[tab(
+        1,
+        source(store_of(20, 4, Completeness::Complete), Arc::default()),
+    )]);
+    let host = t.host();
+    let grid = t
+        .vcx
+        .read(|cx| host.read(cx).grid_of(t.console, 0, cx))
+        .expect("the tab's grid");
+    // One block: rows × columns. (The first key focuses the first cell.)
+    in_window(t.vcx, |window, cx| {
+        grid.update(cx, |g, cx| {
+            for (dir, extend) in [(Dir::Down, false), (Dir::Down, true)] {
+                g.dispatch(GridCommand::Move { dir, extend }, window, cx);
+            }
+        })
+    });
+    t.redraw();
+    assert_eq!(t.text("strip-dims").as_deref(), Some("2 × 1"));
+    // Ctrl/Cmd-click on another cell adds a range: "2 ranges · 3 cells".
+    let at = t.vcx.read(|cx| {
+        let g = grid.read(cx);
+        let geom = g.geometry().expect("painted");
+        let l = g.column_layout();
+        gpui::point(
+            geom.body.left() + gpui::px(l.x_of(2) as f32 + 10.0),
+            geom.body.top() + gpui::px(g.scroll_state().row_top(5) as f32 + 10.0),
+        )
+    });
+    let add = t.vcx.update(|_, cx| gpui::Modifiers::secondary_key(cx));
+    t.vcx.simulate_click(at, add);
+    t.redraw();
+    assert_eq!(
+        t.vcx.read(|cx| grid.read(cx).selection().ranges()),
+        2,
+        "the click added a range"
+    );
+    assert_eq!(t.text("strip-dims").as_deref(), Some("2 ranges · 3 cells"));
 }

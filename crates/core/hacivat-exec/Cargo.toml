@@ -17,8 +17,18 @@ sql-lexer.workspace = true
 sql-dialect.workspace = true
 sql-text.workspace = true
 sql-oracle-pg.workspace = true
-tokio = { workspace = true, features = ["sync", "time"] }
+# ## m3b-t01a-seams: `rt` for the history writer's `spawn_blocking` (P-M3b-32).
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
 futures.workspace = true
+# ## m3b-t01a-seams: the classifier and its pool (Task 14), the gate (Task 15), the history
+# store (SQLite + FTS5, `bundled`; Task 17) and its SHA-256 `text_hash` (R-M3-62).
+sql-safety.workspace = true
+sql-ident.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+# ## m4-t01a-manifests: the refresh-after-DDL sink (Task 21). `hacivat-introspect` never depends
+# back on this crate (`IntrospectNotExec`).
+hacivat-introspect.workspace = true
 
 [dev-dependencies]
 hacivat-driver = { workspace = true, features = ["fake"] }
@@ -34,6 +44,14 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 tokio-util.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true
+# ## m3b-t01a-seams: the gate and history properties (Tasks 15, 17, 20).
+proptest.workspace = true
+# ## m3b-t01a-seams (fix round 1, I1): `cross_crate_equalities` reads the guard's lists
+# (Task 18); `docker_m3b_bypass` reads `sql-testkit/bypass/*.toml` by path (Task 18) and
+# `gen_fn_catalog` writes TOML candidates (Task 3).
+hacivat-guard.workspace = true
+toml.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true

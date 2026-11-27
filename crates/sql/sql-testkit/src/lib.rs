@@ -12,3 +12,8 @@ pub mod lex;
 // ## m3a-t08-split
 /// The splitter corpora and their checker (Task 8).
 pub mod split;
+
+// ## m3b-t01a-seams (fix round 1, M6)
+/// The PostgreSQL regression differential (Task 20), behind the `differential` feature.
+#[cfg(feature = "differential")]
+pub mod differential;

@@ -20,8 +20,12 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::{StreamExt, TryStreamExt};
-use hacivat_driver::{ExecOpts, ExecSummary, Protocol, RawError, RawErrorKind};
+use hacivat_driver::{
+    ExecOpts, ExecSummary, Notice, NoticeSeverity, Protocol, RawError, RawErrorKind,
+};
+use tokio_postgres::error::{DbError, Severity};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{AsyncMessage, Client, Connection, SimpleQueryMessage};
 
@@ -54,23 +58,139 @@ pub fn deallocate_sql(names: &[String]) -> Option<String> {
     })
 }
 
-/// The notice codes the connection task collects for `execute` (Q12).
-pub(crate) type Notices = Arc<Mutex<VecDeque<String>>>;
+/// The notices the connection task collects (Q12): their codes for `execute` and the warning
+/// count, and (m3b-t13) their text for the open typed query.
+pub(crate) type Notices = Arc<Mutex<NoticeBuf>>;
+
+// ## m3b-t13-drivers
+/// What the connection task keeps of the server's notices.
+///
+/// - `codes`: every notice's SQLSTATE, the newest [`NOTICE_CAP`] (M2b's buffer, unchanged).
+/// - `texts`: the notices of the open typed query as [`Notice`]s (R-M3-77: severity, code and
+///   the server's message verbatim, cut at [`Notice::MAX_TEXT_BYTES`] by [`Notice::new`]): the
+///   first [`NOTICE_CAP`] of the query only (`taken` counts those already handed out), and
+///   only while a typed query collects them (`collect`): never during a statement run beside a
+///   suspended query, never between queries. The text is never written to a log; it leaves the
+///   driver only as `QueryEvent::Notice`.
+#[derive(Default)]
+pub(crate) struct NoticeBuf {
+    codes: VecDeque<String>,
+    texts: VecDeque<Notice>,
+    taken: usize,
+    collect: bool,
+    // ## m3b-t13-drivers (fix round 1, M-3)
+    /// The query's notices past the cap: counted, never kept (`take_notices_dropped`).
+    dropped: u32,
+    /// Wakes the open typed query when a notice is kept, so a statement that runs long (a
+    /// PL/pgSQL loop raising progress notices) hands them out as they come, not at its end.
+    wake: Option<UnboundedSender<()>>,
+}
+
+/// The open typed query's end of [`NoticeBuf`]'s wake signal.
+pub(crate) type NoticeWake = UnboundedReceiver<()>;
+
+// The buffer holds server text: its `Debug` prints counts only.
+impl std::fmt::Debug for NoticeBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoticeBuf")
+            .field("codes", &self.codes.len())
+            .field("texts", &self.texts.len())
+            .finish_non_exhaustive()
+    }
+}
+
+fn lock(notices: &Notices) -> std::sync::MutexGuard<'_, NoticeBuf> {
+    notices.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 fn push_notice(notices: &Notices, code: &str) {
-    let mut q = notices.lock().unwrap_or_else(PoisonError::into_inner);
-    if q.len() == NOTICE_CAP {
-        q.pop_front();
+    let mut q = lock(notices);
+    if q.codes.len() == NOTICE_CAP {
+        q.codes.pop_front();
     }
-    q.push_back(code.to_string());
+    q.codes.push_back(code.to_string());
+}
+
+// ## m3b-t13-drivers
+/// A notice's severity as the server labels it (the non-localised field when the server sent
+/// it, else the word itself); anything else is `Notice`.
+fn severity_of(notice: &DbError) -> NoticeSeverity {
+    let parsed = notice.parsed_severity().or(match notice.severity() {
+        "WARNING" => Some(Severity::Warning),
+        "DEBUG" => Some(Severity::Debug),
+        "LOG" => Some(Severity::Log),
+        "INFO" => Some(Severity::Info),
+        _ => None,
+    });
+    match parsed {
+        Some(Severity::Warning) => NoticeSeverity::Warning,
+        Some(Severity::Debug) => NoticeSeverity::Debug,
+        Some(Severity::Log) => NoticeSeverity::Log,
+        Some(Severity::Info) => NoticeSeverity::Info,
+        _ => NoticeSeverity::Notice,
+    }
+}
+
+/// Keeps one notice: its code always, its text while a typed query collects and fewer than
+/// [`NOTICE_CAP`] of the query's were kept.
+fn keep_notice(notices: &Notices, notice: &DbError) {
+    push_notice(notices, notice.code().code());
+    let mut q = lock(notices);
+    if !q.collect {
+        return;
+    }
+    if q.texts.len() + q.taken < NOTICE_CAP {
+        let kept = Notice::new(
+            severity_of(notice),
+            Some(notice.code().code()),
+            notice.message(),
+        );
+        q.texts.push_back(kept);
+        if let Some(wake) = &q.wake {
+            let _ = wake.unbounded_send(());
+        }
+    } else {
+        q.dropped = q.dropped.saturating_add(1);
+    }
+}
+
+/// A typed query starts: earlier texts (and their drop count) are dropped and this query's are
+/// collected; the answer wakes it when one is kept.
+pub(crate) fn collect_notice_texts(notices: &Notices) -> NoticeWake {
+    let (wake, woken) = unbounded();
+    let mut q = lock(notices);
+    q.texts.clear();
+    q.taken = 0;
+    q.dropped = 0;
+    q.collect = true;
+    q.wake = Some(wake);
+    woken
+}
+
+// ## m3b-t13-drivers (fix round 1, M-3)
+/// The notices of the current or last typed query dropped past the cap, taken once.
+pub(crate) fn take_notices_dropped(notices: &Notices) -> u32 {
+    std::mem::take(&mut lock(notices).dropped)
+}
+
+/// The typed query ended: nothing more is collected or kept.
+pub(crate) fn stop_notice_texts(notices: &Notices) {
+    let mut q = lock(notices);
+    q.texts.clear();
+    q.collect = false;
+    q.wake = None;
+}
+
+/// The oldest notice of the open typed query not yet handed out.
+pub(crate) fn next_notice_text(notices: &Notices) -> Option<Notice> {
+    let mut q = lock(notices);
+    let n = q.texts.pop_front()?;
+    q.taken += 1;
+    Some(n)
 }
 
 pub(crate) fn drain_notices(notices: &Notices) -> Vec<String> {
-    notices
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .drain(..)
-        .collect()
+    lock(notices).codes.drain(..).collect()
 }
 
 // ## m3a-t22-typed-readonly
@@ -83,17 +203,18 @@ pub(crate) fn restore_notices(notices: &Notices, held: Vec<String>) {
     if held.is_empty() {
         return;
     }
-    let mut q = notices.lock().unwrap_or_else(PoisonError::into_inner);
-    let newer: Vec<String> = q.drain(..).collect();
-    q.extend(held);
-    q.extend(newer);
-    while q.len() > NOTICE_CAP {
-        q.pop_front();
+    let mut q = lock(notices);
+    let newer: Vec<String> = q.codes.drain(..).collect();
+    q.codes.extend(held);
+    q.codes.extend(newer);
+    while q.codes.len() > NOTICE_CAP {
+        q.codes.pop_front();
     }
 }
 
-/// Drives the connection, keeping notice codes (never their text) and dropping notifications,
-/// until it ends; then wakes anyone waiting on the wire state.
+/// Drives the connection, keeping notice codes (and, m3b-t13, the open typed query's notice
+/// text, never logged) and dropping notifications, until it ends; then wakes anyone waiting on
+/// the wire state.
 pub(crate) async fn drive<S, T>(
     mut connection: Connection<S, T>,
     notices: Notices,
@@ -105,7 +226,8 @@ pub(crate) async fn drive<S, T>(
     let mut messages = futures::stream::poll_fn(move |cx| connection.poll_message(cx));
     while let Some(message) = messages.next().await {
         match message {
-            Ok(AsyncMessage::Notice(notice)) => push_notice(&notices, notice.code().code()),
+            // ## m3b-t13-drivers: the code, and the text for an open typed query (R-M3-77).
+            Ok(AsyncMessage::Notice(notice)) => keep_notice(&notices, &notice),
             Ok(_) => {}
             // The error (if any) reaches the client as a closed connection.
             Err(_) => break,
@@ -144,7 +266,12 @@ impl Exec<'_> {
         drain_notices(self.notices);
         self.wire.clear_tag();
         let _ = self.wire.take_copy_refused();
-        match op.await {
+        // ## m3b-t13-drivers: a statement beside a suspended typed query raises notices of its
+        // own; their text is not the query's (R-M3-77), so none is collected meanwhile.
+        let collecting = std::mem::replace(&mut lock(self.notices).collect, false);
+        let r = op.await;
+        lock(self.notices).collect = collecting;
+        match r {
             Ok(r) => Ok(r),
             Err(e) => {
                 let settled = self.wire.settle(SETTLE).await;

@@ -2,6 +2,7 @@
 //! The workspace owns the stack; Escape pops the topmost layer unless the layer's view handles
 //! it first, and popping restores the focus the layer recorded.
 
+use hacivat_ui::focus_home::{HomeSlot, first_stop_home};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, EntityId, FocusHandle, InteractiveElement, IntoElement, ParentElement,
     Styled, Subscription, div, px,
@@ -31,6 +32,9 @@ pub struct Layer {
 
 struct Entry {
     layer: Layer,
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the layer is a focus home; its primary is its first
+    // Tab stop (a dialog's first field or button).
+    home: HomeSlot,
     /// Keeps the host's subscription to the layer's events alive while it is open.
     _subscription: Option<Subscription>,
 }
@@ -45,6 +49,7 @@ impl Layers {
     pub fn push(&mut self, layer: Layer, subscription: Option<Subscription>) {
         self.stack.push(Entry {
             layer,
+            home: HomeSlot::new(),
             _subscription: subscription,
         });
     }
@@ -52,6 +57,24 @@ impl Layers {
     /// Removes the topmost layer.
     pub fn pop(&mut self) -> Option<Layer> {
         self.stack.pop().map(|e| e.layer)
+    }
+
+    // ## m3b-t21-confirm (named exception): stack-aware focus.
+    /// Removes the layer whose view is `view` and says whether it was the top one. A layer
+    /// removed from under another hands its focus-restore target to the layer that was right
+    /// above it: that layer was opened while the removed one had the focus, so the target it
+    /// recorded is gone with it.
+    pub fn remove_view_in_stack(&mut self, view: EntityId) -> Option<(Layer, bool)> {
+        let at = self
+            .stack
+            .iter()
+            .position(|e| e.layer.view.entity_id() == view)?;
+        let was_top = at + 1 == self.stack.len();
+        let layer = self.stack.remove(at).layer;
+        if !was_top && let Some(above) = self.stack.get_mut(at) {
+            above.layer.restore_focus = layer.restore_focus.clone();
+        }
+        Some((layer, was_top))
     }
 
     /// Removes the layer whose view is `view`.
@@ -125,7 +148,9 @@ impl Layers {
                         .bg(scrim)
                         .occlude();
                 }
-                overlay.child(layer.view.clone()).into_any_element()
+                overlay
+                    .child(first_stop_home(&entry.home, layer.view.clone()))
+                    .into_any_element()
             })
             .collect()
     }

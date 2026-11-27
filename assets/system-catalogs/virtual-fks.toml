@@ -1,0 +1,373 @@
+# Shipped virtual foreign keys of the system catalogs (R-M4-12), e.g.
+# `pg_class.relnamespace -> pg_namespace.oid`. Hand-authored from vendor documentation and
+# reviewed row by row; never copied from another tool. Rows: M4 Task 26.
+#
+# Every row is one reference the vendor documentation states for a column: PostgreSQL's
+# "System Catalogs" chapter lists, per catalog, the column it references
+# ("relnamespace oid (references pg_namespace.oid)"); `source` names the page and the column
+# the row is taken from (version-independent page names, `/docs/current/`). No row is
+# inferred from column names. Each row must resolve against every shipped PostgreSQL snapshot
+# (14-18; `shipped_virtual_fks_resolve_against_every_pg_snapshot`).
+#
+# Caveats for consumers (diagrams, join completion; T26 review m-5):
+# - Many referencing columns hold 0 for "none" rather than NULL (reltoastrelid, reloftype,
+#   reltablespace, relam, typrelid, typelem, typarray, typbasetype, typcollation,
+#   attcollation, conrelid, contypid, conindid, confrelid): a join through them is an outer
+#   join in spirit, and 0 matches no row.
+# - pg_authid is readable by superusers only; for an ordinary role, suggest the readable view
+#   pg_roles (same oid column) instead of a join to pg_authid.
+#
+# Format (read by `hacivat_meta::system`, a strict subset of TOML): one `[[fk]]` per key, with
+# `dbms`, `from` and `to` as `schema.relation`, `from_columns`/`to_columns` in key order,
+# `source`; optional `name`. Not part of the generated manifest (`xtask minicat` leaves it be).
+
+# pg_class: https://www.postgresql.org/docs/current/catalog-pg-class.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_class"
+from_columns = ["relnamespace"]
+to = "pg_catalog.pg_namespace"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_class (catalog-pg-class.html): column relnamespace references pg_namespace.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_class"
+from_columns = ["reltype"]
+to = "pg_catalog.pg_type"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_class (catalog-pg-class.html): column reltype references pg_type.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_class"
+from_columns = ["reloftype"]
+to = "pg_catalog.pg_type"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_class (catalog-pg-class.html): column reloftype references pg_type.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_class"
+from_columns = ["relowner"]
+to = "pg_catalog.pg_authid"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_class (catalog-pg-class.html): column relowner references pg_authid.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_class"
+from_columns = ["relam"]
+to = "pg_catalog.pg_am"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_class (catalog-pg-class.html): column relam references pg_am.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_class"
+from_columns = ["reltablespace"]
+to = "pg_catalog.pg_tablespace"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_class (catalog-pg-class.html): column reltablespace references pg_tablespace.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_class"
+from_columns = ["reltoastrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_class (catalog-pg-class.html): column reltoastrelid references pg_class.oid"
+
+# pg_namespace: https://www.postgresql.org/docs/current/catalog-pg-namespace.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_namespace"
+from_columns = ["nspowner"]
+to = "pg_catalog.pg_authid"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_namespace (catalog-pg-namespace.html): column nspowner references pg_authid.oid"
+
+# pg_attribute: https://www.postgresql.org/docs/current/catalog-pg-attribute.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_attribute"
+from_columns = ["attrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_attribute (catalog-pg-attribute.html): column attrelid references pg_class.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_attribute"
+from_columns = ["atttypid"]
+to = "pg_catalog.pg_type"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_attribute (catalog-pg-attribute.html): column atttypid references pg_type.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_attribute"
+from_columns = ["attcollation"]
+to = "pg_catalog.pg_collation"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_attribute (catalog-pg-attribute.html): column attcollation references pg_collation.oid"
+
+# pg_type: https://www.postgresql.org/docs/current/catalog-pg-type.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_type"
+from_columns = ["typnamespace"]
+to = "pg_catalog.pg_namespace"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_type (catalog-pg-type.html): column typnamespace references pg_namespace.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_type"
+from_columns = ["typowner"]
+to = "pg_catalog.pg_authid"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_type (catalog-pg-type.html): column typowner references pg_authid.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_type"
+from_columns = ["typrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_type (catalog-pg-type.html): column typrelid references pg_class.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_type"
+from_columns = ["typelem"]
+to = "pg_catalog.pg_type"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_type (catalog-pg-type.html): column typelem references pg_type.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_type"
+from_columns = ["typarray"]
+to = "pg_catalog.pg_type"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_type (catalog-pg-type.html): column typarray references pg_type.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_type"
+from_columns = ["typbasetype"]
+to = "pg_catalog.pg_type"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_type (catalog-pg-type.html): column typbasetype references pg_type.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_type"
+from_columns = ["typcollation"]
+to = "pg_catalog.pg_collation"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_type (catalog-pg-type.html): column typcollation references pg_collation.oid"
+
+# pg_proc: https://www.postgresql.org/docs/current/catalog-pg-proc.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_proc"
+from_columns = ["pronamespace"]
+to = "pg_catalog.pg_namespace"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_proc (catalog-pg-proc.html): column pronamespace references pg_namespace.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_proc"
+from_columns = ["proowner"]
+to = "pg_catalog.pg_authid"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_proc (catalog-pg-proc.html): column proowner references pg_authid.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_proc"
+from_columns = ["prolang"]
+to = "pg_catalog.pg_language"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_proc (catalog-pg-proc.html): column prolang references pg_language.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_proc"
+from_columns = ["prorettype"]
+to = "pg_catalog.pg_type"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_proc (catalog-pg-proc.html): column prorettype references pg_type.oid"
+
+# pg_index: https://www.postgresql.org/docs/current/catalog-pg-index.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_index"
+from_columns = ["indexrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_index (catalog-pg-index.html): column indexrelid references pg_class.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_index"
+from_columns = ["indrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_index (catalog-pg-index.html): column indrelid references pg_class.oid"
+
+# pg_constraint: https://www.postgresql.org/docs/current/catalog-pg-constraint.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_constraint"
+from_columns = ["connamespace"]
+to = "pg_catalog.pg_namespace"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_constraint (catalog-pg-constraint.html): column connamespace references pg_namespace.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_constraint"
+from_columns = ["conrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_constraint (catalog-pg-constraint.html): column conrelid references pg_class.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_constraint"
+from_columns = ["contypid"]
+to = "pg_catalog.pg_type"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_constraint (catalog-pg-constraint.html): column contypid references pg_type.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_constraint"
+from_columns = ["conindid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_constraint (catalog-pg-constraint.html): column conindid references pg_class.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_constraint"
+from_columns = ["confrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_constraint (catalog-pg-constraint.html): column confrelid references pg_class.oid"
+
+# pg_trigger: https://www.postgresql.org/docs/current/catalog-pg-trigger.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_trigger"
+from_columns = ["tgrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_trigger (catalog-pg-trigger.html): column tgrelid references pg_class.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_trigger"
+from_columns = ["tgfoid"]
+to = "pg_catalog.pg_proc"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_trigger (catalog-pg-trigger.html): column tgfoid references pg_proc.oid"
+
+# pg_attrdef: https://www.postgresql.org/docs/current/catalog-pg-attrdef.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_attrdef"
+from_columns = ["adrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_attrdef (catalog-pg-attrdef.html): column adrelid references pg_class.oid"
+
+# pg_inherits: https://www.postgresql.org/docs/current/catalog-pg-inherits.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_inherits"
+from_columns = ["inhrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_inherits (catalog-pg-inherits.html): column inhrelid references pg_class.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_inherits"
+from_columns = ["inhparent"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_inherits (catalog-pg-inherits.html): column inhparent references pg_class.oid"
+
+# pg_sequence: https://www.postgresql.org/docs/current/catalog-pg-sequence.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_sequence"
+from_columns = ["seqrelid"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_sequence (catalog-pg-sequence.html): column seqrelid references pg_class.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_sequence"
+from_columns = ["seqtypid"]
+to = "pg_catalog.pg_type"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_sequence (catalog-pg-sequence.html): column seqtypid references pg_type.oid"
+
+# pg_database: https://www.postgresql.org/docs/current/catalog-pg-database.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_database"
+from_columns = ["datdba"]
+to = "pg_catalog.pg_authid"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_database (catalog-pg-database.html): column datdba references pg_authid.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_database"
+from_columns = ["dattablespace"]
+to = "pg_catalog.pg_tablespace"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_database (catalog-pg-database.html): column dattablespace references pg_tablespace.oid"
+
+# pg_enum: https://www.postgresql.org/docs/current/catalog-pg-enum.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_enum"
+from_columns = ["enumtypid"]
+to = "pg_catalog.pg_type"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_enum (catalog-pg-enum.html): column enumtypid references pg_type.oid"
+
+# pg_rewrite: https://www.postgresql.org/docs/current/catalog-pg-rewrite.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_rewrite"
+from_columns = ["ev_class"]
+to = "pg_catalog.pg_class"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_rewrite (catalog-pg-rewrite.html): column ev_class references pg_class.oid"
+
+# pg_auth_members: https://www.postgresql.org/docs/current/catalog-pg-auth-members.html
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_auth_members"
+from_columns = ["roleid"]
+to = "pg_catalog.pg_authid"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_auth_members (catalog-pg-auth-members.html): column roleid references pg_authid.oid"
+
+[[fk]]
+dbms = "postgres"
+from = "pg_catalog.pg_auth_members"
+from_columns = ["member"]
+to = "pg_catalog.pg_authid"
+to_columns = ["oid"]
+source = "PostgreSQL documentation, System Catalogs, pg_auth_members (catalog-pg-auth-members.html): column member references pg_authid.oid"

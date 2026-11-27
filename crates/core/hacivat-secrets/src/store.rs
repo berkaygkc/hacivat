@@ -17,11 +17,14 @@ pub enum SecretSlot {
     SshPassword { hop: u8 },
     SshPassphrase { hop: u8 },
     ProxyPassword,
+    // ## m4-t01c-core (named, R-M4-15): the 32-byte data key of a profile's encrypted catalog
+    // cache (`catalog_sensitive`; retention Forever). Task 11 creates and reads it.
+    CatalogKey,
 }
 
 impl SecretSlot {
     /// The slot's key part: `db-password`, `tls-key-passphrase`, `ssh-<hop>-password`,
-    /// `ssh-<hop>-passphrase`, `proxy-password`.
+    /// `ssh-<hop>-passphrase`, `proxy-password`, `catalog-key`.
     pub fn id(self) -> String {
         match self {
             SecretSlot::DbPassword => "db-password".to_string(),
@@ -29,6 +32,8 @@ impl SecretSlot {
             SecretSlot::SshPassword { hop } => format!("ssh-{hop}-password"),
             SecretSlot::SshPassphrase { hop } => format!("ssh-{hop}-passphrase"),
             SecretSlot::ProxyPassword => "proxy-password".to_string(),
+            // ## m4-t01c-core
+            SecretSlot::CatalogKey => "catalog-key".to_string(),
         }
     }
 }
@@ -109,6 +114,8 @@ fn backend_slots() -> impl Iterator<Item = SecretSlot> {
         SecretSlot::DbPassword,
         SecretSlot::TlsKeyPassphrase,
         SecretSlot::ProxyPassword,
+        // ## m4-t01c-core (named): so `delete_all` removes a deleted profile's catalog key.
+        SecretSlot::CatalogKey,
     ]
     .into_iter()
     .chain((0..=MAX_SSH_HOP).flat_map(|hop| {
@@ -318,7 +325,10 @@ impl SecretStore {
                 slots
             }
         };
-        slots.retain(|slot| wanted(*slot));
+        // ## m4-t01c-core (named, fix round 1): a catalog data key is never copied. Each
+        // profile gets its own, created on its first encrypted cache write (Task 11): a
+        // duplicate has a new id and an empty cache, and is often re-pointed at another server.
+        slots.retain(|slot| *slot != SecretSlot::CatalogKey && wanted(*slot));
         slots.sort();
         slots.dedup();
         for slot in slots {
@@ -449,6 +459,8 @@ mod tests {
             "ssh-2-passphrase"
         );
         assert_eq!(SecretSlot::ProxyPassword.id(), "proxy-password");
+        // ## m4-t01c-core
+        assert_eq!(SecretSlot::CatalogKey.id(), "catalog-key");
         for r in Retention::ALL {
             assert_eq!(Retention::from_id(r.id()), Some(r));
         }
@@ -583,5 +595,168 @@ mod choice_tests {
                 .is_some()
         );
         assert!(backend.get(&key(to, ssh)).unwrap().is_none());
+    }
+}
+
+// ## m4-t11-catalog-key (named lines, R-M4-15): the data key of an encrypted catalog cache.
+/// The byte length of a catalog data key (`SecretSlot::CatalogKey`).
+pub const CATALOG_KEY_LEN: usize = 32;
+
+impl SecretStore {
+    /// The 32-byte data key of `profile`'s encrypted catalog cache (`SecretSlot::CatalogKey`,
+    /// `Retention::Forever`). Blocking (the keyring): only `CatalogHub` calls it, on the
+    /// blocking pool (R-M4-15 key timing).
+    ///
+    /// - A stored key is returned. A stored value that is not a key (damaged) counts as none.
+    /// - With no key: `create = false` answers `Ok(None)`; `create = true` (the first encrypted
+    ///   write) draws 32 bytes from the OS random source and stores them. Each profile gets its
+    ///   own key; a duplicated profile never shares one (`copy_slots` skips the slot).
+    /// - The key is kept in the backend only. When the backend refuses it (a `Forever` put that
+    ///   falls back to the process), the fallback copy is removed and the refusal returned: a
+    ///   key that dies with the process would make the next start's cache unreadable, so the
+    ///   profile's cache runs memory-only instead (alg/02 edge 9).
+    /// - The key travels hex-encoded inside a `SecretString`, and every buffer that holds it is
+    ///   wiped (`Zeroizing`); it is never logged.
+    pub fn catalog_key(
+        &self,
+        profile: ProfileId,
+        create: bool,
+    ) -> Result<Option<zeroize::Zeroizing<[u8; CATALOG_KEY_LEN]>>, SecretError> {
+        use secrecy::ExposeSecret;
+        let key = SecretKey {
+            profile,
+            slot: SecretSlot::CatalogKey,
+        };
+        if let Some(stored) = self.get(&key, Retention::Forever)?
+            && let Some(bytes) = catalog_key_from_hex(stored.expose_secret())
+        {
+            return Ok(Some(bytes));
+        }
+        if !create {
+            return Ok(None);
+        }
+        let mut bytes = zeroize::Zeroizing::new([0u8; CATALOG_KEY_LEN]);
+        getrandom::fill(bytes.as_mut_slice())
+            .map_err(|_| SecretError::Backend("random".to_string()))?;
+        let mut hex = String::with_capacity(CATALOG_KEY_LEN * 2);
+        for b in bytes.iter() {
+            hex.push(char::from(HEX_DIGITS[usize::from(b >> 4)]));
+            hex.push(char::from(HEX_DIGITS[usize::from(b & 15)]));
+        }
+        match self.put(&key, SecretString::from(hex), Retention::Forever)? {
+            Stored::AsRequested => Ok(Some(bytes)),
+            Stored::FellBackTo { reason, .. } => {
+                lock(&self.process).remove(&key);
+                Err(reason)
+            }
+        }
+    }
+}
+
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// The key a stored hex text encodes, if it is exactly 64 hex digits.
+fn catalog_key_from_hex(text: &str) -> Option<zeroize::Zeroizing<[u8; CATALOG_KEY_LEN]>> {
+    fn nibble(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    let text = text.as_bytes();
+    if text.len() != CATALOG_KEY_LEN * 2 {
+        return None;
+    }
+    let mut out = zeroize::Zeroizing::new([0u8; CATALOG_KEY_LEN]);
+    for (i, pair) in text.as_chunks::<2>().0.iter().enumerate() {
+        out[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Some(out)
+}
+
+// ## m4-t11-catalog-key
+#[cfg(test)]
+mod catalog_key_tests {
+    use super::*;
+    use crate::backend::MemoryBackend;
+
+    fn at(profile: ProfileId) -> SecretKey {
+        SecretKey {
+            profile,
+            slot: SecretSlot::CatalogKey,
+        }
+    }
+
+    /// A backend that refuses every write (no keyring service).
+    struct Refusing;
+
+    impl SecretBackend for Refusing {
+        fn get(&self, _: &SecretKey) -> Result<Option<SecretString>, SecretError> {
+            Ok(None)
+        }
+        fn put(&self, _: &SecretKey, _: &SecretString) -> Result<(), SecretError> {
+            Err(SecretError::Unavailable)
+        }
+        fn delete(&self, _: &SecretKey) -> Result<(), SecretError> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "refusing"
+        }
+    }
+
+    #[test]
+    fn the_key_is_created_once_on_request_and_read_back() {
+        let store = SecretStore::new(Some(Arc::new(MemoryBackend::new())));
+        let p = ProfileId::new();
+        assert!(store.catalog_key(p, false).unwrap().is_none());
+        let made = store.catalog_key(p, true).unwrap().unwrap();
+        // `assert!`, not `assert_ne!`: a failure must not print key bytes.
+        assert!(*made != [0u8; CATALOG_KEY_LEN]);
+        let again = store.catalog_key(p, true).unwrap().unwrap();
+        assert!(*again == *made, "an existing key is never replaced");
+        assert!(*store.catalog_key(p, false).unwrap().unwrap() == *made);
+        // Per profile: another profile gets its own key.
+        let other = store.catalog_key(ProfileId::new(), true).unwrap().unwrap();
+        assert!(*other != *made);
+    }
+
+    #[test]
+    fn a_duplicate_profile_never_copies_the_key() {
+        let store = SecretStore::new(Some(Arc::new(MemoryBackend::new())));
+        let (from, to) = (ProfileId::new(), ProfileId::new());
+        store.catalog_key(from, true).unwrap();
+        store.copy_all(from, to, Retention::Forever).unwrap();
+        assert!(store.catalog_key(to, false).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_refused_keyring_leaves_no_process_copy() {
+        let store = SecretStore::new(Some(Arc::new(Refusing)));
+        let p = ProfileId::new();
+        assert!(matches!(
+            store.catalog_key(p, true),
+            Err(SecretError::Unavailable)
+        ));
+        assert!(store.get(&at(p), Retention::Forever).unwrap().is_none());
+        assert!(store.catalog_key(p, false).unwrap().is_none());
+        // No backend at all: the same.
+        assert!(SecretStore::new(None).catalog_key(p, true).is_err());
+    }
+
+    #[test]
+    fn a_damaged_stored_value_counts_as_no_key() {
+        let store = SecretStore::new(Some(Arc::new(MemoryBackend::new())));
+        let p = ProfileId::new();
+        store
+            .put(&at(p), "not-a-key".into(), Retention::Forever)
+            .unwrap();
+        assert!(store.catalog_key(p, false).unwrap().is_none());
+        let fresh = store.catalog_key(p, true).unwrap().unwrap();
+        assert!(*store.catalog_key(p, false).unwrap().unwrap() == *fresh);
+        assert!(catalog_key_from_hex(&"g".repeat(64)).is_none());
+        assert!(*catalog_key_from_hex(&"0A".repeat(32)).unwrap() == [10u8; CATALOG_KEY_LEN]);
     }
 }

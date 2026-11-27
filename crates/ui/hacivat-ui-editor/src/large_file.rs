@@ -13,6 +13,13 @@
 //! - **Nothing above 20 MB** enters the editor in M3a (R-M3-49: the paste guard and the console
 //!   restore refuse it); a document that got there anyway stays in T1, as there is no T2 before
 //!   M4b.
+//! - **T2** (## m4b-t11-editor; UI-EDIT-23 step 1, R-M4b-20): a file past 20 MB opens as a
+//!   read-only preview of its first 2.5 MB ([`preview_cut`]); the host builds the editor over
+//!   that part and calls `EditorView::set_preview`. The tier is then `Preview` for good
+//!   ([`update`] never moves it), the banner reads the T2 copy with the file's and the
+//!   preview's sizes and its own ids (`editor-t2-*`), and the description carries it. A paste
+//!   past 20 MB is still refused unless the host asks the user (`EditorConfig::
+//!   confirm_large_paste`, the 20–100 MB question in `clipboard.rs`).
 //!
 //! The view keeps the longest line from the lines each edit touched (it only grows during
 //! editing; `set_text` measures it again). ## m3a-f4-ime (EDIT-2): it never exceeds the
@@ -26,15 +33,17 @@ use std::rc::Rc;
 use hacivat_text::TextBuffer;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::l10n::UiArg;
-use hacivat_ui::text::{TextSource, paragraph};
+use hacivat_ui::text::{TextSource, paragraph, scroll_viewport};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Context, Global, InteractiveElement, IntoElement, ParentElement, SharedString,
-    Styled, Window, div, px,
+    AnyElement, App, Context, Global, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels,
+    SharedString, StatefulInteractiveElement, Styled, TextRun, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 
 use crate::commands::message;
 use crate::config::{Tier, TierLimits};
+// ## m4b-t11-editor
+use crate::reload::PreviewSpec;
 use crate::view::EditorView;
 
 /// The longest line T0 takes (UI-EDIT-23 step 1: 64 KB).
@@ -49,6 +58,95 @@ pub const REMEASURE_AFTER: std::time::Duration = std::time::Duration::from_milli
 const ICON_GAP_PX: f32 = 9.0;
 /// Drops the icon onto the first line's cap height (the inline notice's 1 px).
 const ICON_NUDGE_PX: f32 = 1.0;
+// ## m3c-narrow (F11; design/m3b-safe surface 24)
+/// An editor narrower than this draws the banner's narrow form ([`banner`]). A rounded design
+/// line (fix round 1, review M4): at 180 px the wide form's margins (2 × 10), padding (2 × 10),
+/// border (2), icon (12) and its gap (9) leave its text 117 px.
+pub const NARROW_BELOW_PX: f32 = 180.0;
+
+// ## m3c-narrow
+/// Whether an editor `width` wide draws the banner's narrow form.
+pub fn narrow(width: Pixels) -> bool {
+    f32::from(width) < NARROW_BELOW_PX
+}
+
+// ## m3c-narrow (fix round 1, review M5)
+/// Whether `s` shows the banner at all (T1): the narrow form, and the text's two-line minimum
+/// beside it, apply only then.
+pub fn shows_banner(s: &TierState) -> bool {
+    s.tier != Tier::Full
+}
+
+// ## m3c-narrow (fix round 1, I1)
+/// The narrow form's well around its title: padding 6 above and below, the 1 px border.
+fn narrow_well_px(t: &hacivat_ui_core::theme::ThemeTokens) -> f32 {
+    2.0 * t.spacing.sm + 2.0
+}
+
+/// The height the narrow form's title wraps to in an editor `width` wide (its text gets the
+/// width less 4 px margins, 6 px padding and the border on each side), measured as the
+/// paragraph lays it out (the line height snapped to the device pixel).
+fn narrow_title_px(
+    title: &SharedString,
+    width: Pixels,
+    style: &hacivat_ui_core::theme::TypeStyle,
+    t: &hacivat_ui_core::theme::ThemeTokens,
+    window: &Window,
+) -> f32 {
+    let room = f32::from(width) - 2.0 * t.spacing.xs - narrow_well_px(t);
+    let pitch = window.pixel_snap(px(style.line_height));
+    let run = TextRun {
+        len: title.len(),
+        font: hacivat_ui_core::fonts::font_for(style),
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_text(
+            title.clone(),
+            px(style.size_px),
+            &[run],
+            Some(px(room.max(1.0))),
+            None,
+        )
+        .map(|lines| lines.iter().map(|l| f32::from(l.size(pitch).height)).sum())
+        .unwrap_or(style.line_height)
+        .ceil()
+}
+
+// ## m4b-t11-editor
+/// The element ids and debug selectors of a banner (scene checks and shots find it by them).
+struct BannerIds {
+    banner: &'static str,
+    notice: &'static str,
+    title_box: &'static str,
+    title: &'static str,
+    body: &'static str,
+    body_scroll: &'static str,
+}
+
+/// The T1 ("Reduced mode") banner's.
+const T1_IDS: BannerIds = BannerIds {
+    banner: "editor-t1-banner",
+    notice: "editor-t1-notice",
+    title_box: "editor-t1-title-box",
+    title: "editor-t1-title",
+    body: "editor-t1-body",
+    body_scroll: "editor-t1-body-scroll",
+};
+
+/// The T2 ("Read-only preview") banner's.
+const T2_IDS: BannerIds = BannerIds {
+    banner: "editor-t2-banner",
+    notice: "editor-t2-notice",
+    title_box: "editor-t2-title-box",
+    title: "editor-t2-title",
+    body: "editor-t2-body",
+    body_scroll: "editor-t2-body-scroll",
+};
 
 /// The module-owned state (P11): the tier, and what the banner says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -63,6 +161,9 @@ pub struct TierState {
     pub by_size: bool,
     /// In T1 because of a line longer than 64 KB (accumulated while in T1).
     pub by_line: bool,
+    // ## m4b-t11-editor
+    /// The T2 preview's sizes (`Tier::Preview` only; `EditorView::set_preview`).
+    pub preview: Option<PreviewSpec>,
 }
 
 /// Formats a document size for the T1 banner in the format locale (L3; "18,4 MB" in Turkey).
@@ -99,6 +200,8 @@ pub fn open(bytes: u64, longest_line: u64, limits: &TierLimits) -> TierState {
         limits: *limits,
         by_size: bytes > limits.full_max_bytes,
         by_line: longest_line > LONG_LINE_MAX_BYTES,
+        // ## m4b-t11-editor
+        preview: None,
     }
 }
 
@@ -114,6 +217,10 @@ pub fn update(
     s.bytes = bytes;
     s.longest_line = longest_line;
     s.limits = *limits;
+    // ## m4b-t11-editor: a T2 preview never moves to another tier (the host reopens it).
+    if s.tier == Tier::Preview {
+        return None;
+    }
     let over_size = bytes > limits.full_max_bytes;
     let over_line = longest_line > LONG_LINE_MAX_BYTES;
     let tier = if s.tier == Tier::Full {
@@ -148,6 +255,43 @@ pub fn update(
 /// The editor's tier state.
 pub fn state(v: &EditorView) -> &TierState {
     &v.tier
+}
+
+// ## m4b-t11-editor (T2, UI-EDIT-23 step 1)
+/// Where a T2 preview of `text` ends when it may show `max` bytes (`TierLimits::preview_bytes`):
+/// the whole text when it fits, else just after the last line break (LF, CRLF or a lone CR)
+/// that ends at or before `max`; with none (a first line longer than that), the last character
+/// boundary at or before `max` that is not between a CR and its LF. Scans back from `max`
+/// only, so a 100 MB text costs what its preview does.
+pub fn preview_cut(text: &str, max: u64) -> usize {
+    let max = usize::try_from(max).unwrap_or(usize::MAX);
+    if text.len() <= max {
+        return text.len();
+    }
+    let b = text.as_bytes();
+    // `max < len`, so `b[i]` exists for every `i <= max`.
+    if let Some(i) = (1..=max)
+        .rev()
+        .find(|&i| b[i - 1] == b'\n' || (b[i - 1] == b'\r' && b[i] != b'\n'))
+    {
+        return i;
+    }
+    let mut i = max;
+    while !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    if i > 0 && b[i - 1] == b'\r' && b[i] == b'\n' {
+        i -= 1;
+    }
+    i
+}
+
+/// Makes `s` a T2 preview of `spec` (`EditorView::set_preview`); `true` when the tier moved.
+pub(crate) fn enter_preview(s: &mut TierState, spec: PreviewSpec) -> bool {
+    let moved = s.tier != Tier::Preview;
+    s.tier = Tier::Preview;
+    s.preview = Some(spec);
+    moved
 }
 
 // ## m3a-f4-ime (PO finding EDIT-2)
@@ -194,7 +338,7 @@ pub(crate) fn after_edit(v: &mut EditorView, cx: &mut Context<EditorView>) {
 }
 
 /// `bytes` as the banner shows it.
-fn size_text(bytes: u64, cx: &App) -> SharedString {
+pub(crate) fn size_text(bytes: u64, cx: &App) -> SharedString {
     if let Some(f) = cx.try_global::<SizeText>() {
         return (f.0)(bytes, cx);
     }
@@ -222,6 +366,21 @@ fn return_line(cx: &App) -> SharedString {
 fn lines(s: &TierState, cx: &App) -> Option<(SharedString, SharedString)> {
     if s.tier == Tier::Full {
         return None;
+    }
+    // ## m4b-t11-editor (design/m4b-scripts surface 9): the file's size, and how much of it
+    // the preview shows.
+    if let (Tier::Preview, Some(p)) = (s.tier, s.preview) {
+        let title = message(
+            cx,
+            "hui-editor-t2-title",
+            &[("size", UiArg::Text(size_text(p.total_bytes, cx)))],
+        );
+        let body = message(
+            cx,
+            "hui-editor-t2-body",
+            &[("preview", UiArg::Text(size_text(p.shown_bytes, cx)))],
+        );
+        return Some((title, body));
     }
     // ## m3a-t29 fix round 1 (M1): the copy follows the cause. The size title when the size
     // caused T1. ## m3a-f4-ime (EDIT-2): the body says when T1 ends for each cause: below
@@ -260,9 +419,27 @@ pub fn description(s: &TierState, cx: &App) -> Option<SharedString> {
 /// notice, padding 6/10, radius 4, 1 px `seam-strong`, a `panel` / `ground` well, the 12 px
 /// info glyph in `text-2`; the title in `text`, the body in `text-2`; 8/10/2/10 around it);
 /// `None` in T0.
-pub fn banner(s: &TierState, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-    let _ = window;
+///
+/// ## m3c-narrow (F11; design/m3b-safe surface 24): `narrow` (the width of an editor narrower
+/// than [`NARROW_BELOW_PX`]) draws the narrow form: 4 px beside the well, padding 6, no icon,
+/// the title and the body below it in a scroll viewport that gives up its height first. Fix
+/// round 1 (I1): the well never gets shorter than its title and padding (measured at that
+/// width, [`narrow_title_px`]), so the title is whole wherever the editor's column holds it;
+/// the text's two-line minimum (`element::NARROW_TEXT_MIN_LINES`) gives way before it. The well
+/// clips, so a column too short for the title itself records the title as cut.
+pub fn banner(
+    s: &TierState,
+    narrow: Option<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
     let (title, body) = lines(s, cx)?;
+    // ## m4b-t11-editor: the T2 banner has its own ids (the T1 ones stay as they were).
+    let ids = if s.tier == Tier::Preview {
+        &T2_IDS
+    } else {
+        &T1_IDS
+    };
     let theme = *Theme::get(cx);
     let t = theme.tokens;
     let c = &t.colors;
@@ -271,13 +448,65 @@ pub fn banner(s: &TierState, window: &mut Window, cx: &mut App) -> Option<AnyEle
         ThemeMode::Light => c.ground,
     };
     let style = t.type_ramp.body_sm;
+    // ## m3c-narrow
+    if let Some(width) = narrow {
+        // ## m3c-narrow (fix round 1, I1): the well keeps its title.
+        let keep = narrow_title_px(&title, width, &style, t, window) + narrow_well_px(t);
+        let notice = div()
+            .debug_selector(move || ids.notice.to_string())
+            .flex()
+            .flex_col()
+            .flex_shrink(1.0)
+            .min_h(px(keep))
+            .overflow_hidden()
+            .px(px(t.spacing.sm))
+            .py(px(t.spacing.sm))
+            .rounded(px(t.radii.sm))
+            .border_1()
+            .border_color(c.seam_strong.to_hsla())
+            .bg(well.to_hsla())
+            .child(
+                div()
+                    // ## m3c-narrow (fix round 1, I1): the title's box, for the scene checks.
+                    .debug_selector(move || ids.title_box.to_string())
+                    .flex_none()
+                    .child(
+                        paragraph(title, TextSource::Fluent, style, c.text.to_hsla()).id(ids.title),
+                    ),
+            )
+            .child(
+                div()
+                    .id(ids.body_scroll)
+                    .flex_shrink(1.0)
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .child(scroll_viewport())
+                    .child(
+                        paragraph(body, TextSource::Fluent, style, c.text_2.to_hsla()).id(ids.body),
+                    ),
+            );
+        return Some(
+            div()
+                .debug_selector(move || ids.banner.to_string())
+                .flex()
+                .flex_col()
+                .flex_shrink(1.0)
+                // ## m3c-narrow (fix round 1, I1): never shorter than the well's own minimum.
+                .min_h(px(keep))
+                .mt(px(t.spacing.md))
+                .mx(px(t.spacing.xs))
+                .mb(px(t.spacing.s_2xs))
+                .child(notice)
+                .into_any_element(),
+        );
+    }
     let text = div()
         .flex()
         .flex_col()
         .flex_1()
         .min_w_0()
-        .child(paragraph(title, TextSource::Fluent, style, c.text.to_hsla()).id("editor-t1-title"))
-        .child(paragraph(body, TextSource::Fluent, style, c.text_2.to_hsla()).id("editor-t1-body"));
+        .child(paragraph(title, TextSource::Fluent, style, c.text.to_hsla()).id(ids.title))
+        .child(paragraph(body, TextSource::Fluent, style, c.text_2.to_hsla()).id(ids.body));
     let notice = div()
         .flex()
         .flex_row()
@@ -299,7 +528,7 @@ pub fn banner(s: &TierState, window: &mut Window, cx: &mut App) -> Option<AnyEle
         .child(text);
     Some(
         div()
-            .debug_selector(|| "editor-t1-banner".to_string())
+            .debug_selector(move || ids.banner.to_string())
             .flex_none()
             .mt(px(t.spacing.md))
             .mx(px(t.spacing.lg))

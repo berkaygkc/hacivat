@@ -12,10 +12,17 @@
 //! says "Waiting for a free connection … (in use of max in use)" with Cancel (R-M3-43).
 //!
 //! **Read-only is never weaker than the profile (R-M3-6, R-M3-29).** A session that is
-//! read-write where `effective_read_only` now says read-only (the profile was tagged production
-//! or marked read-only while connected) is dropped from every console of the profile at once,
-//! and the profile reconnects, so its new sessions open read-only. The console never takes such
-//! a session either (`acquire`).
+//! read-write where `effective_read_only` now says read-only (the profile was marked read-only
+//! while connected) is dropped from every console of the profile at once, and the profile
+//! reconnects, so its new sessions open read-only. The console never takes such a session
+//! either (`acquire`).
+//!
+//! ## m3b-t26-prod-unlock (R-M3-78): a production tag no longer makes a console read-only, so
+//! retagging a profile as production while its console is open reconnects nothing: the gate
+//! reads the live profile's environment on every Run (`orchestrator::conn_safety`), so the
+//! confirmations apply from the next Run; the session keeps its transaction mode (D-036's
+//! Manual default applies to new sessions). Marking a profile read-only keeps the reconnect
+//! above (`pending_read_only`).
 //!
 //! **View.** The editor (`EditorView` with the `SqlLanguageService`) is embedded through
 //! `a11y::embed` (cached while no assistive technology is attached), under the console toolbar;
@@ -28,6 +35,18 @@
 //! A console registered for its tab by someone else (`register_test_console`) is shown as is:
 //! its editor and session are the registrant's, and the host only draws it (no session, no
 //! autosave, no binding).
+//!
+//! ## m4b-t14-tabs (named exception: the script tab's host, R-M4b-4, R-M4b-25, R-M4b-30)
+//! A script tab's host ([`build_script`]) is this host with a [`ScriptDoc`] beside the editor:
+//! its text comes from the file (read off the UI thread while "Opening…" shows), it never
+//! autosaves into the consoles folder (R-M4b-5), and its binding is the one its handle names:
+//! - **never bound by a connect** (R-M3-37's auto-binding skips it, R-M4b-30), and a tab whose
+//!   profile is gone gets no binding at all;
+//! - **its session** (C-M4-5, R-M4b-27): PostgreSQL and SQLite share the profile's sessions as a
+//!   console does; a MySQL/MariaDB tab always opens a session of its own (slot 0, never the
+//!   profile's default one, which consoles and the explorer read) and, under a database other
+//!   than the profile's, switches it with `USE` before Run is enabled (`ScriptDoc::session_taken`);
+//!   a single-session profile that hands back its one session is refused for such a tab.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -36,22 +55,22 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use hacivat_l10n::{NoArgs, Text, ids};
-use hacivat_proto::{AccessLabel, Department, EnvTag, ProfileId};
+use hacivat_proto::{AccessLabel, Department, ProfileId};
 use hacivat_session::LiveState;
 use hacivat_session::session::{
     ClientId, ClosePolicy, SessionHandle, SessionKind, SessionSnapshot, SessionSpec, SessionState,
     effective_read_only,
 };
 use hacivat_sql_editor::SqlLanguageService;
+use hacivat_ui::focus_home::{HomeSlot, focus_home};
 use hacivat_ui::panes::TabId;
-use hacivat_ui::text::{TextSource, paragraph};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{
-    AnyView, App, AppContext as _, Bounds, Context, Entity, Focusable as _, Global,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, point, px,
+    AnyView, App, AppContext as _, Context, Entity, Focusable as _, Global,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
 };
-use hacivat_ui_core::theme::{Theme, popover_surface};
+use hacivat_ui_core::theme::Theme;
 use hacivat_ui_editor::large_file::SizeText;
 use hacivat_ui_editor::{
     CaretBlink, DocContext, DocId, EDITOR_CONTEXT, EditorConfig, EditorEvent, EditorView,
@@ -65,10 +84,14 @@ use crate::console::autosave::{self, Autosave, RESTORE_MAX_BYTES, Restored};
 use crate::console::decor::{console_title, profile_of};
 use crate::console::registry::{ConsoleId, ConsoleState, Consoles};
 use crate::console::status::EditorSegment;
+// ## m3c-t41-chrome
+use crate::console::status::{SegmentCell, SegmentPart};
 use crate::console::toolbar::{self, RunUx, ToolbarActions, ToolbarModel};
 use crate::l10n_global::tr;
 use crate::results::ConsoleResults;
 use crate::shell::{AppState, TabKind, Workspace, register_focus_context};
+// ## m4b-t14-tabs (named exception)
+use crate::scripts::tabs::{ScriptDoc, ScriptDocEvent, ScriptTabId};
 
 // ---- the hosts ------------------------------------------------------------------------------
 
@@ -295,15 +318,10 @@ pub fn size_text(cx: &App, bytes: u64) -> SharedString {
     )
 }
 
-/// The production policy of the app's sessions (R-M3-29), read from the manager.
-fn production_read_only(cx: &App) -> bool {
-    cx.try_global::<ConnectionsModel>()
-        .is_some_and(|m| m.manager().policy().production_read_only)
-}
-
-/// Whether a session of `profile` must be read-only now.
+/// Whether a session of `profile` must be read-only now (## m3b-t26-prod-unlock: the profile's
+/// own read-only flag; its environment no longer decides, R-M3-78).
 fn must_be_read_only(cx: &App, profile: ProfileId) -> bool {
-    profile_of(cx, profile).is_some_and(|p| effective_read_only(&p, production_read_only(cx)))
+    profile_of(cx, profile).is_some_and(|p| effective_read_only(&p))
 }
 
 /// The read-only rule (R-M3-6, ledger T32 note): a console session that is read-write where
@@ -527,6 +545,8 @@ pub struct ConsoleHost {
     clock: Option<(u64, Instant)>,
     clock_task: Option<Task<()>>,
     segment: Option<Entity<EditorSegment>>,
+    // ## m3c-t41-chrome: one status bar cell per part of the segment.
+    segment_cells: Vec<Entity<SegmentCell>>,
     autosave: Option<Autosave>,
     autosave_task: Option<Task<()>>,
     /// The console's session is its own (not the profile's default session): only such a
@@ -540,6 +560,14 @@ pub struct ConsoleHost {
     fixture: Option<FixtureUx>,
     /// The workspace's focused pane when the host last looked.
     pane: Option<hacivat_ui::panes::PaneId>,
+    // ## m4-t33d-fr1 (ruling R-T33d-5): the console is a focus home; its primary is the editor.
+    home: HomeSlot,
+    // ## m4b-t14-tabs (named exception): a script tab's file side, and the home of its
+    // not-yet-shown states.
+    script: Option<Entity<ScriptDoc>>,
+    script_home: HomeSlot,
+    // ## m4b-t22-pre (named line, T21 r1): the notices' area under a strip.
+    notice_area: crate::scripts::disk_bars::NoticeArea,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -552,7 +580,15 @@ pub fn build(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyView {
-    cx.new(|cx| ConsoleHost::new(tab, n, profile, window, cx))
+    cx.new(|cx| ConsoleHost::new(tab, n, profile, None, window, cx))
+        .into()
+}
+
+// ## m4b-t14-tabs (named exception)
+/// The view of script tab `tab`, bound for its life as handle `script` names, built once.
+pub fn build_script(tab: TabId, script: ScriptTabId, window: &mut Window, cx: &mut App) -> AnyView {
+    let n = crate::scripts::tabs::client_number(script);
+    cx.new(|cx| ConsoleHost::new(tab, n, None, Some(script), window, cx))
         .into()
 }
 
@@ -561,6 +597,8 @@ impl ConsoleHost {
         tab: TabId,
         n: u32,
         profile: Option<ProfileId>,
+        // ## m4b-t14-tabs (named exception)
+        script: Option<ScriptTabId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -586,6 +624,7 @@ impl ConsoleHost {
             clock: None,
             clock_task: None,
             segment: None,
+            segment_cells: Vec::new(),
             autosave: None,
             autosave_task: None,
             paint_errors: 0,
@@ -593,6 +632,11 @@ impl ConsoleHost {
             pending_ro: false,
             fixture: None,
             pane: None,
+            home: HomeSlot::new(),
+            // ## m4b-t14-tabs
+            script: None,
+            script_home: HomeSlot::new(),
+            notice_area: Default::default(),
             _subscriptions: subscriptions,
         };
         // A binding the hook handed out is for the tab built in this frame; whatever no host
@@ -612,15 +656,39 @@ impl ConsoleHost {
                 owned: registered.is_none(),
             },
         );
-        if let Some(console) = registered {
+        // ## m4b-t14-tabs (named exception): a script tab's host reads its file first.
+        if let Some(script) = script {
+            this.open_script(script, window, cx);
+        } else if let Some(console) = registered {
             this.adopt(console, cx);
+            // ## m3c-t33-find (named exception): the registrant's editor gets its find bar.
+            if let Some(editor) = this.editor().cloned() {
+                crate::console::find_bar::attach(console, &editor, window, cx);
+            }
         } else if let Some(profile) = profile {
             this.set_binding(profile, cx);
+            // ## m4b-t18-run-as-script fix round 1 (named exception; I3, R-T14-3): a preview
+            // pasted into a MySQL script tab takes a session of its own (slot 0), as the tab.
+            if crate::scripts::run_as_script::pending_wants_own_session(tab, cx) {
+                this.binding = Some((profile, 0));
+                if let Some(e) = cx.default_global::<Hosts>().by_tab.get_mut(&tab) {
+                    e.binding = this.binding;
+                }
+            }
             match take_fresh(cx, profile) {
                 Some(None) => this.open_editor(String::new(), Some(None), true, window, cx),
-                Some(Some(text)) => this.open_editor(text, None, false, window, cx),
+                Some(Some(text)) => {
+                    this.open_editor(text, None, false, window, cx);
+                    // ## m4b-t18-run-as-script (named exception): a pasted preview's tab.
+                    if let (Some(console), Some(editor)) = (this.console(), this.editor().cloned())
+                    {
+                        crate::scripts::run_as_script::adopt_pending(tab, console, &editor, cx);
+                    }
+                }
                 None => this.restore(window, cx),
             }
+            // ## m4b-t18-run-as-script fix round 1 (m6): a pasted text not adopted goes.
+            crate::scripts::run_as_script::forget_pending(tab, cx);
         }
         this
     }
@@ -639,12 +707,80 @@ impl ConsoleHost {
         // Its keys reach the editor's commands like a console of ours.
         let focus = editor.focus_handle(cx);
         register_focus_context(cx, focus, EDITOR_CONTEXT);
-        self.segment = Some(cx.new(|cx| EditorSegment::new(&editor, cx)));
+        self.set_segment(&editor, cx);
         self.mode = Mode::Ready {
             console,
             editor,
             owned: false,
         };
+    }
+
+    // ## m4b-t14-tabs (named exception)
+    /// Starts script tab `script`: its doc, its binding as its handle names it (none when the
+    /// profile is gone or the tab may not run there), then the file's read.
+    fn open_script(&mut self, script: ScriptTabId, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.tab;
+        let doc = cx.new(|cx| ScriptDoc::new(script, tab, cx));
+        self._subscriptions
+            .push(cx.subscribe_in(&doc, window, Self::on_script_doc));
+        let (profile, plan) = {
+            let d = doc.read(cx);
+            (d.spec(cx).and_then(|t| t.profile), d.plan.clone())
+        };
+        if let Some(p) = profile.filter(|p| profile_of(cx, *p).is_some()) {
+            match plan {
+                Ok(crate::scripts::open::SessionPlan::Shared) => self.set_binding(p, cx),
+                Ok(crate::scripts::open::SessionPlan::Own { .. }) => {
+                    // Slot 0: a session of its own, never the profile's default one.
+                    self.binding = Some((p, 0));
+                    if let Some(e) = cx.default_global::<Hosts>().by_tab.get_mut(&self.tab) {
+                        e.binding = self.binding;
+                    }
+                }
+                // Refused where it is bound: no binding, nothing runs.
+                Err(_) => {}
+            }
+        }
+        self.script = Some(doc.clone());
+        self.mode = Mode::Loading;
+        doc.update(cx, |d, cx| d.start_load(None, cx));
+    }
+
+    /// The script doc's events: the file was read (the editor opens over it), or something the
+    /// host draws changed.
+    fn on_script_doc(
+        &mut self,
+        doc: &Entity<ScriptDoc>,
+        event: &ScriptDocEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ScriptDocEvent::Read(opened) => {
+                if !matches!(self.mode, Mode::Loading) {
+                    return;
+                }
+                let opened = (**opened).clone();
+                self.open_editor(opened.text.clone(), None, true, window, cx);
+                let (Some(console), Some(editor)) = (self.console(), self.editor().cloned()) else {
+                    return;
+                };
+                if opened.tier == hacivat_scripts::fileio::SizeTier::Preview {
+                    let spec = hacivat_ui_editor::PreviewSpec {
+                        shown_bytes: opened.text.len() as u64,
+                        total_bytes: opened.total,
+                    };
+                    editor.update(cx, |e, cx| e.set_preview(spec, cx));
+                }
+                doc.update(cx, |d, cx| d.attach(console, editor, opened, cx));
+                // A session taken before the doc knew its console.
+                if let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone()) {
+                    doc.update(cx, |d, cx| d.session_taken(session, cx));
+                }
+                cx.notify();
+            }
+            ScriptDocEvent::Changed => cx.notify(),
+        }
     }
 
     fn set_binding(&mut self, profile: ProfileId, cx: &mut Context<Self>) {
@@ -679,6 +815,56 @@ impl ConsoleHost {
         self.segment.as_ref()
     }
 
+    // ## m3c-t41-chrome
+    /// Gives the console's results the format locale and time zone again when they changed
+    /// from what the attach or the last refresh applied (a settings change refreshes the
+    /// windows).
+    fn follow_display(&mut self, cx: &mut Context<Self>) {
+        let Some(console) = self.console() else {
+            return;
+        };
+        let Some(format) = cx
+            .try_global::<crate::l10n_global::L10nGlobal>()
+            .map(|g| g.l10n.snapshot().format.clone())
+        else {
+            return;
+        };
+        let key = (format.format_locale.clone(), format.time_zone.clone());
+        // ## fix round 1 (m8): against what the attach (or the last refresh) applied, so a
+        // change made before this console's first frame is followed too.
+        match crate::exec_ui::orchestrator::display_applied(console, cx) {
+            Some(applied) if applied != key => {
+                cx.defer(move |cx| crate::exec_ui::orchestrator::refresh_display(console, cx));
+            }
+            _ => {}
+        }
+    }
+
+    // ## m3c-t41-chrome
+    /// The editor's status segment and a status bar cell for each of its parts; and the
+    /// placeholder an empty console shows ("Write SQL here. ⌘↵ runs the statement at the
+    /// caret.", design/m3a-query surface 1, m3b-safe surface 24).
+    fn set_segment(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
+        let placeholder: hacivat_ui::text::TextFn = Rc::new(|cx: &App| {
+            let key =
+                crate::shell::keymap_state::shortcut_label(cx, "editor.run").unwrap_or_default();
+            tr(
+                cx,
+                ids::hv::EDITOR_PLACEHOLDER,
+                ids::hv::HvEditorPlaceholder {
+                    key: hacivat_l10n::Text(key),
+                },
+            )
+        });
+        editor.update(cx, |e, cx| e.set_placeholder(Some(placeholder), cx));
+        let segment = cx.new(|cx| EditorSegment::new(editor, cx));
+        self.segment_cells = SegmentPart::ALL
+            .into_iter()
+            .map(|part| cx.new(|cx| SegmentCell::new(&segment, part, cx)))
+            .collect();
+        self.segment = Some(segment);
+    }
+
     /// The autosave file, once the console has one.
     pub fn autosave_path(&self) -> Option<PathBuf> {
         self.autosave.as_ref().map(|a| a.path().to_path_buf())
@@ -695,6 +881,10 @@ impl ConsoleHost {
     fn on_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = live_kinds(cx);
         match self.mode {
+            // ## m4b-t14-tabs (named exception, R-M4b-30): a script tab is never bound by a
+            // connect.
+            Mode::Unbound | Mode::Loading if self.script.is_some() => {}
+            Mode::Ready { owned: true, .. } if self.script.is_some() && self.binding.is_none() => {}
             Mode::Unbound => {
                 let newly: Vec<ProfileId> = now
                     .iter()
@@ -877,19 +1067,29 @@ impl ConsoleHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((profile_id, slot)) = self.binding else {
+        // ## m4b-t14-tabs (named exception): a script tab opens its editor unbound too (it
+        // then runs nothing); a console needs its binding.
+        let binding = self.binding;
+        if binding.is_none() && self.script.is_none() {
             return;
-        };
-        let profile = profile_of(cx, profile_id);
+        }
+        let slot = binding.map_or(0, |(_, slot)| slot);
+        let profile = binding.and_then(|(p, _)| profile_of(cx, p));
         let doc = DocId(u64::from(self.tab.0));
         let service = SqlLanguageService::new();
         let language: Rc<dyn LanguageService> = service.clone();
-        let label = a11y::label(self.title(cx));
+        // ## m4b-t14-tabs (named exception): a script editor is named by its tab's title.
+        let label = a11y::label(match &self.script {
+            Some(doc) => crate::scripts::tabs::tab_title(doc.read(cx).id, cx),
+            None => self.title(cx),
+        });
         let cfg = editor_config(cx);
         let editor = cx.new(|cx| EditorView::new(doc, &text, cfg, language, label, window, cx));
         let log = hacivat_exec::SessionLog::new();
         let results = cx.new(|_| ConsoleResults::new(log.clone()));
-        let client = if slot <= 1 {
+        // ## m4b-t14-tabs (named exception): slot 0 (a script tab's own session) is never the
+        // default client.
+        let client = if slot == 1 {
             ClientId::DEFAULT
         } else {
             ClientId(u64::from(self.n))
@@ -900,7 +1100,7 @@ impl ConsoleHost {
                 id: ConsoleId(0),
                 tab: self.tab,
                 n: self.n,
-                profile: Some(profile_id),
+                profile: binding.map(|(p, _)| p),
                 client,
                 session: None,
                 editor: Some(editor.clone()),
@@ -911,6 +1111,18 @@ impl ConsoleHost {
             },
         );
         exec_attach(console, &editor, window, cx);
+        // ## m4b-t21-shots (named exception): while a Run-as-script strip shows, this host
+        // draws the T2 banner above it (see `render`).
+        editor.update(cx, |e, cx| {
+            e.set_host_banner(
+                Some(std::rc::Rc::new(move |cx: &App| {
+                    crate::scripts::run_as_script::strip(console, cx).is_some()
+                })),
+                cx,
+            );
+        });
+        // ## m3c-t33-find (named exception): the console's find bar.
+        crate::console::find_bar::attach(console, &editor, window, cx);
         let focus_handle = editor.focus_handle(cx);
         register_focus_context(cx, focus_handle.clone(), EDITOR_CONTEXT);
         let subscriptions = [
@@ -920,11 +1132,14 @@ impl ConsoleHost {
             }),
         ];
         self._subscriptions.extend(subscriptions);
-        self.segment = Some(cx.new(|cx| EditorSegment::new(&editor, cx)));
+        self.set_segment(&editor, cx);
+        // ## m4b-t14-tabs (named exception, R-M4b-5): a script tab never autosaves into the
+        // consoles folder.
+        let autosave = autosave.filter(|_| autosave::allowed(self.script.is_some()));
         self.autosave = autosave.and_then(|on_disk| {
             let paths = cx.try_global::<AppState>()?.paths.clone();
             Some(Autosave::new(
-                autosave::console_path(&paths, profile_id, self.n),
+                autosave::console_path(&paths, binding?.0, self.n),
                 on_disk,
             ))
         });
@@ -945,7 +1160,7 @@ impl ConsoleHost {
         &mut self,
         editor: &Entity<EditorView>,
         event: &EditorEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // The editor counts failed paints; the app logs each new one (never their text).
@@ -959,9 +1174,32 @@ impl ConsoleHost {
             self.paint_errors = errors;
         }
         match event {
-            EditorEvent::Changed { .. } => self.schedule_autosave(cx),
+            EditorEvent::Changed { .. } => {
+                self.schedule_autosave(cx);
+                // ## m4b-t14-tabs (named exception): dirty and recovery are the doc's.
+                if let Some(doc) = &self.script {
+                    doc.update(cx, |d, cx| d.on_edit(cx));
+                }
+            }
             EditorEvent::TierChanged(tier) => {
                 exec_tier(editor, self.console(), *tier, cx);
+            }
+            // ## m4b-t14-tabs (named exception)
+            EditorEvent::Reloaded { version } => {
+                if let Some(doc) = &self.script {
+                    let version = *version;
+                    doc.update(cx, |d, cx| d.on_reloaded(version, cx));
+                }
+            }
+            // ## m4b-t18-run-as-script (named exception; Task 11's question, R-T11-2): a
+            // 20-100 MB paste asks; "Paste as preview" opens the document as a preview tab.
+            EditorEvent::PasteNeedsConfirm { bytes, total } => {
+                crate::scripts::run_as_script::ask_paste(editor, *bytes, *total, window, cx);
+            }
+            EditorEvent::PasteAsPreview { text } => {
+                if let Some(console) = self.console() {
+                    crate::scripts::run_as_script::open_pasted(console, text, window, cx);
+                }
             }
             _ => {}
         }
@@ -1056,7 +1294,8 @@ impl ConsoleHost {
             return;
         };
         let read_only = must_be_read_only(cx, profile);
-        if slot <= 1 {
+        // ## m4b-t14-tabs (named exception): slot 0 is a script tab's own session.
+        if slot == 1 {
             let Some(handle) = sessions.default_session() else {
                 return;
             };
@@ -1148,6 +1387,20 @@ impl ConsoleHost {
                 .default_session()
         });
         self.own_session = default.is_none_or(|d| d.id() != handle.id());
+        // ## m4b-t14-tabs (named exception, R-M4b-27): a script tab that needs a session of its
+        // own never takes the profile's default one (a single-session profile hands it back).
+        if !self.own_session
+            && self.binding.is_some_and(|(_, slot)| slot == 0)
+            && let Some(doc) = self.script.clone()
+        {
+            // ## m4b-t14-tabs fix round 1 (I3, R-T14-3): never a shared session.
+            doc.update(cx, |d, cx| {
+                d.show(crate::scripts::tabs::Notice::OneSession, cx);
+                d.switch = crate::scripts::tabs::Switch::Failed;
+            });
+            self.acquire = Acquire::Cancelled;
+            return;
+        }
         // The registry's client says whose session it is (Task 33 closes a closed console's
         // session only when it is not the default one).
         let client = if self.own_session {
@@ -1161,6 +1414,12 @@ impl ConsoleHost {
         });
         exec_rebind(console, window, cx);
         self.watch_session(window, cx);
+        // ## m4b-t14-tabs (named exception): a MySQL script tab switches its own session.
+        if let Some(doc) = self.script.clone()
+            && let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone())
+        {
+            doc.update(cx, |d, cx| d.session_taken(session, cx));
+        }
     }
 
     /// Takes the session away from the console; a session of its own closes.
@@ -1342,18 +1601,6 @@ impl ConsoleHost {
         cx.notify();
     }
 
-    /// The production explanation, under the notice.
-    fn explain(&mut self, at: Option<Bounds<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
-        let anchor = at.map_or_else(|| window.mouse_position(), |b| b.bottom_left());
-        let anchor = point(anchor.x, anchor.y + px(6.0));
-        let view: AnyView = cx.new(ProdPopover::new).into();
-        if let Some(ws) = window.root::<Workspace>().flatten() {
-            ws.update(cx, |ws, cx| {
-                ws.open_anchored("console-prod-popover", anchor, view, window, cx);
-            });
-        }
-    }
-
     // ---- render -----------------------------------------------------------------------------
 
     fn toolbar_model(&self, cx: &App) -> ToolbarModel {
@@ -1380,14 +1627,9 @@ impl ConsoleHost {
 
     fn live_toolbar_model(&self, cx: &App) -> ToolbarModel {
         let profile = self.binding.and_then(|(p, _)| profile_of(cx, p));
-        // The notice claims read-only only over a read-only session (or none yet): during a
-        // pending reconnect the console says what is true instead (C1).
-        let production = production_read_only(cx)
-            && !self.pending_ro
-            && self.ux.is_none_or(|u| u.read_only)
-            && profile
-                .as_ref()
-                .is_some_and(|p| p.environment == Some(EnvTag::Production));
+        // ## m3b-t26-prod-unlock: no production read-only notice (R-M3-6 REVISED ends): a
+        // production console shows its environment (the swatch, the hairline, the capsule) and,
+        // when the session is read-only because the profile is, the lock chip like any other.
         let name = self.title(cx);
         let waiting = match (&self.acquire, self.binding) {
             (Acquire::Waiting { .. }, Some((p, _))) => cx
@@ -1412,9 +1654,22 @@ impl ConsoleHost {
             }
             _ => RunUx::Idle,
         };
+        // ## m4b-t22-pre fix round 1 (T22-pre review I1): a Run as script shows Stop for the
+        // whole run, its first pass and the gaps between units included (no unit in flight),
+        // in the toolbar's first row, which never leaves the tile. Its clock is the strip's.
+        let run = match run {
+            RunUx::Idle
+                if self
+                    .console()
+                    .is_some_and(|c| crate::scripts::run_as_script::running(c, cx)) =>
+            {
+                RunUx::Running(0)
+            }
+            other => other,
+        };
         let read_only = self
             .ux
-            .filter(|ux| ux.read_only && !production && !self.pending_ro)
+            .filter(|ux| ux.read_only && !self.pending_ro)
             .map(|ux| access_label(cx, ux.access));
         let pending_read_only = self.pending_ro.then(|| {
             profile
@@ -1422,9 +1677,14 @@ impl ConsoleHost {
                 .map(|p| SharedString::from(p.name.clone()))
                 .unwrap_or_default()
         });
+        // ## m4b-t14-tabs (named exception): a script tab runs only where it may.
+        let script_runs = self
+            .script
+            .as_ref()
+            .is_none_or(|d| d.read(cx).run_enabled(cx));
         ToolbarModel {
             run,
-            run_enabled: !matches!(self.acquire, Acquire::Waiting { .. }),
+            run_enabled: !matches!(self.acquire, Acquire::Waiting { .. }) && script_runs,
             name,
             env: profile
                 .as_ref()
@@ -1432,14 +1692,13 @@ impl ConsoleHost {
                 .map(|tag| env_kind(Some(tag))),
             waiting,
             read_only,
-            production,
             pending_read_only,
         }
     }
 
     fn actions(&self, cx: &mut Context<Self>) -> ToolbarActions {
         let me = cx.weak_entity();
-        let (a, b, c, d) = (me.clone(), me.clone(), me.clone(), me);
+        let (a, b, c) = (me.clone(), me.clone(), me);
         ToolbarActions {
             run: Rc::new(move |window, cx| {
                 let _ = a.update(cx, |h, cx| h.run(window, cx));
@@ -1449,9 +1708,6 @@ impl ConsoleHost {
             }),
             cancel_wait: Rc::new(move |_, cx| {
                 let _ = c.update(cx, |h, cx| h.cancel_wait(cx));
-            }),
-            explain: Rc::new(move |at, window, cx| {
-                let _ = d.update(cx, |h, cx| h.explain(at, window, cx));
             }),
         }
     }
@@ -1463,6 +1719,10 @@ impl ConsoleHost {
             && e.host.upgrade().is_none()
         {
             cx.default_global::<Hosts>().by_tab.remove(&self.tab);
+        }
+        // ## m4b-t14-tabs (named exception): the last tab of a file lets the service forget it.
+        if let Some(doc) = self.script.take() {
+            doc.update(cx, |d, cx| d.closed(cx));
         }
         let Mode::Ready {
             console,
@@ -1476,6 +1736,14 @@ impl ConsoleHost {
         {
             abort.abort();
         }
+        // ## m3c-t33-find (named exception)
+        crate::console::find_bar::console_closed(console, cx);
+        // ## m4b-t18-run-as-script (named exception): its run stops, its pasted text goes.
+        crate::scripts::run_as_script::console_closed(console, cx);
+        // ## m3c-t41-chrome: the editor's key context leaves with the console (its handle may
+        // outlive the tab, held by a pending task).
+        let handle = editor.read(cx).focus_handle(cx);
+        crate::shell::unregister_focus_context(cx, &handle);
         if owned {
             // The last edits are written now, on the closing thread (fix round 2, M16): a new
             // console that reuses this number starts after it, and its autosave takes the file
@@ -1510,6 +1778,11 @@ impl Render for ConsoleHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let editor = match &self.mode {
+            // ## m4b-t14-tabs (named exception): a script tab whose text is not shown says why.
+            Mode::Unbound | Mode::Loading if self.script.is_some() => {
+                let doc = self.script.clone().expect("checked");
+                return crate::scripts::disk_bars::render_unloaded(&doc, &self.script_home, cx);
+            }
             Mode::Unbound => return crate::shell::workspace::editor_empty(&theme, cx),
             Mode::Loading => {
                 return div()
@@ -1521,29 +1794,102 @@ impl Render for ConsoleHost {
         };
         // A registrant may swap the console's session (Task 34's tests do).
         self.watch_session(window, cx);
+        // ## m3c-t41-chrome: a regional format or time zone change reaches the results
+        // (`ConsoleResults::set_display` again; the console's attach applied the first).
+        self.follow_display(cx);
         let model = self.toolbar_model(cx);
         let actions = self.actions(cx);
-        let bar = toolbar::build(&model, &actions, cx);
-        div()
+        // ## m4b-t21-shots: the Run-as-script strip, if any (below).
+        let strip = self
+            .console()
+            .and_then(|c| crate::scripts::run_as_script::strip(c, cx));
+        let strip_shown = strip.is_some();
+        // ## m4b-t22-pre (T21 r1)
+        let host = cx.entity_id();
+        if !strip_shown {
+            self.notice_area.reset();
+        }
+        // ## m3b-t22-tx-ui (named exception): with the console's transaction items.
+        let bar = toolbar::build_for(&model, &actions, self.console(), cx);
+        let root = div()
             .id(("console", self.tab.0))
+            // ## m4b-t21-shots fix round 2 (m-a): the tile's box, for the tests.
+            .debug_selector(|| "console-tile".to_string())
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.tokens.colors.panel.to_hsla())
+            // ## m4b-t22-pre fix round 1 (ruling R-T22-1): the tile's bottom, for the notices'
+            // floor, which gives way to the strip.
+            .relative()
+            .children(strip_shown.then(|| self.notice_area.tile_probe()))
             .child(bar)
+            // ## m4b-t14-tabs (named exception): a script tab's notices, under its toolbar.
+            // ## m4b-t21-shots fix round 2 (m-a): the notices give way first while a strip
+            // shows (they scroll), so the code keeps its two lines inside the tile; the strip
+            // and the banner's title never shrink.
+            // ## m4b-t22-pre (T21 r1); fix round 1 (ruling R-T22-1): the most severe notice's
+            // title and buttons keep a floor that gives way only to the strip; the others give
+            // way first (`NoticeArea`).
+            .children(match self.script.as_ref() {
+                Some(doc) if strip_shown => self.notice_area.render(doc, host, cx),
+                Some(doc) => crate::scripts::disk_bars::render(doc, cx)
+                    .map(|n| div().flex_none().child(n).into_any_element())
+                    .into_iter()
+                    .collect(),
+                None => Vec::new(),
+            })
+            // ## m4b-t18-run-as-script (named exception; NOTES surface 9): the Run-as-script
+            // strip, under the notices (never over a trust signal).
+            // ## m4b-t21-shots (named exception, T18 concern): and under the T2 banner, as the
+            // mock shows: while a strip shows, this host draws the editor's banner above it
+            // (`EditorView::set_host_banner`, set at attach).
+            .children(strip.as_ref().and_then(|_| {
+                editor
+                    .clone()
+                    .update(cx, |e, cx| e.banner_element(window, cx))
+            }))
+            .children(strip.map(|s| {
+                div()
+                    .flex_none()
+                    // ## m4b-t22-pre fix round 1 (ruling R-T22-1)
+                    .relative()
+                    .child(s)
+                    .child(self.notice_area.strip_probe(host))
+            }))
+            // ## m3c-t33-find (named exception): the find bar, a row under the toolbar
+            // (design/m3b-safe surface 16, M3c-9).
+            .children(
+                self.console()
+                    .and_then(|c| crate::console::find_bar::render(c, cx)),
+            )
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_h(px(0.0))
+                    // ## m4b-t21-shots fix round 1 (m1, named exception): while a strip shows,
+                    // the code keeps two lines; the condensed banner's body gives way first.
+                    .min_h(if strip_shown {
+                        // ## m4b-t21-shots fix round 2 (m-a): with the code's top inset.
+                        hacivat_ui_editor::EditorView::code_height(2, cx)
+                    } else {
+                        px(0.0)
+                    })
                     .child(a11y::embed(
                         &editor,
                         StyleRefinement::default().size_full(),
                         window,
                     )),
             )
-            .into_any_element()
+            // ## m3b-t23-escalation (named exception): the error-policy bar at the foot of the
+            // editor tile, above the seam to the results (design/m3b-safe surface 7).
+            .children(
+                self.console()
+                    .and_then(|c| crate::exec_ui::error_bar::render(c, cx)),
+            );
+        // ## m4-t33d-fr1 (ruling R-T33d-5)
+        focus_home(&self.home, editor.focus_handle(cx), root).into_any_element()
     }
 }
 
@@ -1580,6 +1926,16 @@ fn live_kinds(cx: &App) -> HashMap<ProfileId, LiveKind> {
         .unwrap_or_default()
 }
 
+// ## m4-t24-live (named exception): Open data's console (R-M4-13).
+/// The next console tab built for `profile` opens over `text` (as a shots fixture's does:
+/// nothing restored, autosave off), not empty.
+pub(crate) fn queue_text(profile: ProfileId, text: String, cx: &mut App) {
+    cx.default_global::<Hosts>()
+        .fresh
+        .borrow_mut()
+        .push((profile, Some(text)));
+}
+
 /// Whether `console_binding` (or a shots fixture, with its text) just handed `profile` to a
 /// new console tab (consumed).
 fn take_fresh(cx: &App, profile: ProfileId) -> Option<Option<String>> {
@@ -1603,6 +1959,9 @@ fn editor_config(cx: &App) -> EditorConfig {
             hacivat_settings::CaretBlinkPref::System => CaretBlink::System,
             hacivat_settings::CaretBlinkPref::Off => CaretBlink::Off,
         },
+        // ## m4b-t18-run-as-script (named exception; carries-w1 T11/T18): the host takes the
+        // 20-100 MB paste question (`run_as_script::ask_paste`).
+        confirm_large_paste: true,
         ..EditorConfig::default()
     }
 }
@@ -1694,6 +2053,34 @@ pub fn editor_segment(console: ConsoleId, cx: &App) -> Option<AnyView> {
     host.read(cx).segment.clone().map(Into::into)
 }
 
+// ## m3c-t41-chrome (F2 M8; M3c-35)
+/// The status bar's cells of `console`'s editor segment: one per part it shows now, left to
+/// right ("Reduced mode", "Mixed line endings", the carets, the selected count, Ln/Col).
+pub fn editor_segment_cells(console: ConsoleId, cx: &App) -> Vec<(SegmentPart, AnyView)> {
+    let Some(tab) = Consoles::get(cx, console).map(|s| s.tab) else {
+        return Vec::new();
+    };
+    let Some(host) = cx
+        .try_global::<Hosts>()
+        .and_then(|h| h.by_tab.get(&tab))
+        .and_then(|e| e.host.upgrade())
+    else {
+        return Vec::new();
+    };
+    let host = host.read(cx);
+    let Some(segment) = &host.segment else {
+        return Vec::new();
+    };
+    let shown = segment.read(cx).parts().to_vec();
+    host.segment_cells
+        .iter()
+        .filter_map(|cell| {
+            let part = cell.read(cx).part();
+            shown.contains(&part).then(|| (part, cell.clone().into()))
+        })
+        .collect()
+}
+
 /// The host of console tab `tab` (tests, the shots fixtures).
 pub fn host_of(cx: &App, tab: TabId) -> Option<Entity<ConsoleHost>> {
     cx.try_global::<Hosts>()?.by_tab.get(&tab)?.host.upgrade()
@@ -1777,66 +2164,6 @@ pub mod fixtures {
                 cx.notify();
             });
         }
-    }
-}
-
-// ---- the production explanation -------------------------------------------------------------
-
-/// "Why this console is read-only" (NOTES ruling 6): a 300 px popover with the title, why, and
-/// what still works.
-struct ProdPopover {
-    focus: hacivat_ui_core::gpui_surface::FocusHandle,
-    focused_once: bool,
-}
-
-impl ProdPopover {
-    fn new(cx: &mut Context<Self>) -> Self {
-        ProdPopover {
-            focus: cx.focus_handle(),
-            focused_once: false,
-        }
-    }
-}
-
-impl Render for ProdPopover {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.focused_once {
-            self.focused_once = true;
-            window.focus(&self.focus, cx);
-        }
-        let theme = *Theme::get(cx);
-        let t = theme.tokens;
-        let c = &t.colors;
-        let title = tr(cx, ids::hv::CONSOLE_PROD_POP_TITLE, NoArgs);
-        popover_surface(&theme)
-            .id("console-prod-popover")
-            .track_focus(&self.focus)
-            .w(px(300.0))
-            .p(px(t.spacing.lg))
-            .flex()
-            .flex_col()
-            .gap(px(t.spacing.sm))
-            .child(
-                hacivat_ui::text::Label::new(
-                    title,
-                    TextSource::Fluent,
-                    t.type_ramp.body_strong,
-                    c.text.to_hsla(),
-                )
-                .id("console-prod-pop-title"),
-            )
-            .child(paragraph(
-                tr(cx, ids::hv::CONSOLE_PROD_POP_BODY, NoArgs),
-                TextSource::Fluent,
-                t.type_ramp.body,
-                c.text.to_hsla(),
-            ))
-            .child(paragraph(
-                tr(cx, ids::hv::CONSOLE_PROD_POP_READS, NoArgs),
-                TextSource::Fluent,
-                t.type_ramp.body,
-                c.text_2.to_hsla(),
-            ))
     }
 }
 

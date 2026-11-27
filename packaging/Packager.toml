@@ -17,6 +17,11 @@ category = "DeveloperTool"
 resources = [
     { src = "../THIRD_PARTY_NOTICES.md", target = "THIRD_PARTY_NOTICES.md" },
 ]
+# ## m3b-ci (controller fix): the AppImage needs a square PNG icon ("Could not find a square icon
+# to use as AppImage icon" otherwise) and the deb installs it into hicolor. Only
+# packaging/package-linux.sh un-comments this line, so the macOS .app and the Windows NSIS
+# installer stay exactly as they were. Paths resolve from this config's directory.
+#linux-only# icons = ["icons/hacivat-*.png"]
 
 [[binaries]]
 path = "hacivat"

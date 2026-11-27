@@ -18,6 +18,8 @@ fixed_decimal.workspace = true
 icu_locale.workspace = true
 jiff.workspace = true
 unicode-segmentation.workspace = true
+# ## m3b-t01a-seams: locale collation for the grid's local sort (`valfmt::compare`, Task 36).
+icu_collator.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -115,6 +115,8 @@ fn steps(f: &FakeDriver, from: usize) -> Vec<Step> {
             FakeCall::Typed(FakeTypedCall::Query(_)) => Step::Query,
             FakeCall::Typed(FakeTypedCall::FetchMore(_)) => Step::Fetch,
             FakeCall::Typed(FakeTypedCall::Close(how)) => Step::Close(*how),
+            // ## m3b-t01c-core-seams: a new fake call (no M3a query has binds).
+            FakeCall::Typed(FakeTypedCall::Binds(b)) => Step::Other(format!("binds {}", b.len())),
             FakeCall::Reset => Step::Reset,
         };
         let repeat = matches!(step, Step::PlanBefore | Step::Replay) && out.last() == Some(&step);

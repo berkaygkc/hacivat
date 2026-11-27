@@ -28,6 +28,8 @@ pub use rules::{
     HintSource, duplicate_name, is_local_endpoint, needs_environment_prompt, production_hint,
     suggest_name,
 };
+// ## m3b-t01c-core-seams
+pub use rules::{valid_fn_allowlist_entry, valid_startup_script};
 pub use store::{LoadedProfiles, ProfileDiag, ProfileStore, SaveReport, StoreError};
 
 /// Where a profile connects (HV-CONN-01).
@@ -99,7 +101,42 @@ pub struct Profile {
     /// How long the SSH passwords and passphrases are kept (default Forever, B30); never the
     /// database `retention` (Q23).
     pub ssh_retention: Retention,
+    // ## m3b-t01c-core-seams (P-M3b-10); each key left out at its default, so an M2b/M3a file
+    // round-trips byte for byte.
+    /// SQL run after connect and after every reset on read-write sessions (C3, Task 12); a
+    /// read-only session ignores it. At most [`STARTUP_SCRIPT_MAX_BYTES`], no NUL.
+    pub startup_script: Option<String>,
+    /// The functions a read-only session may call beyond the built-in allowlist (D-009,
+    /// R-M3-56; `ClassifyCtx::fn_allowlist`, Task 24). Edited in the profile file only.
+    pub read_only_fn_allowlist: Vec<String>,
+    /// Statements of this profile go to the query history (D-061, Task 17); default `true`.
+    pub record_history: bool,
+    // ## m4-t01c-core (R-M4-15): left out when unset, so an M2b/M3 file round-trips byte for
+    // byte (the P-M3b-10 rule).
+    // ## m4-t20-scope (named exception, ruling R-W3-1): tri-state.
+    /// "Encrypt cached metadata" as the user set it: `Some` when chosen in the connection
+    /// dialog, `None` (every profile from before M4, every import) to derive it from the
+    /// environment. Read the effective value with [`Profile::catalog_sensitive`]: when it is
+    /// `true` the catalog cache rows are encrypted with the profile's `SecretSlot::CatalogKey`
+    /// (Task 11).
+    pub catalog_sensitive_set: Option<bool>,
 }
+
+// ## m4-t20-scope (named exception, ruling R-W3-1)
+impl Profile {
+    /// Whether the profile's cached metadata is encrypted (R-M4-15): as the user set it, else
+    /// on for production-tagged profiles (PO-Q2) and off for every other one.
+    pub fn catalog_sensitive(&self) -> bool {
+        self.catalog_sensitive_set
+            .unwrap_or(self.environment == Some(EnvTag::Production))
+    }
+}
+
+// ## m3b-t01c-core-seams
+/// The most bytes a profile's startup script may hold (64 KiB).
+pub const STARTUP_SCRIPT_MAX_BYTES: usize = 64 * 1024;
+/// The most entries a read-only function allowlist may hold.
+pub const FN_ALLOWLIST_MAX: usize = 1_000;
 
 impl Default for Profile {
     /// A new PostgreSQL profile with a fresh ID.
@@ -133,6 +170,12 @@ impl Default for Profile {
             isolation: None,
             idle_disconnect_s: None,
             ssh_retention: Retention::default(),
+            // ## m3b-t01c-core-seams
+            startup_script: None,
+            read_only_fn_allowlist: Vec::new(),
+            record_history: true,
+            // ## m4-t01c-core; ## m4-t20-scope (R-W3-1): derived until set.
+            catalog_sensitive_set: None,
         }
     }
 }

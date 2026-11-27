@@ -38,7 +38,8 @@ async fn caps_follow_the_servers_net_write_timeout() {
         c.typed_caps(),
         TypedCaps {
             suspend: true,
-            binds: false,
+            // ## m3b-t13-drivers (named exception): binds since M3b.
+            binds: true,
             close_needs_kill: true,
             idle_bound: Some(Duration::from_secs(45)),
         }
@@ -658,6 +659,9 @@ async fn read_only_1295_stays_unsupported_and_is_never_resent_as_text() {
     c.ping().await.unwrap();
 }
 
+// ## m3b-t13-drivers (named exception): M3a refused every bind and the simple protocol; M3b
+// binds and runs a simple-protocol text as one (`typed_m3b.rs`). What stays refused: binds with
+// the simple protocol (nothing sent), and a placeholder without a bind (prepared, never run).
 #[tokio::test]
 async fn binds_placeholders_and_the_simple_protocol_are_refused() {
     let (mut c, server, setup) = scripted(false, |cmd| match cmd.code {
@@ -665,13 +669,11 @@ async fn binds_placeholders_and_the_simple_protocol_are_refused() {
         _ => None,
     })
     .await;
-    let mut simple = spec("SELECT 1", false, 1);
-    simple.protocol = Protocol::Simple;
-    assert_eq!(kind(c.query(simple).await), RawErrorKind::Unsupported);
     let binds = [BindValue::Null];
-    let mut bound = spec("SELECT ?", false, 1);
-    bound.binds = &binds;
-    assert_eq!(kind(c.query(bound).await), RawErrorKind::Unsupported);
+    let mut simple = spec("SELECT ?", false, 1);
+    simple.protocol = Protocol::Simple;
+    simple.binds = &binds;
+    assert_eq!(kind(c.query(simple).await), RawErrorKind::Unsupported);
     assert_eq!(server.count(), setup, "refused before anything was sent");
     // A placeholder: prepared, never executed.
     assert_eq!(
@@ -1077,7 +1079,8 @@ async fn a_server_without_net_write_timeout_connects_without_suspension() {
         c.typed_caps(),
         TypedCaps {
             suspend: false,
-            binds: false,
+            // ## m3b-t13-drivers (named exception): binds since M3b.
+            binds: true,
             close_needs_kill: true,
             idle_bound: None,
         }

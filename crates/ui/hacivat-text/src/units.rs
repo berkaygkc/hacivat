@@ -68,6 +68,15 @@ pub trait TokenOracle {
     /// Ranges may run past the line (a block comment); they are clipped to it. `None` when the
     /// service has no analysis at the current version: the character classes apply.
     fn words_on_line(&self, line: Range<usize>) -> Option<SmallVec<[Range<usize>; 16]>>;
+
+    // ## m3c-t31-multi (named exception): the IME's plain-text check (R-M3-64).
+    /// Whether text typed at byte `at` lands inside a string literal or a comment: `at` strictly
+    /// inside one, or at the end of a line comment or of an unterminated one. `None` when the
+    /// service has no analysis at the current version (the IME then takes the safe fallback).
+    fn in_string_or_comment(&self, at: usize) -> Option<bool> {
+        let _ = at;
+        None
+    }
 }
 
 /// The class of a character for word movement without tokens.

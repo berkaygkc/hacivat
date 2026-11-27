@@ -114,6 +114,49 @@ fn appended_rows_are_followed_at_the_bottom(cx: &mut TestAppContext) {
     assert!(!last_frame(&built, vcx).contains(&99));
 }
 
+// ## demofix-1 (PO demo F8)
+/// Sticky scroll: rows leaving the front of a full list (a capped log) never move a paused
+/// view off its rows, and the host hears when following stops and resumes.
+#[gpui::test]
+fn a_paused_list_keeps_its_rows_when_the_front_is_dropped(cx: &mut TestAppContext) {
+    use hacivat_ui_grid::ListEvent;
+    let (view, vcx, _, _) = open(cx, 100);
+    let heard: Rc<RefCell<Vec<ListEvent>>> = Rc::default();
+    let sink = heard.clone();
+    vcx.update(|_, cx| {
+        cx.subscribe(&view, move |_, e: &ListEvent, _| sink.borrow_mut().push(*e))
+            .detach()
+    });
+    vcx.update(|_, cx| view.update(cx, |l, cx| l.scroll_to_end(cx)));
+    vcx.run_until_parked();
+    assert!(!view.read_with(vcx, |l, _| l.paused()));
+    // End resumed following (a list opened at its top, not following, was paused).
+    assert_eq!(heard.borrow().last(), Some(&ListEvent::Paused(false)));
+    heard.borrow_mut().clear();
+    // The user scrolls up.
+    vcx.update(|_, cx| view.update(cx, |l, cx| l.scroll_px(-18.0 * 50.0, cx)));
+    vcx.run_until_parked();
+    let at = view.read_with(vcx, |l, _| l.visible_rows());
+    assert_eq!(at, 40..50);
+    assert!(view.read_with(vcx, |l, _| l.paused()));
+    assert_eq!(heard.borrow().as_slice(), [ListEvent::Paused(true)]);
+    // 30 rows leave the front, 30 arrive: the same rows stay in view, 30 lower in index.
+    vcx.update(|_, cx| view.update(cx, |l, cx| l.shift_rows(-30, cx)));
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(vcx, |l, _| l.visible_rows()), 10..20);
+    // Back to the bottom by scrolling: following again.
+    vcx.update(|_, cx| view.update(cx, |l, cx| l.scroll_px(18.0 * 500.0, cx)));
+    vcx.run_until_parked();
+    assert!(!view.read_with(vcx, |l, _| l.paused()));
+    assert_eq!(
+        heard.borrow().as_slice(),
+        [ListEvent::Paused(true), ListEvent::Paused(false)]
+    );
+    vcx.update(|_, cx| view.update(cx, |l, cx| l.shift_rows(-30, cx)));
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(vcx, |l, _| l.visible_rows()), 90..100);
+}
+
 #[gpui::test]
 fn an_empty_list_builds_nothing(cx: &mut TestAppContext) {
     let (view, vcx, _, calls) = open(cx, 0);

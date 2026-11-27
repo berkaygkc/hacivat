@@ -25,7 +25,9 @@ use hacivat_net::ssh::{
     SshAuth, SshError, SshPrompter, SshSecretKind, SshSpec, TunnelConfig, TunnelEvent, TunnelLease,
     TunnelManager, TunnelRequest,
 };
-use hacivat_testkit::ssh_server::{ForwardPolicy, ForwardTarget, TestSshConfig, TestSshServer};
+use hacivat_testkit::ssh_server::{
+    ForwardGate, ForwardPolicy, ForwardTarget, TestSshConfig, TestSshServer,
+};
 use russh::keys::PrivateKey;
 use russh::keys::ssh_key::private::Ed25519Keypair;
 use russh::keys::ssh_key::{Cipher, Kdf, LineEnding};
@@ -71,15 +73,32 @@ async fn settle_until(what: &str, f: impl Fn() -> bool) {
     assert!(f(), "{what}");
 }
 
-/// One temp directory for every store of this test binary.
-fn dir() -> &'static Path {
-    static DIR: OnceLock<TempDir> = OnceLock::new();
-    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
+thread_local! {
+    /// One temp directory for every store of this test thread, removed when the thread ends (a
+    /// process-wide static is never dropped, so its directory outlived every run).
+    static DIR: TempDir = tempfile::tempdir().unwrap();
 }
 
-/// The `known_hosts` of the manager built for `s` (one file per server port).
+fn dir() -> PathBuf {
+    DIR.with(|d| d.path().to_path_buf())
+}
+
+/// The store directory of the server `s` alone. Its port and its (fresh) host key name it: a
+/// loopback port is reused by later tests' servers, so a store named by the port alone made a
+/// later server on that port meet an earlier server's key as `HostKeyChanged` (CI flake).
+fn dir_of(s: &TestSshServer) -> PathBuf {
+    let id: String = s.host_key.sha256[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let d = dir().join(format!("server-{}-{id}", port(s)));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// The `known_hosts` of the manager built for `s` (one file per server).
 fn known_path(s: &TestSshServer) -> PathBuf {
-    dir().join(format!("known_hosts-{}", s.addr.port()))
+    dir_of(s).join("known_hosts")
 }
 
 fn known_of(s: &TestSshServer) -> Arc<KnownHosts> {
@@ -96,14 +115,14 @@ fn port(s: &TestSshServer) -> u16 {
 
 /// A store whose only line gives `s`'s host and port another key.
 fn known_with(s: &TestSshServer, other: &HostKey) -> Arc<KnownHosts> {
-    let path = dir().join(format!("known_other-{}", port(s)));
+    let path = dir_of(s).join("known_other");
     let line = format!(
         "{} {}\n",
         hacivat_net::ssh::known_hosts::host_pattern(&host(s), port(s)),
         other.openssh
     );
     std::fs::write(&path, line).unwrap();
-    KnownHosts::load(vec![path], dir().join(format!("known_own-{}", port(s))))
+    KnownHosts::load(vec![path], dir_of(s).join("known_own"))
 }
 
 fn known_empty() -> Arc<KnownHosts> {
@@ -285,7 +304,10 @@ fn ed25519() -> PrivateKey {
 }
 
 static KEY_A: LazyLock<PrivateKey> = LazyLock::new(ed25519);
-static KEY_A_FILE: LazyLock<PathBuf> = LazyLock::new(|| write_key(&KEY_A, None, "key_a"));
+/// `KEY_A` written (unencrypted) into this test thread's fixture folder.
+fn key_a_file() -> PathBuf {
+    write_key(&KEY_A, None, "key_a")
+}
 
 /// Writes `key` in OpenSSH form (encrypted with `passphrase` when given), mode `0600`.
 fn write_key(key: &PrivateKey, passphrase: Option<&str>, name: &str) -> PathBuf {
@@ -693,7 +715,7 @@ async fn identities_only_tries_the_key_file_first() {
         .max_auth_tries(1))
     .await;
     let agent = agent_with_wrong_keys(5).await;
-    let r = req_key(&s, &KEY_A_FILE).identities_only(true);
+    let r = req_key(&s, &key_a_file()).identities_only(true);
     assert!(
         mgr_agent(&s, &agent.socket)
             .acquire(r, None, tok())
@@ -701,7 +723,7 @@ async fn identities_only_tries_the_key_file_first() {
             .is_ok()
     );
     // Without IdentitiesOnly the agent goes first and exhausts MaxAuthTries.
-    let r = req_key(&s, &KEY_A_FILE).identities_only(false).no_share();
+    let r = req_key(&s, &key_a_file()).identities_only(false).no_share();
     let e = mgr_agent(&s, &agent.socket)
         .acquire(r, None, tok())
         .await
@@ -725,6 +747,40 @@ async fn many_agent_keys_without_identities_only_reports_auth_with_hop() {
         .await
         .unwrap_err();
     assert!(matches!(e, SshError::Auth { hop: 0, .. }), "{e:?}");
+}
+
+/// Test isolation (CI flake, m4-netflake): a loopback port that another test's server held
+/// earlier, with another host key, starts with an empty store. One proxy port leads first to `a`
+/// (trusted there) and then to `b`; `b`'s store must not know `a`'s key.
+#[tokio::test]
+async fn a_reused_port_starts_with_an_empty_store() {
+    let mut a = ssh(cfg().user_pw("u", "pw")).await;
+    let mut b = ssh(cfg().user_key("u", KEY_A.public_key().clone())).await;
+    let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let reused = proxy.local_addr().unwrap();
+    let to = Arc::new(Mutex::new(a.addr));
+    let route = to.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = proxy.accept().await {
+            let target = *route.lock().unwrap();
+            tokio::spawn(async move {
+                if let Ok(mut up) = tokio::net::TcpStream::connect(target).await {
+                    let _ = tokio::io::copy_bidirectional(&mut sock, &mut up).await;
+                }
+            });
+        }
+    });
+    a.addr = reused;
+    mgr(&a)
+        .acquire(req_user(&a, "u"), None, tok())
+        .await
+        .unwrap();
+    *to.lock().unwrap() = b.addr;
+    b.addr = reused;
+    let mut r = req(&b, SshAuth::Agent);
+    r.spec.host_keys = HostKeyPolicy::AcceptNew;
+    let e = mgr(&b).acquire(r, None, tok()).await.unwrap_err();
+    assert_eq!(e, SshError::AgentUnavailable { hop: 0 });
 }
 
 #[tokio::test]
@@ -1097,7 +1153,7 @@ async fn key_of_another_type_than_the_known_one_is_changed_not_new() {
 #[tokio::test]
 async fn revoked_key_is_refused_in_every_policy() {
     let s = ssh(cfg().user_pw("u", "pw")).await;
-    let path = dir().join(format!("known_revoked-{}", port(&s)));
+    let path = dir_of(&s).join("known_revoked");
     std::fs::write(
         &path,
         format!(
@@ -1107,10 +1163,7 @@ async fn revoked_key_is_refused_in_every_policy() {
         ),
     )
     .unwrap();
-    let known = KnownHosts::load(
-        vec![path],
-        dir().join(format!("known_rev_own-{}", port(&s))),
-    );
+    let known = KnownHosts::load(vec![path], dir_of(&s).join("known_rev_own"));
     for policy in HostKeyPolicy::ALL {
         let e = mgr_known(known.clone(), TunnelConfig::default())
             .acquire(req_policy(&s, policy), prompter().trusts().dyn_(), tok())
@@ -1299,14 +1352,18 @@ async fn a_stalled_inner_hop_releases_the_hops_before_it() {
 }
 
 /// I2: a `direct-tcpip` channel the server confirms after the open timed out is closed, not
-/// left open on the server.
+/// left open on the server. The server holds the confirmation until the open has timed out (a
+/// gate, not a delay racing the timeout). `connect_timeout` is also the channel's limit, so it
+/// is the handshake's budget here: wide enough for a starved runner (CI flake: 500 ms timed out
+/// the acquire itself on Windows), and the channel waits it out once.
 #[tokio::test]
 async fn a_channel_confirmed_after_the_timeout_is_closed() {
     let t = echo_target().await;
-    let s = ssh(cfg().user_pw("u", "pw").forward_delay(ms(1500))).await;
+    let gate = ForwardGate::new();
+    let s = ssh(cfg().user_pw("u", "pw").forward_gate(gate.clone())).await;
     let m = mgr(&s);
     let lease = m
-        .acquire(req_user(&s, "u").timeout(ms(500)), None, tok())
+        .acquire(req_user(&s, "u").timeout(secs(5)), None, tok())
         .await
         .unwrap();
     let e = lease
@@ -1316,6 +1373,8 @@ async fn a_channel_confirmed_after_the_timeout_is_closed() {
         .err()
         .unwrap();
     assert_eq!(classify_channel_err(&e), Some(SshError::Timeout { hop: 0 }));
+    assert_eq!(s.channels_opened(), 0, "the server still holds it");
+    gate.release();
     settle_until("the server confirmed it late", || s.channels_opened() == 1).await;
     settle_until("the late channel was closed", || s.channels_live() == 0).await;
     assert_eq!(s.sessions_open(), 1, "the session itself stays");

@@ -5,8 +5,8 @@
 //! **One query.** `query` keeps M2b's routing (`exec::extended_route`): a `SET` runs over
 //! `COM_QUERY` (text protocol); a text the read-only connection must not run either way is
 //! `Unsupported` before anything is sent; everything else is prepared (`prep`, so a statement
-//! with a `?` placeholder is refused, `Unsupported`, before it runs: binds are M3b) and executed
-//! (`COM_STMT_EXECUTE`, binary protocol). A statement the server cannot prepare
+//! whose `?` placeholders are not one per bind is refused, `Unsupported`, before it runs) and
+//! executed (`COM_STMT_EXECUTE`, binary protocol). A statement the server cannot prepare
 //! (`ER_UNSUPPORTED_PS`, 1295, from the prepare only) is `Unsupported` on a read-only connection
 //! (the guard layer's refusal is never bypassed) and on a read-write one runs once more over
 //! `COM_QUERY`, decoded as text. `query` returns once the first result's header (or its OK
@@ -65,19 +65,43 @@
 //! [`TypedState::poisoned`] for as long as they run (`connect.rs`): a future dropped before it
 //! completed (mid-prepare, say) leaves a reply in the socket that the next command would take
 //! for its own, so the next call abandons the connection and answers `Io(NotConnected)`.
+//!
+//! ## m3b-t13-drivers (HV-EXEC-03 driver half; R-M3-60, -66, -77, -79)
+//!
+//! **Binds.** `spec.binds` go out as the binary protocol's parameters of `COM_STMT_EXECUTE`
+//! ([`bind_value`]: `Int`/`UInt` when the hint is a signed/unsigned integer and the text is its
+//! canonical decimal, decoded bytes for a bytes hint in `\x` hex (malformed `\x`: refused),
+//! else `Bytes` of the text; NULL as NULL), never into the SQL text. Only the prepared
+//! route carries them: a text the route sends over `COM_QUERY` (a `SET`), a statement the
+//! server cannot prepare (1295) and the text-protocol test seam answer `Unsupported` when binds
+//! are given, and the prepared statement's placeholder count must equal `binds.len()` (else
+//! `Unsupported`: prepared, never executed).
+//!
+//! **Run as one** (`Protocol::Simple`, R-M3-60): one `COM_QUERY` of the whole text, its result
+//! sets under the rules above (the first `max_result_sets` kept, the rest drained and counted;
+//! it never suspends). Only a read-write connection has the multi-statement capability
+//! (`connect.rs`, `.multi_statements(!req.read_only)`); on a read-only one it is `Unsupported`
+//! before anything is sent, as are binds. A result after the first carries no command tag (the
+//! text's first keyword names only the first statement).
+//!
+//! **Warnings** (R-M3-77): [`warnings`] runs `SHOW WARNINGS` after a `Done` whose count is
+//! positive, keeping at most [`MAX_WARNINGS`] rows as `Notice`s (`Notice::new`: text cut at
+//! 16 KiB), never on a read-only connection (the guard's `ROLLBACK` follows at once: the count
+//! only) and never while a query is open.
 
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hacivat_driver::{
-    CloseHow, Closed, Protocol, QueryDone, QueryEvent, QuerySpec, RawError, RawErrorKind,
-    ResultEnd, TxStatus, TypedCaps,
+    CloseHow, Closed, Notice, NoticeSeverity, Protocol, QueryDone, QueryEvent, QuerySpec, RawError,
+    RawErrorKind, ResultEnd, TxStatus, TypedCaps,
 };
-use hacivat_values::{Chunk, ChunkBuilder};
+use hacivat_values::{BindValue, Chunk, ChunkBuilder, LogicalType};
 use mysql_async::prelude::{Protocol as WireProtocol, Queryable};
-use mysql_async::{BinaryProtocol, Column, Conn, QueryResult, Row, TextProtocol};
+use mysql_async::{BinaryProtocol, Column, Conn, Params, QueryResult, Row, TextProtocol};
 
 use crate::connect::raw_error;
 use crate::decode::{Plan, Wire, binary_decodable};
@@ -104,6 +128,16 @@ pub(crate) struct TypedState {
     pub poisoned: bool,
     /// Test seam: every query over `COM_QUERY` (text protocol).
     pub force_text: bool,
+    // ## m3b-t07-types (ledger 194)
+    /// The session `time_zone` read at connect, which `TIMESTAMP` columns carry.
+    pub time_zone: Option<Arc<str>>,
+    // ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1)
+    /// The session `sql_mode` read at connect in the same round trip
+    /// (`RawConn::session_settings`; the read-only guard classifies and pins with it).
+    pub sql_mode: Option<Arc<str>>,
+    /// The current database (`DATABASE()`) read at connect in the same round trip (the
+    /// classifier's `search_path[0]` on MySQL and MariaDB, the T20 carry); `None` when none.
+    pub database: Option<Arc<str>>,
 }
 
 impl TypedState {
@@ -117,6 +151,10 @@ impl TypedState {
             draining: None,
             poisoned: false,
             force_text: false,
+            time_zone: None,
+            // ## m3b-t18-safe06
+            sql_mode: None,
+            database: None,
         }
     }
 
@@ -150,9 +188,147 @@ pub(crate) fn caps_for(net_write_timeout: Option<Duration>) -> TypedCaps {
         .filter(|b| !b.is_zero());
     TypedCaps {
         suspend: bound.is_some(),
-        binds: false,
+        // ## m3b-t13-drivers: binary-protocol parameters.
+        binds: true,
         close_needs_kill: true,
         idle_bound: bound,
+    }
+}
+
+// ## m3b-t13-drivers
+/// The most `SHOW WARNINGS` rows kept (the rest are read and dropped).
+pub const MAX_WARNINGS: usize = 100;
+
+/// One bind as a binary-protocol parameter (R-M3-79); `None` refuses it (nothing is sent):
+/// - a signed/unsigned integer hint with **canonical** decimal text (optional `-` for signed
+///   only, no `+`, no leading zero, ASCII digits, in range: `n.to_string() == text`) → `Int`/`UInt`;
+/// - a bytes hint with `\x` and pairs of hex digits (the raw text Hacivat shows for bytes, as
+///   PostgreSQL's `bytea` input reads it) → `Bytes` of the decoded bytes (fix round 1, I-2); a
+///   bytes hint whose text starts with `\x`/`\X` but is not that → `None`;
+/// - anything else → `Bytes` of the text (the server converts it); NULL as NULL.
+pub fn bind_value(b: &BindValue) -> Option<mysql_async::Value> {
+    use mysql_async::Value as V;
+    let BindValue::Typed { hint, text } = b else {
+        return Some(V::NULL);
+    };
+    let typed = match hint {
+        LogicalType::Int { signed: true, .. } => canonical::<i64>(text).map(V::Int),
+        LogicalType::Int { signed: false, .. } => canonical::<u64>(text).map(V::UInt),
+        LogicalType::Bytes { .. } => match hex_bytes(text) {
+            HexText::Bytes(bytes) => Some(V::Bytes(bytes)),
+            HexText::Malformed => return None,
+            HexText::NotHex => None,
+        },
+        _ => None,
+    };
+    Some(typed.unwrap_or_else(|| V::Bytes(text.as_bytes().to_vec())))
+}
+
+/// `text` as an integer only when it is that integer's canonical decimal spelling (M-1).
+fn canonical<T: std::str::FromStr + ToString>(text: &str) -> Option<T> {
+    let n: T = text.parse().ok()?;
+    (n.to_string() == text).then_some(n)
+}
+
+/// A bytes-hinted text (fix round 1, I-2).
+#[derive(Debug, PartialEq, Eq)]
+pub enum HexText {
+    /// `\x` and pairs of hex digits (either case): these bytes (`\x` alone: none).
+    Bytes(Vec<u8>),
+    /// Starts with `\x` or `\X` but is not that: refused on every engine.
+    Malformed,
+    /// No `\x` prefix: the text's own bytes.
+    NotHex,
+}
+
+/// Reads a bytes-hinted text (the same rule on all three drivers).
+pub fn hex_bytes(text: &str) -> HexText {
+    if text.starts_with("\\X") {
+        return HexText::Malformed;
+    }
+    let Some(hex) = text.strip_prefix("\\x") else {
+        return HexText::NotHex;
+    };
+    let hex = hex.as_bytes();
+    if hex.len() % 2 != 0 {
+        return HexText::Malformed;
+    }
+    let digit = |c: u8| (c as char).to_digit(16);
+    hex.chunks(2)
+        .map(|p| Some((digit(p[0])? * 16 + digit(p[1])?) as u8))
+        .collect::<Option<Vec<u8>>>()
+        .map_or(HexText::Malformed, HexText::Bytes)
+}
+
+/// The parameters of a statement with `binds` (none: `Params::Empty`, as before M3b); `None`
+/// when one is refused.
+fn params_of(binds: &[BindValue]) -> Option<Params> {
+    if binds.is_empty() {
+        Some(Params::Empty)
+    } else {
+        binds
+            .iter()
+            .map(bind_value)
+            .collect::<Option<Vec<_>>>()
+            .map(Params::Positional)
+    }
+}
+
+/// A `SHOW WARNINGS` row (`Level`, `Code`, `Message`) as a notice: the server's text, cut by
+/// `Notice::new`; a missing or odd cell is empty.
+fn warning_of(row: &Row) -> Notice {
+    let text = |i: usize| match row.as_ref(i) {
+        Some(mysql_async::Value::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
+        Some(mysql_async::Value::Int(n)) => n.to_string(),
+        Some(mysql_async::Value::UInt(n)) => n.to_string(),
+        _ => String::new(),
+    };
+    let severity = if text(0).eq_ignore_ascii_case("note") {
+        NoticeSeverity::Notice
+    } else {
+        NoticeSeverity::Warning
+    };
+    let code = text(1);
+    Notice::new(
+        severity,
+        (!code.is_empty()).then_some(code.as_str()),
+        &text(2),
+    )
+}
+
+/// `RawConn::warnings`: `SHOW WARNINGS` after the last statement, when it had any.
+pub(crate) async fn warnings(cx: Ctx<'_>) -> Result<Vec<Notice>, RawError> {
+    // A read-only session's guard rolls back at once: the count is all it reports.
+    if cx.read_only {
+        return Ok(Vec::new());
+    }
+    if cx.state.busy() {
+        return Err(unsupported());
+    }
+    let Some(conn) = cx.conn.as_mut() else {
+        return Err(not_connected());
+    };
+    if conn.get_warnings() == 0 {
+        return Ok(Vec::new());
+    }
+    let read = async {
+        let mut result = conn.query_iter("SHOW WARNINGS").await?;
+        let mut out = Vec::new();
+        while let Some(row) = result.next().await? {
+            if out.len() < MAX_WARNINGS {
+                out.push(warning_of(&row));
+            }
+        }
+        Ok::<_, mysql_async::Error>(out)
+    };
+    match read.await {
+        Ok(out) => {
+            if let Some(status) = cx.conn.as_ref().and_then(last_status) {
+                *cx.tx = status;
+            }
+            Ok(out)
+        }
+        Err(e) => Err(fail(cx, Fail::My(e)).await),
     }
 }
 
@@ -160,21 +336,61 @@ pub(crate) fn caps_for(net_write_timeout: Option<Duration>) -> TypedCaps {
 /// unknown variable) or a value that is not a positive number gives `None` (nothing suspends);
 /// an I/O or protocol failure fails the connect: a connection that cannot answer one query is
 /// not handed out as usable.
-pub(crate) async fn read_net_write_timeout(conn: &mut Conn) -> Result<Option<Duration>, RawError> {
-    let row = match conn
-        .query_first::<Row, _>("SELECT @@net_write_timeout")
-        .await
-    {
-        Ok(row) => row,
-        Err(mysql_async::Error::Server(_)) => return Ok(None),
-        Err(e) => return Err(raw_error(&e)),
+///
+/// ## m3b-t07-types (ledger 194): the same round trip reads the session `time_zone`
+/// (`SYSTEM`, `+03:00`, a named zone), verbatim; `None` when not text. A server that refuses
+/// the pair is asked for `net_write_timeout` alone, as before (its zone is then `None`).
+///
+/// ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1, R-M3-57): and the session
+/// `sql_mode`, verbatim (the third value; `None` when not text or refused), and the current
+/// database (`DATABASE()`, the fourth; `None` for SQL NULL), folded into this round trip rather
+/// than a separate one.
+pub(crate) async fn read_net_write_timeout(conn: &mut Conn) -> Result<ConnectReads, RawError> {
+    // ## m3b-t18-safe06 (fix round 1, m11): a server that refuses one of the four steps down
+    // to T7's pair (so it keeps its zone), then to `net_write_timeout` alone.
+    const QUERIES: [&str; 3] = [
+        "SELECT @@net_write_timeout, @@session.time_zone, @@session.sql_mode, DATABASE()",
+        "SELECT @@net_write_timeout, @@session.time_zone",
+        "SELECT @@net_write_timeout",
+    ];
+    let mut row = None;
+    for sql in QUERIES {
+        match conn.query_first::<Row, _>(sql).await {
+            Ok(answer) => {
+                row = Some(answer);
+                break;
+            }
+            Err(mysql_async::Error::Server(_)) => {}
+            Err(e) => return Err(raw_error(&e)),
+        }
+    }
+    let Some(row) = row else {
+        return Ok((None, None, None, None));
     };
-    Ok(row
+    let timeout = row
+        .as_ref()
         .and_then(|r| crate::probe::int(r.as_ref(0)))
         .and_then(|secs| u64::try_from(secs).ok())
         .filter(|s| *s > 0)
-        .map(Duration::from_secs))
+        .map(Duration::from_secs);
+    let text = |i: usize| {
+        row.as_ref().and_then(|r| match r.as_ref(i) {
+            Some(mysql_async::Value::Bytes(b)) => std::str::from_utf8(b).ok().map(Arc::from),
+            _ => None,
+        })
+    };
+    Ok((timeout, text(1), text(2), text(3)))
 }
+
+// ## m3b-t18-safe06
+/// What the connect's setup query reads: `net_write_timeout`, the session `time_zone`, the
+/// session `sql_mode` and the current database.
+pub(crate) type ConnectReads = (
+    Option<Duration>,
+    Option<Arc<str>>,
+    Option<Arc<str>>,
+    Option<Arc<str>>,
+);
 
 /// What the typed path uses of a connection.
 pub(crate) struct Ctx<'a> {
@@ -249,6 +465,9 @@ pub(crate) struct Open {
     command_tag: Option<String>,
     /// A later statement's error, after the current result's end.
     error: Option<RawError>,
+    // ## m3b-t13-drivers
+    /// Run as one (`Protocol::Simple`): results after the first carry no command tag.
+    simple: bool,
 }
 
 impl Open {
@@ -271,11 +490,16 @@ impl Open {
             skipped: 0,
             command_tag: tag,
             error: None,
+            simple: false,
         }
     }
 
     /// The next kept result (never suspended: only a single-result unit suspends).
     fn start_next(&mut self, plan: Plan) {
+        // ## m3b-t13-drivers: the text's first keyword names only the first statement.
+        if self.simple {
+            self.command_tag = None;
+        }
         self.plan = plan;
         self.stage = Stage::Start;
         self.builder = None;
@@ -571,7 +795,8 @@ async fn finish<P: WireProtocol>(conn: &mut Conn, q: &mut Open) -> Result<Result
             return Err(Fail::Protocol);
         }
         let done = end(q, conn);
-        q.start_next(Plan::for_columns(&columns));
+        let zone = q.plan.time_zone.clone();
+        q.start_next(Plan::for_columns_in(&columns, zone.as_ref()));
         return Ok(done);
     }
     let drained = drain_rest::<P>(conn, q.wire, &mut q.skipped).await;
@@ -592,20 +817,30 @@ async fn start(
     conn: &mut Conn,
     sql: &str,
     route: ExtendedRoute,
+    binds: &[BindValue],
 ) -> Result<(Wire, std::sync::Arc<[Column]>), StartFail> {
     match route {
         ExtendedRoute::Refused => Err(StartFail::Refused),
+        // ## m3b-t13-drivers: `COM_QUERY` carries no parameter; binds are never spliced.
+        ExtendedRoute::Text if !binds.is_empty() => Err(StartFail::Refused),
         ExtendedRoute::Text => {
             let result = conn.query_iter(sql).await.map_err(StartFail::My)?;
             Ok((Wire::Text, result.columns().unwrap_or_else(|| [].into())))
         }
         ExtendedRoute::Prepared => {
             let statement = conn.prep(sql).await.map_err(StartFail::Prepare)?;
-            if statement.num_params() > 0 {
+            // ## m3b-t13-drivers: one bind per placeholder, else nothing runs (a missing bind
+            // never becomes NULL; an extra one is never ignored).
+            if usize::from(statement.num_params()) != binds.len() {
                 return Err(StartFail::Binds);
             }
+            // Fix round 1 (I-2): a refused value never reaches the server; `query` checked
+            // every bind before anything was sent, so this is only the backstop.
+            let Some(params) = params_of(binds) else {
+                return Err(StartFail::Binds);
+            };
             let result = conn
-                .exec_iter(&statement, ())
+                .exec_iter(&statement, params)
                 .await
                 .map_err(StartFail::My)?;
             Ok((Wire::Binary, result.columns().unwrap_or_else(|| [].into())))
@@ -614,9 +849,9 @@ async fn start(
 }
 
 enum StartFail {
-    /// Nothing was sent (`extended_route` refused the text).
+    /// Nothing was sent (`extended_route` refused the text, or binds for a text route).
     Refused,
-    /// The statement has placeholders (binds are M3b); prepared, not executed.
+    /// The placeholder count is not the bind count; prepared, not executed.
     Binds,
     /// The prepare failed: nothing ran (the only failure a 1295 retry follows).
     Prepare(mysql_async::Error),
@@ -630,7 +865,18 @@ fn is_unsupported_ps(e: &mysql_async::Error) -> bool {
 
 /// `RawConn::query`.
 pub(crate) async fn query(cx: Ctx<'_>, spec: QuerySpec<'_>) -> Result<(), RawError> {
-    if cx.state.busy() || spec.protocol == Protocol::Simple || !spec.binds.is_empty() {
+    if cx.state.busy() {
+        return Err(unsupported());
+    }
+    // ## m3b-t13-drivers: Run as one is one `COM_QUERY`: never on a read-only connection (it
+    // has no multi-statement capability), never with binds.
+    let simple = spec.protocol == Protocol::Simple;
+    if simple && (cx.read_only || !spec.binds.is_empty()) {
+        return Err(unsupported());
+    }
+    // Fix round 1 (I-2): a bytes-hinted value with a malformed `\x` is refused before anything
+    // is sent.
+    if params_of(spec.binds).is_none() {
         return Err(unsupported());
     }
     let Some(conn) = cx.conn.as_mut() else {
@@ -638,19 +884,20 @@ pub(crate) async fn query(cx: Ctx<'_>, spec: QuerySpec<'_>) -> Result<(), RawErr
     };
     let limits = Limits::of(&spec);
     let tag = command_tag(spec.sql);
-    let route = if cx.state.force_text {
+    let route = if simple || cx.state.force_text {
         ExtendedRoute::Text
     } else {
         extended_route(spec.sql, cx.read_only)
     };
-    let started = match start(conn, spec.sql, route).await {
+    let started = match start(conn, spec.sql, route, spec.binds).await {
         // Only a refused prepare is retried: nothing ran.
         Err(StartFail::Prepare(e)) if is_unsupported_ps(&e) => {
-            if cx.read_only {
-                // The refused prepare changed nothing; it is never re-sent as text.
+            if cx.read_only || !spec.binds.is_empty() {
+                // The refused prepare changed nothing; it is never re-sent as text (binds would
+                // have to be spliced into it).
                 return Err(unsupported());
             }
-            start(conn, spec.sql, ExtendedRoute::Text).await
+            start(conn, spec.sql, ExtendedRoute::Text, &[]).await
         }
         other => other,
     };
@@ -670,13 +917,15 @@ pub(crate) async fn query(cx: Ctx<'_>, spec: QuerySpec<'_>) -> Result<(), RawErr
         && wire == Wire::Binary
         && tag.as_deref() != Some("CALL")
         && !columns.is_empty();
-    cx.state.open = Some(Open::new(
+    let mut open = Open::new(
         wire,
-        Plan::for_columns(&columns),
+        Plan::for_columns_in(&columns, cx.state.time_zone.as_ref()),
         limits,
-        suspendable,
+        suspendable && !simple,
         tag,
-    ));
+    );
+    open.simple = simple;
+    cx.state.open = Some(open);
     Ok(())
 }
 
@@ -975,7 +1224,8 @@ mod tests {
             caps,
             TypedCaps {
                 suspend: true,
-                binds: false,
+                // ## m3b-t13-drivers
+                binds: true,
                 close_needs_kill: true,
                 idle_bound: Some(Duration::from_secs(45)),
             }

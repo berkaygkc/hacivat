@@ -17,13 +17,18 @@ shots = [
     # ## m3a-t01b-seams: the result fixtures and the synthetic grid source of the M3 shots.
     "hacivat-results/test-support",
     "hacivat-ui-grid/test-support",
+    # ## m4b-t01a-manifests: the script-workspace shots drive libraries through the fake
+    # watcher source (Tasks 13-18).
+    "hacivat-scripts/test-support",
 ]
 # M2b (Task 1, fix round 1, M5): test seams (`events::handled_events`, the session crate's
 # `publish_event`), enabled only by this crate's own dev-dependency on itself below.
 test-support = ["hacivat-session/test-support"]
 # ## m3a-t01b-seams: the B3 and B1-real benches (Tasks 20 and 36).
 # ## m3a-t36-bench: named exception (controller): the grid's own paint timer for B1-real.
-bench = ["hacivat-ui-core/bench", "hacivat-driver/fake", "hacivat-ui-grid/bench"]
+# ## m3c-t44 (named exception: feature-only, M3a T36 precedent): the language worker's relex
+# timer for R-M3-9 (`hacivat-sql-editor/bench`).
+bench = ["hacivat-ui-core/bench", "hacivat-driver/fake", "hacivat-ui-grid/bench", "hacivat-sql-editor/bench"]
 
 [dependencies]
 hacivat-ui-core.workspace = true
@@ -58,6 +63,22 @@ sql-dialect.workspace = true
 sql-text.workspace = true
 # The app builds `ExecAt` and the preview override (P6).
 smallvec.workspace = true
+# ## m3b-t01a-seams: the editor find panel and the grid find build their matchers here; the Ui
+# crates take compiled matchers (R-M3-10; Tasks 33, 37).
+regex.workspace = true
+# ## m4-t01a-manifests: the explorer tree, the DDL view, the scope editor and `TreeKey` (XXH3).
+# The shipped system-catalog snapshots are embedded in this binary only
+# (`EmbeddedSystemOnlyFromApp`).
+hacivat-meta = { workspace = true, features = ["catalog", "persist", "system", "embedded-system"] }
+hacivat-introspect.workspace = true
+hacivat-ddl.workspace = true
+sql-catalog.workspace = true
+twox-hash.workspace = true
+# ## m4b-t01a-manifests: the script workspace (Tasks 13-18). The app is the only crate that sees
+# these and UI types together; it maps `hacivat_exec::history::SecretSpanKind` onto
+# `hacivat_scripts::SpanKind` (R-M4b-28).
+hacivat-scripts.workspace = true
+hacivat-git.workspace = true
 
 [dev-dependencies]
 hacivat-driver = { workspace = true, features = ["fake"] }
@@ -72,6 +93,10 @@ hacivat-app = { workspace = true, features = ["test-support"] }
 # ## m3a-t01b-seams: result fixtures and the synthetic grid source.
 hacivat-results = { workspace = true, features = ["test-support"] }
 hacivat-ui-grid = { workspace = true, features = ["test-support"] }
+# ## m4-t33b-carries (ruling R-W3-7): the introspection fakes the explorer tests drive.
+hacivat-introspect = { workspace = true, features = ["test-fakes"] }
+# ## m4b-t01a-manifests: the fake watcher source for the script-workspace tests.
+hacivat-scripts = { workspace = true, features = ["test-support"] }
 
 # The screenshot harness owns `main` (Task 18): on macOS the platform text system can only be
 # created on the main thread, and libtest runs every test on a spawned thread.
@@ -87,6 +112,12 @@ required-features = ["bench"]
 
 [[example]]
 name = "b1_real"
+required-features = ["bench"]
+
+# ## m4-t01a-manifests: the G1 bench (cached catalog on screen in < 300 ms at 160k columns), an
+# app example like `b3`/`b1_real` (P-M4-19); a fail-closed stub until Task 29.
+[[example]]
+name = "catalog_cold"
 required-features = ["bench"]
 
 [lints]

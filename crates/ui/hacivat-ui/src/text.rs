@@ -66,6 +66,11 @@ pub struct RenderedText {
     /// It runs past a side of the dialog card it is drawn in ([`card_scope`]): the card's own
     /// clip is the window, so check (b) cannot see this.
     pub outside_card: bool,
+    // ## m4b-t22-pre (named item, T21 r1)
+    /// It is cut, or hidden, at a scroll viewport's fold (its top or bottom edge): check (b)
+    /// lets such text through as scrolling, so the checks that must see a label whole (trust
+    /// signals, a notice's title) read this too.
+    pub folded: bool,
 }
 
 /// What the last frame drew, when `enabled` (tests and debug tooling; off by default). Each
@@ -96,6 +101,40 @@ impl TextRegistry {
         let text = text();
         begin_record(cx);
         cx.global_mut::<TextRegistry>().frame.push(text);
+    }
+
+    // ## m4b-t22-pre (named items, T21 r1)
+    /// [`TextRegistry::record`], returning where the text sits in the current frame (`None`:
+    /// not recorded), so a later step of the same frame can complete it
+    /// ([`TextRegistry::update_at`]).
+    pub fn record_index(cx: &mut App, text: impl FnOnce() -> RenderedText) -> Option<usize> {
+        let reg = cx.try_global::<TextRegistry>()?;
+        if !reg.enabled {
+            return None;
+        }
+        let text = text();
+        begin_record(cx);
+        let frame = &mut cx.global_mut::<TextRegistry>().frame;
+        frame.push(text);
+        Some(frame.len() - 1)
+    }
+
+    /// Applies `update` to the text recorded at `index` in the current frame when it is still
+    /// `text` (a record of an earlier frame is never touched: a new frame clears the list).
+    pub fn update_at(
+        cx: &mut App,
+        index: usize,
+        text: &SharedString,
+        update: impl FnOnce(&mut RenderedText),
+    ) {
+        if !cx.try_global::<TextRegistry>().is_some_and(|r| r.enabled) {
+            return;
+        }
+        if let Some(r) = cx.global_mut::<TextRegistry>().frame.get_mut(index)
+            && r.text == *text
+        {
+            update(r);
+        }
     }
 
     // ## m2a-t21-shots
@@ -133,8 +172,13 @@ pub(crate) fn begin_record(cx: &mut App) {
     if cx.has_global::<ScrollViewports>() {
         cx.global_mut::<ScrollViewports>().0.clear();
     }
+    // ## m4-t33b-carries (fix round 1, review 2)
+    if cx.has_global::<ClipBoxes>() {
+        cx.global_mut::<ClipBoxes>().0.clear();
+    }
     if cx.has_global::<crate::capsule::CapsuleProbe>() {
-        cx.global_mut::<crate::capsule::CapsuleProbe>().bounds = None;
+        // ## m4-m3carry (U-6 c): the whole probe, its trust facts too.
+        *cx.global_mut::<crate::capsule::CapsuleProbe>() = Default::default();
     }
     // Deferred effects run once the current update (and with it this draw) is done.
     cx.defer(|cx| cx.default_global::<RecordingFrame>().0 = false);
@@ -168,6 +212,17 @@ impl Global for CardScopes {}
 /// nothing, opens the scope at prepaint; the card's children-prepainted hook closes it. Call it
 /// on the card before adding its children (`dialog_frame` does).
 pub fn card_scope(card: Div) -> Div {
+    card_scope_then(card, |_, _, _| {})
+}
+
+// ## m3b-t29-shots (named exception; T29 review I1)
+/// [`card_scope`], then `then` with the children's bounds once they prepainted (the scope's
+/// canvas is the first of them): a card that needs its own children-prepainted step (the
+/// popup menu's row layout) keeps it.
+pub fn card_scope_then(
+    card: Div,
+    then: impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static,
+) -> Div {
     card.relative()
         .child(
             canvas(
@@ -179,8 +234,9 @@ pub fn card_scope(card: Div) -> Div {
             .left_0()
             .size_full(),
         )
-        .on_children_prepainted(|_, _, cx| {
+        .on_children_prepainted(move |bounds, window, cx| {
             cx.default_global::<CardScopes>().0.pop();
+            then(bounds, window, cx);
         })
 }
 
@@ -213,6 +269,87 @@ fn is_scroll_viewport(cx: &App, mask: Bounds<Pixels>) -> bool {
                 && near(v.bottom(), mask.bottom())
         })
     })
+}
+
+// ## m4-t33b-carries (named exception; found by the scope-editor shots; fix round 1, review 2)
+/// Whether text at `bounds`, painted in `mask`, is cut only at a scroll viewport's fold:
+/// - `mask` is that viewport's own clip ([`is_scroll_viewport`]); or
+/// - `mask` is the clip of a box that noted itself with [`clip_box`] (a segmented control's
+///   rounded box), the text lies inside that box's own (unclipped) top and bottom, `mask` lies
+///   inside a noted viewport on all four sides (an ancestor), and every cut edge of `mask` is
+///   that viewport's own edge.
+///
+/// A box that cuts its own text, or any clip that never noted itself, is a clip. A sideways cut
+/// is never scrolling.
+fn cut_at_fold(cx: &App, bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> bool {
+    if is_scroll_viewport(cx, mask) {
+        return true;
+    }
+    let near = |a: Pixels, b: Pixels| (a - b).abs() <= px(1.0);
+    let slack = px(0.5);
+    let Some(own) = cx.try_global::<ClipBoxes>().and_then(|c| {
+        c.0.iter().rev().find(|(_, m)| {
+            near(m.left(), mask.left())
+                && near(m.right(), mask.right())
+                && near(m.top(), mask.top())
+                && near(m.bottom(), mask.bottom())
+        })
+    }) else {
+        return false;
+    };
+    let own = own.0;
+    if bounds.top() < own.top() - slack || bounds.bottom() > own.bottom() + slack {
+        return false;
+    }
+    let cut_top = bounds.top() < mask.top() - slack;
+    let cut_bottom = bounds.bottom() > mask.bottom() + slack;
+    cx.try_global::<ScrollViewports>().is_some_and(|v| {
+        v.0.iter().any(|v| {
+            mask.left() >= v.left() - px(1.0)
+                && mask.right() <= v.right() + px(1.0)
+                && mask.top() >= v.top() - px(1.0)
+                && mask.bottom() <= v.bottom() + px(1.0)
+                && (!cut_top || near(v.top(), mask.top()))
+                && (!cut_bottom || near(v.bottom(), mask.bottom()))
+        })
+    })
+}
+
+// ## m4-t33b-carries (fix round 1, review 2)
+/// The boxes that noted themselves this frame ([`clip_box`]): their own layout bounds and the
+/// clip their content is painted in.
+#[derive(Default)]
+struct ClipBoxes(Vec<(Bounds<Pixels>, Bounds<Pixels>)>);
+
+impl Global for ClipBoxes {}
+
+/// Marks its parent, an `overflow_hidden` box, for the frame checks: put it first among the
+/// children. It records the box's own bounds and the clip its content is painted in, so text
+/// inside the box that only an enclosing scroll viewport cuts at its fold counts as scrolled
+/// (a segmented control half under a dialog's fold), while text the box itself cuts stays
+/// clipped.
+///
+/// ## m4-t33b-carries (fix round 2, re-review R-2)
+/// **A box that calls it must not contain clips of its own** (no `overflow_hidden` or scroll
+/// element between it and its text): the check matches a label to the box by the clip the
+/// label is painted in, so an inner clip whose edge lies on the fold would pass as the box's
+/// and its cut would read as scrolled. `Segmented`'s segments do not clip.
+pub fn clip_box() -> impl IntoElement {
+    canvas(
+        |bounds, window, cx| {
+            if !cx.try_global::<TextRegistry>().is_some_and(|r| r.enabled) {
+                return;
+            }
+            begin_record(cx);
+            let mask = window.content_mask().bounds;
+            cx.default_global::<ClipBoxes>().0.push((bounds, mask));
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// One line of text in a type style.
@@ -708,7 +845,9 @@ impl Element for LabelElement {
             None => px(0.0),
         };
         let mask = window.content_mask().bounds;
-        let cut = cut_by_clip(bounds, mask, is_scroll_viewport(cx, mask));
+        let scrolls = cut_at_fold(cx, bounds, mask);
+        let cut = cut_by_clip(bounds, mask, scrolls);
+        let folded = !drew_nothing && scrolls && past_fold(bounds, mask);
         let outside = outside_card(cx, bounds.left(), bounds.left() + painted_width);
         TextRegistry::record(cx, || RenderedText {
             text: self.label.text.clone(),
@@ -720,6 +859,7 @@ impl Element for LabelElement {
             path: self.label.path(),
             visible: !drew_nothing && shows_in(bounds, mask),
             outside_card: outside,
+            folded,
         });
         painted
     }
@@ -844,6 +984,29 @@ fn cut_by_clip(bounds: Bounds<Pixels>, mask: Bounds<Pixels>, scrolls: bool) -> b
     sideways || (vertically && !scrolls)
 }
 
+// ## m4b-t22-pre (named item, T21 r1)
+/// Whether text laid out in `bounds` runs past `mask`'s top or bottom edge, or lies wholly
+/// above or below it (half a pixel of slack): with `mask` a scroll viewport's clip, the text is
+/// [`RenderedText::folded`].
+fn past_fold(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> bool {
+    let slack = px(0.5);
+    bounds.top() < mask.top() - slack || bounds.bottom() > mask.bottom() + slack
+}
+
+/// What a text laid out in `bounds` and painted in the current clip shows, by the policy
+/// [`Label`] and [`Paragraph`] record with: (`visible`, `clipped`, `folded`). For text
+/// recorded before layout (an inline notice's lines) that updates its record at prepaint
+/// ([`TextRegistry::update_at`]).
+pub(crate) fn fit_in_clip(bounds: Bounds<Pixels>, window: &Window, cx: &App) -> (bool, bool, bool) {
+    let mask = window.content_mask().bounds;
+    let scrolls = cut_at_fold(cx, bounds, mask);
+    (
+        shows_in(bounds, mask),
+        cut_by_clip(bounds, mask, scrolls),
+        scrolls && past_fold(bounds, mask),
+    )
+}
+
 /// What a paragraph laid out in `bounds` (clipped to `mask`) drew: its widest line and whether
 /// part of it is cut off. `lines` holds each wrapped line's width and height. Half a pixel of
 /// slack absorbs rounding.
@@ -896,7 +1059,10 @@ impl IntoElement for Paragraph {
                     underline: None,
                     strikethrough: None,
                 };
-                let line_height = px(style.line_height);
+                // ## m3c-shotfix F3/F5: the line height the text is laid out with: GPUI's text
+                // element snaps it to the device pixel (`Window::pixel_snap`), so an unsnapped
+                // one measured n wrapped lines taller than the box that holds them.
+                let line_height = window.pixel_snap(px(style.line_height));
                 let lines: Vec<(Pixels, Pixels)> = window
                     .text_system()
                     .shape_text(
@@ -917,7 +1083,7 @@ impl IntoElement for Paragraph {
                     })
                     .unwrap_or_default();
                 let mask = window.content_mask().bounds;
-                let scrolls = is_scroll_viewport(cx, mask);
+                let scrolls = cut_at_fold(cx, bounds, mask);
                 let (painted, clipped) = paragraph_fit(&lines, bounds, mask, scrolls);
                 let outside = outside_card(cx, bounds.left(), bounds.left() + painted);
                 TextRegistry::record(cx, || RenderedText {
@@ -930,6 +1096,8 @@ impl IntoElement for Paragraph {
                     path,
                     visible: shows_in(bounds, mask),
                     outside_card: outside,
+                    // ## m4b-t22-pre (T21 r1)
+                    folded: scrolls && past_fold(bounds, mask),
                 });
             },
             |_, (), _, _| {},
@@ -953,11 +1121,101 @@ impl IntoElement for Paragraph {
     }
 }
 
+// ## m4b-t21-shots fix round 2 (named items; N-I1, m-b)
+/// The first `head` and the last `tail` grapheme clusters of `text`, when it has more than
+/// `head + tail + 1` of them (the parts a middle shortening keeps: "first…last"); `None` when
+/// it is short enough to show whole. Cuts only between grapheme clusters, so a flag, a
+/// skin-tone emoji, a ZWJ sequence or a base with its combining marks is kept whole on its side.
+/// A caller that escapes invisible characters escapes each part after the cut, so an escape
+/// token is never split.
+pub fn middle_parts(text: &str, head: usize, tail: usize) -> Option<(&str, &str)> {
+    let bounds: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).collect();
+    let n = bounds.len();
+    if n <= head + tail + 1 {
+        return None;
+    }
+    let head_end = bounds[head];
+    let tail_start = bounds[n - tail];
+    Some((&text[..head_end], &text[tail_start..]))
+}
+
+/// The first `n` visible grapheme clusters of `text` and "…" (a truncation floor): Fluent's
+/// isolate marks (U+2068, U+2069) and a pseudo-locale's opening `[` before the first visible
+/// cluster are kept but not counted. `None` when `text` has at most `n` visible clusters.
+pub fn floor_prefix(text: &str, n: usize) -> Option<String> {
+    let mut out = String::new();
+    let mut counted = 0;
+    let mut started = false;
+    let mut rest = text.graphemes(true);
+    for g in rest.by_ref() {
+        out.push_str(g);
+        let isolate = g == "\u{2068}" || g == "\u{2069}";
+        let bracket = !started && g == "[";
+        if !isolate && !bracket {
+            started = true;
+            counted += 1;
+        }
+        if counted == n {
+            break;
+        }
+    }
+    let more = rest.any(|g| g != "\u{2068}" && g != "\u{2069}" && g != "]");
+    more.then(|| {
+        out.push('…');
+        out
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{TestAppContext, point, size};
     use hacivat_ui_core::theme::DARK;
+
+    // ## m4b-t21-shots fix round 2 (N-I1, m-b)
+    #[test]
+    fn middle_parts_cut_only_between_grapheme_clusters() {
+        let pad = |s: &str| format!("{s}{}", "a".repeat(30));
+        // A flag at the head's cut: kept whole (two regional indicators).
+        let t = format!("{}🇹🇷{}", "a".repeat(19), "b".repeat(30));
+        let (h, _) = middle_parts(&t, 20, 19).expect("long");
+        assert!(h.ends_with("🇹🇷"), "{h}");
+        // A flag at the tail's cut.
+        let t = format!("{}🇹🇷{}", "a".repeat(30), "b".repeat(18));
+        let (_, tl) = middle_parts(&t, 20, 19).expect("long");
+        assert!(tl.starts_with("🇹🇷"), "{tl}");
+        // A skin-tone emoji keeps its modifier.
+        let t = format!("{}👍🏽{}", "a".repeat(19), "b".repeat(30));
+        let (h, _) = middle_parts(&t, 20, 19).expect("long");
+        assert!(h.ends_with("👍🏽"), "{h}");
+        // A combining mark stays on its base, never on the "…".
+        let t = format!("{}x\u{0307}{}", "a".repeat(30), "b".repeat(18));
+        let (_, tl) = middle_parts(&t, 20, 19).expect("long");
+        assert!(tl.starts_with("x\u{0307}"), "{tl:?}");
+        // A ZWJ sequence is one cluster.
+        let t = format!("{}👩\u{200d}💻{}", "a".repeat(19), "b".repeat(30));
+        let (h, _) = middle_parts(&t, 20, 19).expect("long");
+        assert!(h.ends_with("👩\u{200d}💻"), "{h:?}");
+        // Short enough: whole.
+        assert_eq!(middle_parts(&pad(""), 20, 19), None);
+        assert_eq!(middle_parts(&"a".repeat(40), 20, 19), None);
+        assert!(middle_parts(&"a".repeat(41), 20, 19).is_some());
+    }
+
+    #[test]
+    fn the_floor_counts_visible_clusters_only() {
+        // Fluent isolates the file name; the pseudo-locale brackets the message.
+        assert_eq!(
+            floor_prefix("\u{2068}orders_report.sql\u{2069}", 4).as_deref(),
+            Some("\u{2068}orde…")
+        );
+        assert_eq!(
+            floor_prefix("[\u{2068}orders_report.sql\u{2069}", 4).as_deref(),
+            Some("[\u{2068}orde…")
+        );
+        assert_eq!(floor_prefix("🇹🇷🇹🇷ab.sql", 4).as_deref(), Some("🇹🇷🇹🇷ab…"));
+        assert_eq!(floor_prefix("\u{2068}a.sq\u{2069}", 4), None);
+    }
 
     #[gpui::test]
     fn label_lays_out_one_line_of_its_style(cx: &mut TestAppContext) {

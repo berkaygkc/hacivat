@@ -47,9 +47,15 @@ pub fn note_focus_bounds(
 
 /// An absolute probe, drawing nothing, that records its parent's bounds while `handle` holds
 /// the focus. Its parent must be positioned (`relative`).
+///
+/// ## m4-t33d-fr1 (ruling R-T33d-5): it also reports the widget to the focus homes around it
+/// ([`crate::focus_home`]), so the focus can move on when the widget stops being drawn.
 pub fn focus_probe(handle: FocusHandle) -> impl IntoElement {
     canvas(
-        move |bounds, window, cx| note_focus_bounds(&handle, bounds, window, cx),
+        move |bounds, window, cx| {
+            note_focus_bounds(&handle, bounds, window, cx);
+            crate::focus_home::note_drawn(&handle, window, cx);
+        },
         |_, (), _, _| {},
     )
     .absolute()
@@ -65,11 +71,28 @@ pub struct FollowFocus {
     scroll: ScrollHandle,
     found: Found,
     followed: Rc<RefCell<Option<FocusHandle>>>,
+    // ## m4b-t22-pre fix round 1 (T22-pre review I2)
+    home_on_leave: bool,
+    holds: Rc<std::cell::Cell<bool>>,
 }
 
 impl FollowFocus {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    // ## m4b-t22-pre fix round 1 (named item; T22-pre review I2)
+    /// When the focus leaves the container after it followed a control, the container scrolls
+    /// back to its top (a script tab's notices under a Run-as-script strip: their title shows
+    /// again).
+    pub fn home_on_leave(mut self) -> Self {
+        self.home_on_leave = true;
+        self
+    }
+
+    /// Whether a control inside the container held the focus in the last frame.
+    pub fn holds_focus(&self) -> bool {
+        self.holds.get()
     }
 
     /// The container's scroll handle (`track_scroll`).
@@ -98,6 +121,18 @@ impl FollowFocus {
     pub fn scope_end(&self, window: &mut Window, cx: &mut App) {
         cx.default_global::<FollowScopes>().0.pop();
         let found = self.found.borrow_mut().take();
+        self.holds.set(found.is_some());
+        // ## m4b-t22-pre fix round 1 (T22-pre review I2): the focus left: back to the top.
+        if self.home_on_leave
+            && found.is_none()
+            && self.followed.borrow().is_some()
+            && self.scroll.offset().y != px(0.0)
+        {
+            let mut offset = self.scroll.offset();
+            offset.y = px(0.0);
+            self.scroll.set_offset(offset);
+            window.refresh();
+        }
         // ## m2b-t24-shots (follow-up, R3)
         if !is_new_focus(
             found.as_ref().map(|(focus, _)| focus),

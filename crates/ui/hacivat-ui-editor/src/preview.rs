@@ -132,6 +132,9 @@ pub struct BandPlan {
     /// Run would open the chooser on these units, offering this many candidates (0: it would
     /// not, or this is the chooser's own hover).
     pub choices: u32,
+    // ## m3c-t34-editor (named exception)
+    /// Run sends the selection as one unit of this many statements (`ExecPreview::as_one`).
+    pub as_one: u32,
 }
 
 /// Called by the view after every commit, analysis and context change: restarts the 50 ms
@@ -190,20 +193,17 @@ fn ask(v: &mut EditorView) {
     v.band.mapped = false;
 }
 
-/// Where Run is asked on `snap`: its non-empty selections, else its carets. `editor.run`
-/// (`commands/run.rs`) builds its request with this same function, so the band and Run never
-/// ask about different places (review round 1, Minor 9).
+/// Where Run is asked on `snap`: the main range only (## m3c-t31-multi, controller ruling 2:
+/// with several carets Run follows the main one, the last added): its selection, else its
+/// caret. `editor.run` (`commands/run.rs`) builds its request with this same function, so the
+/// band and Run never ask about different places (review round 1, Minor 9).
 pub(crate) fn exec_at(snap: &Snapshot) -> ExecAt {
-    let ranges = snap.selection.ranges();
-    let selected: SmallVec<[Range<usize>; 1]> = ranges
-        .iter()
-        .filter(|r| !r.is_empty())
-        .map(|r| r.range())
-        .collect();
-    if selected.is_empty() {
-        ExecAt::Carets(ranges.iter().map(|r| r.head).collect())
+    let main = snap.selection.main();
+    if main.is_empty() {
+        ExecAt::Carets(smallvec::smallvec![main.head])
     } else {
-        ExecAt::Selections(selected)
+        let r: Range<usize> = main.range();
+        ExecAt::Selections(smallvec::smallvec![r])
     }
 }
 
@@ -309,6 +309,7 @@ pub fn plan(s: &BandState, snap: &Snapshot) -> Option<BandPlan> {
             units,
             from_override: true,
             choices: 0,
+            as_one: 0,
         });
     }
     let p = answer(s, snap)?;
@@ -326,6 +327,12 @@ pub fn plan(s: &BandState, snap: &Snapshot) -> Option<BandPlan> {
         from_override: false,
         choices: if p.state == PreviewState::AskPreselected {
             p.choices
+        } else {
+            0
+        },
+        // ## m3c-t34-editor (named exception)
+        as_one: if p.state == PreviewState::Units {
+            p.as_one
         } else {
             0
         },
@@ -398,6 +405,9 @@ pub enum PreviewHint {
     // ## m3a-t33-exec-ui (named exception)
     /// "2 choices", with the chevrons-up-down glyph: Run would open the chooser.
     Choices { n: u32 },
+    // ## m3c-t34-editor
+    /// "as one · 2 statements", with the layers glyph: Run sends the selection as one unit.
+    AsOne { n: u32 },
 }
 
 /// One rectangle of the band, in window coordinates.
@@ -502,6 +512,10 @@ pub(crate) fn layout(
             BandStyle::Run if ui == 0 && plan.choices > 1 => {
                 Some(PreviewHint::Choices { n: plan.choices })
             }
+            // ## m3c-t34-editor (named exception): "as one · 2 statements" on its first line.
+            BandStyle::Run if ui == 0 && plan.as_one > 1 => {
+                Some(PreviewHint::AsOne { n: plan.as_one })
+            }
             BandStyle::Run if multi => Some(PreviewHint::Unit { i: ui + 1, n }),
             BandStyle::Run => None,
         };
@@ -510,10 +524,10 @@ pub(crate) fn layout(
         }
         let first = l0.max(rows.first_line);
         let last = l1.min(rows.last_line);
-        for line in first..=last {
-            let Some(row) = layout.row(line) else {
-                continue;
-            };
+        // ## m3c-t32-fold (named exception, fix round 1 M7): the painted rows only, never the
+        // hidden lines of a folded unit one by one.
+        for row in layout.rows_in(first, last) {
+            let line = row.line;
             let lr = buf.line_range(line as usize, false);
             let left_out =
                 line == l0 && !blank_outside(buf, lr.start..u.start.max(lr.start), false);
@@ -662,6 +676,7 @@ mod tests {
                 ranges: smallvec![0..8],
                 state: PreviewState::Units,
                 choices: 0,
+                as_one: 0,
             })
         }
         fn token_oracle(&self, _: DocId) -> Rc<dyn TokenOracle> {
@@ -784,6 +799,7 @@ mod tests {
                 ranges: smallvec![0..11],
                 state: PreviewState::Units,
                 choices: 0,
+                as_one: 0,
             }),
             last_version: 4,
             asked_at: Some(ExecAt::Carets(smallvec![1])),

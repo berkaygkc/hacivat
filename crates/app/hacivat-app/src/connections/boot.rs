@@ -168,13 +168,28 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         known_hosts: known_hosts.clone(),
     };
     // ## m2b-t22-live: B18 liveness presets and B19 reconnects (T17; `default()` keeps M2a's).
-    // ## m3a-t01b-seams: production-tagged profiles get read-only sessions until M3b's
-    // confirmations land (R-M3-6 REVISED, R-M3-29).
+    // ## m3b-t26-prod-unlock: production-tagged profiles get read-write sessions (Manual mode,
+    // D-036); every unit that is not a read passes the exec gate and its confirmations
+    // (R-M3-55) before it is sent (R-M3-6 REVISED ends).
+    let config = ManagerConfig::m2b();
+    // ## m3b-t18-safe06 (named exception): the read-only guard's classifier (R-M3-83).
+    // ## m3b-t24-exec-ui (named exception): one pool for the guard and for Run (R-M3-53).
+    let pool = hacivat_exec::classify_pool::ClassifyPool::new(2);
+    crate::exec_ui::orchestrator::install_classifier(pool.clone(), cx);
     let config = ManagerConfig {
-        production_read_only: true,
-        ..ManagerConfig::m2b()
+        classifier: Some(pool),
+        ..config
     };
     let manager = ConnectionManager::new(runtime.handle(), Arc::new(deps), config);
+    // ## m3b-t22-tx-ui (named exception, T12 concern 2): the settings' time zone reaches every
+    // session the manager opens (C11), and a later change of the setting too
+    // ([`follow_time_zone`]).
+    if let Some(state) = cx.try_global::<crate::AppState>() {
+        // ## m4-t32-shots (fix round 1, review M-3): an unknown zone is never sent.
+        manager.set_time_zone(crate::settings_ui::time_zone::session_zone(
+            &state.settings.ui.time_zone,
+        ));
+    }
     let LoadedProfiles {
         profiles,
         diags,
@@ -197,10 +212,37 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
     })
     .detach();
 
+    // ## m3b-t22-tx-ui (named exception)
+    follow_time_zone(cx);
     push_store_toasts(cx, &diags, quarantined.as_deref());
+    // ## m3b-t24-exec-ui (named exception): the query history opens on the core runtime,
+    // never holding the window (R-M3-62; T17 carries).
+    crate::exec_ui::orchestrator::open_history(cx);
+    // ## m4-t24-live (named lines): the explorer's catalogs (`CatalogHub` on the core runtime).
+    crate::explorer::live::install(cx);
+    // ## m4b-t13-explorer (named line): the script libraries' service on the core runtime,
+    // when a library was ever attached (the Scripts nodes read its snapshot).
+    crate::scripts::projection::install_service(cx);
 }
 
 // ## m2b-t22-live
+// ## m3b-t22-tx-ui (named exception, T12 concern 2)
+/// Gives the manager the settings' time zone whenever the settings change (`AppState` is
+/// replaced by `shell::update_settings`): sessions opened afterwards send it; sessions already
+/// open keep theirs. The manager ignores a zone it already has.
+fn follow_time_zone(cx: &mut App) {
+    cx.observe_global::<crate::AppState>(|cx| {
+        // ## m4-t32-shots (fix round 1, review M-3): an unknown zone is never sent.
+        let zone = crate::settings_ui::time_zone::session_zone(
+            &cx.global::<crate::AppState>().settings.ui.time_zone,
+        );
+        if let Some(m) = cx.try_global::<ConnectionsModel>() {
+            m.manager().set_time_zone(zone);
+        }
+    })
+    .detach();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

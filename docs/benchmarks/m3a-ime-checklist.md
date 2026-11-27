@@ -107,3 +107,30 @@ The manual rows above sit on top of the scripted IME traces, which run on every 
 - **Focus move while the window is inactive** (M0, still open → M5): GPUI delivers no blur for an inactive window, so a composition can stay on the old editor. Task 27's `blur_rule_active_and_inactive_window` and `a_composition_dropped_while_the_window_was_inactive_ends` pin what the editor does today.
 - **Windows and Linux rows** are open until those hosts exist (R-M3-7), and so is whether the clipboard's line-wise metadata survives on those platforms.
 - **Fallback if 1a–1c duplicate text** (Task 27): a fork carry that discards the marked text on `ContentChanged` while composing.
+
+<!-- ## m3c-t45 -->
+## M3c: several carets (Task 31 mirroring; M3c gate E2)
+
+Re-run the macOS table above on the M3c build, then these rows. Setup: as above. Add carets with
+⌥⌘↓ (`editor.add_caret_below`) or Option-click; one undo is ⌘Z. "Mirroring" means the IME's
+composition is typed at every caret while the OS sees only the main caret (R-M3-64). If any other
+caret sits inside a string or a comment, the composition goes to the main caret only and the status
+line says "Input method: typing at the main caret only, because another caret was inside a string
+or comment" / "Giriş yöntemi: başka bir imleç bir dizenin ya da yorumun içinde olduğu için yalnızca
+ana imleçte yazılıyor".
+
+| # | Input source / setup | Input | Expected result | Observed | Pass/Fail |
+|---|---|---|---|---|---|
+| M1 | Japanese; three carets on three plain lines (`SELECT 1` ×3, carets at line ends) | type `kanji`, commit with Enter | `漢字` (or the chosen candidate) at all three carets; the underline shows at every caret while composing; one ⌘Z removes all three | | |
+| M2 | Japanese; three carets, one of them inside `'…'` | type `kanji`, commit | the fallback sentence shows; text goes in at the main caret only; the other carets stay | | |
+| M3 | Japanese, Chinese Pinyin; three carets on lines far apart | compose | the candidate window sits under the **main** caret only | | |
+| M4 | U.S.; three carets | press and hold `e`, choose `é` | `é` at all three carets (the platform range moves every mirror); no extra `e` left | | |
+| M5 | Japanese; three carets | while composing, press ⌘↵ | nothing runs (F15); the composition stays at every caret | | |
+| M6 | Japanese; three carets | type `'` at all carets, then start a composition right away | the fallback applies (the carets are now inside strings) | | |
+| M7 | Japanese; fallback active | start a composition, press Escape | composition cancelled; all three carets come back as they were | | |
+| M8 | Turkish Q; three carets | `ğüşıöçİ`, `Shift+i`, `i` | typed at every caret, `İ`/`i` exact; one undo group per run of typing | | |
+| M9 | any | Option-click on a caret's own spot while the pointer jitters by a pixel | the carets stay (no stray column selection) | | |
+| M10 | any; a line of CJK wide characters | Option-drag a column across it | the column lands on whole characters (a wide glyph is two advances) | | |
+
+Linux (open until a host exists): primary selection on X11 and Wayland, middle-click paste at
+several carets; whether the clipboard's per-caret pieces survive on Windows and Linux.

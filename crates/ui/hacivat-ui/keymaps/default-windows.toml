@@ -469,3 +469,433 @@ context = "Grid"
 chord = "ctrl-f2"
 command = "exec.cancel"
 context = "Console"
+
+## m3b-t01b-seams
+# M3b and M3c (Task 1b; P-M3b-21): every new chord of both milestones. Each command is
+# registered since Task 1b with a stub body (a no-op) until its task fills it: multi-cursor (31),
+# folding (32, palette-only), find (33, 37), lines and history recall (34), grid model (35), views
+# and the value viewer (38), the grid menu (39), result tabs (25), the history dialog (27).
+# `editor.find` and `grid.find` stay unbound until Tasks 33 and 37 bind them (controller ruling
+# R5): a stub must not take the explorer filter's chord (PO Q10 shadowing) before its find bar
+# exists. `results.next_tab`/`prev_tab` live in the `Results` context (the
+# results tile's root); `ctrl-tab` stays Workspace tab switching. A second `exec.cancel` while
+# cancelling escalates (Task 23): same chord, no new row. Select all occurrences is
+# `ctrl-shift-l`: DataGrip's `ctrl-alt-shift-j` types `<` through AltGr on TR-F (the
+# datagrip preset keeps it as accepted shadowing; P-M3b-T1b-2).
+
+[[binding]]
+chord = "ctrl-alt-shift-up"
+command = "editor.add_caret_above"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-alt-shift-down"
+command = "editor.add_caret_below"
+context = "Editor"
+
+[[binding]]
+chord = "alt-j"
+command = "editor.select_next_occurrence"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-l"
+command = "editor.select_all_occurrences"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-u"
+command = "editor.undo_selection"
+context = "Editor"
+
+[[binding]]
+chord = "f3"
+command = "editor.find_next"
+context = "Editor"
+
+[[binding]]
+chord = "shift-f3"
+command = "editor.find_prev"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-/"
+command = "editor.toggle_comment"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-d"
+command = "editor.duplicate_line"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-y"
+command = "editor.delete_line"
+context = "Editor"
+
+[[binding]]
+chord = "alt-shift-up"
+command = "editor.move_line_up"
+context = "Editor"
+
+[[binding]]
+chord = "alt-shift-down"
+command = "editor.move_line_down"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-alt-up"
+command = "editor.history_prev"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-alt-down"
+command = "editor.history_next"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-space"
+command = "grid.select_column"
+context = "Grid"
+
+[[binding]]
+chord = "alt-shift-up"
+command = "grid.grow_selection"
+context = "Grid"
+
+[[binding]]
+chord = "alt-shift-down"
+command = "grid.shrink_selection"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-g"
+command = "grid.goto_row"
+context = "Grid"
+
+[[binding]]
+chord = "shift-enter"
+command = "grid.open_value"
+context = "Grid"
+
+[[binding]]
+chord = "shift-f10"
+command = "grid.context_menu"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-pagedown"
+command = "results.next_tab"
+context = "Results"
+
+[[binding]]
+chord = "ctrl-pageup"
+command = "results.prev_tab"
+context = "Results"
+
+[[binding]]
+chord = "ctrl-shift-h"
+command = "history.open"
+context = "Workspace"
+
+## m3b-t33-find
+# M3c Task 33 (named exception; controller ruling R5): the find bar. The chord shadows the
+# Workspace explorer filter only while the editor (or its find bar) has the focus (P-M3b-21).
+
+[[binding]]
+chord = "ctrl-f"
+command = "editor.find"
+context = "Editor"
+
+## m3b-t37-find-goto
+# M3c Task 37 (named exception; controller ruling R5, NOTES Plan notes Task 37): the grid find
+# bar and its own Select all occurrences row. ctrl-f shadows the Workspace explorer filter only while a
+# grid (or its find field) has the focus (P-M3b-21), as the editor's does. Note on the Task 1b
+# comment above ("`editor.find` and `grid.find` stay unbound…"): both are bound now (Tasks 33
+# and 37); this file is append-only, so the note lives here.
+
+[[binding]]
+chord = "ctrl-f"
+command = "grid.find"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-shift-l"
+command = "grid.select_all_occurrences"
+context = "Grid"
+
+## m3c-po
+# PO decision on M3c-09 (2026-11-17; named exception to the append-only rule, Task 1b's rows
+# stay as they are). Fold and unfold take VS Code's chords (the PO's habit), remappable like
+# every row; Ctrl+Shift only, so no AltGr collision. Fold all and unfold all stay palette-only:
+# VS Code's `ctrl-k ctrl-0` and `ctrl-k ctrl-j` start with `ctrl-k`, the command palette's chord
+# here, which a two-key chord in the editor would hold back. "Use selection for find" (macOS
+# `cmd-e`) has no standard chord on Windows: palette only. `alt-shift-f` is VS Code's Format
+# Document, reserved for M5's reformat (no other row may take it). Collision check:
+# `tests/m3b_routing.rs` (`m3c_po_chords_collide_with_nothing_in_any_preset`).
+
+[[binding]]
+chord = "ctrl-shift-["
+command = "editor.fold"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-]"
+command = "editor.unfold"
+context = "Editor"
+
+## m4-t01b-seams
+# M4 (plan-m4 Task 1b, PO-Q10): the explorer tree and the DDL view. Defaults follow VS Code where
+# VS Code has an equivalent, and every row is remappable. The commands are registered disabled
+# until their tasks land (Tasks 24, 25, 27), so until then the chord passes through.
+# - `explorer.view_ddl` F12: VS Code's Go to Definition.
+# - `explorer.copy_qualified_name`: VS Code's Copy Path (`shift-alt-c`, not `ctrl-alt-c`,
+#   which is AltGr+C: `ć` on Polish).
+# - `explorer.collapse_all`: VS Code's `list.collapseAll`. The `Explorer` context is the tree's
+#   own focus, so the chord never reaches the filter field or the editor.
+# - `explorer.refresh` F5, in the `Explorer` context only (the file-manager and browser
+#   convention; VS Code has no default).
+# - `ddl_view.copy` has no row (review I1): the `DdlView` tab context stays on the stack whatever
+#   has the focus, so a copy chord there would take the standard copy from the explorer filter,
+#   the list and every text field. Inside the DDL text the read-only editor's `editor.copy` is
+#   the copy; the command is the toolbar's Copy button and a palette entry.
+# - Palette only: `explorer.open_data` (Enter on a table or view row is the tree's own activate;
+#   on a profile row Enter stays `connection.toggle_connect`), `explorer.expand_all_children`,
+#   `explorer.edit_scope`, `explorer.set_level.*`, `metadata.clear_cache`, `ddl_view.copy`.
+# - No `explorer.focus_filter` row: VS Code's `ctrl-alt-f` is AltGr+F, which types `@` on
+#   Turkish-F (`altgr/tr-f.toml`); the Workspace `ctrl-f` row stays (P-M4-9).
+# No row takes `alt-shift-f` (M5's reformat) or starts with the command palette's chord.
+# Checks: `crates/app/hacivat-app/tests/m4_routing.rs` and the AltGr CI
+# (`crates/ui/hacivat-ui/tests/keymap_collisions.rs`).
+# ## m4-t14-explorer (fix round 2, ruling R-W2-12b; named exception in Task 1b's rows): the
+# rows below are in the `ExplorerTree` context, which the tree's focus carries on every row;
+# `Explorer` (the connection rows above) is pushed only while the cursor is on a profile root.
+# Chords unchanged; each command decides whether it applies to the cursor's row (R-W1-5).
+
+[[binding]]
+chord = "f12"
+command = "explorer.view_ddl"
+context = "ExplorerTree"
+
+[[binding]]
+chord = "shift-alt-c"
+command = "explorer.copy_qualified_name"
+context = "ExplorerTree"
+
+[[binding]]
+chord = "ctrl-left"
+command = "explorer.collapse_all"
+context = "ExplorerTree"
+
+[[binding]]
+chord = "f5"
+command = "explorer.refresh"
+context = "ExplorerTree"
+
+## m4-t25-ddl-view
+# Named exception in Task 1b's rows (coordinator, T25 round 1): F5 reloads the DDL view while
+# its read-only text has the focus (design/m4-explorer surface 11 "Reload is also F5 in the DDL
+# view"). The `DdlViewCode` context is the text's own focus, never the tab's (`DdlView` is on
+# the stack whatever has the focus, review I1), so F5 stays the explorer's refresh in the tree
+# and reaches no other field.
+
+[[binding]]
+chord = "f5"
+command = "ddl_view.reload"
+context = "DdlViewCode"
+
+## m4b-t01b-seams
+# The M4b script-workspace rows (R-M4b-37, controller ruling R-T2-1 (c);
+# design/m4b-scripts/NOTES.md "Keys"). Each command is registered disabled until its task fills
+# it, so its chord passes through until then (M4 precedent).
+# - `scripts.goto` (Go to script): `ctrl-shift-o`, free on all three hosts; Ctrl+Shift never collides
+#   with AltGr, and it does not start with the palette's chord.
+# - `file.save`: `ctrl-s` in the script tab's own key context only (`ScriptTab`); the M2a
+#   `ConnectionDialog` row on the same chord is a modal layer's and wins while it is open.
+# - `file.save_all`: palette and menu only here: `ctrl-alt-s` is AltGr+S (`ś` on
+#   Polish), Ctrl+Shift+S is VS Code's Save As and Ctrl+K S starts with the palette chord.
+# - `scripts.rename`: F2 on a script file or folder row (`ExplorerTree`); the command decides
+#   whether the cursor row is a script row.
+# - `scripts.reveal`, `scripts.attach` and Move to Trash: palette and menu only (no chord).
+
+[[binding]]
+chord = "ctrl-shift-o"
+command = "scripts.goto"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-s"
+command = "file.save"
+context = "ScriptTab"
+
+[[binding]]
+chord = "f2"
+command = "scripts.rename"
+context = "ExplorerTree"
+
+## inputnav-1
+# Single-line text fields (context `TextInput`, PO demo finding F1): the keys of a native
+# Windows text field. The focused field resolves them itself (`hacivat_ui::input::keys`), after
+# the workspace dispatcher: a chord an outer context binds would win, so CI keeps these chords
+# out of every context that stays live while a field has the focus (`keymap_collisions.rs`).
+# No Ctrl+Alt chord: that is AltGr text. Enter and Escape stay the field's Submitted and
+# Cancelled events.
+
+[[binding]]
+chord = "left"
+command = "input.move_left"
+context = "TextInput"
+
+[[binding]]
+chord = "right"
+command = "input.move_right"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-left"
+command = "input.select_left"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-right"
+command = "input.select_right"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-left"
+command = "input.move_word_left"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-right"
+command = "input.move_next_word_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-left"
+command = "input.select_word_left"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-right"
+command = "input.select_next_word_start"
+context = "TextInput"
+
+[[binding]]
+chord = "home"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "end"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-home"
+command = "input.select_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-end"
+command = "input.select_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "backspace"
+command = "input.delete_backward"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-backspace"
+command = "input.delete_backward"
+context = "TextInput"
+
+[[binding]]
+chord = "delete"
+command = "input.delete_forward"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-backspace"
+command = "input.delete_word_backward"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-delete"
+command = "input.delete_to_next_word_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-a"
+command = "input.select_all"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-c"
+command = "input.copy"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-x"
+command = "input.cut"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-v"
+command = "input.paste"
+context = "TextInput"
+
+# inputnav-1 fix round 1 (m4): Ctrl+Home/End (with ⇧ they select), the old clipboard keys
+# (⇧Delete cut, Ctrl+Insert copy, ⇧Insert paste; a masked field still never copies or cuts),
+# and undo (Ctrl+Z) and redo (Ctrl+Y, Ctrl+⇧Z) in the field.
+
+[[binding]]
+chord = "ctrl-home"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-end"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-home"
+command = "input.select_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-end"
+command = "input.select_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-delete"
+command = "input.cut"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-insert"
+command = "input.copy"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-insert"
+command = "input.paste"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-z"
+command = "input.undo"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-y"
+command = "input.redo"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-z"
+command = "input.redo"
+context = "TextInput"

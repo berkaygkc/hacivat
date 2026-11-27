@@ -6,7 +6,8 @@
 //! in `steps`, so the complexity tests can prove the pass linear.
 
 use sql_dialect::lex_profiles::{At, Colon, Dollar, DoubleQuote, Question};
-use sql_dialect::{LexDialect, LexModes, keyword_lookup};
+use sql_dialect::split_profile::{ClientProfile, client_profile};
+use sql_dialect::{ClientFlavor, LexDialect, LexModes, keyword_lookup};
 use sql_text::{TextChunks, TextRange, TextSize};
 
 use crate::state::LexState;
@@ -25,6 +26,27 @@ use crate::{comments, dollar, numbers, ops, params, strings, words};
 /// (R-M3-49 caps one at 20 MB).
 pub fn lex(text: &str, profile: &LexDialect, modes: LexModes, start: &LexState) -> Lexed {
     Cursor::new(text, profile, modes).run(start)
+}
+
+// ## m3b-t05-incremental: follow-up (b), ledger 274.
+/// [`lex`] for a script of `client` (psql, the mysql client): a backslash command outside
+/// strings and comments is one `ClientCommand` token, and its argument ends at the end of its
+/// line (psql: or at a `\\` outside single quotes; psql's `\;` and the mysql client's
+/// terminators and `\c` are two bytes), as `sql-split`'s client pre-pass reads it. A quote in
+/// the argument (`\echo don't`) then opens nothing. `ClientFlavor::None` (and sqlite3, which
+/// has no backslash commands) lexes as [`lex`]. A psql `\copy … from stdin` token ends at its
+/// line too: its data lines are the splitter's to skip.
+///
+/// # Panics
+/// As [`lex`].
+pub fn lex_with_client(
+    text: &str,
+    profile: &LexDialect,
+    modes: LexModes,
+    start: &LexState,
+    client: ClientFlavor,
+) -> Lexed {
+    Cursor::with_client(text, profile, modes, client).run(start)
 }
 
 /// [`lex`] and the number of bytes the cursor examined (the complexity tests' counter).
@@ -147,10 +169,27 @@ pub(crate) struct Cursor<'a> {
     pub(crate) steps: u64,
     /// The PostgreSQL operator run being split (`ops`), so a long run is read once.
     pub(crate) op_run: ops::RunCache,
+    // ## m3b-t05-incremental
+    /// The client whose backslash commands are tokens of their own.
+    pub(crate) client: ClientFlavor,
+    pub(crate) client_profile: &'static ClientProfile,
 }
+
+/// The token starts lexing records as checkpoints are about this far apart.
+pub(crate) const CHECKPOINT_BYTES: usize = 2048;
+const BOM: &[u8] = b"\xEF\xBB\xBF";
 
 impl<'a> Cursor<'a> {
     pub(crate) fn new(text: &'a str, p: &'a LexDialect, modes: LexModes) -> Cursor<'a> {
+        Cursor::with_client(text, p, modes, ClientFlavor::None)
+    }
+
+    pub(crate) fn with_client(
+        text: &'a str,
+        p: &'a LexDialect,
+        modes: LexModes,
+        client: ClientFlavor,
+    ) -> Cursor<'a> {
         Cursor {
             text,
             b: text.as_bytes(),
@@ -158,6 +197,8 @@ impl<'a> Cursor<'a> {
             modes,
             steps: 0,
             op_run: ops::RunCache::default(),
+            client,
+            client_profile: client_profile(client),
         }
     }
 
@@ -233,6 +274,8 @@ impl<'a> Cursor<'a> {
         // SQL averages about five bytes a token; the cap keeps a huge string or comment from
         // reserving arrays it never fills (the vectors grow past it as needed).
         let mut out = Lexed::with_capacity((len / 6).min(1 << 16) + 16, text_size(len));
+        out.start = start.clone();
+        out.client = self.client;
         let mut pos = 0;
         if *start != LexState::Initial {
             if len == 0 {
@@ -242,15 +285,26 @@ impl<'a> Cursor<'a> {
                 pos = self.emit(&mut out, 0, scan);
             }
         }
+        let mut next_checkpoint = CHECKPOINT_BYTES;
         while pos < len {
+            if pos >= next_checkpoint && self.checkpoint_at(pos) {
+                out.checkpoints.push(text_size(pos));
+                next_checkpoint = pos + CHECKPOINT_BYTES;
+            }
             let scan = self.scan(pos);
             pos = self.emit(&mut out, pos, scan);
         }
         out
     }
 
+    /// Whether a token lexed in `Initial` at `pos` is a checkpoint: it starts a line and not
+    /// with a byte-order mark (lexing a slice from there reads it as lexing the whole does).
+    pub(crate) fn checkpoint_at(&self, pos: usize) -> bool {
+        pos > 0 && self.b[pos - 1] == b'\n' && !self.b[pos..].starts_with(BOM)
+    }
+
     /// Appends `scan` (starting at `pos`) to `out`; returns where it ends.
-    fn emit(&mut self, out: &mut Lexed, pos: usize, scan: Scan) -> usize {
+    pub(crate) fn emit(&mut self, out: &mut Lexed, pos: usize, scan: Scan) -> usize {
         debug_assert!(
             scan.end > pos && scan.end <= self.len(),
             "{scan:?} at {pos}"
@@ -273,7 +327,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// Finishes the construct `state` is inside of, from offset 0.
-    fn resume(&mut self, state: &LexState) -> Scan {
+    pub(crate) fn resume(&mut self, state: &LexState) -> Scan {
         match state {
             LexState::Initial => self.scan(0),
             LexState::InBlockComment { depth } => comments::block_from(self, 0, *depth),
@@ -291,7 +345,89 @@ impl<'a> Cursor<'a> {
     }
 
     /// The token at `pos`, in the initial state.
-    fn scan(&mut self, pos: usize) -> Scan {
+    pub(crate) fn scan(&mut self, pos: usize) -> Scan {
+        let scan = self.scan_sql(pos);
+        // ## m3b-t05-incremental: a backslash that is an unknown byte of its own (outside
+        // every string and comment) starts a client command, as the splitter reads it.
+        if self.client_profile.backslash_commands
+            && self.b[pos] == b'\\'
+            && scan.kind == TokenKind::Unknown
+            && scan.end == pos + 1
+        {
+            return self.client_command(pos);
+        }
+        scan
+    }
+
+    /// The backslash command at `pos` (`sql-split`'s `client::backslash`, ending its argument
+    /// at the end of its line).
+    fn client_command(&mut self, pos: usize) -> Scan {
+        let cp = self.client_profile;
+        let b = self.b;
+        let eol = match self.find(pos, b'\n') {
+            Some(lf) if lf > pos && b[lf - 1] == b'\r' => lf - 1,
+            Some(lf) => lf,
+            None => b.len(),
+        };
+        let next = b.get(pos + 1).copied();
+        let end = if cp.inline_semicolon && next == Some(b';') {
+            pos + 2
+        } else if cp.backslash_line {
+            // psql: the name runs to white space or a backslash; the argument to the end of the
+            // line, or to a `\\` outside single quotes.
+            let name_end = (pos + 1..eol)
+                .find(|i| b[*i].is_ascii_whitespace() || b[*i] == b'\\')
+                .unwrap_or(eol);
+            self.steps += (name_end - pos) as u64;
+            if name_end == pos + 1 {
+                if next == Some(b'\\') {
+                    pos + 2
+                } else {
+                    pos + 1
+                }
+            } else {
+                let mut quoted = false;
+                let mut end = eol;
+                for i in name_end..eol {
+                    match b[i] {
+                        b'\'' => quoted = !quoted,
+                        b'\\' if !quoted && b.get(i + 1) == Some(&b'\\') => {
+                            end = i + 2;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                self.steps += (end - name_end) as u64;
+                end
+            }
+        } else {
+            // The mysql client: `\` and one letter; the terminators and `\c` take nothing more,
+            // `\d` and the rest take the line.
+            match next {
+                None => pos + 1,
+                Some(n) if n.is_ascii_whitespace() => pos + 1,
+                Some(n) if !n.is_ascii() => eol,
+                Some(n) => {
+                    let name = [n];
+                    let name = std::str::from_utf8(&name).unwrap_or_default();
+                    let short = cp.backslash_terminators.iter().any(|(t, _)| *t == name)
+                        || cp.backslash_clear.contains(&name);
+                    if short {
+                        pos + 2
+                    } else if cp.backslash_delimiter.contains(&name) || cp.backslash_to_eol {
+                        eol
+                    } else {
+                        pos + 2
+                    }
+                }
+            }
+        };
+        Scan::new(TokenKind::ClientCommand, end.max(pos + 1))
+    }
+
+    /// The SQL token at `pos`, in the initial state.
+    fn scan_sql(&mut self, pos: usize) -> Scan {
         let c = self.b[pos];
         if c >= 0x80 {
             if self.bom_at(pos) {

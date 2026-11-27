@@ -29,6 +29,8 @@ pub struct Checkbox {
     disabled: bool,
     focus: Option<FocusHandle>,
     on_toggle: Option<ToggleHandler>,
+    // ## m4b-t16-attach (named exception)
+    wrap: bool,
 }
 
 impl Checkbox {
@@ -41,8 +43,20 @@ impl Checkbox {
             disabled: false,
             focus: None,
             on_toggle: None,
+            // ## m4b-t16-attach (named line)
+            wrap: false,
         }
     }
+
+    // ## m4b-t16-attach (named exception)
+    /// The label and the sub-label stacked under each other, each wrapping to the room it is
+    /// given (a long sentence in a dialog card: NOTES M4b surface 3's share box). Off by
+    /// default: one row, the sub-label ellipsized.
+    pub fn wrap(mut self, wrap: bool) -> Self {
+        self.wrap = wrap;
+        self
+    }
+    // ## m4b-t16-attach
 
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
@@ -83,6 +97,7 @@ impl Checkbox {
             disabled,
             focus,
             on_toggle,
+            wrap,
         } = self;
         let well = match theme.mode {
             ThemeMode::Dark => c.panel,
@@ -116,7 +131,8 @@ impl Checkbox {
                 .child(
                     Icon::new(IconName::Check)
                         .size(IconSize::Chrome)
-                        .color(c.text_3.to_hsla()),
+                        // ## m3c-t41 (M3c-38): the disabled ink.
+                        .color(c.text_disabled.to_hsla()),
                 ),
             (false, _) => mark
                 .bg(well.to_hsla())
@@ -124,43 +140,82 @@ impl Checkbox {
         };
 
         let (ink, sub_ink) = if disabled {
-            (c.text_3, c.text_3)
+            // ## m3c-t41 (M3c-38): the disabled ink, never remapped (Raised Ink Rule exempt).
+            (c.text_disabled, c.text_disabled)
         } else {
             (c.text, c.text_2)
         };
         let selector = format!("checkbox-{id}");
-        let mut row = div()
-            .id(id.clone())
-            .debug_selector(move || selector)
-            .flex()
-            .flex_row()
-            .flex_none()
-            .items_center()
-            .gap(px(t.spacing.md))
-            // ## m2a-t21-shots: in a narrow row the sub-label ellipsizes (tooltip: all of
-            // it); the box and the label keep their size.
-            .flex_shrink(1.0)
-            .min_w(px(0.0))
-            .child(div().flex_none().child(mark))
-            .child(
-                div().flex_none().child(
-                    Label::new(
-                        label.clone(),
-                        TextSource::Fluent,
-                        t.type_ramp.body,
-                        ink.to_hsla(),
-                    )
-                    // ## m2b-t24-shots (fix round 1, I2): the label's ID, for the shots'
-                    // surface markers.
-                    .id(SharedString::from(format!("checkbox-label-{id}"))),
-                ),
-            );
-        if let Some(sub) = sub_label.clone() {
-            row = row.child(
-                Label::new(sub, TextSource::Fluent, t.type_ramp.body, sub_ink.to_hsla())
-                    .truncate(true),
-            );
-        }
+        // ## m4b-t16-attach (named exception): the stacked, wrapping layout.
+        let row = if wrap {
+            div()
+                .id(id.clone())
+                .debug_selector(move || selector)
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(t.spacing.md))
+                .w_full()
+                .min_w(px(0.0))
+                .child(div().flex_none().pt(px(2.0)).child(mark))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .gap(px(t.spacing.xs))
+                        .child(crate::text::paragraph(
+                            label.clone(),
+                            TextSource::Fluent,
+                            t.type_ramp.body,
+                            ink.to_hsla(),
+                        ))
+                        .children(sub_label.clone().map(|sub| {
+                            crate::text::paragraph(
+                                sub,
+                                TextSource::Fluent,
+                                t.type_ramp.body_sm,
+                                sub_ink.to_hsla(),
+                            )
+                        })),
+                )
+        } else {
+            // ## m4b-t16-attach
+            let mut row = div()
+                .id(id.clone())
+                .debug_selector(move || selector)
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap(px(t.spacing.md))
+                // ## m2a-t21-shots: in a narrow row the sub-label ellipsizes (tooltip: all of
+                // it); the box and the label keep their size.
+                .flex_shrink(1.0)
+                .min_w(px(0.0))
+                .child(div().flex_none().child(mark))
+                .child(
+                    div().flex_none().child(
+                        Label::new(
+                            label.clone(),
+                            TextSource::Fluent,
+                            t.type_ramp.body,
+                            ink.to_hsla(),
+                        )
+                        // ## m2b-t24-shots (fix round 1, I2): the label's ID, for the shots'
+                        // surface markers.
+                        .id(SharedString::from(format!("checkbox-label-{id}"))),
+                    ),
+                );
+            if let Some(sub) = sub_label.clone() {
+                row = row.child(
+                    Label::new(sub, TextSource::Fluent, t.type_ramp.body, sub_ink.to_hsla())
+                        .truncate(true),
+                );
+            }
+            row
+        };
 
         // Assistive technology hears the state (also when disabled) and the sub-label as the
         // description.

@@ -18,15 +18,22 @@ pub mod commands;
 mod config;
 mod decor;
 pub mod element;
+// ## m3b-t01b-seams: find (Task 33) and folding (Task 32).
+pub mod find;
+pub mod fold_gutter;
 pub mod gutter;
 mod ime;
 pub mod large_file;
 mod layout_cache;
+// ## m4b-t17-secrets-ui (named item): the host's line marks.
+mod line_marks;
 pub mod marks;
 mod mouse;
 mod paint;
 pub mod preview;
 mod probe;
+// ## m4b-t01b-seams: reload from disk and the T2 preview (stubs until Task 11).
+mod reload;
 mod scroll;
 pub mod scrollbar;
 mod service;
@@ -48,7 +55,22 @@ pub use preview::BandState;
 pub use probe::FrameProbe;
 pub use scrollbar::ScrollbarCtx;
 pub use service::{
-    Confidence, DecorationSource, ExecAction, ExecAt, ExecPreview, ExecRequest, FailClosedService,
-    InvalidateFn, LanguageService, NoTokens, PreviewState, SourceId, StatementSpan,
+    CommentTokens, Confidence, DecorationSource, ExecAction, ExecAt, ExecPreview, ExecRequest,
+    FailClosedService, InvalidateFn, LanguageService, NoTokens, PreviewState, SourceId,
+    StatementSpan,
 };
 pub use view::{EditorEvent, EditorStatus, EditorView, FocusedEditor};
+// ## m4b-t21-shots fix round 1 (m6): a host names the banner hook's type.
+pub use view::HostBanner;
+// ## m3b-t01b-seams
+pub use find::{FindMatcher, FindStatus};
+// ## m3c-t34-editor
+pub use mouse::DRAG_AUTOSCROLL_TICK;
+// ## m4b-t01b-seams
+pub use reload::{PreviewSpec, ReloadRefused};
+// ## m4b-t11-editor
+pub use clipboard::{PasteAnswer, PastedDocument};
+pub use reload::{DiskEdit, disk_edit};
+pub use view::UiWork;
+// ## m4b-t17-secrets-ui
+pub use line_marks::LineMark;

@@ -192,6 +192,14 @@ pub struct Dialog {
     content: Option<AnyView>,
     // ## m3a-t33-exec-ui (named exception): an alertdialog (the open-transaction prompt).
     role: Role,
+    // ## m4-t33b-carries (named exception): the content's own tab stops (a checkbox).
+    content_focus: Vec<FocusHandle>,
+    // ## m4-t33b-carries (named exception): a line under the title (a size, a connection).
+    subtitle: Option<TextFn>,
+    // ## m4b-t21-shots fix round 1 (named item; m4, controller ruling (e))
+    /// The first button, a Danger one, stands alone at the footer's far left, the
+    /// `danger_isolation` gap (28 px) before the rest ([`Dialog::isolate_danger`]).
+    isolate_danger: bool,
 }
 
 impl EventEmitter<DialogEvent> for Dialog {}
@@ -237,6 +245,10 @@ impl Dialog {
                 access_keys: !cfg!(target_os = "macos"),
                 content: None,
                 role: Role::Dialog,
+                content_focus: Vec::new(),
+                subtitle: None,
+                // ## m4b-t21-shots fix round 1
+                isolate_danger: false,
             }
         })
     }
@@ -263,13 +275,39 @@ impl Dialog {
         self.content = Some(content);
     }
 
+    // ## m4-t33b-carries (named exception)
+    /// A line under the title (12 px `text-2`; NOTES M4 surface 13: the cache's size). An
+    /// empty text draws nothing (a size still being measured).
+    pub fn set_subtitle(&mut self, subtitle: TextFn) {
+        self.subtitle = Some(subtitle);
+    }
+
+    // ## m4b-t21-shots fix round 1 (named item; m4, controller ruling (e); moved out of M4's
+    // block in fix round 2, m-c)
+    /// Isolates a first Danger button (DESIGN's isolation): alone at the footer's far left,
+    /// 28 px and the free space before the other buttons. Without a Danger first button the
+    /// footer is unchanged.
+    pub fn isolate_danger(&mut self) {
+        self.isolate_danger = true;
+    }
+    // ## m4b-t21-shots
+
+    // ## m4-t33b-carries (named exception)
+    /// The tab stops of the content (a checkbox the answer needs), in order: Tab visits them
+    /// before the buttons and stays in the card. The initial focus is still the primary
+    /// button; Enter on one of them presses the primary (never a destructive one).
+    pub fn set_content_focus(&mut self, handles: Vec<FocusHandle>) {
+        self.content_focus = handles;
+    }
+
     /// The index of the focused button, if one is.
     pub fn focused_button(&self, window: &Window) -> Option<usize> {
         self.buttons.iter().position(|h| h.is_focused(window))
     }
 
     fn move_focus(&self, forward: bool, window: &mut Window, cx: &mut App) {
-        let order: Vec<&FocusHandle> = self.buttons.iter().collect();
+        // ## m4-t33b-carries: the content's tab stops first, then the buttons.
+        let order: Vec<&FocusHandle> = self.content_focus.iter().chain(&self.buttons).collect();
         let n = order.len();
         let at = order.iter().position(|h| h.is_focused(window));
         let next = match (at, forward) {
@@ -402,6 +440,10 @@ impl Render for Dialog {
             vec![AccessKey::None; self.spec.buttons.len()]
         };
 
+        // ## m4b-t21-shots fix round 1 (m4)
+        let isolated = self.isolate_danger
+            && self.spec.buttons.len() > 1
+            && self.spec.buttons.first().map(|b| b.kind) == Some(ButtonKind::Danger);
         let buttons: Vec<_> = self
             .spec
             .buttons
@@ -463,6 +505,24 @@ impl Render for Dialog {
                         .child(title_element)
                         .child(close),
                 )
+                // ## m4-t33b-carries: the subtitle, when it says something.
+                .children(
+                    self.subtitle
+                        .as_ref()
+                        .map(|f| f(cx))
+                        .filter(|s| !s.is_empty())
+                        .map(|s| {
+                            div().mt(px(-t.spacing.sm)).child(
+                                Label::new(
+                                    s,
+                                    TextSource::Fluent,
+                                    t.type_ramp.body_sm,
+                                    c.text_2.to_hsla(),
+                                )
+                                .id("dialog-subtitle"),
+                            )
+                        }),
+                )
                 // ## m2a-t21-shots: the body wraps to the card (a long locale never clips).
                 .child(div().child(crate::text::paragraph(
                     body,
@@ -471,7 +531,29 @@ impl Render for Dialog {
                     c.text_2.to_hsla(),
                 )))
                 .children(self.content.clone())
-                .child(
+                .child(if isolated {
+                    // ## m4b-t21-shots fix round 1 (m4): the Danger answer alone at the far
+                    // left, the rest at the right, 28 px at least between them (they wrap,
+                    // still apart, when they do not fit).
+                    let mut buttons = buttons.into_iter();
+                    let danger = buttons.next();
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_x(px(t.spacing.danger_isolation))
+                        .gap_y(px(t.spacing.md))
+                        .children(danger)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .ml_auto()
+                                .gap(px(t.spacing.md))
+                                .children(buttons),
+                        )
+                } else {
                     div()
                         .flex()
                         .flex_row()
@@ -480,8 +562,8 @@ impl Render for Dialog {
                         .flex_wrap()
                         .justify_end()
                         .gap(px(t.spacing.md))
-                        .children(buttons),
-                );
+                        .children(buttons)
+                });
         A11yNode::new("dialog-node", self.role, title, true, card).description(body_text)
     }
 }

@@ -199,6 +199,8 @@ impl Bench {
                     doc_range: at..at + s.len(),
                     kind: sql_split::exec_range::UnitKind::Statement,
                     suspendable: s.starts_with("SELECT"),
+                    // ## m3b-t16-run-service (named exception)
+                    title: None,
                 };
                 at += s.len() + 2;
                 u
@@ -210,6 +212,14 @@ impl Bench {
             units,
             fetch,
             log: self.log.clone(),
+            // ## m3b-t01c-core-seams: M3a's run (P-M3b-22).
+            prepared: None,
+            plan: None,
+            policy: hacivat_session::session::ErrorPolicy::StopOnError,
+            run_as_one: false,
+            history: None,
+            confirm: None,
+            context_generation: None,
         }
     }
 
@@ -233,7 +243,8 @@ pub async fn service_over(fake: FakeDriver) -> (Bench, SessionHandle, Arc<FakeDr
     let engine = fake.descriptor().kind;
     let (h, f) = fake_session(tokio::runtime::Handle::current(), fake, profile_of(engine)).await;
     let bench = Bench {
-        svc: ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)),
+        // ## m3b-t26-prod-unlock (fix round 1, A-M2): `req` builds M3a's plan-less requests.
+        svc: ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)).with_plan_less_runs(),
         log: SessionLog::new(),
         engine,
     };
@@ -901,18 +912,16 @@ pub mod matrix {
     pub struct Opts {
         pub read_only: bool,
         pub env: Option<EnvTag>,
-        /// The app's boot policy (R-M3-29): production profiles get read-only sessions.
-        pub production_policy: bool,
         pub user: Option<String>,
         pub database: Option<String>,
     }
 
     impl Opts {
-        /// A development console under the app's production policy (the app's boot value).
+        /// A development console under the app's boot configuration (## m3b-t26-prod-unlock:
+        /// `ManagerConfig::m2b()`, the production policy is gone).
         pub fn dev() -> Opts {
             Opts {
                 env: Some(EnvTag::Dev),
-                production_policy: true,
                 ..Opts::default()
             }
         }
@@ -959,10 +968,7 @@ pub mod matrix {
             if let Some(db) = opts.database {
                 p.database = Some(db);
             }
-            let config = ManagerConfig {
-                production_read_only: opts.production_policy,
-                ..ManagerConfig::m2b()
-            };
+            let config = ManagerConfig::m2b();
             let m =
                 ConnectionManager::new(tokio::runtime::Handle::current(), Arc::new(deps()), config);
             let profile = Arc::new(p);
@@ -979,7 +985,8 @@ pub mod matrix {
                 m,
                 profile,
                 s,
-                svc: ExecService::new(MemoryBudget::new(4 << 30, 256 << 20)),
+                // ## m3b-t26-prod-unlock (fix round 1, A-M2): its M3a legs run plan-less.
+                svc: ExecService::new(MemoryBudget::new(4 << 30, 256 << 20)).with_plan_less_runs(),
                 log: SessionLog::new(),
                 ctx: sqlctx::dialect_ctx(line.engine, version.as_ref(), None),
                 version,
@@ -1076,6 +1083,14 @@ pub mod matrix {
                     units,
                     fetch,
                     log: self.log.clone(),
+                    // ## m3b-t01c-core-seams: M3a's run (P-M3b-22).
+                    prepared: None,
+                    plan: None,
+                    policy: hacivat_session::session::ErrorPolicy::StopOnError,
+                    run_as_one: false,
+                    history: None,
+                    confirm: None,
+                    context_generation: None,
                 },
             )
         }
@@ -1091,6 +1106,14 @@ pub mod matrix {
                     units,
                     fetch,
                     log: self.log.clone(),
+                    // ## m3b-t01c-core-seams: M3a's run (P-M3b-22).
+                    prepared: None,
+                    plan: None,
+                    policy: hacivat_session::session::ErrorPolicy::StopOnError,
+                    run_as_one: false,
+                    history: None,
+                    confirm: None,
+                    context_generation: None,
                 },
             )
         }
@@ -1440,6 +1463,2178 @@ pub mod matrix {
         match major.split_once('.') {
             Some((a, b)) => a == v.major.to_string() && b == v.minor.to_string(),
             None => major == v.major.to_string(),
+        }
+    }
+}
+
+// ## m3b-t16-run-service
+// Task 16's helpers: M3b requests (prepared units with a gate plan the user answered) over the
+// fake console session, without Task 15's `prepare_units`/`gate` bodies (P-M3b-16: a plan is
+// built here item by item).
+
+pub mod m3b {
+    use std::sync::Arc;
+
+    use hacivat_exec::{
+        ErrorPolicy, ExecUnit, GateClass, GateDecision, GateItem, GatePlan, OffsetMap,
+        PreparedUnit, RunRequest,
+    };
+    use hacivat_session::session::{SessionEffects, UnitVerdict};
+    use hacivat_values::{BindValue, LogicalType};
+    use sql_split::exec_range::UnitKind;
+
+    use super::Bench;
+
+    /// A unit of `text` at `start`, titled `title`.
+    pub fn unit(text: &str, start: usize, title: Option<&str>) -> ExecUnit {
+        ExecUnit {
+            text: text.into(),
+            doc_range: start..start + text.len(),
+            kind: UnitKind::Statement,
+            suspendable: false,
+            title: title.map(Arc::from),
+        }
+    }
+
+    /// Units of `texts`, two bytes apart, untitled.
+    pub fn units(texts: &[&str]) -> Vec<ExecUnit> {
+        let mut at = 0;
+        texts
+            .iter()
+            .map(|t| {
+                let u = unit(t, at, None);
+                at += t.len() + 2;
+                u
+            })
+            .collect()
+    }
+
+    /// `unit` prepared as written: no binds, its own text masked.
+    pub fn prepared(unit: &ExecUnit) -> PreparedUnit {
+        PreparedUnit {
+            unit: unit.clone(),
+            final_text: unit.text.clone(),
+            binds: Arc::from(Vec::new()),
+            masked: unit.text.clone(),
+            offsets: OffsetMap::identity(unit.doc_range.start),
+        }
+    }
+
+    /// A text bind value.
+    pub fn text_bind(s: &str) -> BindValue {
+        BindValue::Typed {
+            hint: LogicalType::Text {
+                max_chars: None,
+                fixed: false,
+            },
+            text: s.into(),
+        }
+    }
+
+    /// A gate item for unit `i` deciding `decision`.
+    pub fn item(i: u32, decision: GateDecision) -> GateItem {
+        GateItem {
+            unit: i,
+            decision,
+            verdict: UnitVerdict::Unknown,
+            effects: SessionEffects::empty(),
+            class: GateClass::Read,
+            fingerprint: 0,
+        }
+    }
+
+    /// A plan that runs every one of `n` units.
+    pub fn run_all(n: usize) -> GatePlan {
+        GatePlan {
+            items: (0..n)
+                .map(|i| item(u32::try_from(i).unwrap(), GateDecision::Run))
+                .collect(),
+        }
+    }
+
+    /// An M3b request of `units` prepared as written, run by `plan`.
+    pub fn request(b: &Bench, units: Vec<ExecUnit>, plan: GatePlan) -> RunRequest {
+        let prepared = units.iter().map(prepared).collect();
+        RunRequest {
+            units,
+            prepared: Some(prepared),
+            plan: Some(plan),
+            policy: ErrorPolicy::StopOnError,
+            ..b.req(&[])
+        }
+    }
+}
+
+// ## m3b-t15-gate
+
+/// Task 15's report builders (P-M3b-16): the gate's tests build `SafetyReport`s by hand over
+/// the exact final text (dialect and `set_targets` set, as `classify` sets them), so the gate
+/// is tested without Task 14's classifier. `fake_stmt` reads a statement's first words the way
+/// these tests need; it is no classifier and nothing outside these tests uses it.
+pub mod gate_fx {
+    use std::sync::Arc;
+
+    use hacivat_driver::TxStatus;
+    use hacivat_exec::{
+        ConnSafety, ExecUnit, GateDecision, GateItem, ParamAnswers, ParamValueStore, Prepared,
+        PreparedUnit, SafetyReport, SuppressSet, gate, prepare_units, prepare_units_with,
+    };
+    use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+    use hacivat_session::session::{TxMode, TxOwner};
+    use hacivat_values::{BindValue, LogicalType};
+    use sql_dialect::{DialectCtx, DialectId};
+    use sql_ident::parse_qualified;
+    use sql_safety::effects::class_of;
+    use sql_safety::{
+        Confidence, DestructiveKind, DestructiveReason, EffectSet, ObjectKind, ObjectRef, Reason,
+        ReasonCode, RiskFlags, SetTarget, StmtKind, StmtReport, TouchedObjects,
+    };
+    use sql_split::ParamSettings;
+    use sql_split::exec_range::UnitKind;
+    use sql_text::{TextRange, TextSize};
+
+    /// The dialect of `engine`.
+    pub fn dialect_of(engine: DbmsKind) -> DialectId {
+        match engine {
+            DbmsKind::MySql | DbmsKind::TiDb => DialectId::MySql,
+            DbmsKind::MariaDb => DialectId::MariaDb,
+            DbmsKind::Sqlite => DialectId::Sqlite,
+            _ => DialectId::Postgres,
+        }
+    }
+
+    pub fn ctx_of(engine: DbmsKind) -> DialectCtx {
+        DialectCtx::new(dialect_of(engine), None)
+    }
+
+    /// An object named `name` (a qualified name as written) of `kind`.
+    pub fn object(name: &str, kind: ObjectKind) -> ObjectRef {
+        ObjectRef {
+            name: parse_qualified(DialectId::Postgres, name).expect("a name"),
+            kind,
+        }
+    }
+
+    /// A statement of `kind` with `effects` (class `class_of(effects)`, as the backends write
+    /// it); `over` makes it cover the whole text.
+    pub fn stmt(kind: StmtKind, effects: EffectSet) -> StmtReport {
+        StmtReport {
+            range: TextRange::default(),
+            kind,
+            effects,
+            flags: RiskFlags::empty(),
+            class: class_of(effects),
+            touched: TouchedObjects::default(),
+            reasons: Vec::new(),
+            destructive: Vec::new(),
+            confidence: Confidence::Exact,
+            set_targets: Vec::new(),
+            // ## m4-t01c-core (named exception)
+            ddl: Vec::new(),
+        }
+    }
+
+    /// The plan's builder: a statement of `kind` with `effects` and the destructive `kinds`,
+    /// each on the table `target` (written exactly so).
+    pub fn report(
+        kind: StmtKind,
+        effects: EffectSet,
+        kinds: &[DestructiveKind],
+        target: &str,
+    ) -> StmtReport {
+        let mut s = stmt(kind, effects);
+        s.touched.writes.push(object(target, ObjectKind::Table));
+        s.destructive = kinds
+            .iter()
+            .map(|k| DestructiveReason {
+                kind: *k,
+                range: TextRange::default(),
+                target: Some(object(target, ObjectKind::Table)),
+            })
+            .collect();
+        s
+    }
+
+    pub fn reason(code: ReasonCode, arg: Option<&str>) -> Reason {
+        Reason {
+            code,
+            range: None,
+            arg: arg.map(Arc::from),
+        }
+    }
+
+    /// The request of `items` over exactly `text` in `dialect`, merged and hashed the way
+    /// `classify` does (P-M3b-2); an item whose range is empty covers the whole text.
+    pub fn over(text: &str, dialect: DialectId, mut items: Vec<StmtReport>) -> SafetyReport {
+        let whole = TextRange::up_to(TextSize::from(u32::try_from(text.len()).unwrap()));
+        // ## m3c-p2-07 (fix rounds 3 and 4): a hand-built pattern with a target and no range of
+        // its own sits where its statement writes that name, as a classifier places it (the gate
+        // reads a typed name only at the pattern's own position). One statement's patterns of
+        // one name share its place; another statement takes the next place not yet given out.
+        let mut taken: Vec<TextRange> = Vec::new();
+        for s in &mut items {
+            if s.range.is_empty() {
+                s.range = whole;
+            }
+            let stmt_range = s.range;
+            let mut mine: Vec<(String, TextRange)> = Vec::new();
+            for d in &mut s.destructive {
+                if let (true, Some(t)) = (d.range.is_empty(), &d.target) {
+                    let name: Vec<&str> = t.name.parts.iter().map(|p| &*p.text).collect();
+                    let name = name.join(".");
+                    let placed = mine
+                        .iter()
+                        .find(|(n, _)| *n == name)
+                        .map(|(_, r)| *r)
+                        .or_else(|| written_at(text, stmt_range, &name, &taken));
+                    if let Some(r) = placed {
+                        d.range = r;
+                        mine.push((name, r));
+                    }
+                }
+            }
+            taken.extend(mine.into_iter().map(|(_, r)| r));
+        }
+        let ctx = DialectCtx::new(dialect, None);
+        let mut r = SafetyReport::pre_decided(text, sql_split::hv_norm1(text, &ctx), Vec::new());
+        let (class, effects, flags) = sql_safety::report::merge(&items);
+        r.items = items;
+        r.request_class = class;
+        r.request_effects = effects;
+        r.flags = flags;
+        r.pre_decision = None;
+        r.dialect = Some(dialect);
+        r
+    }
+
+    // ## m3c-p2-07 (fix round 3)
+    /// Where `name` is first written in `text[within]` as a whole word (ASCII case ignored),
+    /// at a place not in `taken`.
+    fn written_at(
+        text: &str,
+        within: TextRange,
+        name: &str,
+        taken: &[TextRange],
+    ) -> Option<TextRange> {
+        let start = usize::from(within.start());
+        let body = text.get(start..usize::from(within.end()))?;
+        let (hay, needle) = (body.to_ascii_lowercase(), name.to_ascii_lowercase());
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        hay.match_indices(&needle).find_map(|(i, _)| {
+            let end = i + needle.len();
+            let (before, after) = (hay[..i].chars().next_back(), hay[end..].chars().next());
+            if word(before) || word(after) {
+                return None;
+            }
+            // A quoted name keeps its quotes (the gate reads it as written).
+            let quoted = before.is_some_and(|c| matches!(c, '"' | '`')) && before == after;
+            let (i, end) = if quoted { (i - 1, end + 1) } else { (i, end) };
+            let r = TextRange::new(
+                TextSize::from(u32::try_from(start + i).unwrap()),
+                TextSize::from(u32::try_from(start + end).unwrap()),
+            );
+            (!taken.contains(&r)).then_some(r)
+        })
+    }
+
+    /// The word after the first of `keys` in `text` (a table, schema or database name).
+    fn name_after(text: &str, keys: &[&str]) -> String {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for (i, w) in words.iter().enumerate() {
+            if keys.iter().any(|k| w.eq_ignore_ascii_case(k)) {
+                let mut j = i + 1;
+                while words.get(j).is_some_and(|w| {
+                    ["IF", "EXISTS", "ONLY", "TABLE"].contains(&w.to_ascii_uppercase().as_str())
+                }) {
+                    j += 1;
+                }
+                if let Some(n) = words.get(j) {
+                    let n = n.trim_end_matches(';');
+                    return n.split('(').next().unwrap_or_default().to_string();
+                }
+            }
+        }
+        "t".to_string()
+    }
+
+    /// A test-only statement report of `text` by its first words (the module docs).
+    pub fn fake_stmt(text: &str) -> StmtReport {
+        let up = text.to_ascii_uppercase();
+        let has = |w: &str| up.split_whitespace().any(|x| x.trim_end_matches(';') == w);
+        let first = up.split_whitespace().next().unwrap_or_default().to_string();
+        let table = |keys: &[&str]| name_after(text, keys);
+        match first.as_str() {
+            "EXPLAIN" if has("ANALYZE") => {
+                let at = up.find("ANALYZE").unwrap() + "ANALYZE".len();
+                let mut s = fake_stmt(text[at..].trim_start());
+                s.kind = StmtKind::Explain { analyze: true };
+                s.flags |= RiskFlags::EXPLAIN_ANALYZE;
+                s.reasons.push(reason(ReasonCode::ExplainAnalyze, None));
+                s
+            }
+            "SELECT" | "WITH" | "VALUES" | "SHOW" => {
+                if up.contains("FOR UPDATE") {
+                    let mut s = stmt(StmtKind::Select, EffectSet::READ | EffectSet::LOCK_ROW);
+                    s.reasons.push(reason(ReasonCode::LockingClause, None));
+                    s
+                } else if up.contains("F_WRITE(") {
+                    let mut s = stmt(StmtKind::Select, EffectSet::READ);
+                    s.flags |= RiskFlags::VOLATILE_FN;
+                    s.reasons
+                        .push(reason(ReasonCode::FnUnknown, Some("f_write")));
+                    s
+                } else {
+                    stmt(StmtKind::Select, EffectSet::READ)
+                }
+            }
+            "INSERT" => stmt(StmtKind::Insert, EffectSet::WRITE_DATA),
+            "UPDATE" if has("WHERE") => stmt(StmtKind::Update, EffectSet::WRITE_DATA),
+            "UPDATE" => report(
+                StmtKind::Update,
+                EffectSet::WRITE_DATA,
+                &[DestructiveKind::NoWhere],
+                &table(&["UPDATE"]),
+            ),
+            "DELETE" if has("WHERE") => stmt(StmtKind::Delete, EffectSet::WRITE_DATA),
+            "DELETE" => report(
+                StmtKind::Delete,
+                EffectSet::WRITE_DATA,
+                &[DestructiveKind::NoWhere],
+                &table(&["FROM"]),
+            ),
+            "CALL" => {
+                let mut s = stmt(StmtKind::Call, EffectSet::ROUTINE_CALL);
+                s.reasons.push(reason(ReasonCode::RoutineCall, None));
+                s
+            }
+            "DO" => {
+                let mut s = stmt(StmtKind::Do, EffectSet::UNKNOWN);
+                s.reasons.push(reason(ReasonCode::ProceduralCode, None));
+                s
+            }
+            "SET" => {
+                let rest = text[3..].trim().trim_end_matches(';');
+                let (name, value) = match rest.split_once('=') {
+                    Some((n, v)) => (n.trim(), v.trim()),
+                    None => match rest.split_once(' ') {
+                        Some((n, v)) => (n.trim(), v.trim().trim_start_matches("TO ").trim()),
+                        None => (rest, ""),
+                    },
+                };
+                let mut s = stmt(StmtKind::Set, EffectSet::SESSION_STATE);
+                s.set_targets.push(SetTarget {
+                    name: Arc::from(name),
+                    value: Some(Arc::from(value)),
+                });
+                if name.eq_ignore_ascii_case("role") {
+                    s.reasons.push(reason(ReasonCode::PrivilegeChange, None));
+                } else {
+                    s.reasons.push(reason(ReasonCode::SessionState, Some(name)));
+                }
+                s
+            }
+            "BEGIN" | "COMMIT" | "ROLLBACK" | "START" => {
+                let kind = match first.as_str() {
+                    "COMMIT" => StmtKind::Commit,
+                    "ROLLBACK" => StmtKind::Rollback,
+                    _ => StmtKind::Begin,
+                };
+                stmt(kind, EffectSet::TXN_CONTROL)
+            }
+            "LOCK" => stmt(StmtKind::Lock, EffectSet::LOCK_TABLE),
+            "CREATE" if has("TEMP") || has("TEMPORARY") => {
+                stmt(StmtKind::CreateTable, EffectSet::DDL_TEMP)
+            }
+            "CREATE" if has("TABLE") => stmt(StmtKind::CreateTable, EffectSet::DDL),
+            "CREATE" => stmt(StmtKind::CreateOther, EffectSet::DDL),
+            "ALTER" => stmt(StmtKind::Alter, EffectSet::DDL),
+            "DROP" => {
+                let cascade = has("CASCADE");
+                let (kind, key) = if has("SCHEMA") {
+                    (ObjectKind::Schema, "SCHEMA")
+                } else if has("DATABASE") {
+                    (ObjectKind::Database, "DATABASE")
+                } else {
+                    (ObjectKind::Table, "DROP")
+                };
+                let mut s = stmt(StmtKind::Drop, EffectSet::DDL);
+                s.destructive.push(DestructiveReason {
+                    kind: DestructiveKind::Drop { cascade },
+                    range: TextRange::default(),
+                    target: Some(object(&table(&[key]), kind)),
+                });
+                s
+            }
+            "TRUNCATE" => {
+                let mut s = stmt(StmtKind::Truncate, EffectSet::DDL);
+                s.destructive.push(DestructiveReason {
+                    kind: DestructiveKind::Truncate,
+                    range: TextRange::default(),
+                    target: Some(object(&table(&["TRUNCATE"]), ObjectKind::Table)),
+                });
+                s
+            }
+            "GRANT" => stmt(StmtKind::Grant, EffectSet::PRIVILEGE),
+            "REVOKE" => stmt(StmtKind::Revoke, EffectSet::PRIVILEGE),
+            "COPY" if up.contains("PROGRAM") => stmt(StmtKind::Copy, EffectSet::PROCESS_EXEC),
+            _ => {
+                let mut s = stmt(StmtKind::Other, EffectSet::UNKNOWN);
+                s.reasons.push(reason(ReasonCode::EffectsUnknown, None));
+                s
+            }
+        }
+    }
+
+    /// `fake_stmt` over exactly `text` in `dialect`.
+    pub fn fake_classify(text: &str, dialect: DialectId) -> SafetyReport {
+        over(text, dialect, vec![fake_stmt(text)])
+    }
+
+    /// A connection: idle, Auto-commit, unsafe-WHERE confirmation on.
+    pub fn conn(engine: DbmsKind, env: Option<EnvTag>) -> ConnSafety {
+        ConnSafety {
+            engine,
+            env,
+            read_only: false,
+            tx_status: TxStatus::Idle,
+            tx_owner: TxOwner::None,
+            tx_mode: TxMode::Auto,
+            confirm_unsafe_where: true,
+        }
+    }
+
+    pub fn conn_dev() -> ConnSafety {
+        conn(DbmsKind::Postgres, Some(EnvTag::Dev))
+    }
+
+    pub fn conn_staging() -> ConnSafety {
+        conn(DbmsKind::Postgres, Some(EnvTag::Staging))
+    }
+
+    pub fn conn_prod() -> ConnSafety {
+        conn(DbmsKind::Postgres, Some(EnvTag::Production))
+    }
+
+    pub fn conn_prod_auto() -> ConnSafety {
+        conn_prod()
+    }
+
+    pub fn conn_prod_manual_idle() -> ConnSafety {
+        ConnSafety {
+            tx_mode: TxMode::Manual,
+            ..conn_prod()
+        }
+    }
+
+    pub fn conn_prod_user_tx() -> ConnSafety {
+        ConnSafety {
+            tx_status: TxStatus::InTx,
+            tx_owner: TxOwner::User,
+            tx_mode: TxMode::Manual,
+            ..conn_prod()
+        }
+    }
+
+    /// A read-only (toggle or guard) development connection.
+    pub fn conn_ro() -> ConnSafety {
+        ConnSafety {
+            read_only: true,
+            ..conn_dev()
+        }
+    }
+
+    /// A store holding `pairs` for every profile (none: a store with no remembered value).
+    pub struct Values(pub Vec<(String, BindValue)>);
+
+    impl Values {
+        pub fn of(pairs: &[(&str, &str)]) -> Values {
+            Values(
+                pairs
+                    .iter()
+                    .map(|(n, v)| (n.to_string(), text_value(v)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl ParamValueStore for Values {
+        fn get(&self, _: &ProfileId, name: &str) -> Option<BindValue> {
+            self.0
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+        }
+        fn put(&self, _: &ProfileId, _: &str, _: BindValue) {}
+    }
+
+    pub fn text_value(v: &str) -> BindValue {
+        BindValue::Typed {
+            hint: LogicalType::Text {
+                max_chars: None,
+                fixed: false,
+            },
+            text: Arc::from(v),
+        }
+    }
+
+    /// Statement units of `texts`, one after the other in a document (two bytes apart), each
+    /// with a read head (`suspendable`).
+    pub fn exec_units(texts: &[&str]) -> Vec<ExecUnit> {
+        let mut at = 0;
+        texts
+            .iter()
+            .map(|t| {
+                let u = ExecUnit {
+                    text: Arc::from(*t),
+                    doc_range: at..at + t.len(),
+                    kind: UnitKind::Statement,
+                    suspendable: true,
+                    title: None,
+                };
+                at += t.len() + 2;
+                u
+            })
+            .collect()
+    }
+
+    /// `texts` prepared on `engine`, every prompt answered from `values` by its name
+    /// (placeholders inside DDL bind): the prompt, then the run with the answers.
+    pub fn prepare_answered(
+        engine: DbmsKind,
+        texts: &[&str],
+        values: &[(&str, &str)],
+        s: ParamSettings,
+    ) -> Prepared {
+        let (ctx, profile) = (ctx_of(engine), ProfileId::new());
+        let store = Values(Vec::new());
+        match prepare_units(exec_units(texts), &ctx, &s, &store, &profile) {
+            Prepared::NeedsValues(prompts) => {
+                let mut answers = ParamAnswers::default();
+                for p in &prompts {
+                    if let Some((_, v)) = values.iter().find(|(n, _)| **n == *p.name) {
+                        answers.insert(p, text_value(v));
+                    }
+                }
+                prepare_units_with(exec_units(texts), &ctx, &s, &store, &profile, &answers)
+            }
+            other => other,
+        }
+    }
+
+    /// `text` prepared on `engine` with `values` (placeholders inside DDL bind).
+    pub fn prepared_on(engine: DbmsKind, text: &str, values: &[(&str, &str)]) -> PreparedUnit {
+        let s = ParamSettings {
+            in_ddl: true,
+            ..ParamSettings::default()
+        };
+        match prepare_answered(engine, &[text], values, s) {
+            Prepared::Ready(mut u) => u.remove(0),
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+
+    /// The gate's item for `text` on `conn`, `fake_stmt` over its final text.
+    pub fn item_of(text: &str, conn: &ConnSafety) -> GateItem {
+        let unit = prepared_on(conn.engine, text, &[]);
+        let report = fake_classify(&unit.final_text, dialect_of(conn.engine));
+        gate(&[unit], &[report], conn, &SuppressSet::default(), 1)
+            .items
+            .remove(0)
+    }
+
+    /// The gate's decision for `text` on `conn` (`item_of`).
+    pub fn decision(text: &str, conn: ConnSafety) -> GateDecision {
+        item_of(text, &conn).decision
+    }
+}
+
+// ## m3b-t18-safe06
+/// Task 18's read-only consoles with the read-only guard's classifier (run A′, P-M3b-13):
+/// a profile connected read-only on a manager of its own whose `ManagerConfig::classifier` is
+/// the one given (the app's boot installs a `ClassifyPool`), as `user`.
+#[allow(
+    clippy::result_large_err,
+    reason = "Reply is the session's fixed interface"
+)]
+pub mod t18 {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use hacivat_driver::ExecOpts;
+    use hacivat_secrets::SecretString;
+    use hacivat_session::pipeline::Interaction;
+    use hacivat_session::profile::Profile;
+    use hacivat_session::session::{
+        ExecErrorKind, ExecOrigin, Reply, Request, SessionHandle, StatementClassifier,
+    };
+    use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
+
+    use super::matrix::{Line, deps, profile_of};
+
+    /// A read-only console of `line` as `user`.
+    pub struct RoConsole {
+        pub m: Arc<ConnectionManager>,
+        pub profile: Arc<Profile>,
+        pub s: SessionHandle,
+    }
+
+    impl RoConsole {
+        /// Connects `line` read-only as `user` (the test account when `None`), with
+        /// `classifier` (`None`: run B's layers alone) and the profile's function `allowlist`.
+        pub async fn open(
+            line: &Line,
+            user: Option<&str>,
+            classifier: Option<Arc<dyn StatementClassifier>>,
+            allowlist: &[&str],
+        ) -> RoConsole {
+            let mut p = profile_of(line);
+            p.read_only = true;
+            p.allow_unsupported_server = true;
+            if let Some(user) = user {
+                p.user = Some(user.to_string());
+            }
+            p.read_only_fn_allowlist = allowlist.iter().map(|s| s.to_string()).collect();
+            let config = ManagerConfig {
+                classifier,
+                ..ManagerConfig::m2b()
+            };
+            let m =
+                ConnectionManager::new(tokio::runtime::Handle::current(), Arc::new(deps()), config);
+            let profile = Arc::new(p);
+            let password = line
+                .target
+                .as_ref()
+                .map(|t| SecretString::from(t.password.clone()));
+            m.connect(profile.clone(), password, Interaction::Headless);
+            let mut changes = m.changes();
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                match m.state(profile.id) {
+                    LiveState::Connected(_) => break,
+                    LiveState::Failed(e) => {
+                        panic!("{}: the connect failed: {:?}", line.id, e.class)
+                    }
+                    LiveState::Lost { class } => panic!("{}: lost: {class:?}", line.id),
+                    _ => {}
+                }
+                assert!(Instant::now() < deadline, "{}: never connected", line.id);
+                tokio::select! {
+                    _ = changes.changed() => {}
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            }
+            let s = m
+                .sessions(profile.id)
+                .expect("connected")
+                .default_session()
+                .expect("a default session");
+            assert!(s.state().borrow().read_only, "{}", line.id);
+            RoConsole { m, profile, s }
+        }
+
+        /// The profile's `application_name` (PostgreSQL's side channel finds the backend by it).
+        pub fn app(&self) -> &str {
+            &self.profile.application_name
+        }
+
+        /// Runs `sql` as a user statement (M2b `Exec`), reading up to 10 rows.
+        pub async fn exec(&self, sql: &str) -> Reply {
+            self.s
+                .submit(Request::Exec {
+                    sql: sql.to_string(),
+                    opts: ExecOpts::values(10),
+                    origin: ExecOrigin::User,
+                })
+                .reply
+                .await
+                .expect("the actor replies")
+        }
+
+        /// Hacivat's own constant statement (outside the guard), its first value.
+        pub async fn internal(&self, sql: &str) -> Option<String> {
+            self.s
+                .submit(Request::Exec {
+                    sql: sql.to_string(),
+                    opts: ExecOpts::values(10),
+                    origin: ExecOrigin::Internal { idempotent: true },
+                })
+                .reply
+                .await
+                .expect("the actor replies")
+                .ok()?
+                .rows
+                .first()?
+                .first()
+                .cloned()
+                .flatten()
+        }
+
+        pub fn close(self) {
+            self.m.disconnect(self.profile.id);
+        }
+    }
+
+    /// Whether `reply` is step 0b's denial.
+    pub fn safety_denied(reply: &Reply) -> bool {
+        matches!(reply, Err(e) if matches!(e.kind, ExecErrorKind::SafetyDenied(_)))
+    }
+}
+
+// ## m3b-t28-matrix
+/// Task 28's helpers (the M3b gate's E-rows over the Docker matrix, `docker_m3b_matrix`): a
+/// console driven the app's M3b way. A document goes through `resolve_units`, then
+/// `prepare_units` (the prompts answered by name), then the real `ClassifyPool` in the
+/// session's own context, then `gate` on the live connection, then `ExecService::run`, a real
+/// session and the typed driver. The lines, the side channel and the waits are Task 31's
+/// (`matrix`).
+pub mod t28 {
+    use std::collections::VecDeque;
+    use std::fmt::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use futures::future::BoxFuture;
+    use hacivat_driver::{ExecOpts, Protocol, SemVerLoose};
+    use hacivat_exec::classify_pool::{ClassifyPool, guard_ctx_in};
+    use hacivat_exec::{
+        ClassifyCtx, CommitQuestion, ConfirmAnswer, ConfirmPort, ConfirmQuestion, ConnSafety,
+        ExecService, ExecUnit, Expect, GateDecision, GatePlan, ParamAnswers, ParamValueStore,
+        Prepared, PreparedUnit, Resolution, RunAction, RunRequest, RunTicket, SafetyReport,
+        SessionLog, SuppressSet, apply_answer, gate, prepare_units, prepare_units_with,
+        resolve_units, sqlctx,
+    };
+    use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+    use hacivat_results::{FetchPolicy, MemoryBudget, ResultId, ResultStore, ResultWriter};
+    use hacivat_secrets::SecretString;
+    use hacivat_session::pipeline::Interaction;
+    use hacivat_session::profile::{Profile, ProfileEndpoint};
+    use hacivat_session::session::{
+        ClassifierContext, CommitAnswer, ErrorPolicy, ExecOrigin, ObserverRef, Request, RoAnswer,
+        RoCheck, RunEvent, RunId, RunObserver, RunSpec, RunUnit, SessionEffects, SessionHandle,
+        SessionSnapshot, SessionState, StatementClassifier, TxCommand, TxMode, UnitId,
+    };
+    use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
+    use hacivat_values::{BindValue, ResultSchema};
+    use sql_dialect::DialectCtx;
+    use sql_split::exec_range::UnitKind;
+    use sql_split::{DocSnapshot, ParamSettings};
+    use tokio::sync::oneshot;
+
+    use super::matrix::{Line, Ran, deps, ended, profile_of, secs};
+
+    /// How a console is opened.
+    pub struct Spec {
+        pub env: Option<EnvTag>,
+        pub read_only: bool,
+        /// The read-only guard's classifier (`ManagerConfig::classifier`, step 0b).
+        pub classifier: Option<Arc<dyn StatementClassifier>>,
+    }
+
+    impl Spec {
+        pub fn dev() -> Spec {
+            Spec {
+                env: Some(EnvTag::Dev),
+                read_only: false,
+                classifier: None,
+            }
+        }
+
+        /// A production console that writes (as Task 26 leaves it): `ManagerConfig::m2b()`
+        /// keeps production sessions writable, so the gate's confirmations are the only
+        /// barrier (P-M3b-7: the production policy flag is never named here).
+        pub fn production() -> Spec {
+            Spec {
+                env: Some(EnvTag::Production),
+                read_only: false,
+                classifier: None,
+            }
+        }
+
+        /// A read-only development console whose guard asks `classifier`.
+        pub fn read_only(classifier: Arc<dyn StatementClassifier>) -> Spec {
+            Spec {
+                env: Some(EnvTag::Dev),
+                read_only: true,
+                classifier: Some(classifier),
+            }
+        }
+    }
+
+    /// The values a run remembers (none: every prompt is answered by the test).
+    struct NoMemory;
+
+    impl ParamValueStore for NoMemory {
+        fn get(&self, _: &ProfileId, _: &str) -> Option<BindValue> {
+            None
+        }
+        fn put(&self, _: &ProfileId, _: &str, _: BindValue) {}
+    }
+
+    /// A run of a console, planned: the units, their prepared form (exactly the bytes sent),
+    /// the pool's reports of those bytes, and the gate's plan on the live connection.
+    #[derive(Debug, Clone)]
+    pub struct Planned {
+        pub units: Vec<ExecUnit>,
+        pub prepared: Vec<PreparedUnit>,
+        pub reports: Vec<SafetyReport>,
+        pub plan: GatePlan,
+        pub run_as_one: bool,
+        /// The units that asked before the run (`Confirm`/`Warn`), answered by
+        /// [`Planned::answer`].
+        pub asked: Vec<u32>,
+    }
+
+    impl Planned {
+        /// Each unit's decision, as a short name ([`shape`]).
+        pub fn shapes(&self) -> Vec<&'static str> {
+            self.plan.items.iter().map(|i| shape(&i.decision)).collect()
+        }
+
+        /// The user's `answer` to every `Confirm`/`Warn` (the app's dialogs, Task 21).
+        pub fn answer(&mut self, answer: ConfirmAnswer) {
+            let asking: Vec<u32> = self
+                .plan
+                .items
+                .iter()
+                .filter(|i| {
+                    matches!(
+                        i.decision,
+                        GateDecision::Confirm { .. } | GateDecision::Warn(_)
+                    )
+                })
+                .map(|i| i.unit)
+                .collect();
+            for unit in asking {
+                assert!(apply_answer(&mut self.plan, unit, answer), "{answer:?}");
+                self.asked.push(unit);
+            }
+        }
+
+        /// Unit `i`'s plan item turned to `Run` (a gate that missed): what the session's own
+        /// layers must still stop.
+        pub fn forced(mut self, i: usize) -> Planned {
+            self.plan.items[i].decision = GateDecision::Run;
+            self
+        }
+    }
+
+    /// A short name for a decision (the gate tests' table names).
+    pub fn shape(d: &GateDecision) -> &'static str {
+        match d {
+            GateDecision::Run => "run",
+            GateDecision::Warn(_) => "warn",
+            GateDecision::Confirm {
+                type_to_confirm: Some(_),
+                ..
+            } => "confirm+type",
+            GateDecision::Confirm { .. } => "confirm",
+            GateDecision::RunInTxThenConfirm { .. } => "tx-confirm",
+            GateDecision::ExplainAnalyzeRollback => "explain-wrap",
+            GateDecision::Deny(_) => "deny",
+        }
+    }
+
+    /// PostgreSQL's `SHOW search_path` split into its elements, quotes removed (`$user` kept).
+    fn split_search_path(raw: &str) -> Vec<Arc<str>> {
+        raw.split(',')
+            .map(|s| Arc::<str>::from(s.trim().trim_matches('"')))
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    static CONSOLES: AtomicU64 = AtomicU64::new(1_000);
+
+    /// A console of the M3b pipeline (the module docs).
+    pub struct Con {
+        pub line: Line,
+        pub m: Arc<ConnectionManager>,
+        pub profile: Arc<Profile>,
+        pub s: SessionHandle,
+        pub svc: ExecService,
+        pub log: Arc<SessionLog>,
+        pub ctx: DialectCtx,
+        pub version: Option<SemVerLoose>,
+        pub pool: Arc<ClassifyPool>,
+        console: u64,
+    }
+
+    impl Con {
+        /// Connects `line` as `spec` says; the run service classifies with `pool` (also its
+        /// "Count rows" check).
+        pub async fn open(line: &Line, spec: Spec, pool: &Arc<ClassifyPool>) -> Con {
+            let mut p = profile_of(line);
+            p.read_only = spec.read_only;
+            p.environment = spec.env;
+            if spec.read_only
+                && let ProfileEndpoint::File {
+                    create_if_missing, ..
+                } = &mut p.endpoint
+            {
+                *create_if_missing = false;
+            }
+            let config = ManagerConfig {
+                classifier: spec.classifier,
+                ..ManagerConfig::m2b()
+            };
+            let m =
+                ConnectionManager::new(tokio::runtime::Handle::current(), Arc::new(deps()), config);
+            let profile = Arc::new(p);
+            let password = line
+                .target
+                .as_ref()
+                .map(|t| SecretString::from(t.password.clone()));
+            m.connect(profile.clone(), password, Interaction::Headless);
+            let mut changes = m.changes();
+            let deadline = Instant::now() + secs(60);
+            let version = loop {
+                match m.state(profile.id) {
+                    LiveState::Connected(info) => break info.server.version.clone(),
+                    LiveState::Failed(e) => {
+                        panic!("{}: the connect failed: {:?}", line.id, e.class)
+                    }
+                    LiveState::Lost { class } => panic!("{}: lost: {class:?}", line.id),
+                    _ => {}
+                }
+                assert!(Instant::now() < deadline, "{}: never connected", line.id);
+                tokio::select! {
+                    _ = changes.changed() => {}
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            };
+            let s = m
+                .sessions(profile.id)
+                .expect("connected")
+                .default_session()
+                .expect("a default session");
+            assert_eq!(s.state().borrow().read_only, spec.read_only, "{}", line.id);
+            let mut c = Con {
+                line: line.clone(),
+                m,
+                profile,
+                s,
+                // ## m3b-t26-prod-unlock (fix round 1, A-M2): its M3a legs run plan-less.
+                svc: ExecService::new(MemoryBudget::new(4 << 30, 256 << 20))
+                    .with_classifier(pool.clone())
+                    .with_plan_less_runs(),
+                log: SessionLog::new(),
+                ctx: sqlctx::dialect_ctx(line.engine, version.as_ref(), None),
+                version,
+                pool: pool.clone(),
+                console: CONSOLES.fetch_add(1, Ordering::SeqCst),
+            };
+            if let Some(sql) = sqlctx::probe_sql(line.engine) {
+                let row = c.internal(sql).await;
+                c.ctx = sqlctx::dialect_ctx(line.engine, c.version.as_ref(), row.as_deref());
+            }
+            c
+        }
+
+        /// Hacivat's own idempotent statement: its first value (`None` for NULL, no row, or a
+        /// failure).
+        pub async fn internal(&self, sql: &str) -> Option<String> {
+            self.s
+                .submit(Request::Exec {
+                    sql: sql.to_string(),
+                    opts: ExecOpts {
+                        max_rows: 10,
+                        protocol: Protocol::Simple,
+                    },
+                    origin: ExecOrigin::Internal { idempotent: true },
+                })
+                .reply
+                .await
+                .expect("the actor replies")
+                .ok()?
+                .rows
+                .first()?
+                .first()
+                .cloned()
+                .flatten()
+        }
+
+        /// What the run path classifies with (the T24 carry): the session's own context, read
+        /// now (its lexing-mode setting, PostgreSQL's search path, the MySQL family's current
+        /// database as `search_path[0]`, the server version), modes known when read.
+        pub async fn classify_ctx(&self, expect: Expect) -> ClassifyCtx {
+            let (lex_modes, search_path) = match self.line.engine {
+                DbmsKind::Postgres => (
+                    self.internal("SHOW standard_conforming_strings").await,
+                    self.internal("SHOW search_path")
+                        .await
+                        .map(|p| split_search_path(&p)),
+                ),
+                DbmsKind::MySql | DbmsKind::MariaDb => (
+                    self.internal("SELECT @@SESSION.sql_mode").await,
+                    self.internal("SELECT DATABASE()")
+                        .await
+                        .map(|d| vec![Arc::<str>::from(d)]),
+                ),
+                _ => (None, None),
+            };
+            let c = ClassifierContext {
+                lex_modes: lex_modes.map(Arc::from),
+                search_path: search_path.map(Arc::from),
+                server_version: self.version.clone(),
+            };
+            let mut ctx = guard_ctx_in(self.line.engine, Arc::from(Vec::new()), &c);
+            ctx.expect = expect;
+            ctx
+        }
+
+        pub fn snap(&self) -> SessionSnapshot {
+            self.s.state().borrow().clone()
+        }
+
+        /// The snapshot once the session left its request (the run's reply follows `Idle`).
+        pub async fn settled(&self) -> SessionSnapshot {
+            let mut state = self.s.state();
+            let left = |s: &SessionSnapshot| {
+                !matches!(
+                    s.state,
+                    SessionState::Busy { .. } | SessionState::Cancelling { .. }
+                )
+            };
+            match tokio::time::timeout(secs(10), state.wait_for(left)).await {
+                Ok(Ok(snap)) => snap.clone(),
+                Ok(Err(_)) => panic!("{}: the session ended", self.line.id),
+                Err(_) => panic!("{}: the session stayed busy", self.line.id),
+            }
+        }
+
+        /// The gate's view of the connection now.
+        pub fn conn(&self) -> ConnSafety {
+            let snap = self.snap();
+            ConnSafety {
+                engine: self.line.engine,
+                env: self.profile.environment,
+                read_only: snap.read_only,
+                tx_status: snap.tx.status,
+                tx_owner: snap.tx.owner,
+                tx_mode: snap.tx.mode,
+                confirm_unsafe_where: true,
+            }
+        }
+
+        pub fn doc(&self, text: &str) -> DocSnapshot {
+            super::doc_in(text, self.ctx)
+        }
+
+        /// The units Run Execute3 (the whole script) sends for `text`.
+        pub fn units(&self, text: &str) -> Vec<ExecUnit> {
+            match resolve_units(
+                &self.doc(text),
+                &[super::caret(0)],
+                RunAction::Execute3,
+                None,
+            ) {
+                Resolution::Units(units) => units,
+                other => panic!("{}: `{text}` resolved to {other:?}", self.line.id),
+            }
+        }
+
+        /// `text` as one unit, sent as written (Run as one, R-M3-60).
+        pub fn as_one(&self, text: &str) -> Vec<ExecUnit> {
+            vec![ExecUnit {
+                text: Arc::from(text),
+                doc_range: 0..text.len(),
+                kind: UnitKind::Verbatim,
+                suspendable: false,
+                title: None,
+            }]
+        }
+
+        /// Prepares `units` (every prompt answered from `values` by its name), classifies the
+        /// prepared bytes on the pool in the session's context and gates them on the live
+        /// connection.
+        pub async fn plan_units(
+            &self,
+            units: Vec<ExecUnit>,
+            values: &[(&str, BindValue)],
+            run_as_one: bool,
+        ) -> Planned {
+            let id = &self.line.id;
+            let settings = ParamSettings::default();
+            let profile = self.profile.id;
+            let prepared =
+                match prepare_units(units.clone(), &self.ctx, &settings, &NoMemory, &profile) {
+                    Prepared::Ready(p) => p,
+                    Prepared::NeedsValues(prompts) => {
+                        let mut answers = ParamAnswers::default();
+                        for p in &prompts {
+                            let (_, v) = values
+                                .iter()
+                                .find(|(n, _)| *n == &*p.name)
+                                .unwrap_or_else(|| panic!("{id}: no value for `{}`", p.name));
+                            answers.insert(p, v.clone());
+                        }
+                        match prepare_units_with(
+                            units.clone(),
+                            &self.ctx,
+                            &settings,
+                            &NoMemory,
+                            &profile,
+                            &answers,
+                        ) {
+                            Prepared::Ready(p) => p,
+                            other => panic!("{id}: {other:?}"),
+                        }
+                    }
+                    other => panic!("{id}: {other:?}"),
+                };
+            let expect = if run_as_one {
+                Expect::Script
+            } else {
+                Expect::SingleStatement
+            };
+            let texts: Vec<Arc<str>> = prepared.iter().map(|p| p.final_text.clone()).collect();
+            let reports = match self
+                .pool
+                .classify_units(texts, self.classify_ctx(expect).await)
+                .await
+            {
+                Ok(r) => r,
+                Err(never) => match never {},
+            };
+            let plan = gate(
+                &prepared,
+                &reports,
+                &self.conn(),
+                &SuppressSet::default(),
+                self.console,
+            );
+            Planned {
+                units,
+                prepared,
+                reports,
+                plan,
+                run_as_one,
+                asked: Vec::new(),
+            }
+        }
+
+        /// [`Con::plan_units`] of Run Execute3 on `text`.
+        pub async fn plan(&self, text: &str, values: &[(&str, BindValue)]) -> Planned {
+            self.plan_units(self.units(text), values, false).await
+        }
+
+        /// Sends `p` through the run service.
+        pub fn send(
+            &self,
+            p: &Planned,
+            policy: ErrorPolicy,
+            confirm: Option<Arc<dyn ConfirmPort>>,
+        ) -> RunTicket {
+            self.svc.run(
+                &self.s,
+                RunRequest {
+                    console: self.console,
+                    engine: self.line.engine,
+                    units: p.units.clone(),
+                    fetch: FetchPolicy::default(),
+                    log: self.log.clone(),
+                    prepared: Some(p.prepared.clone()),
+                    plan: Some(p.plan.clone()),
+                    policy,
+                    run_as_one: p.run_as_one,
+                    history: None,
+                    confirm,
+                    context_generation: None,
+                },
+            )
+        }
+
+        /// Plans `text` with `values`, answers every confirmation Execute, runs it (stop on
+        /// error) and waits for its end.
+        pub async fn run_with(&self, text: &str, values: &[(&str, BindValue)]) -> Ran {
+            let mut p = self.plan(text, values).await;
+            p.answer(ConfirmAnswer::Execute);
+            ended(self.send(&p, ErrorPolicy::StopOnError, None)).await
+        }
+
+        pub async fn run(&self, text: &str) -> Ran {
+            self.run_with(text, &[]).await
+        }
+
+        /// [`Con::run`]; every unit must succeed.
+        pub async fn ok(&self, text: &str) -> Ran {
+            let ran = self.run(text).await;
+            assert_eq!(ran.outcome(), "ran", "{}: `{text}`", self.line.id);
+            ran
+        }
+
+        /// Sets the transaction mode (the chip, Task 22).
+        pub async fn set_mode(&self, mode: TxMode) {
+            let r = self
+                .s
+                .submit(Request::Tx(TxCommand::SetMode(mode)))
+                .reply
+                .await
+                .expect("the actor replies");
+            assert!(r.is_ok(), "{}: SetMode({mode:?}): {r:?}", self.line.id);
+        }
+
+        /// Sends `p`'s units straight to the session with `deadline` as the confirm deadline,
+        /// unanswered; the run's events. The run service has no deadline of its own to inject
+        /// (D-014's 5 minutes, `RunSpec::CONFIRM_DEADLINE`), so this pass builds the same
+        /// `RunUnit`s the service builds (the M3a T31 precedent: a run through
+        /// `SessionHandle::run` with an observer of the test's own).
+        pub async fn run_with_deadline(&self, p: &Planned, deadline: Duration) -> Vec<RunEvent> {
+            static RUNS: AtomicU64 = AtomicU64::new(u64::MAX / 2);
+            let run = RunId(RUNS.fetch_add(1, Ordering::SeqCst));
+            let units: Arc<[RunUnit]> = p
+                .prepared
+                .iter()
+                .zip(&p.plan.items)
+                .enumerate()
+                .map(|(i, (prep, item))| {
+                    assert!(
+                        matches!(
+                            item.decision,
+                            GateDecision::Run
+                                | GateDecision::RunInTxThenConfirm { .. }
+                                | GateDecision::ExplainAnalyzeRollback
+                        ),
+                        "{}: unit {i} is not to be sent: {:?}",
+                        self.line.id,
+                        item.decision
+                    );
+                    RunUnit {
+                        id: UnitId {
+                            run,
+                            ordinal: u32::try_from(i).unwrap(),
+                        },
+                        sql: prep.final_text.clone(),
+                        protocol: Protocol::Extended,
+                        suspendable: false,
+                        binds: prep.binds.clone(),
+                        verdict: item.verdict,
+                        effects: item.effects,
+                        masked: prep.masked.clone(),
+                        max_result_sets: 100,
+                        cell_cap: None,
+                    }
+                })
+                .collect();
+            let events = Arc::new(Events::default());
+            let spec = RunSpec {
+                run,
+                units,
+                policy: ErrorPolicy::StopOnError,
+                fetch: FetchPolicy::default(),
+                observer: ObserverRef(events.clone()),
+                confirm_deadline: deadline,
+                context_generation: None,
+            };
+            // The reply of a run whose deadline rolled back is `Tx(ConfirmTimedOut)`; the
+            // events say what happened.
+            let reply = self.s.run(spec).reply.await.expect("the actor replies");
+            if let Err(e) = &reply {
+                assert!(
+                    matches!(
+                        e.kind,
+                        hacivat_session::session::ExecErrorKind::Tx(
+                            hacivat_session::session::TxError::ConfirmTimedOut
+                        )
+                    ),
+                    "{}: {:?}",
+                    self.line.id,
+                    e.kind
+                );
+            }
+            events.take()
+        }
+
+        pub async fn shutdown(self) {
+            self.m.shutdown().await;
+        }
+    }
+
+    /// The events of a run sent straight to the session.
+    #[derive(Default)]
+    struct Events {
+        events: Mutex<Vec<RunEvent>>,
+    }
+
+    impl Events {
+        fn take(&self) -> Vec<RunEvent> {
+            std::mem::take(&mut *self.events.lock().unwrap())
+        }
+    }
+
+    impl RunObserver for Events {
+        fn open_result(&self, _: UnitId, _: u32, schema: Arc<ResultSchema>) -> ResultWriter {
+            let budget = MemoryBudget::new(1 << 30, 256 << 20);
+            let (_store, writer) = ResultStore::new(ResultId(u64::MAX), schema, budget, 0);
+            writer
+        }
+
+        fn event(&self, ev: &RunEvent) {
+            self.events.lock().unwrap().push(ev.clone());
+        }
+    }
+
+    /// The confirm-in-transaction port of a test: it records every question and holds it
+    /// until the test answers ([`Port::answer`]), so the side channel can look first.
+    #[derive(Debug, Default)]
+    pub struct Port {
+        asked: Mutex<Vec<CommitQuestion>>,
+        waiting: Mutex<VecDeque<oneshot::Sender<CommitAnswer>>>,
+    }
+
+    impl Port {
+        pub fn new() -> Arc<Port> {
+            Arc::new(Port::default())
+        }
+
+        /// The questions asked so far.
+        pub fn asked(&self) -> Vec<CommitQuestion> {
+            self.asked.lock().unwrap().clone()
+        }
+
+        /// Waits (real time, at most 30 s) until `n` questions were asked; the `n`-th.
+        pub async fn question(&self, id: &str, n: usize) -> CommitQuestion {
+            let deadline = Instant::now() + secs(30);
+            loop {
+                if let Some(q) = self.asked.lock().unwrap().get(n - 1) {
+                    return q.clone();
+                }
+                assert!(Instant::now() < deadline, "{id}: question {n} never came");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        /// Answers the oldest question still waiting.
+        pub fn answer(&self, a: CommitAnswer) {
+            let tx = self
+                .waiting
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a question waits");
+            assert!(tx.send(a).is_ok(), "the run still waits");
+        }
+    }
+
+    impl ConfirmPort for Port {
+        fn confirm(&self, _: ConfirmQuestion) -> oneshot::Receiver<ConfirmAnswer> {
+            // Pre-run confirmations are answered on the plan ([`Planned::answer`]).
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(ConfirmAnswer::Cancel);
+            rx
+        }
+
+        fn commit_decision(&self, q: CommitQuestion) -> oneshot::Receiver<CommitAnswer> {
+            let (tx, rx) = oneshot::channel();
+            self.waiting.lock().unwrap().push_back(tx);
+            self.asked.lock().unwrap().push(q);
+            rx
+        }
+    }
+
+    /// A read-only guard classifier that allows everything (a classifier that missed): what
+    /// the server's own layers must still stop.
+    #[derive(Debug)]
+    pub struct AllowAll;
+
+    impl StatementClassifier for AllowAll {
+        fn check_read_only(
+            &self,
+            _: DbmsKind,
+            _: Arc<str>,
+            _: Arc<[Arc<str>]>,
+        ) -> BoxFuture<'static, RoCheck> {
+            Box::pin(async { RoCheck::Allow })
+        }
+
+        fn effects(&self, _: DbmsKind, _: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>> {
+            Box::pin(async { None })
+        }
+
+        fn check_read_only_in(
+            &self,
+            _: DbmsKind,
+            _: Arc<str>,
+            _: Arc<[Arc<str>]>,
+            _: ClassifierContext,
+        ) -> BoxFuture<'static, RoAnswer> {
+            Box::pin(async {
+                RoAnswer {
+                    check: RoCheck::Allow,
+                    changes_context: false,
+                }
+            })
+        }
+    }
+
+    /// The engine × version × case table of one test, written to the Docker artifact
+    /// `t28-<test>.tsv` (ADR 0006 `m3b-t28` tabulates them).
+    #[derive(Debug, Default)]
+    pub struct Table {
+        rows: Mutex<Vec<(String, String, String, String)>>,
+    }
+
+    impl Table {
+        pub fn new() -> Table {
+            Table::default()
+        }
+
+        pub fn add(&self, line: &Line, version: Option<&SemVerLoose>, case: &str, outcome: &str) {
+            let v = version.map_or_else(String::new, |v| {
+                format!("{}.{}.{}", v.major, v.minor, v.patch)
+            });
+            self.rows.lock().unwrap().push((
+                line.id.clone(),
+                v,
+                case.to_string(),
+                outcome.to_string(),
+            ));
+        }
+
+        /// Asserts that every line of `lines` recorded a row, in order (no engine is skipped
+        /// silently), and writes the artifact.
+        pub fn finish(&self, test: &str, lines: &[Line]) {
+            let rows = self.rows.lock().unwrap();
+            let mut seen: Vec<&str> = Vec::new();
+            for (id, ..) in rows.iter() {
+                if !seen.contains(&id.as_str()) {
+                    seen.push(id);
+                }
+            }
+            let want: Vec<&str> = lines.iter().map(|l| l.id.as_str()).collect();
+            assert_eq!(seen, want, "{test}: a line of the active set did not run");
+            let mut out = String::new();
+            for (id, v, case, outcome) in rows.iter() {
+                let _ = writeln!(out, "{id}\t{v}\t{case}\t{outcome}");
+            }
+            let path = hacivat_testkit::artifact(&format!("t28-{test}.tsv"));
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).expect("the artifact directory");
+            }
+            std::fs::write(&path, out).expect("the record is written");
+        }
+    }
+}
+
+// ## m3b-t26-prod-unlock
+/// Task 26's Docker helpers (`docker_prod_unlock`).
+#[allow(dead_code)]
+pub mod t26 {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use hacivat_secrets::SecretString;
+    use hacivat_session::pipeline::Interaction;
+    use hacivat_session::session::SessionHandle;
+    use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
+
+    use super::matrix::{Line, deps, profile_of, secs};
+
+    /// A read-write development session of `line` connected without a database (MySQL's
+    /// `DATABASE()` is then NULL), on its own manager (the app's configuration).
+    pub async fn without_database(line: &Line) -> (Arc<ConnectionManager>, SessionHandle) {
+        let mut p = profile_of(line);
+        p.database = None;
+        p.environment = Some(hacivat_proto::EnvTag::Dev);
+        let m = ConnectionManager::new(
+            tokio::runtime::Handle::current(),
+            Arc::new(deps()),
+            ManagerConfig::m2b(),
+        );
+        let profile = Arc::new(p);
+        let password = line
+            .target
+            .as_ref()
+            .map(|t| SecretString::from(t.password.clone()));
+        m.connect(profile.clone(), password, Interaction::Headless);
+        let mut changes = m.changes();
+        let deadline = Instant::now() + secs(60);
+        loop {
+            match m.state(profile.id) {
+                LiveState::Connected(_) => break,
+                LiveState::Failed(e) => panic!("{}: the connect failed: {:?}", line.id, e.class),
+                LiveState::Lost { class } => panic!("{}: lost: {class:?}", line.id),
+                _ => {}
+            }
+            assert!(Instant::now() < deadline, "{}: never connected", line.id);
+            tokio::select! {
+                _ = changes.changed() => {}
+                () = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+        let s = m
+            .sessions(profile.id)
+            .expect("connected")
+            .default_session()
+            .expect("a default session");
+        (m, s)
+    }
+}
+
+// ## m4b-t12-script-run
+/// Task 12's helpers (`script_run`): script sources (in memory, with their own chunkings per
+/// pass, and a real file read through one handle), a confirmation port that answers from a
+/// list, and a runner over a fake console session.
+pub mod t12 {
+    use std::collections::VecDeque;
+    use std::fs::File;
+    use std::io::Read;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::SystemTime;
+
+    use futures::future::BoxFuture;
+    use hacivat_driver::Driver;
+    use hacivat_driver::fake::{FakeDriver, FakeTypedCall};
+    use hacivat_exec::gate::CommitQuestion;
+    use hacivat_exec::{
+        ChunkError, ClassifyPool, CommitAnswer, ConfirmAnswer, ConfirmPort, ConfirmQuestion,
+        ExecService, ScriptChunks, ScriptGate, ScriptProgress, ScriptRunOutcome, ScriptRunRequest,
+        ScriptRunner, SessionLog, SuppressSet, run_file,
+    };
+    use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+    use hacivat_results::MemoryBudget;
+    use hacivat_session::session::{SessionHandle, StatementClassifier};
+    use hacivat_session::testing::{fake_session, fake_session_classified};
+    use sha2::{Digest, Sha256};
+    use sql_dialect::{ClientFlavor, DialectCtx, DialectId};
+    use tokio::sync::{oneshot, watch};
+
+    /// A hook a source calls after each chunk.
+    pub type Hook = Arc<dyn Fn(usize, usize) + Send + Sync>;
+
+    // ---- in-memory sources -------------------------------------------------------------------
+
+    /// What a [`MemScript`]'s second pass does differently.
+    #[derive(Debug, Clone, Default)]
+    pub enum Pass2 {
+        /// Reads the same text (in its own chunk sizes).
+        #[default]
+        Same,
+        /// Reads another text, saying nothing (a reader that does not notice a change).
+        Text(String),
+        /// Answers `Err(e)` instead of its `n`-th chunk (from 0), then nothing.
+        FailAt(usize, ChunkError),
+        /// `reopen_verified` refuses with `e` (the file changed between the passes).
+        Refused(ChunkError),
+    }
+
+    /// Counts of what a [`MemScript`] did, over both passes.
+    #[derive(Debug, Default)]
+    pub struct Stats {
+        pub reopens: AtomicUsize,
+        pub chunks: AtomicUsize,
+    }
+
+    /// A script in memory, read in chunks of `sizes[pass]` bytes (cycled; widened to a
+    /// character boundary): the short reads of a real reader, different in each pass.
+    #[derive(Clone)]
+    pub struct MemScript {
+        text: Arc<str>,
+        sizes: [Vec<usize>; 2],
+        pass2: Pass2,
+        /// Pass 1 fails with `e` instead of its `n`-th chunk.
+        pass1_fail: Option<(usize, ChunkError)>,
+        pass: usize,
+        at: usize,
+        k: usize,
+        failed: bool,
+        pub stats: Arc<Stats>,
+        /// Called with `(pass, bytes handed out in this pass)` after each chunk.
+        hook: Option<Hook>,
+    }
+
+    /// `text` in 64 KiB reads in both passes.
+    pub fn script(text: &str) -> MemScript {
+        MemScript {
+            text: Arc::from(text),
+            sizes: [vec![64 << 10], vec![64 << 10]],
+            pass2: Pass2::Same,
+            pass1_fail: None,
+            pass: 0,
+            at: 0,
+            k: 0,
+            failed: false,
+            stats: Arc::default(),
+            hook: None,
+        }
+    }
+
+    impl MemScript {
+        /// Reads of `sizes` bytes in pass `pass` (1 or 2).
+        pub fn sizes(mut self, pass: usize, sizes: &[usize]) -> Self {
+            self.sizes[pass - 1] = sizes.to_vec();
+            self
+        }
+
+        pub fn pass2(mut self, p: Pass2) -> Self {
+            self.pass2 = p;
+            self
+        }
+
+        pub fn pass1_fails_at(mut self, n: usize, e: ChunkError) -> Self {
+            self.pass1_fail = Some((n, e));
+            self
+        }
+
+        pub fn hook(mut self, f: impl Fn(usize, usize) + Send + Sync + 'static) -> Self {
+            self.hook = Some(Arc::new(f));
+            self
+        }
+
+        pub fn boxed(self) -> Box<dyn ScriptChunks> {
+            Box::new(self)
+        }
+    }
+
+    impl ScriptChunks for MemScript {
+        fn next_chunk(&mut self) -> Option<Result<String, ChunkError>> {
+            if self.failed {
+                return None;
+            }
+            let fail = match (&self.pass2, self.pass) {
+                (Pass2::FailAt(n, e), 1) if *n == self.k => Some(e.clone()),
+                (_, 0) => self
+                    .pass1_fail
+                    .as_ref()
+                    .filter(|(n, _)| *n == self.k)
+                    .map(|(_, e)| e.clone()),
+                _ => None,
+            };
+            if let Some(e) = fail {
+                self.failed = true;
+                return Some(Err(e));
+            }
+            let text: Arc<str> = match (&self.pass2, self.pass) {
+                (Pass2::Text(t), 1) => Arc::from(t.as_str()),
+                _ => self.text.clone(),
+            };
+            if self.at >= text.len() {
+                return None;
+            }
+            let sizes = &self.sizes[self.pass];
+            let size = sizes[self.k % sizes.len()].max(1);
+            let mut end = (self.at + size).min(text.len());
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            let out = text[self.at..end].to_string();
+            self.at = end;
+            self.k += 1;
+            self.stats.chunks.fetch_add(1, Ordering::SeqCst);
+            if let Some(h) = &self.hook {
+                h(self.pass + 1, self.at);
+            }
+            Some(Ok(out))
+        }
+
+        fn reopen_verified(
+            self: Box<Self>,
+        ) -> BoxFuture<'static, Result<Box<dyn ScriptChunks>, ChunkError>> {
+            let mut next = *self;
+            Box::pin(async move {
+                next.stats.reopens.fetch_add(1, Ordering::SeqCst);
+                if let Pass2::Refused(e) = &next.pass2 {
+                    return Err(e.clone());
+                }
+                next.pass = 1;
+                next.at = 0;
+                next.k = 0;
+                next.failed = false;
+                Ok(Box::new(next) as Box<dyn ScriptChunks>)
+            })
+        }
+    }
+
+    // ---- a real file through one handle ------------------------------------------------------
+
+    /// What identifies the file a pass read: length, mtime and (Unix) the inode.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Stamp {
+        len: u64,
+        mtime: Option<SystemTime>,
+        ino: u64,
+    }
+
+    fn stamp(m: &std::fs::Metadata) -> Stamp {
+        #[cfg(unix)]
+        let ino = std::os::unix::fs::MetadataExt::ino(m);
+        #[cfg(not(unix))]
+        let ino = 0;
+        Stamp {
+            len: m.len(),
+            mtime: m.modified().ok(),
+            ino,
+        }
+    }
+
+    /// A script file read through **one** open handle in 64 KiB blocks, the way
+    /// `hacivat_scripts` reads one (HV-SCRIPT-12 step 4): after every read the handle's and the
+    /// path's stamps must equal the stamp at open, else `ChunkError::Changed`, and nothing read
+    /// after the change is handed out. Its second pass checks that the file is the one pass 1
+    /// read (the stamp) and that every block hashes as in pass 1 (R-T10-3's contract).
+    pub struct FileScript {
+        path: PathBuf,
+        file: File,
+        at_open: Stamp,
+        blocks: Vec<[u8; 32]>,
+        expect: Option<Vec<[u8; 32]>>,
+        k: usize,
+        done: bool,
+        pass: usize,
+        /// Called with `(pass, block)` after each block is read and checked.
+        hook: Option<Hook>,
+    }
+
+    impl FileScript {
+        pub fn open(path: PathBuf) -> FileScript {
+            let file = File::open(&path).expect("the script opens");
+            let at_open = stamp(&file.metadata().expect("its metadata"));
+            FileScript {
+                path,
+                file,
+                at_open,
+                blocks: Vec::new(),
+                expect: None,
+                k: 0,
+                done: false,
+                pass: 1,
+                hook: None,
+            }
+        }
+
+        pub fn hook(mut self, f: impl Fn(usize, usize) + Send + Sync + 'static) -> Self {
+            self.hook = Some(Arc::new(f));
+            self
+        }
+
+        fn unchanged(&self) -> bool {
+            let by_handle = self.file.metadata().map(|m| stamp(&m)).ok();
+            let by_path = std::fs::symlink_metadata(&self.path)
+                .map(|m| stamp(&m))
+                .ok();
+            by_handle == Some(self.at_open) && by_path == Some(self.at_open)
+        }
+    }
+
+    impl ScriptChunks for FileScript {
+        fn next_chunk(&mut self) -> Option<Result<String, ChunkError>> {
+            if self.done {
+                return None;
+            }
+            let mut buf = vec![0u8; 64 << 10];
+            let mut n = 0;
+            while n < buf.len() {
+                match self.file.read(&mut buf[n..]) {
+                    Ok(0) => break,
+                    Ok(k) => n += k,
+                    Err(e) => {
+                        self.done = true;
+                        return Some(Err(ChunkError::Io(e.kind())));
+                    }
+                }
+            }
+            if !self.unchanged() {
+                self.done = true;
+                return Some(Err(ChunkError::Changed));
+            }
+            if n == 0 {
+                self.done = true;
+                let short = self.expect.as_ref().is_some_and(|e| e.len() != self.k);
+                return short.then_some(Err(ChunkError::Changed));
+            }
+            buf.truncate(n);
+            let digest: [u8; 32] = Sha256::digest(&buf).into();
+            if let Some(expect) = &self.expect
+                && expect.get(self.k) != Some(&digest)
+            {
+                self.done = true;
+                return Some(Err(ChunkError::Changed));
+            }
+            self.blocks.push(digest);
+            self.k += 1;
+            if let Some(h) = &self.hook {
+                h(self.pass, self.k);
+            }
+            // The fixtures are ASCII: a block never splits a character.
+            match String::from_utf8(buf) {
+                Ok(s) => Some(Ok(s)),
+                Err(_) => {
+                    self.done = true;
+                    Some(Err(ChunkError::Decode))
+                }
+            }
+        }
+
+        fn reopen_verified(
+            self: Box<Self>,
+        ) -> BoxFuture<'static, Result<Box<dyn ScriptChunks>, ChunkError>> {
+            Box::pin(async move {
+                if !self.done || self.pass != 1 {
+                    return Err(ChunkError::Changed);
+                }
+                let file = File::open(&self.path).map_err(|e| ChunkError::Io(e.kind()))?;
+                let now = stamp(&file.metadata().map_err(|e| ChunkError::Io(e.kind()))?);
+                if now != self.at_open {
+                    return Err(ChunkError::Changed);
+                }
+                Ok(Box::new(FileScript {
+                    path: self.path,
+                    file,
+                    at_open: now,
+                    blocks: Vec::new(),
+                    expect: Some(self.blocks),
+                    k: 0,
+                    done: false,
+                    pass: 2,
+                    hook: self.hook,
+                }) as Box<dyn ScriptChunks>)
+            })
+        }
+    }
+
+    // ---- confirmations -----------------------------------------------------------------------
+
+    /// A port that answers confirmations from a list (then `Cancel`) and commit questions with
+    /// Commit, recording every question.
+    pub struct Answers {
+        answers: Mutex<VecDeque<ConfirmAnswer>>,
+        pub asked: Mutex<Vec<ConfirmQuestion>>,
+        pub commits: Mutex<Vec<CommitQuestion>>,
+        // ## m4b-t12-script-run fix round 1
+        /// Called on every question, while the dialog is "open".
+        on_ask: Option<Box<dyn Fn() + Send + Sync>>,
+    }
+
+    impl std::fmt::Debug for Answers {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Answers").finish_non_exhaustive()
+        }
+    }
+
+    impl Answers {
+        pub fn new(answers: &[ConfirmAnswer]) -> Arc<Answers> {
+            Arc::new(Answers {
+                answers: Mutex::new(answers.iter().copied().collect()),
+                asked: Mutex::default(),
+                commits: Mutex::default(),
+                on_ask: None,
+            })
+        }
+
+        /// [`Answers::new`] that calls `f` on every question.
+        pub fn with_hook(
+            answers: &[ConfirmAnswer],
+            f: impl Fn() + Send + Sync + 'static,
+        ) -> Arc<Answers> {
+            Arc::new(Answers {
+                answers: Mutex::new(answers.iter().copied().collect()),
+                asked: Mutex::default(),
+                commits: Mutex::default(),
+                on_ask: Some(Box::new(f)),
+            })
+        }
+
+        /// The statement numbers asked about (`ConfirmQuestion::index`), in order.
+        pub fn asked_units(&self) -> Vec<u32> {
+            self.asked.lock().unwrap().iter().map(|q| q.index).collect()
+        }
+    }
+
+    impl ConfirmPort for Answers {
+        fn confirm(&self, q: ConfirmQuestion) -> oneshot::Receiver<ConfirmAnswer> {
+            self.asked.lock().unwrap().push(q);
+            if let Some(f) = &self.on_ask {
+                f();
+            }
+            let a = self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(ConfirmAnswer::Cancel);
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(a);
+            rx
+        }
+
+        fn commit_decision(&self, q: CommitQuestion) -> oneshot::Receiver<CommitAnswer> {
+            self.commits.lock().unwrap().push(q);
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(CommitAnswer::Commit);
+            rx
+        }
+    }
+
+    /// A PostgreSQL fake that answers the read-only guard `rounds` times (its transaction, a
+    /// clean canary, its rollback), as `hacivat-session`'s `carries_m3b` does.
+    pub fn pg_read_only(rounds: usize) -> FakeDriver {
+        use hacivat_driver::fake::FakeExec;
+        use hacivat_driver::{ExecSummary, TxStatus};
+        let step = |prefix: &'static str, rows: Vec<Vec<Option<String>>>, tx| FakeExec {
+            prefix,
+            result: Ok(ExecSummary {
+                row_count: rows.len() as u64,
+                rows,
+                ..ExecSummary::default()
+            }),
+            delay: std::time::Duration::ZERO,
+            tx_after: tx,
+            panics: false,
+        };
+        let mut script = Vec::new();
+        for _ in 0..rounds {
+            script.push(step(
+                "BEGIN ISOLATION LEVEL",
+                Vec::new(),
+                Some(TxStatus::InTx),
+            ));
+            script.push(step(
+                "SELECT pg_catalog.txid_current_if_assigned()",
+                vec![vec![None]],
+                None,
+            ));
+            script.push(step("ROLLBACK", Vec::new(), Some(TxStatus::Idle)));
+        }
+        super::fake_pg().exec(script)
+    }
+
+    // ---- the runner over a fake session ------------------------------------------------------
+
+    /// A runner over a console session of a fake.
+    pub struct Rig {
+        pub runner: ScriptRunner,
+        pub session: SessionHandle,
+        pub fake: Arc<FakeDriver>,
+        pub log: Arc<SessionLog>,
+        pub engine: DbmsKind,
+        /// Every text the runner's classifier pool classified, in order.
+        pub classified: Arc<Mutex<Vec<String>>>,
+        pub cancel: watch::Sender<bool>,
+        // ## m4b-t12-script-run fix round 1
+        /// The profile's live environment tag (I2): a test retags it mid-run.
+        pub env: watch::Sender<Option<EnvTag>>,
+        /// The manager of a managed session ([`managed_rig`]), kept alive with it.
+        pub manager: Option<Arc<hacivat_session::ConnectionManager>>,
+    }
+
+    /// A rig over `fake`; `read_only` makes the profile (and so the session) read-only, its
+    /// guard asking a classifier pool of its own.
+    pub async fn rig(fake: FakeDriver, read_only: bool) -> Rig {
+        let engine = fake.descriptor().kind;
+        let classified: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = classified.clone();
+        let pool = ClassifyPool::observed(
+            1,
+            Arc::new(move |sql: &str, _: &hacivat_exec::ClassifyCtx| {
+                seen.lock().unwrap().push(sql.to_string());
+            }),
+        );
+        let mut profile = super::profile_of(engine);
+        profile.read_only = read_only;
+        let rt = tokio::runtime::Handle::current();
+        let (session, fake) = if read_only {
+            let guard = ClassifyPool::new(1) as Arc<dyn StatementClassifier>;
+            fake_session_classified(rt, fake, profile, guard).await
+        } else {
+            fake_session(rt, fake, profile).await
+        };
+        let exec = Arc::new(ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)));
+        Rig {
+            runner: ScriptRunner::new(exec, pool),
+            session,
+            fake,
+            log: SessionLog::new(),
+            engine,
+            classified,
+            cancel: watch::channel(false).0,
+            env: watch::channel(None).0,
+            manager: None,
+        }
+    }
+
+    // ## m4b-t12-script-run fix round 1
+    /// A rig over a console session that a `ConnectionManager` built over `fake` (I3): unlike
+    /// `fake_session`'s, it recovers a lost connection in place (`SessionEvent::Reconnected`).
+    pub async fn managed_rig(fake: FakeDriver) -> Rig {
+        use std::path::PathBuf;
+
+        use hacivat_driver::{DriverRegistry, EngineCatalog};
+        use hacivat_net::ssh::{KnownHosts, TunnelManager};
+        use hacivat_net::{BoxedStream, StreamFactory};
+        use hacivat_secrets::{CredentialFiles, MemoryBackend, SecretBackend, SecretStore};
+        use hacivat_session::pipeline::{ApprovedRoots, ConnectDeps, Interaction};
+        use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
+
+        let engine = fake.descriptor().kind;
+        let fake = Arc::new(fake);
+        let mut drivers = DriverRegistry::new();
+        drivers.register(fake.clone());
+        let known_hosts = KnownHosts::load(Vec::new(), PathBuf::from("hacivat-test-known-hosts"));
+        let tunnels = TunnelManager::new(known_hosts.clone(), Default::default());
+        let backend: Arc<dyn SecretBackend> = Arc::new(MemoryBackend::new());
+        let deps = ConnectDeps {
+            drivers: Arc::new(drivers),
+            catalog: EngineCatalog::embedded(),
+            secrets: Arc::new(SecretStore::new(Some(backend))),
+            files: CredentialFiles {
+                pgpass: None,
+                pg_service: None,
+            },
+            transport_wrap: Some(Arc::new(|_direct: StreamFactory| {
+                StreamFactory::new(|| {
+                    Box::pin(async {
+                        let (near, _far) = tokio::io::duplex(64);
+                        Ok(Box::new(near) as BoxedStream)
+                    })
+                })
+            })),
+            extra_steps: Vec::new(),
+            approved_roots: ApprovedRoots::for_user(),
+            timeout_override: None,
+            tunnels,
+            known_hosts,
+        };
+        let m = ConnectionManager::new(
+            tokio::runtime::Handle::current(),
+            Arc::new(deps),
+            ManagerConfig::m2b(),
+        );
+        let profile = Arc::new(super::profile_of(engine));
+        m.connect(profile.clone(), None, Interaction::Headless);
+        let mut changes = m.changes();
+        loop {
+            match m.state(profile.id) {
+                LiveState::Connected(_) => break,
+                LiveState::Failed(e) => panic!("the connect failed: {:?}", e.class),
+                _ => {}
+            }
+            changes.changed().await.unwrap();
+        }
+        let session = m
+            .sessions(profile.id)
+            .expect("connected")
+            .default_session()
+            .expect("a default session");
+        let classified: Arc<Mutex<Vec<String>>> = Arc::default();
+        let exec = Arc::new(ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)));
+        Rig {
+            runner: ScriptRunner::new(exec, ClassifyPool::new(1)),
+            session,
+            fake,
+            log: SessionLog::new(),
+            engine,
+            classified,
+            cancel: watch::channel(false).0,
+            env: watch::channel(None).0,
+            manager: Some(m),
+        }
+    }
+
+    /// A PostgreSQL fake whose context reads answer `modes` in turn
+    /// (`standard_conforming_strings`, then `public` as the search path), then nothing.
+    pub fn pg_context(modes: &[&'static str]) -> FakeDriver {
+        use hacivat_driver::ExecSummary;
+        use hacivat_driver::fake::FakeExec;
+        super::fake_pg().exec(
+            modes
+                .iter()
+                .map(|m| FakeExec {
+                    prefix: "SELECT pg_catalog.current_setting('standard_conforming_strings')",
+                    result: Ok(ExecSummary {
+                        rows: vec![vec![Some((*m).to_string()), Some("public".to_string())]],
+                        row_count: 1,
+                        ..ExecSummary::default()
+                    }),
+                    delay: std::time::Duration::ZERO,
+                    tx_after: None,
+                    panics: false,
+                })
+                .collect(),
+        )
+    }
+
+    /// The dialect of a script of `engine` (default modes) and its client flavor.
+    pub fn dialect_of(engine: DbmsKind) -> (DialectCtx, ClientFlavor) {
+        match engine {
+            DbmsKind::MySql => (
+                DialectCtx::new(DialectId::MySql, None),
+                ClientFlavor::MySqlCli,
+            ),
+            DbmsKind::MariaDb => (
+                DialectCtx::new(DialectId::MariaDb, None),
+                ClientFlavor::MySqlCli,
+            ),
+            DbmsKind::Sqlite => (DialectCtx::new(DialectId::Sqlite, None), ClientFlavor::None),
+            _ => (super::pg18(), ClientFlavor::Psql),
+        }
+    }
+
+    impl Rig {
+        /// A request running `source` on the rig's session under `env`, asking `port`.
+        pub fn request(
+            &self,
+            source: Box<dyn ScriptChunks>,
+            env: Option<EnvTag>,
+            port: Arc<Answers>,
+        ) -> ScriptRunRequest {
+            let (dialect, flavor) = dialect_of(self.engine);
+            ScriptRunRequest {
+                session: self.session.clone(),
+                source,
+                console: 7,
+                profile: ProfileId::new(),
+                engine: self.engine,
+                dialect,
+                flavor,
+                modes_known: false,
+                gate: ScriptGate {
+                    env: {
+                        self.env.send_replace(env);
+                        self.env.subscribe()
+                    },
+                    confirm_unsafe_where: true,
+                    allowlist: Arc::from(Vec::new()),
+                    suppressed: SuppressSet::default(),
+                    connection: Arc::from("orders"),
+                },
+                confirm: port,
+                log: self.log.clone(),
+                cancel: self.cancel.subscribe(),
+                history: None,
+                refresh: None,
+            }
+        }
+
+        /// Runs `req`; the outcome and the last progress published.
+        pub async fn run(&self, req: ScriptRunRequest) -> (ScriptRunOutcome, ScriptProgress) {
+            let (tx, rx) = watch::channel(ScriptProgress::default());
+            let out = run_file(&self.runner, req, tx).await;
+            let last = rx.borrow().clone();
+            (out, last)
+        }
+
+        /// Every typed query and statement the fake ran, typed ones first.
+        pub fn all_sent(&self) -> Vec<String> {
+            self.fake
+                .typed_log()
+                .into_iter()
+                .filter_map(|c| match c {
+                    FakeTypedCall::Query(q) => Some(q),
+                    _ => None,
+                })
+                .chain(self.fake.executed())
+                .collect()
+        }
+
+        /// What the fake ran of the statements `of`, in order (the session's own context
+        /// reads and guards are left out).
+        pub fn sent(&self, of: &[&str]) -> Vec<String> {
+            self.all_sent()
+                .into_iter()
+                .filter(|q| of.contains(&q.as_str()))
+                .collect()
         }
     }
 }

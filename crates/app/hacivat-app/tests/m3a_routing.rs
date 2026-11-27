@@ -23,8 +23,9 @@ fn hooks(vcx: &gpui::VisualTestContext) -> ShellHooks {
 
 /// Redraws the shell's window and waits until it is drawn.
 fn redraw(vcx: &gpui::VisualTestContext) {
-    in_window(vcx, |window, _| window.refresh());
-    vcx.run_until_parked();
+    // ## m4-t33d (T33 flaky3 follow-up): the last frame renders every view (a frame after
+    // `run_until_parked` may reuse a cached view, which records no texts).
+    redraw_full(vcx);
 }
 
 #[gpui::test]

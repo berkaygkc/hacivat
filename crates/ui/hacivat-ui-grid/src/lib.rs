@@ -18,9 +18,13 @@ pub mod testing;
 mod view;
 
 pub use commands::{GRID_COMMANDS, grid_command};
-pub use list::{RowRenderer, VirtualList};
+pub use list::{ListEvent, RowRenderer, VirtualList};
 pub use source::{
     Align, CellContent, CellKind, ColId, ColumnKind, ColumnSpec, GRID_CONTEXT, GridCellFlags,
     GridDataSource, GridFrame, ModelCell, ModelRow, NULL_MARKER, RowCount, SourceCaps, ViewRow,
 };
 pub use view::{GridCommand, GridConfig, GridEvent, GridLabels, GridView};
+// ## m3c-t37: a find's marks (layer 5).
+pub use view::{CellMarks, Highlights};
+// ## m3c-t38: the Transposed view (HV-GRID-12).
+pub use element::TransposedSource;

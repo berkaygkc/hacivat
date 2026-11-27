@@ -478,7 +478,8 @@ fn session_lost_toast_lists_lost_items(cx: &mut TestAppContext) {
         toast
             .lines
             .iter()
-            .any(|l| l == &t(vcx, ids::hv::CONN_LOST_TX)),
+            // ## m3b-t22-tx-ui (named exception, T12 carry r1-m1): the line says "may have".
+            .any(|l| l == &t(vcx, ids::hv::TX_LOST_MAYBE)),
         "{toast:?}"
     );
     assert!(
@@ -546,7 +547,8 @@ fn a_reconnected_session_claims_no_rollback(cx: &mut TestAppContext) {
         },
     );
     let toast = sticky_toast(vcx);
-    let rollback = t(vcx, ids::hv::CONN_LOST_TX);
+    // ## m3b-t22-tx-ui (named exception, T12 carry r1-m1)
+    let rollback = t(vcx, ids::hv::TX_LOST_MAYBE);
     assert!(!toast.lines.contains(&rollback), "{toast:?}");
     assert!(
         toast.lines.iter().all(|l| !l.contains("rolled back")),
@@ -734,14 +736,44 @@ fn an_idle_connection_says_so_everywhere_and_reconnects_from_the_capsule(cx: &mu
         "{}",
         status_bar_text(vcx)
     );
-    assert!(vcx.debug_bounds("explorer-row-idle-0").is_some());
+    // ## m4-t14-explorer (named exception): the explorer row is the tree's root; its idle
+    // mark is the unplug glyph in the meta-mark slot (`hv-tree-mark-<key>`).
+    let mark = |vcx: &VisualTestContext| root_row(vcx, id).and_then(|r| r.meta_mark);
+    assert_eq!(
+        mark(vcx),
+        Some(hacivat_ui::tree::MetaMark::Glyph(
+            hacivat_ui::icon::IconName::Unplug
+        ))
+    );
+    assert!(
+        vcx.debug_bounds(tree_selector("hv-tree-mark", id))
+            .is_some()
+    );
     // B18: it reconnects when used; the capsule's body does it.
     click(vcx, "capsule-body");
     wait_until(vcx, "the reconnect", |vcx| {
         matches!(live(vcx, "orders-dev"), LiveState::Connected(_))
     });
     assert!(!vcx.cx.read(|cx| session_toasts::is_idle(cx, id)));
-    assert!(vcx.debug_bounds("explorer-row-idle-0").is_none());
+    assert_eq!(mark(vcx), Some(hacivat_ui::tree::MetaMark::Ok));
+}
+
+// ## m4-t14-explorer (named exception)
+/// The explorer tree's root row of profile `id`, as the tree shows it.
+fn root_row(vcx: &VisualTestContext, id: ProfileId) -> Option<hacivat_ui::tree::TreeRowData> {
+    vcx.run_until_parked();
+    let key = hacivat_app::explorer::adapter::profile_key(id);
+    vcx.cx
+        .read(hacivat_app::connections::explorer::shown_rows)
+        .into_iter()
+        .find(|r| r.key == key)
+        .map(|r| r.data)
+}
+
+/// The tree's debug selector `prefix-<key>` of profile `id`'s root row.
+fn tree_selector(prefix: &str, id: ProfileId) -> &'static str {
+    let key = hacivat_app::explorer::adapter::profile_key(id);
+    Box::leak(format!("{prefix}-{}", key.0).into_boxed_str())
 }
 
 /// An idle production capsule keeps its PRODUCTION block first, and it stays the one filled
@@ -1072,6 +1104,37 @@ fn tab_reaches_the_access_segment(cx: &mut TestAppContext) {
     assert!(layer_open(vcx));
 }
 
+// ## demofix-1 re-review (r2): the status bar's version segment is a Tab stop; Enter or
+// Space copies the server's whole version text.
+#[gpui::test]
+fn tab_reaches_the_version_segment_and_enter_copies_it(cx: &mut TestAppContext) {
+    let (vcx, id) = connected_with(cx, AccessLabel::ReadWrite, vec![]);
+    let raw = "PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on aarch64-unknown-linux-gnu, 64-bit";
+    let mut live = info("16.16", AccessLabel::ReadWrite, vec![]);
+    live.server.raw_version = raw.to_string();
+    set_state(vcx, id, LiveState::Connected(Arc::new(live)));
+    let segment = vcx
+        .cx
+        .update(|cx| hacivat_app::connections::status::version_focus(cx))
+        .expect("the segment's focus is installed");
+    let mut reached = false;
+    for _ in 0..60 {
+        vcx.simulate_keystrokes("tab");
+        if focused(vcx).as_ref() == Some(&segment) {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "Tab never reached the version segment");
+    vcx.simulate_keystrokes("enter");
+    let copied = vcx.read_from_clipboard().and_then(|i| i.text());
+    assert_eq!(copied.as_deref(), Some(raw));
+    vcx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+    vcx.simulate_keystrokes("space");
+    let copied = vcx.read_from_clipboard().and_then(|i| i.text());
+    assert_eq!(copied.as_deref(), Some(raw), "Space copies too");
+}
+
 #[gpui::test]
 fn a_press_outside_closes_the_explanation(cx: &mut TestAppContext) {
     let (vcx, _) = connected_with(cx, AccessLabel::ReadOnlyGuarded, vec![]);
@@ -1219,7 +1282,25 @@ fn ssh_path_segment_and_explorer_flag(cx: &mut TestAppContext) {
     set_state(vcx, id, LiveState::Connected(Arc::new(live)));
     assert!(capsule_text(vcx, "path").contains("bastion.acme.io"));
     assert_eq!(capsule_text(vcx, "path"), "SSH via bastion.acme.io");
-    assert!(vcx.debug_bounds("explorer-row-route-0").is_some());
+    // ## m4-t14-explorer (named exception): the route flag is one of the tree root's flags.
+    let flags = root_row(vcx, id).expect("the root row").flags;
+    let at = flags
+        .iter()
+        .position(|f| {
+            matches!(
+                f,
+                hacivat_ui::tree::RowFlag::Icon {
+                    icon: hacivat_ui::icon::IconName::Route,
+                    ..
+                }
+            )
+        })
+        .expect("the SSH route flag");
+    let sel = tree_selector("hv-tree-flag", id);
+    assert!(
+        vcx.debug_bounds(Box::leak(format!("{sel}-{at}").into_boxed_str()))
+            .is_some()
+    );
     assert_eq!(status_text(vcx, "path"), capsule_text(vcx, "path"));
     // The status bar mirrors the rest too: the latency and the encryption.
     let status = plain(&status_bar_text(vcx));
@@ -1289,10 +1370,20 @@ fn the_capsule_degrades_to_fit_the_minimum_window(cx: &mut TestAppContext) {
         // The minimum window: the latency goes first, then the path text, then the access text.
         vcx.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
         settle_until(vcx, WAIT, || text_of(vcx, "capsule-text-latency").is_none());
-        wait_until_mut(vcx, "the palette field at its minimum or wider", |vcx| {
-            let palette = vcx.debug_bounds("palette-field");
-            palette.is_some_and(|b| b.size.width >= gpui::px(170.0) - gpui::px(0.5))
-        });
+        // ## m4-m3carry (U-6 c, P2-04; named update of this M2b test): or collapsed to its
+        // magnifier, where that keeps a trust word of this capsule.
+        wait_until_mut(
+            vcx,
+            "the palette field at its minimum or wider, or its icon",
+            |vcx| {
+                let palette = vcx.debug_bounds("palette-field");
+                palette.is_some_and(|b| {
+                    b.size.width >= gpui::px(170.0) - gpui::px(0.5)
+                        || (b.size.width - gpui::px(hacivat_ui::titlebar::PALETTE_ICON_PX)).abs()
+                            <= gpui::px(0.5)
+                })
+            },
+        );
         let palette = vcx
             .debug_bounds("palette-field")
             .expect("the palette field");
@@ -1371,26 +1462,27 @@ fn the_ssh_flag_never_squeezes_the_explorer_meta(cx: &mut TestAppContext) {
         ))),
     );
     set_state(vcx, a, LiveState::Connected(Arc::new(through_ssh)));
+    // ## m4-t14-explorer (named exception): the rows are the tree's roots (R-M4-18). The route
+    // flag follows the name (mock M4 surface 1: flags after the name); a connected root's meta
+    // is its latency alone, and both rows draw it whole and alike.
+    let sel = tree_selector("hv-tree-flag", a);
     let route = vcx
-        .debug_bounds("explorer-row-route-0")
-        .expect("the route flag");
-    let row = vcx.debug_bounds("explorer-row-0").expect("the row");
-    assert!(route.left() > row.left());
+        .debug_bounds(Box::leak(format!("{sel}-2").into_boxed_str()))
+        .expect("the route flag (after the mark and the lock)");
+    let name = vcx
+        .debug_bounds(tree_selector("hv-tree-name", a))
+        .expect("the name");
+    assert!(route.left() >= name.right(), "{route:?} after {name:?}");
     let latency = |i: usize| {
         registry_frame(vcx)
             .into_iter()
-            .find(|r| r.path.ends_with(&format!("#explorer-row-latency-{i}")))
+            .filter(|r| r.path.ends_with("#hv-tree-meta"))
+            .nth(i)
             .unwrap_or_else(|| panic!("row {i} draws its latency"))
     };
-    let engine = |i: usize| {
-        registry_frame(vcx)
-            .into_iter()
-            .find(|r| r.path.ends_with(&format!("#explorer-row-engine-{i}")))
-            .unwrap_or_else(|| panic!("row {i} draws its engine"))
-    };
     assert_eq!(latency(0).painted_px, latency(1).painted_px);
-    assert_eq!(latency(0).truncated, latency(1).truncated);
-    assert_eq!(engine(0).painted_px, engine(1).painted_px);
+    assert!(!latency(0).truncated && !latency(1).truncated);
+    assert_eq!(latency(0).text, latency(1).text);
 }
 
 /// M4: a connect that starts while a countdown sleeps gets its 50 ms clock at once.

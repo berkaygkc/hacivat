@@ -1,0 +1,790 @@
+# SQL-SAFE-06 bypass catalogue, MariaDB (M3b Task 18; `alg/13` SQL-SAFE-06). Data, read by
+# path: run A (`sql-safety/tests/bypass_run_a.rs`, classifier on, offline), run A′
+# (`hacivat-exec/tests/docker_m3b_bypass.rs`, the real pool on Docker) and run B
+# (`hacivat-session/tests/docker_m2b_bypass.rs`, no classifier on Docker).
+#
+# Each row:
+# - `id`: the catalogue row (P/M/L/X, `SAFE02-n` for the SQL-SAFE-02 test table, `n-3` and
+#   `M7/I-2` for run B's review rows);
+# - `sql`: the statement; `{victim}` (another backend's ID), `{tro}` (the engine's transaction
+#   read-only variable) and `{d}` (a scratch directory) are filled in where it runs;
+# - `classifier`: run A's verdict under `ReadOnlyPlusExplain` for a human and the report's
+#   reason codes (sorted, unique), with the session's lexing modes known (the dialect's
+#   defaults unless `modes` names others; `modes = "unknown"`: not known);
+# - `server_off`: run B's outcomes that count as stopped with no classifier (a server code, `1a`,
+#   `protocol`, `function`, `gap`, `refused`); empty for a neutralised row (it may run, and
+#   must leave nothing);
+# - `accounts`: who runs it in Docker (`hv_ro`, `owner` = the test account); empty: run A only;
+# - `kind`: `server_blocked | neutralised | privilege_only | non_transactional`;
+# - `anchor`: where the row comes from;
+# - optional `search_path`, `allowlist` (the profile's function allowlist), `note`, and on
+#   MariaDB `observed`: run B's recorded outcome per account (C19, R-M3-58).
+
+[[row]]
+id = "M1"
+sql = "/*!50000 DROP TABLE hv_t23_bypass */"
+classifier = { verdict = "deny", reasons = ["Destructive", "ExecutableComment", "SchemaChange"] }
+server_off = ["1792", "1142"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1792", owner = "blocked 1792" }
+
+[[row]]
+id = "M1"
+sql = "/*!50000 INSERT INTO hv_t23_bypass VALUES (50) */"
+classifier = { verdict = "deny", reasons = ["ExecutableComment", "WriteData"] }
+server_off = ["1792", "1142"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1142", owner = "blocked 1792" }
+
+[[row]]
+id = "M2"
+sql = "SELECT 1; DROP TABLE hv_t23_bypass"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = ["1064"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1064", owner = "blocked 1064" }
+
+[[row]]
+id = "M5"
+sql = "SELECT * FROM hv_t23_bypass FOR UPDATE"
+classifier = { verdict = "deny", reasons = ["LockingClause"] }
+server_off = ["1792", "1142"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1792", owner = "blocked 1792" }
+
+[[row]]
+id = "M5"
+sql = "LOCK TABLES hv_t23_bypass WRITE"
+classifier = { verdict = "deny", reasons = ["TableLock"] }
+server_off = ["protocol"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "gap (L6, connection discarded)", owner = "gap (L6, connection discarded)" }
+
+[[row]]
+id = "M6"
+sql = "PREPARE hv_t23_s FROM 'DELETE FROM hv_t23_bypass'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = ["protocol"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked protocol", owner = "blocked protocol" }
+
+[[row]]
+id = "M8"
+sql = "CREATE TABLE hv_t23_m8 (a int)"
+classifier = { verdict = "deny", reasons = ["SchemaChange"] }
+server_off = ["1792", "1142"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1142", owner = "blocked 1792" }
+
+[[row]]
+id = "M8"
+sql = "TRUNCATE TABLE hv_t23_bypass"
+classifier = { verdict = "deny", reasons = ["Destructive", "SchemaChange", "WriteData"] }
+server_off = ["1792", "1142"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1792", owner = "blocked 1792" }
+
+[[row]]
+id = "M8"
+sql = "DELETE FROM hv_t23_bypass"
+classifier = { verdict = "deny", reasons = ["Destructive", "WriteData"] }
+server_off = ["1792", "1142"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1142", owner = "blocked 1792" }
+
+[[row]]
+id = "M12"
+sql = "HANDLER hv_t23_bypass OPEN"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError", "SessionState"] }
+server_off = ["protocol"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "ran, neutralised", owner = "ran, neutralised" }
+
+[[row]]
+id = "M13"
+sql = "XA START 'hv_t23'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError", "TxnControl"] }
+server_off = ["protocol"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1400", owner = "blocked 1400" }
+
+[[row]]
+id = "M17"
+sql = "CREATE TEMPORARY TABLE hv_t23_tmp (a int)"
+classifier = { verdict = "deny", reasons = ["SchemaChange", "WriteTemp"] }
+server_off = ["1792", "1044"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1044", owner = "blocked 1792" }
+
+[[row]]
+id = "M4"
+sql = "SELECT a FROM hv_t23_bypass INTO OUTFILE '/tmp/hv_t23_out'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ExternalFile", "ExternalIo", "ParseError"] }
+server_off = ["1227"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1227" }
+
+[[row]]
+id = "M10"
+sql = "SET GLOBAL max_connections = 999"
+classifier = { verdict = "deny", reasons = ["AdminControl", "SessionState", "SetNotAllowlisted"] }
+server_off = ["1227"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1227" }
+
+[[row]]
+id = "M10"
+sql = "SET PERSIST max_connections = 999"
+classifier = { verdict = "deny", reasons = ["AdminControl", "EffectsUnknown", "ParseError", "SessionState", "SetNotAllowlisted"] }
+server_off = ["1227", "1064"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1064" }
+
+[[row]]
+id = "M10"
+sql = "RESET PERSIST max_connections"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = ["3615"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1064" }
+
+[[row]]
+id = "M10"
+sql = "FLUSH TABLES"
+classifier = { verdict = "deny", reasons = ["AdminControl"] }
+server_off = ["1227"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1227" }
+
+[[row]]
+id = "M10"
+sql = "KILL {victim}"
+classifier = { verdict = "deny", reasons = ["AdminControl"] }
+server_off = ["1095"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1095" }
+
+[[row]]
+id = "M11"
+sql = "CREATE FUNCTION hv_t23_udf RETURNS STRING SONAME 'hv_t23.so'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = ["protocol"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1792" }
+
+[[row]]
+id = "M7"
+sql = "CALL hv_t23_escape()"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown", "RoutineCall"] }
+server_off = ["1370"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "blocked 1370", owner = "committed; L6 gap (connection discarded): 1 row committed" }
+
+[[row]]
+id = "M1"
+sql = "SELECT 1 /*!50000 , (SELECT GET_LOCK('hv_t23_m1', 0)) */"
+classifier = { verdict = "deny", reasons = ["AdvisoryLock", "ExecutableComment", "FnDenylisted"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "ran, neutralised" }
+
+[[row]]
+id = "M3"
+sql = "SET sql_mode = 'NO_BACKSLASH_ESCAPES'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "LexModeChange", "SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "ran, neutralised" }
+
+[[row]]
+id = "M5"
+sql = "SELECT GET_LOCK('hv_t23_m5', 0)"
+classifier = { verdict = "deny", reasons = ["AdvisoryLock", "FnDenylisted"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "ran, neutralised" }
+
+[[row]]
+id = "M9"
+sql = "SET SESSION TRANSACTION READ WRITE"
+classifier = { verdict = "deny", reasons = ["SessionState", "TxnControl"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "ran, neutralised" }
+
+[[row]]
+id = "M9"
+sql = "SET @@session.{tro} = 0"
+classifier = { verdict = "deny", reasons = ["SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "ran, neutralised" }
+
+[[row]]
+id = "M14"
+sql = "SET @hv_t23 = 1"
+classifier = { verdict = "deny", reasons = ["SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #mysql-ro"
+observed = { hv_ro = "ran, neutralised" }
+
+[[row]]
+id = "M9"
+sql = "CREATE TABLE hv_m9 (a int)"
+classifier = { verdict = "deny", reasons = ["SchemaChange"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B) runs it inline, not from this file"
+
+[[row]]
+id = "M5"
+sql = "SELECT GET_LOCK('hv_m5', 0)"
+classifier = { verdict = "deny", reasons = ["AdvisoryLock", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B) runs it inline, not from this file"
+
+[[row]]
+id = "n-3"
+sql = "ALTER USER USER() IDENTIFIED BY 'hv_t23_changed'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B) runs it inline, not from this file"
+
+[[row]]
+id = "n-3"
+sql = "ALTER USER CURRENT_USER() IDENTIFIED BY 'hv_t23_changed'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B) runs it inline, not from this file"
+
+[[row]]
+id = "n-3"
+sql = "SET PASSWORD = 'hv_t23_changed'"
+classifier = { verdict = "deny", reasons = ["PrivilegeGrant", "SessionState"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B) runs it inline, not from this file"
+
+[[row]]
+id = "M7/I-2"
+sql = "CALL hv_t23_escape_ro()"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown", "RoutineCall"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B) runs it inline, not from this file"
+
+[[row]]
+id = "M1"
+sql = "SELECT 1 /*!50000 , (SELECT GET_LOCK('x',10)) */"
+classifier = { verdict = "deny", reasons = ["AdvisoryLock", "ExecutableComment", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M1"
+sql = "/*M! DROP TABLE t */ SELECT 1"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ExecutableComment", "ParseError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M1"
+sql = "SELECT 1 /*!99999 , SLEEP(100) */"
+classifier = { verdict = "deny", reasons = ["ExecutableComment", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M2"
+sql = "SELECT 1; DROP TABLE t"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M3"
+sql = "SET NAMES gbk"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "LexModeChange", "SessionState"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M3"
+sql = "SELECT /*+ SET_VAR(sql_mode='NO_BACKSLASH_ESCAPES') */ 1"
+classifier = { verdict = "deny", reasons = ["HintSetVar"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M4"
+sql = "LOAD DATA LOCAL INFILE '/etc/passwd' INTO TABLE t"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ExternalFile", "ExternalIo", "ParseError", "WriteData"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M4"
+sql = "SELECT LOAD_FILE('/etc/passwd')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M5"
+sql = "SELECT SLEEP(10)"
+classifier = { verdict = "deny", reasons = ["FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M5"
+sql = "SELECT BENCHMARK(100000000, MD5('a'))"
+classifier = { verdict = "deny", reasons = ["FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M6"
+sql = "EXECUTE s"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M7"
+sql = "SELECT definer_fn()"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M8"
+sql = "TRUNCATE TABLE t"
+classifier = { verdict = "deny", reasons = ["Destructive", "SchemaChange", "WriteData"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M9"
+sql = "SET @@transaction_read_only = 0"
+classifier = { verdict = "deny", reasons = ["SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M10"
+sql = "SHUTDOWN"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M10"
+sql = "PURGE BINARY LOGS BEFORE '2026-01-01'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M10"
+sql = "INSTALL PLUGIN hv SONAME 'hv.so'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M10"
+sql = "CLONE LOCAL DATA DIRECTORY = '/tmp/hv'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M10"
+sql = "SET PERSIST max_connections = 1"
+classifier = { verdict = "deny", reasons = ["AdminControl", "EffectsUnknown", "ParseError", "SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M11"
+sql = "SELECT sys_exec('id')"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "ProcessExec"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M12"
+sql = "HANDLER t OPEN"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError", "SessionState"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M13"
+sql = "XA START 'x'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError", "TxnControl"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M14"
+sql = "SELECT @hv := 1"
+classifier = { verdict = "deny", reasons = ["SessionState"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+note = "alg/13 S-13 allows the in-statement assignment, flagged; the T4 policy refuses SESSION_STATE on a read-only session (stricter); the reset clears it anyway"
+
+[[row]]
+id = "M15"
+sql = "SELECT 1--1;DROP TABLE t"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M16"
+sql = "SELECT /*+ SET_VAR(transaction_read_only=0) */ 1"
+classifier = { verdict = "deny", reasons = ["HintSetVar"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M16"
+sql = "SELECT /*+ MAX_EXECUTION_TIME(0) */ SLEEP(2)"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "HintExecTime"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M17"
+sql = "CREATE TEMPORARY TABLE t (a int)"
+classifier = { verdict = "deny", reasons = ["SchemaChange", "WriteTemp"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M18"
+sql = "SET GLOBAL super_read_only = OFF"
+classifier = { verdict = "deny", reasons = ["AdminControl", "SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "M19"
+sql = "GRANT SELECT ON t TO 'hacivat_ddl'"
+classifier = { verdict = "deny", reasons = ["PrivilegeGrant"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "SAFE02-22"
+sql = "SELECT 1 /*!99999 , SLEEP(100) */"
+classifier = { verdict = "deny", reasons = ["ExecutableComment", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-23"
+sql = "/*!50000 DROP TABLE t */"
+classifier = { verdict = "deny", reasons = ["Destructive", "ExecutableComment", "SchemaChange"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-24"
+sql = "SELECT * FROM t INTO OUTFILE '/tmp/x'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ExternalFile", "ExternalIo", "ParseError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-24"
+sql = "SELECT LOAD_FILE('/etc/passwd')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-25"
+sql = "SELECT 1--1;DROP TABLE t"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-26"
+sql = "SELECT GET_LOCK('a', 1)"
+classifier = { verdict = "deny", reasons = ["AdvisoryLock", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-27"
+sql = "SELECT @v := 1"
+classifier = { verdict = "deny", reasons = ["SessionState"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "X1"
+sql = "SELECT 'a\\' /*!; DO SLEEP(5); */ x'"
+modes = "NO_BACKSLASH_ESCAPES"
+classifier = { verdict = "deny", reasons = ["AmbiguousBoundary", "LexError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X1"
+sql = "SELECT 'a\\' /*!; DO SLEEP(5); */ x'"
+modes = "unknown"
+classifier = { verdict = "deny", reasons = ["AmbiguousBoundary", "LexError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X1"
+sql = "SELECT \"a\\\" FROM t; DROP TABLE t; -- \""
+modes = "ANSI_QUOTES"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X2"
+sql = "S\u0415LECT 1"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X3"
+sql = "SELECT 1\u0000; DROP TABLE t"
+classifier = { verdict = "deny", reasons = ["LexError", "MultiStatement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X4"
+sql = "SELECT 1 DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a DIV a"
+classifier = { verdict = "deny", reasons = ["TooComplex"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X5"
+sql = "SELECT (SELECT (SELECT GET_LOCK('x', 0)))"
+classifier = { verdict = "deny", reasons = ["AdvisoryLock", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "M1"
+sql = "/*M!100100 DROP TABLE t */ SELECT 1"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ExecutableComment", "ParseError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "MariaDB only (P-M3b-8; the T18 ORACLE carry)"
+
+[[row]]
+id = "M1"
+sql = "SELECT 1 /*M!100100 , (SELECT GET_LOCK('x', 0)) */"
+classifier = { verdict = "deny", reasons = ["AdvisoryLock", "ExecutableComment", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "MariaDB only (P-M3b-8; the T18 ORACLE carry)"
+
+[[row]]
+id = "P-M3b-8"
+sql = "SELECT NEXT VALUE FOR s"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError", "SequenceAdvance"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "MariaDB only (P-M3b-8; the T18 ORACLE carry)"
+
+[[row]]
+id = "P-M3b-8"
+sql = "DELETE FROM t RETURNING *"
+classifier = { verdict = "deny", reasons = ["Destructive", "WriteData"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "MariaDB only (P-M3b-8; the T18 ORACLE carry)"
+
+[[row]]
+id = "P-M3b-8"
+sql = "SELECT * FROM t FOR SYSTEM_TIME ALL"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError", "ParserDisagreement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "MariaDB only (P-M3b-8; the T18 ORACLE carry)"
+
+[[row]]
+id = "P-M3b-8"
+sql = "BEGIN NOT ATOMIC SELECT 1; END"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError", "ProceduralCode"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "MariaDB only (P-M3b-8; the T18 ORACLE carry)"
+
+[[row]]
+id = "M3"
+sql = "SELECT 1"
+modes = "ORACLE"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "UnsupportedDialect"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "MariaDB only (P-M3b-8; the T18 ORACLE carry)"

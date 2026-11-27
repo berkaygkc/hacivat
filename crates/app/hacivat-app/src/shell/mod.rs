@@ -37,6 +37,8 @@ pub use hooks::unregister_focus_context;
 pub use keymap_state::{ActiveKeymap, install_with as install_keymap_with, set_keymap_preset};
 pub use layers::{Layer, Layers};
 pub use tab_content::{TabContent, TabContentRegistry, TabKind};
+// ## m4-t01b-seams (ruling R-W0-1)
+pub use tab_content::DdlObjectId;
 pub use tiles::TileLayout;
 pub use workspace::{DemoCapsule, POPOVER_CONTEXT, Workspace, open_workspace};
 
@@ -200,6 +202,8 @@ pub fn start(
     }
     let window = open_workspace(cx, demo)?;
     show_startup_diags(cx, &startup.diags, startup.quarantined.as_deref());
+    // ## m4b-t14-tabs (named exception, R-M4b-5): unsaved script text a crashed instance left.
+    crate::scripts::restore::recover_at_launch(cx);
     Ok(window)
 }
 

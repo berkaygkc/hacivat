@@ -1,0 +1,66 @@
+[package]
+name = "hacivat-introspect"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "Introspection: catalog query packs, scope and filters, the scheduler and CatalogHub, the PG/MySQL/SQLite introspectors, freshness, refresh after DDL and the minicat generator (HV-INTRO-01..16)"
+
+# Core layer (`IntrospectNotExec`): never `hacivat-exec` or `hacivat-results`; catalog SQL never
+# travels the execution path (R-M4-7). `hacivat-exec` may depend on this crate (Task 21).
+#
+# ## m4-t01a-model (fix round 2): `session` (default) gates every module that needs a live
+# connection (session, secrets, settings); without it the crate is the pure grammars (`pack`
+# parser, `scope`, `filter`, `glob`) that `fuzz/meta` builds without the session/SSH stack.
+[features]
+default = ["session"]
+session = ["dep:hacivat-session", "dep:hacivat-secrets", "dep:hacivat-settings"]
+# ## m4-t33b-carries (ruling R-W3-7, the T15 m13 carry; the one listed manifest edit): the test
+# doubles (`testing`: FakeIntrospector, the big-catalog fixture; with `session`) build only for
+# tests, this crate's and its consumers' dev-dependencies, never into a product binary. It
+# enables nothing else, so a `--no-default-features` test build stays without `session`.
+test-fakes = []
+
+[dependencies]
+hacivat-meta = { workspace = true, features = ["catalog", "persist", "system"] }
+hacivat-session = { workspace = true, optional = true }
+hacivat-proto.workspace = true
+hacivat-values.workspace = true
+hacivat-secrets = { workspace = true, optional = true }
+hacivat-settings = { workspace = true, optional = true }
+sql-ident.workspace = true
+sql-safety.workspace = true
+sql-dialect.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-util.workspace = true
+futures.workspace = true
+twox-hash.workspace = true
+smallvec.workspace = true
+regex.workspace = true
+serde.workspace = true
+bitflags.workspace = true
+
+[dev-dependencies]
+# Docker targets (`require_target`, `targets`, `artifact`).
+hacivat-testkit.workspace = true
+# Task 31's DDL round trip.
+hacivat-ddl.workspace = true
+proptest.workspace = true
+# Task 23's minicat raw files.
+serde_json.workspace = true
+tempfile.workspace = true
+hacivat-meta = { workspace = true, features = ["test-support"] }
+# ## m4 (controller manifest amendment R-W3-4): Docker tests build a SessionManager, whose
+# ConnectDeps need hacivat_net::ssh::{KnownHosts, TunnelManager} (T17 NEEDS_CONTEXT).
+hacivat-net.workspace = true
+# ## m4 (controller manifest amendment R-W3-5): Docker tests need `EngineCatalog::embedded()`
+# and `ExecOpts`/`Protocol` (T16, T17).
+hacivat-driver = { workspace = true, features = ["fake"] }
+# ## m4-t33b-carries (R-W3-7): this crate's integration tests use its own test doubles. A path
+# dependency without `default`, so a `--no-default-features` test build stays without `session`
+# (T33b review 1).
+hacivat-introspect = { path = ".", default-features = false, features = ["test-fakes"] }
+
+[lints]
+workspace = true

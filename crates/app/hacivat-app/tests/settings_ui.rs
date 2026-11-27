@@ -42,15 +42,14 @@ fn settings_tab_with(
     time_zone: &str,
 ) -> (&'static mut VisualTestContext, LocalPaths) {
     apply_text_rendering(TextRendering::Crisp);
-    let root = tempfile::tempdir().expect("temp dir");
-    let paths = LocalPaths::under(root.path());
+    // The temp root lives until the test ends; the shell writes `workspace.json` there.
+    let root = temp_root();
+    let paths = LocalPaths::under(&root);
     write(
         paths.settings_toml(),
         &format!("version = 1\n\n[ui]\ntime_zone = \"{time_zone}\"\n"),
     );
-    // The temp root lives as long as the test process; the shell writes `workspace.json` there.
-    let root: &'static tempfile::TempDir = Box::leak(Box::new(root));
-    let vcx = shell_at(cx, root.path(), "en");
+    let vcx = shell_at(cx, &root, "en");
     let layout = KeyboardLayoutId(layout.to_string());
     vcx.cx
         .update(|cx| install_keymap_with(cx, platform, layout, None));
@@ -267,6 +266,27 @@ fn restart_now_asks_first_and_flushes_before_restarting(cx: &mut TestAppContext)
     assert!(read(paths.settings_toml()).contains("text_rendering = \"standard\""));
 }
 
+// ## m4-t33d (R-T33-1, M4 NOTES surface 13 "Keyboard": as the shipped page, Tab through rows):
+// the restart row's Restart now is a Tab stop, and Enter on it asks first.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn restart_now_is_a_tab_stop(cx: &mut TestAppContext) {
+    let (vcx, _paths) = settings_tab(cx);
+    click_segment(vcx, "ui.text_rendering", "standard");
+    let restart = handle_of(vcx, "button-settings-restart-now");
+    assert!(
+        layer_ids(vcx).is_empty(),
+        "learning the handle asked nothing"
+    );
+    assert!(
+        tab_order(vcx).contains(&restart),
+        "Restart now is a Tab stop"
+    );
+    vcx.update(|window, cx| window.focus(&restart, cx));
+    press_enter(vcx);
+    assert_eq!(dialog_title(vcx), "Restart Hacivat?");
+}
+
 #[gpui::test]
 fn a_restart_flushes_the_pending_settings_and_layout_writes(cx: &mut TestAppContext) {
     let (vcx, paths) = settings_tab(cx);
@@ -284,7 +304,11 @@ fn a_restart_flushes_the_pending_settings_and_layout_writes(cx: &mut TestAppCont
 fn search_matches_english_layer_in_turkish() {
     assert_eq!(filter_rows("theme", &rows_tr(), &tol()), ["ui.theme"]);
     assert_eq!(filter_rows("tema", &rows_tr(), &tol()), ["ui.theme"]);
-    assert_eq!(filter_rows("dil", &rows_tr(), &tol()), ["ui.language"]);
+    // ## m4-t32-shots (named exception; PO R-W5-14 a): "dil" is in "Saat dilimi" too.
+    assert_eq!(
+        filter_rows("dil", &rows_tr(), &tol()),
+        ["ui.language", "ui.time_zone"]
+    );
 }
 
 #[gpui::test]
@@ -505,4 +529,797 @@ fn the_title_bar_theme_segments_rove_with_the_arrow_keys(cx: &mut TestAppContext
     assert_eq!(vcx.cx.read(|cx| Theme::get(cx).mode), mode);
     assert_eq!(focused_handle(vcx), Some(other_handle));
     assert!(read(paths.settings_toml()).contains(&format!("theme = \"{value}\"")));
+}
+
+// ## m3b-t42-settings: the M3b settings rows (R-M3-44; NOTES surface 25).
+
+use hacivat_app::settings_ui::value_limit::SizeUnit;
+use hacivat_app::shell::AppState;
+use hacivat_settings::{
+    EditorSettings, ExecSettings, GridSettings, HistorySettings, Settings, ValueLimit,
+};
+
+/// The settings the shell holds.
+fn settings(vcx: &VisualTestContext) -> Settings {
+    vcx.cx.read(|cx| cx.global::<AppState>().settings.clone())
+}
+
+/// The largest-value field's text and unit.
+fn value_limit_field(vcx: &VisualTestContext) -> (String, SizeUnit) {
+    vcx.cx.read(|cx| {
+        let page = hacivat_app::settings_ui::open_page(cx).expect("the settings page is open");
+        let page = page.read(cx);
+        (page.value_limit_text(cx), page.value_limit_unit())
+    })
+}
+
+/// Clicks the largest-value field, replaces its text with `text` and presses Enter.
+fn type_value_limit(vcx: &mut VisualTestContext, text: &str) {
+    reveal(vcx, "results.max_value_bytes");
+    click(vcx, "settings-max-value-field".to_string());
+    // Clear it wherever the click put the caret: to the end, then back over every character.
+    let len = value_limit_field(vcx).0.chars().count();
+    for _ in 0..len {
+        vcx.simulate_keystrokes("right");
+    }
+    for _ in 0..len {
+        vcx.simulate_keystrokes("backspace");
+    }
+    vcx.simulate_input(text);
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+}
+
+fn clamp_note(vcx: &VisualTestContext) -> Option<String> {
+    label_with_id(vcx, "settings-max-value-clamped")
+}
+
+/// Sets the largest value as a hand edit of the file would (not through the row).
+fn set_value_limit(vcx: &mut VisualTestContext, bytes: u32) {
+    vcx.cx.update(|cx| {
+        update_settings(cx, |s| {
+            s.results.max_value_bytes = ValueLimit::new(bytes).unwrap();
+        });
+        cx.refresh_windows();
+    });
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn each_row_writes_through_update_settings(cx: &mut TestAppContext) {
+    let (vcx, paths) = settings_tab(cx);
+    // `auto` is the default and writes nothing (T33): choosing another row leaves it out.
+    choose(vcx, "exec.error_policy_ask", "off");
+    choose(vcx, "exec.error_policy_ask", "on");
+    assert!(!read(paths.settings_toml()).contains("find_turkish_tolerant"));
+    // (row, the choice away from its default, the line `settings.toml` then holds).
+    let cases = [
+        ("editor.tab_size", "8", "tab_size = 8"),
+        ("editor.insert_spaces", "off", "insert_spaces = false"),
+        (
+            "editor.copy_line_without_selection",
+            "off",
+            "copy_line_without_selection = false",
+        ),
+        ("editor.caret_blink", "off", "caret_blink = \"off\""),
+        (
+            "editor.find_turkish_tolerant",
+            "on",
+            "find_turkish_tolerant = \"on\"",
+        ),
+        (
+            "exec.confirm_unsafe_where",
+            "off",
+            "confirm_unsafe_where = false",
+        ),
+        ("exec.error_policy_ask", "off", "error_policy_ask = false"),
+        ("grid.raw_display", "on", "raw_display = true"),
+        ("history.enabled", "off", "enabled = false"),
+    ];
+    for (key, value, line) in cases {
+        let before = settings(vcx);
+        choose(vcx, key, value);
+        let after = settings(vcx);
+        assert_ne!(before, after, "{key}: the shell's settings changed");
+        assert_eq!(rows::current_value(&after, key), value, "{key}");
+        let file = read(paths.settings_toml());
+        assert!(file.contains(line), "{key}: {file}");
+    }
+    let s = settings(vcx);
+    assert_eq!(s.editor.tab_size.get(), 8);
+    assert!(!s.editor.insert_spaces && !s.editor.copy_line_without_selection);
+    assert!(!s.exec.confirm_unsafe_where && !s.exec.error_policy_ask);
+    assert!(s.grid.raw_display && !s.history.enabled);
+
+    // Back to the defaults: the file holds none of them (`auto` writes nothing, T33).
+    for (key, value) in [
+        ("editor.tab_size", "4"),
+        ("editor.insert_spaces", "on"),
+        ("editor.copy_line_without_selection", "on"),
+        ("editor.caret_blink", "on"),
+        ("editor.find_turkish_tolerant", "auto"),
+        ("exec.confirm_unsafe_where", "on"),
+        ("exec.error_policy_ask", "on"),
+        ("grid.raw_display", "off"),
+        ("history.enabled", "on"),
+    ] {
+        choose(vcx, key, value);
+    }
+    let s = settings(vcx);
+    assert_eq!(s.editor, EditorSettings::default());
+    assert_eq!(s.exec, ExecSettings::default());
+    assert_eq!(s.grid, GridSettings::default());
+    assert_eq!(s.history, HistorySettings::default());
+    // The store keeps a key the file has and rewrites its value (`store.rs` `write_key_or`).
+    let file = read(paths.settings_toml());
+    for (key, _, line) in cases {
+        assert!(!file.contains(line), "{key}: {file}");
+    }
+    assert!(file.contains("find_turkish_tolerant = \"auto\""), "{file}");
+
+    // The largest value, through the same writer.
+    type_value_limit(vcx, "2");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 2 << 20);
+    let file = read(paths.settings_toml());
+    assert!(file.contains("max_value_bytes = 2097152"), "{file}");
+}
+
+#[test]
+fn search_finds_rows_in_tr() {
+    let rows = rows_tr();
+    let t = tol();
+    let find = |q: &str| filter_rows(q, &rows, &t);
+    assert_eq!(find("sekme"), ["editor.tab_size"]);
+    // The Turkish İ/ı fold: dotted capitals and dotless lower case find "girintile".
+    assert_eq!(find("GİRİNTİ"), ["editor.insert_spaces"]);
+    assert_eq!(find("gırıntı"), ["editor.insert_spaces"]);
+    // Accents folded: "imleç", "geçmiş", "başarısız".
+    assert_eq!(find("imlec"), ["editor.caret_blink"]);
+    assert_eq!(find("gecmis"), ["history.enabled"]);
+    assert_eq!(find("basarisiz"), ["exec.error_policy_ask"]);
+    assert_eq!(find("esnek"), ["editor.find_turkish_tolerant"]);
+    assert_eq!(find("WHERE"), ["exec.confirm_unsafe_where"]);
+    assert_eq!(find("hücre"), ["results.max_value_bytes"]);
+    assert_eq!(find("ham"), ["grid.raw_display"]);
+    // The English layer, in a Turkish UI.
+    assert_eq!(find("raw"), ["grid.raw_display"]);
+    assert_eq!(find("tab size"), ["editor.tab_size"]);
+    assert_eq!(find("history"), ["history.enabled"]);
+    assert_eq!(find("largest value"), ["results.max_value_bytes"]);
+}
+
+#[gpui::test]
+fn a_search_result_names_its_section(cx: &mut TestAppContext) {
+    let (vcx, _) = settings_tab(cx);
+    switch_to(vcx, "tr");
+    vcx.run_until_parked();
+    click(vcx, "settings-search".to_string());
+    vcx.simulate_input("GEÇMİŞ");
+    assert!(row_visible(vcx, "history.enabled"));
+    assert!(!row_visible(vcx, "editor.tab_size"));
+    assert_eq!(
+        label_with_id(vcx, "settings-row-section-history.enabled").as_deref(),
+        Some("Geçmiş")
+    );
+    assert!(label_with_id(vcx, "settings-section-title").is_none());
+    // Without a search, a row names no section (its heading does).
+    click(vcx, "settings-nav-6".to_string());
+    assert!(row_visible(vcx, "history.enabled"));
+    assert!(label_with_id(vcx, "settings-row-section-history.enabled").is_none());
+    assert_eq!(
+        label_with_id(vcx, "settings-section-title").as_deref(),
+        Some("GEÇMİŞ")
+    );
+}
+
+#[gpui::test]
+fn value_limit_clamps(cx: &mut TestAppContext) {
+    let (vcx, paths) = settings_tab(cx);
+    reveal(vcx, "results.max_value_bytes");
+    assert_eq!(value_limit_field(vcx), ("1".to_string(), SizeUnit::Mb));
+    assert_eq!(clamp_note(vcx), None);
+    assert!(
+        label_with_id(vcx, "settings-row-note-results.max_value_bytes")
+            .is_some_and(|n| n.starts_with("From 64 KB to 64 MB.")),
+    );
+
+    // Above 64 MB: set to 64 MB, and the row says so.
+    type_value_limit(vcx, "128");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 64 << 20);
+    assert_eq!(value_limit_field(vcx), ("64".to_string(), SizeUnit::Mb));
+    assert_eq!(
+        clamp_note(vcx).as_deref(),
+        Some("128 MB is above the largest allowed, so it was set to 64 MB.")
+    );
+    assert!(read(paths.settings_toml()).contains("max_value_bytes = 67108864"));
+
+    // Below 64 KB: set to 64 KB, shown in KB.
+    type_value_limit(vcx, "0.01");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 64 << 10);
+    assert_eq!(value_limit_field(vcx), ("64".to_string(), SizeUnit::Kb));
+    assert_eq!(
+        clamp_note(vcx).as_deref(),
+        Some("0.01 MB is below the smallest allowed, so it was set to 64 KB.")
+    );
+
+    // In range: the note goes; the unit stays KB.
+    type_value_limit(vcx, "512");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 512 << 10);
+    assert_eq!(value_limit_field(vcx), ("512".to_string(), SizeUnit::Kb));
+    assert_eq!(clamp_note(vcx), None);
+    assert!(read(paths.settings_toml()).contains("max_value_bytes = 524288"));
+
+    // Not a size: nothing is written and the field shows the saved size again.
+    type_value_limit(vcx, "lots");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 512 << 10);
+    assert_eq!(value_limit_field(vcx), ("512".to_string(), SizeUnit::Kb));
+}
+
+#[gpui::test]
+fn the_value_limit_reads_and_writes_the_regional_format(cx: &mut TestAppContext) {
+    let (vcx, _) = settings_tab_with(cx, support_platform(), "us", "Europe/Istanbul");
+    choose(vcx, "ui.regional_format", "tr-TR");
+    vcx.run_until_parked();
+    set_value_limit(vcx, 1536 << 10);
+    reveal(vcx, "results.max_value_bytes");
+    assert_eq!(value_limit_field(vcx), ("1.536".to_string(), SizeUnit::Kb));
+    // `.` groups in Turkey: 2.048 KB is 2 MB, still shown in KB.
+    type_value_limit(vcx, "2.048");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 2 << 20);
+    assert_eq!(value_limit_field(vcx), ("2.048".to_string(), SizeUnit::Kb));
+    // `,` is the decimal separator, in the field and in the note.
+    type_value_limit(vcx, "1,5");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 64 << 10);
+    assert_eq!(
+        clamp_note(vcx).as_deref(),
+        Some("1,5 KB is below the smallest allowed, so it was set to 64 KB.")
+    );
+    // A hand-edited size follows into the field (here a whole number of megabytes).
+    set_value_limit(vcx, 8 << 20);
+    assert_eq!(value_limit_field(vcx), ("8".to_string(), SizeUnit::Mb));
+}
+
+#[gpui::test]
+fn choosing_the_other_unit_converts_the_saved_size(cx: &mut TestAppContext) {
+    // ## m3c-t42 fix round 1 (review m2, controller ruling): a unit converts the saved size; a
+    // number typed first is saved in the unit it was typed in.
+    let (vcx, paths) = settings_tab(cx);
+    // Active, so the field's focus-out listener runs as it does in the app.
+    in_window(vcx, |window, _| window.activate_window());
+    reveal(vcx, "results.max_value_bytes");
+    let choose_unit = |vcx: &mut VisualTestContext, index: usize| {
+        click(vcx, "settings-max-value-unit".to_string());
+        click(vcx, format!("menu-item-{index}"));
+    };
+    // 1 MB is 1,024 KB: nothing is written.
+    choose_unit(vcx, 0);
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 1 << 20);
+    assert_eq!(value_limit_field(vcx), ("1,024".to_string(), SizeUnit::Kb));
+    assert_eq!(clamp_note(vcx), None);
+    assert!(!read(paths.settings_toml()).contains("max_value_bytes"));
+    // 512 KB in MB is 0.5.
+    type_value_limit(vcx, "512");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 512 << 10);
+    choose_unit(vcx, 1);
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 512 << 10);
+    assert_eq!(value_limit_field(vcx), ("0.5".to_string(), SizeUnit::Mb));
+    // Typed (no Enter), then KB: the typed 512 is saved in MB (set to 64 MB, said), then shown
+    // in KB.
+    click(vcx, "settings-max-value-field".to_string());
+    vcx.simulate_keystrokes("right right right backspace backspace backspace");
+    vcx.simulate_input("512");
+    click(vcx, "settings-max-value-unit".to_string());
+    assert_eq!(
+        settings(vcx).results.max_value_bytes.get(),
+        512 << 10,
+        "not yet: the focus is still in the row"
+    );
+    click(vcx, "menu-item-0".to_string());
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 64 << 20);
+    assert_eq!(value_limit_field(vcx), ("65,536".to_string(), SizeUnit::Kb));
+    assert_eq!(
+        clamp_note(vcx).as_deref(),
+        Some("512 MB is above the largest allowed, so it was set to 64 MB.")
+    );
+    assert!(read(paths.settings_toml()).contains("max_value_bytes = 67108864"));
+}
+
+#[gpui::test]
+fn leaving_the_field_keeps_what_was_typed(cx: &mut TestAppContext) {
+    let (vcx, _) = settings_tab(cx);
+    // Focus-out listeners fire only in an active window.
+    in_window(vcx, |window, _| window.activate_window());
+    reveal(vcx, "results.max_value_bytes");
+    click(vcx, "settings-max-value-field".to_string());
+    vcx.simulate_keystrokes("right backspace");
+    vcx.simulate_input("3");
+    assert_eq!(
+        settings(vcx).results.max_value_bytes.get(),
+        1 << 20,
+        "not yet"
+    );
+    click(vcx, "settings-search".to_string());
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 3 << 20);
+    // Escape puts the saved size back.
+    click(vcx, "settings-max-value-field".to_string());
+    vcx.simulate_keystrokes("right backspace");
+    vcx.simulate_input("9");
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(value_limit_field(vcx), ("3".to_string(), SizeUnit::Mb));
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 3 << 20);
+}
+
+#[gpui::test]
+fn the_four_new_sections_show_their_rows_and_notes(cx: &mut TestAppContext) {
+    let (vcx, _) = settings_tab(cx);
+    let sections = [
+        (
+            3,
+            "Editor",
+            "EDITOR",
+            &[
+                "editor.tab_size",
+                "editor.insert_spaces",
+                "editor.copy_line_without_selection",
+                "editor.caret_blink",
+                "editor.find_turkish_tolerant",
+            ][..],
+        ),
+        (
+            4,
+            "Execution",
+            "EXECUTION",
+            &["exec.confirm_unsafe_where", "exec.error_policy_ask"][..],
+        ),
+        (
+            5,
+            "Results",
+            "RESULTS",
+            &["results.max_value_bytes", "grid.raw_display"][..],
+        ),
+        (6, "History", "HISTORY", &["history.enabled"][..]),
+    ];
+    for (index, nav, heading, keys) in sections {
+        assert_eq!(nav_label(vcx, index), nav);
+        click(vcx, format!("settings-nav-{index}"));
+        assert_eq!(
+            label_with_id(vcx, "settings-section-title").as_deref(),
+            Some(heading)
+        );
+        for key in keys {
+            assert!(row_visible(vcx, key), "{key}");
+            assert!(row_title(vcx, key).is_some(), "{key}");
+            let note = rows::row_note(key).is_some();
+            let id = format!("settings-row-note-{key}");
+            assert_eq!(label_with_id(vcx, &id).is_some(), note, "{key}");
+        }
+    }
+    assert_eq!(
+        label_with_id(vcx, "settings-row-note-history.enabled").as_deref(),
+        Some(
+            "Up to 10,000 statements per connection are kept for 90 days; recognised passwords \
+             and secrets are masked."
+        )
+    );
+}
+
+#[gpui::test]
+fn editor_rows_reach_the_open_editors(cx: &mut TestAppContext) {
+    use hacivat_app::console::{ConsoleId, ConsoleState, Consoles};
+    use hacivat_ui_editor::{CaretBlink, DocId, EditorConfig, EditorView, LanguageService};
+    let (vcx, _) = settings_tab(cx);
+    let editor = in_window(vcx, |window, cx| {
+        let service: std::rc::Rc<dyn LanguageService> =
+            hacivat_sql_editor::SqlLanguageService::new();
+        // Test data, not a product label.
+        let label: hacivat_ui::text::TextFn =
+            std::rc::Rc::new(|_: &gpui::App| gpui::SharedString::from("SQL"));
+        use gpui::AppContext as _;
+        let editor = cx.new(|cx| {
+            EditorView::new(
+                DocId(42),
+                "",
+                EditorConfig::default(),
+                service,
+                label,
+                window,
+                cx,
+            )
+        });
+        Consoles::register(
+            cx,
+            ConsoleState {
+                id: ConsoleId(0),
+                tab: hacivat_ui::panes::TabId(42),
+                n: 1,
+                profile: None,
+                client: hacivat_session::session::ClientId::DEFAULT,
+                session: None,
+                editor: Some(editor.clone()),
+                results: None,
+                sql: None,
+                log: hacivat_exec::SessionLog::new(),
+                service: None,
+            },
+        );
+        editor
+    });
+    choose(vcx, "editor.tab_size", "2");
+    choose(vcx, "editor.insert_spaces", "off");
+    choose(vcx, "editor.copy_line_without_selection", "off");
+    choose(vcx, "editor.caret_blink", "off");
+    let cfg = vcx.cx.read(|cx| *editor.read(cx).config());
+    assert_eq!(cfg.tab_size, 2);
+    assert!(!cfg.insert_spaces && !cfg.copy_line_without_selection);
+    assert_eq!(cfg.caret_blink, CaretBlink::Off);
+}
+
+/// Every key the settings file can hold, as the store writes them.
+fn written_keys() -> Vec<String> {
+    use hacivat_settings::{
+        CaretBlinkPref, FindTolerancePref, KeymapPreset, LanguagePref, TabSize, TextRenderingPref,
+        ThemePref, TimeZonePref,
+    };
+    let mut s = Settings::default();
+    s.ui.language = LanguagePref::Tag("tr".into());
+    s.ui.regional_format = LanguagePref::Tag("tr-TR".into());
+    s.ui.time_zone = TimeZonePref::Iana("Europe/Istanbul".into());
+    s.ui.theme = ThemePref::Light;
+    s.ui.text_rendering = TextRenderingPref::Standard;
+    s.keymap.preset = KeymapPreset::Datagrip;
+    s.editor.tab_size = TabSize::new(2).unwrap();
+    s.editor.insert_spaces = false;
+    s.editor.copy_line_without_selection = false;
+    s.editor.caret_blink = CaretBlinkPref::Off;
+    s.editor.find_turkish_tolerant = FindTolerancePref::Off;
+    s.exec.confirm_unsafe_where = false;
+    s.exec.error_policy_ask = false;
+    s.results.max_value_bytes = ValueLimit::new(2 << 20).unwrap();
+    s.history.enabled = false;
+    s.grid.raw_display = true;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    hacivat_settings::save_changes(&path, &s).unwrap();
+    let mut table = String::new();
+    let mut keys = Vec::new();
+    for line in read(path).lines() {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            table = name.to_string();
+        } else if let Some((key, _)) = line.split_once(" =") {
+            keys.push(if table.is_empty() {
+                key.to_string()
+            } else {
+                format!("{table}.{key}")
+            });
+        }
+    }
+    keys
+}
+
+// ## m4-t32-shots (named exception; PO R-W5-14 a): the time zone has its row now.
+#[test]
+fn every_setting_has_a_row_but_the_version() {
+    let keys = written_keys();
+    assert!(keys.len() > 15, "{keys:?}");
+    let without: Vec<&str> = keys
+        .iter()
+        .map(String::as_str)
+        .filter(|k| rows::row_section(k).is_none())
+        .collect();
+    assert_eq!(without, ["version"]);
+    assert_eq!(rows::row_section("ui.time_zone"), Some(Section::General));
+}
+
+// ## m3c-t42 fix round 1
+
+/// Review I1: on the guard rows an arrow key moves the focus only; Enter chooses.
+#[gpui::test]
+fn arrow_keys_never_flip_a_guard_row(cx: &mut TestAppContext) {
+    let (vcx, paths) = settings_tab(cx);
+    in_window(vcx, |window, _| window.activate_window());
+    for key in [
+        "exec.confirm_unsafe_where",
+        "exec.error_policy_ask",
+        "history.enabled",
+    ] {
+        reveal(vcx, key);
+        let before = settings(vcx);
+        // The pressed On segment, then → and ← (each wraps to the other segment).
+        focus_segment(vcx, &format!("segmented-{key}-0"));
+        for arrow in ["right", "left", "right"] {
+            vcx.simulate_keystrokes(arrow);
+            vcx.run_until_parked();
+            assert_eq!(settings(vcx), before, "{key}: {arrow} wrote nothing");
+        }
+        let name = key.rsplit('.').next().unwrap();
+        assert!(!read(paths.settings_toml()).contains(name), "{key}");
+        // The focus moved to Off: Enter chooses it.
+        press_enter(vcx);
+        assert_eq!(rows::current_value(&settings(vcx), key), "off", "{key}");
+        choose(vcx, key, "on");
+    }
+    // Other rows keep the roving press (the default).
+    reveal(vcx, "editor.tab_size");
+    focus_segment(vcx, "segmented-editor.tab_size-1");
+    vcx.simulate_keystrokes("right");
+    vcx.run_until_parked();
+    assert_eq!(settings(vcx).editor.tab_size.get(), 8);
+}
+
+/// Review m1: a group mark stands only between groups of three digits, so `1,5` in English and
+/// `1.5` in Turkey are not sizes: the saved size comes back and nothing is written.
+#[gpui::test]
+fn a_misplaced_group_mark_is_not_a_size(cx: &mut TestAppContext) {
+    let (vcx, paths) = settings_tab_with(cx, support_platform(), "us", "Europe/Istanbul");
+    type_value_limit(vcx, "1,5");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 1 << 20);
+    assert_eq!(value_limit_field(vcx), ("1".to_string(), SizeUnit::Mb));
+    choose(vcx, "ui.regional_format", "tr-TR");
+    vcx.run_until_parked();
+    type_value_limit(vcx, "1.5");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 1 << 20);
+    assert_eq!(value_limit_field(vcx), ("1".to_string(), SizeUnit::Mb));
+    assert!(!read(paths.settings_toml()).contains("max_value_bytes"));
+    // In Turkey `,` is the decimal separator: 1,5 MB.
+    type_value_limit(vcx, "1,5");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 1536 << 10);
+}
+
+/// Review m3: a hand-edited size that is not a whole number of KB shows exactly, and an
+/// untouched field never rewrites it.
+#[gpui::test]
+fn a_hand_edited_size_shows_exactly(cx: &mut TestAppContext) {
+    let (vcx, _) = settings_tab(cx);
+    in_window(vcx, |window, _| window.activate_window());
+    set_value_limit(vcx, 65_537);
+    reveal(vcx, "results.max_value_bytes");
+    assert_eq!(
+        value_limit_field(vcx),
+        ("64.0009765625".to_string(), SizeUnit::Kb)
+    );
+    let before = settings(vcx);
+    click(vcx, "settings-max-value-field".to_string());
+    vcx.simulate_keystrokes("enter");
+    click(vcx, "settings-search".to_string());
+    assert_eq!(settings(vcx), before);
+    // The exact text is a size: typed back, it is the same bytes.
+    type_value_limit(vcx, "64.0009765625");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 65_537);
+}
+
+/// Review I2: history off at boot opens no store; turning it on in Settings opens it, and the
+/// next statement is recorded.
+#[cfg(unix)]
+#[gpui::test]
+fn turning_history_back_on_opens_the_store_and_records(cx: &mut TestAppContext) {
+    use hacivat_driver::fake::{FakeDriver, FakeQuery, FakeResultSet, FakeRows};
+    use hacivat_proto::{DbmsKind, EnvTag};
+    let vcx = shell_with_connections_prepared(
+        cx,
+        "en",
+        std::sync::Arc::new(hacivat_secrets::MemoryBackend::new()),
+        |paths: &LocalPaths| {
+            write(
+                paths.settings_toml(),
+                "version = 1\n\n[history]\nenabled = false\n",
+            );
+        },
+    );
+    in_window(vcx, |window, _| window.activate_window());
+    let p = hacivat_session::profile::Profile {
+        engine: DbmsKind::Postgres,
+        ..test_profile("orders-dev", Some(EnvTag::Dev), "127.0.0.1")
+    };
+    let profile = add_profile(vcx, p.clone());
+    let rt = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .core_runtime()
+            .handle()
+    });
+    let answer = FakeQuery {
+        prefix: "SELECT 42",
+        sets: vec![FakeResultSet {
+            columns: vec![(
+                "answer",
+                hacivat_values::LogicalType::Text {
+                    max_chars: None,
+                    fixed: false,
+                },
+            )],
+            rows: FakeRows::Literal(vec![vec![hacivat_values::Value::Text("42".into())]]),
+        }],
+        ..Default::default()
+    };
+    let (session, fake) = futures::executor::block_on(hacivat_session::testing::fake_session(
+        rt,
+        answers_probe_with(FakeDriver::new(DbmsKind::Postgres), vec![answer]),
+        p,
+    ));
+    let id = register_test_console(vcx, profile, session);
+    wait_until(vcx, "the console's SQL context", |vcx| {
+        vcx.cx.read(|cx| {
+            hacivat_app::exec_ui::sql_context(id, cx)
+                != hacivat_app::exec_ui::context::SqlContext::Pending
+        })
+    });
+    assert!(vcx.cx.read(|cx| hacivat_app::history::store(cx).is_none()));
+    // The row's own handler (the click path is `each_row_writes_through_update_settings`).
+    vcx.cx
+        .update(|cx| rows::apply_choice(cx, "history.enabled", "on"));
+    wait_until(vcx, "the history store", |vcx| {
+        vcx.cx.read(|cx| hacivat_app::history::store(cx).is_some())
+    });
+    let store = vcx
+        .cx
+        .read(hacivat_app::history::store)
+        .expect("the history store");
+    let editor = vcx.cx.read(|cx| {
+        hacivat_app::console::Consoles::get(cx, id)
+            .and_then(|s| s.editor.clone())
+            .expect("the console has an editor")
+    });
+    vcx.cx.update(|cx| {
+        editor.update(cx, |e, cx| {
+            e.set_text("SELECT 42 AS answer;", cx);
+            e.select_range(0..0, cx);
+        })
+    });
+    in_window(vcx, |window, cx| {
+        let handle = gpui::Focusable::focus_handle(editor.read(cx), cx);
+        window.focus(&handle, cx);
+        editor.update(cx, |e, cx| assert!(e.run_command("editor.run", window, cx)));
+    });
+    vcx.run_until_parked();
+    wait_until(vcx, "the statement in the history", |_| {
+        futures::executor::block_on(store.recall(profile, String::new(), 10))
+            .is_ok_and(|r| r.iter().any(|s| s.contains("SELECT 42")))
+    });
+    fake.kill_connections();
+    stop_core_runtime_test(cx);
+}
+
+use hacivat_app::settings_ui::fixtures as settings_fixtures;
+
+fn strip(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\u{2068}' | '\u{2069}'))
+        .collect()
+}
+
+// ## m4-t32-shots (named exception; PO ruling R-W5-14 a): Settings › General › Time zone.
+
+/// The row lists System (with the zone the OS reports; none in tests, so UTC), UTC and the
+/// zone list; a choice is saved through the one writer and reaches the formats at once.
+#[gpui::test]
+fn the_time_zone_row_offers_system_utc_and_the_list_and_saves_a_choice(cx: &mut TestAppContext) {
+    use hacivat_app::settings_ui::time_zone::ZONES;
+    let (vcx, paths) = settings_tab_with(cx, support_platform(), "us", "system");
+    vcx.cx
+        .update(|cx| settings_fixtures::show_section(Section::General, cx));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("settings-time-zone").is_some());
+    let (labels, selected) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    assert_eq!(labels.len(), 2 + ZONES.len(), "{labels:?}");
+    assert_eq!(strip(&labels[0]), "System (UTC)");
+    assert_eq!(labels[1], "UTC");
+    assert_eq!(&labels[2..], ZONES.map(String::from).as_slice());
+    assert_eq!(selected, 0, "the saved `system` is selected");
+    // Europe/Istanbul: saved, and the formats follow it.
+    let istanbul = 2 + ZONES.iter().position(|z| *z == "Europe/Istanbul").unwrap();
+    vcx.cx
+        .update(|cx| settings_fixtures::pick_time_zone(istanbul, cx));
+    vcx.run_until_parked();
+    assert!(
+        read(paths.settings_toml()).contains("time_zone = \"Europe/Istanbul\""),
+        "{}",
+        read(paths.settings_toml())
+    );
+    let zone = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::l10n_global::L10nGlobal>()
+            .l10n
+            .snapshot()
+            .format
+            .time_zone
+            .clone()
+    });
+    assert_eq!(zone, "Europe/Istanbul");
+    // Back to System: the stored value is `system` again.
+    vcx.cx.update(|cx| settings_fixtures::pick_time_zone(0, cx));
+    vcx.run_until_parked();
+    assert!(
+        read(paths.settings_toml()).contains("time_zone = \"system\"")
+            || !read(paths.settings_toml()).contains("time_zone"),
+        "{}",
+        read(paths.settings_toml())
+    );
+    // Turkish.
+    switch_to(vcx, "tr");
+    vcx.run_until_parked();
+    let (labels, _) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    assert_eq!(strip(&labels[0]), "Sistem (UTC)");
+}
+
+/// A hand-edited zone outside the list shows as one more choice, selected (the select always
+/// names what is saved).
+#[gpui::test]
+fn a_hand_edited_time_zone_shows_as_one_more_choice(cx: &mut TestAppContext) {
+    let (vcx, _paths) = settings_tab_with(cx, support_platform(), "us", "America/Halifax");
+    let (labels, selected) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    assert_eq!(labels.last().map(String::as_str), Some("America/Halifax"));
+    assert_eq!(selected, labels.len() - 1);
+}
+
+// ## m4-t32-shots (fix round 1, review M-3): a well-formed zone the tz database does not know
+// fails closed to the system zone, and the row says so.
+#[gpui::test]
+fn an_unknown_time_zone_fails_closed_with_a_notice(cx: &mut TestAppContext) {
+    let (vcx, _paths) = settings_tab_with(cx, support_platform(), "us", "Mars/Olympus");
+    vcx.cx
+        .update(|cx| settings_fixtures::show_section(Section::General, cx));
+    vcx.run_until_parked();
+    let (labels, selected) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    assert_eq!(selected, labels.len() - 1);
+    assert_eq!(strip(&labels[selected]), "Mars/Olympus (unknown)");
+    let note = text_of(vcx, "settings-time-zone-unknown").expect("the notice");
+    assert_eq!(
+        strip(&note),
+        "Mars/Olympus isn't a time zone Hacivat knows, so System (UTC) is used."
+    );
+    // The formats use the system zone (UTC in tests).
+    let zone = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::l10n_global::L10nGlobal>()
+            .l10n
+            .snapshot()
+            .format
+            .time_zone
+            .clone()
+    });
+    assert_eq!(zone, "UTC");
+}
+
+// ## m4-t33b-carries (T32 re-review RR-5): the row looks the saved zone up in the tz database
+// once per settings change, never on every frame.
+#[gpui::test]
+fn the_time_zone_row_checks_the_saved_zone_once_per_change(cx: &mut TestAppContext) {
+    let (vcx, _paths) = settings_tab_with(cx, support_platform(), "us", "Mars/Olympus");
+    vcx.cx
+        .update(|cx| settings_fixtures::show_section(Section::General, cx));
+    vcx.run_until_parked();
+    let lookups = |vcx: &VisualTestContext| {
+        vcx.cx
+            .read(settings_fixtures::time_zone_lookups)
+            .expect("the settings page")
+    };
+    let first = lookups(vcx);
+    assert!(first >= 1, "looked up when the row was built");
+    for _ in 0..5 {
+        vcx.cx.update(|cx| cx.refresh_windows());
+        vcx.run_until_parked();
+    }
+    assert_eq!(lookups(vcx), first, "a frame looks nothing up");
+    assert!(text_of(vcx, "settings-time-zone-unknown").is_some());
+    // A change: one more lookup, and the notice goes.
+    let (labels, _) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    let utc = labels.iter().position(|l| l == "UTC").expect("UTC");
+    vcx.cx
+        .update(|cx| settings_fixtures::pick_time_zone(utc, cx));
+    vcx.run_until_parked();
+    assert_eq!(lookups(vcx), first + 1);
+    assert!(text_of(vcx, "settings-time-zone-unknown").is_none());
 }

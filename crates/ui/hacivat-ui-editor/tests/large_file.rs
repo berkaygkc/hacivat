@@ -343,6 +343,13 @@ fn typing_in_reduced_mode_stays_within_budget(cx: &mut TestAppContext) {
     }
     took.sort();
     let p95 = took[took.len() * 95 / 100];
+    // ## m3c-t44 (named line): the figure for the M3c bench notes (ledger 298).
+    eprintln!(
+        "PERF typing in a 19 MiB document (Reduced, commit + draw): p50 {:?} p95 {p95:?} max {:?} over {} keystrokes",
+        took[took.len() / 2],
+        took[took.len() - 1],
+        took.len()
+    );
     assert!(p95.as_secs_f64() < 0.016, "p95 {p95:?}");
 }
 
@@ -490,7 +497,9 @@ fn a_part_row_never_paints_over_the_t1_notice(cx: &mut TestAppContext) {
     text.push_str(&format!("SELECT '{}';\n", "x".repeat(70_000)));
     let (e, vcx) = open(cx, text);
     assert_eq!(state(&e, vcx).tier, Tier::Reduced);
-    vcx.simulate_event(gpui::ScrollWheelEvent {
+    // ## m3b-t24-exec-ui (named exception, the T24 fix round 2): `ScrollWheelEvent` is now
+    // `ScrollEvent` (the compiler's deprecation note); workspace clippy with `--all-features`.
+    vcx.simulate_event(gpui::ScrollEvent {
         position: gpui::point(gpui::px(450.0), gpui::px(400.0)),
         delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-14.0))),
         ..Default::default()
@@ -498,7 +507,7 @@ fn a_part_row_never_paints_over_the_t1_notice(cx: &mut TestAppContext) {
     draw(vcx);
     let banner = vcx.debug_bounds("editor-t1-banner").expect("the T1 notice");
     let (first_top, area_top) = vcx.read(|cx| {
-        let rows = e.read(cx).last_layout().unwrap().rows().clone();
+        let rows = *e.read(cx).last_layout().unwrap().rows();
         (rows.first_y, rows.bounds.top())
     });
     assert!(

@@ -368,23 +368,28 @@ async fn type_golden_table_hv_types() {
             Value::F64(v) => assert!(v == 0.0 && v.is_sign_negative(), "{id} -0"),
             other => panic!("{id}: {other:?}"),
         }
-        for (name, type_name, text) in [
-            ("ai", "_int4", Some("{1,NULL,3}")),
-            ("mo", "money", None),
-            ("ine", "inet", Some("192.168.0.1/24")),
-            ("tsv", "tsvector", Some("'a' 'b'")),
-        ] {
-            match r.cell(0, at(name)) {
-                Value::Opaque(o) => {
-                    assert_eq!(&*o.type_name, type_name, "{id} {name}");
-                    if let Some(text) = text {
-                        assert_eq!(&*o.text, text, "{id} {name}");
-                    } else {
-                        assert!(o.text.contains("12"), "{id} {name}: {}", o.text);
-                    }
-                }
-                other => panic!("{id} {name}: {other:?}"),
+        // m3b-t07 (R-M3-67): arrays and network types decode in binary to their canonical
+        // text, money is typed text in the server's `lc_monetary` form; tsvector stays opaque.
+        assert_eq!(
+            r.cell(0, at("ai")),
+            Value::Text("{1,NULL,3}".into()),
+            "{id}"
+        );
+        assert_eq!(
+            r.cell(0, at("ine")),
+            Value::Text("192.168.0.1/24".into()),
+            "{id}"
+        );
+        match r.cell(0, at("mo")) {
+            Value::Text(t) => assert!(t.contains("12"), "{id} mo: {t}"),
+            other => panic!("{id} mo: {other:?}"),
+        }
+        match r.cell(0, at("tsv")) {
+            Value::Opaque(o) => {
+                assert_eq!(&*o.type_name, "tsvector", "{id}");
+                assert_eq!(&*o.text, "'a' 'b'", "{id}");
             }
+            other => panic!("{id} tsv: {other:?}"),
         }
 
         // Row 1: the special values. `"char"` `''` is its byte 0 in binary, kept as U+0000
@@ -1141,12 +1146,27 @@ async fn a_statement_beside_a_portal_keeps_the_querys_warnings() {
         ))
         .await
         .unwrap();
+        // ## m3b-t13-drivers (named exception): the query's notices now come out as
+        // `QueryEvent::Notice` (R-M3-77) wherever they fall; the rest of the grammar is as
+        // before, and the canary's statement lends the query none.
+        let mut texts = Vec::new();
+        async fn next(c: &mut PgConn, texts: &mut Vec<String>) -> QueryEvent {
+            loop {
+                match c.next_event().await.unwrap() {
+                    QueryEvent::Notice(n) => texts.push(n.text.to_string()),
+                    other => return other,
+                }
+            }
+        }
         assert!(matches!(
-            c.next_event().await.unwrap(),
+            next(&mut c, &mut texts).await,
             QueryEvent::ResultStart(_)
         ));
-        assert!(matches!(c.next_event().await.unwrap(), QueryEvent::Rows(_)));
-        assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+        assert!(matches!(
+            next(&mut c, &mut texts).await,
+            QueryEvent::Rows(_)
+        ));
+        assert_eq!(next(&mut c, &mut texts).await, QueryEvent::Suspended);
         let canary = c
             .execute(
                 "SELECT pg_catalog.txid_current_if_assigned()",
@@ -1160,13 +1180,15 @@ async fn a_statement_beside_a_portal_keeps_the_querys_warnings() {
         assert!(canary.notice_codes.is_empty(), "{}: {canary:?}", t.id);
         c.fetch_more(100).await.unwrap();
         let done = loop {
-            match c.next_event().await.unwrap() {
+            match next(&mut c, &mut texts).await {
                 QueryEvent::Done(done) => break done,
                 QueryEvent::Rows(_) | QueryEvent::ResultEnd(_) => {}
                 other => panic!("{}: {other:?}", t.id),
             }
         };
         assert_eq!(done.warnings, 10, "{}", t.id);
+        let want: Vec<String> = (1..=10).map(|n| format!("hv_t22 {n}")).collect();
+        assert_eq!(texts, want, "{}", t.id);
         c.batch("ROLLBACK").await.unwrap();
         assert_synced(&mut c).await;
         Box::new(c).close().await;

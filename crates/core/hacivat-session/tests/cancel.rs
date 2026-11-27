@@ -284,3 +284,35 @@ async fn a_terminate_that_ends_the_request_reports_cancelled() {
     ));
     assert!(matches!(snap(&h).state, SessionState::Broken(_)));
 }
+
+// ## m4-pgcancel
+
+/// Ruling I1 (fail closed): a protocol cancel that answered `Err(Timeout)` before its statement
+/// ended may still land, so the connection is never used again and the next request fails
+/// cleanly (this session has no reconnect), never running on it.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_that_timed_out_never_reaches_the_next_request() {
+    let (h, f) = session(
+        fake_pg()
+            .cancel_times_out()
+            .exec(vec![slow("select a", secs(5))]),
+    )
+    .await;
+    let a = h.submit(exec("select a"));
+    settle().await;
+    assert_eq!(
+        h.cancel(a.seq).await.unwrap(),
+        CancelOutcome::Failed(ErrClass::NetworkTimeout)
+    );
+    let b = h.submit(exec("select b"));
+    // The fake's timed-out cancel ended nothing: the statement ends on its own.
+    assert!(a.reply.await.unwrap().is_ok(), "a ended on its own");
+    assert_eq!(
+        b.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::NotConnected
+    );
+    assert_eq!(f.cancel_calls(), 1);
+    assert_eq!(snap(&h).state, SessionState::Broken(ErrClass::Cancelled));
+    assert_eq!(f.open_connections(), 0);
+    assert!(!f.executed().contains(&"select b".to_string()));
+}

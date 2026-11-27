@@ -58,14 +58,25 @@ pub fn user_tx(console: ConsoleId, cx: &App) -> Option<UserTx> {
     user_tx_of(Consoles::get(cx, console)?.session.as_ref()?)
 }
 
+// ## m3b-t22-tx-ui (named exception, review I3): the palette's Commit and Roll back wait
+// as the badge's do: never while the console's session runs the user's request or a question
+// of its run is open (T11 I1, T19 carry 3).
+fn answer_waits(console: ConsoleId, cx: &App) -> bool {
+    crate::console::tx_badge::answer_waits(console, cx)
+}
+
 fn can_commit(cx: &App) -> bool {
     focused_console(cx)
+        .filter(|c| !answer_waits(*c, cx))
         .and_then(|c| user_tx(c, cx))
         .is_some_and(|t| !t.failed)
 }
 
 fn can_roll_back(cx: &App) -> bool {
-    focused_console(cx).and_then(|c| user_tx(c, cx)).is_some()
+    focused_console(cx)
+        .filter(|c| !answer_waits(*c, cx))
+        .and_then(|c| user_tx(c, cx))
+        .is_some()
 }
 
 /// Ends console `console`'s user transaction (`commit`, else roll back). The task answers
@@ -101,8 +112,37 @@ pub fn end_tx(console: ConsoleId, commit: bool, cx: &mut App) -> Task<bool> {
                 false,
             ),
         };
+        // ## m4-t27-refresh-ui (review m-5): the status after a failed end.
+        let idle_after = session.state().borrow().tx.status == TxStatus::Idle;
         drop(session);
         cx.update(|cx| {
+            // ## m4-t27-refresh-ui (named exception, T21 carry): the refresh coordinator learns
+            // the transaction ended (a commit whose answer was lost may have committed).
+            let lost = matches!(
+                &error,
+                Some(e) if matches!(
+                    e.kind,
+                    hacivat_session::session::ExecErrorKind::NotConnected
+                        | hacivat_session::session::ExecErrorKind::ConnectionLost { .. }
+                )
+            );
+            let outcome = match (ended, commit) {
+                (true, true) => Some(hacivat_session::session::TxOutcome::Committed),
+                (true, false) => Some(hacivat_session::session::TxOutcome::RolledBack),
+                (false, true) if lost => Some(hacivat_session::session::TxOutcome::Unknown),
+                (false, false) if lost => Some(hacivat_session::session::TxOutcome::RolledBack),
+                // Review m-5: a COMMIT the server refused (a deferred constraint, a
+                // serialization failure) ended the transaction anyway; what it holds is not
+                // known, so it is refreshed (Always) or marked stale (Ask, Never), never kept
+                // waiting for a COMMIT that will not come.
+                (false, _) if error.is_some() && idle_after => {
+                    Some(hacivat_session::session::TxOutcome::Unknown)
+                }
+                _ => None,
+            };
+            if let Some(outcome) = outcome {
+                crate::explorer::refresh_prompt::tx_ended(console, outcome, cx);
+            }
             if ended {
                 log.append(
                     if commit {
@@ -141,15 +181,17 @@ pub fn end_tx(console: ConsoleId, commit: bool, cx: &mut App) -> Task<bool> {
 }
 
 fn run_commit(_window: &mut Window, cx: &mut App) {
-    if let Some(console) =
-        focused_console(cx).filter(|c| user_tx(*c, cx).is_some_and(|t| !t.failed))
+    if let Some(console) = focused_console(cx)
+        .filter(|c| !answer_waits(*c, cx) && user_tx(*c, cx).is_some_and(|t| !t.failed))
     {
         end_tx(console, true, cx).detach();
     }
 }
 
 fn run_roll_back(_window: &mut Window, cx: &mut App) {
-    if let Some(console) = focused_console(cx).filter(|c| user_tx(*c, cx).is_some()) {
+    if let Some(console) =
+        focused_console(cx).filter(|c| !answer_waits(*c, cx) && user_tx(*c, cx).is_some())
+    {
         end_tx(console, false, cx).detach();
     }
 }

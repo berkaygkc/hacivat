@@ -44,6 +44,8 @@ use crate::{exec, probe, tls};
 // ## m3a-t14-mysql-typed
 use crate::typed;
 use hacivat_driver::{CloseHow, Closed, QueryEvent, QuerySpec, TypedCaps};
+// ## m3b-t13-drivers
+use hacivat_driver::Notice;
 
 /// Runs on the session at connect when the profile is read-only (HV-CONN-07).
 const READ_ONLY_SESSION: &str = "SET SESSION TRANSACTION READ ONLY";
@@ -335,14 +337,20 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
     // ## m3a-t14-mysql-typed: the server's `net_write_timeout` bounds how long a suspended
     // cursor may idle (ER6, R19); read once here, never set. A connection that cannot answer
     // it (an I/O or protocol failure) fails the connect.
-    let net_write_timeout = match typed::read_net_write_timeout(&mut conn).await {
-        Ok(v) => v,
-        Err(e) => {
-            conn.abandon();
-            return Err(e);
-        }
-    };
-    let typed = typed::TypedState::new(u64::from(conn.id()), net_write_timeout);
+    // ## m3b-t07-types: the same round trip reads the session `time_zone` (ledger 194).
+    // ## m3b-t18-safe06 (named exception): and the session `sql_mode` (R-M3-57).
+    let (net_write_timeout, time_zone, sql_mode, database) =
+        match typed::read_net_write_timeout(&mut conn).await {
+            Ok(v) => v,
+            Err(e) => {
+                conn.abandon();
+                return Err(e);
+            }
+        };
+    let mut typed = typed::TypedState::new(u64::from(conn.id()), net_write_timeout);
+    typed.time_zone = time_zone;
+    typed.sql_mode = sql_mode;
+    typed.database = database;
     Ok(MySqlConn {
         conn: Some(conn),
         guard,
@@ -662,6 +670,16 @@ impl RawConn for MySqlConn {
         Some(crate::exec::autocommit_from_status(ok.status_flags()))
     }
 
+    // ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1)
+    /// The session `sql_mode` and the current database the connect read
+    /// (`read_net_write_timeout`'s round trip).
+    fn session_settings(&self) -> hacivat_driver::SessionSettings {
+        hacivat_driver::SessionSettings {
+            lex_modes: self.typed.sql_mode.clone(),
+            search_path: self.typed.database.clone(),
+        }
+    }
+
     // ## m3a-t14-mysql-typed (the bodies and their rules: `crate::typed`)
 
     fn typed_caps(&self) -> TypedCaps {
@@ -702,6 +720,19 @@ impl RawConn for MySqlConn {
             self.check_poison()?;
             self.typed.poisoned = true;
             let r = typed::close_query(self.typed_ctx(), how).await;
+            self.typed.poisoned = false;
+            r
+        })
+    }
+
+    // ## m3b-t13-drivers
+    /// `SHOW WARNINGS` after a `Done` with warnings (R-M3-77; `typed::warnings`): never on a
+    /// read-only connection, never while a query is open; poisons like the other calls.
+    fn warnings(&mut self) -> BoxFuture<'_, Result<Vec<Notice>, RawError>> {
+        Box::pin(async move {
+            self.check_poison()?;
+            self.typed.poisoned = true;
+            let r = typed::warnings(self.typed_ctx()).await;
             self.typed.poisoned = false;
             r
         })

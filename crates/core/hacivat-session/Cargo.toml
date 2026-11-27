@@ -34,6 +34,12 @@ getrandom.workspace = true
 # ## m3a-t01b-seams: `Request::Run` streams typed results into the result store.
 hacivat-values.workspace = true
 hacivat-results.workspace = true
+# ## m3b-t01a-seams (fix round 1): `SessionEffects` (Task 1c, C1); splitting the profile's
+# startup script in execution mode (Task 12, C2).
+bitflags.workspace = true
+sql-split.workspace = true
+sql-lexer.workspace = true
+sql-dialect.workspace = true
 
 [dev-dependencies]
 # ## m3a-t01b-seams: stores from rows for the run tests (Task 18).
@@ -46,6 +52,9 @@ tracing-subscriber.workspace = true
 tracing-log.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# ## m4-t05 (controller manifest amendment, R-W1-15): the session's own test seams for its
+# tests only (the hacivat-app precedent), so `-p hacivat-session` alone builds `test-support`.
+hacivat-session = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

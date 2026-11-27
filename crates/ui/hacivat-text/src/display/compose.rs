@@ -62,7 +62,8 @@ fn char_cells(c: char) -> u32 {
 
 /// The display width of one grapheme cluster: its widest character; a VS16 emoji sequence
 /// and a regional-indicator pair (a flag) are 2 (an emoji ZWJ sequence is one 2-cell glyph).
-fn cluster_cells(g: &str) -> u32 {
+// ## m3c-t31-multi (named exception): column selection counts cells with it.
+pub(crate) fn cluster_cells(g: &str) -> u32 {
     let widest = g.chars().map(char_cells).max().unwrap_or(0);
     let flag = g
         .chars()
@@ -210,4 +211,23 @@ pub fn compose_line(
         last_line: line,
         fragments,
     }
+}
+
+// ## m3c-t32-fold
+/// Composes a folded range's one visual line (UI-EDIT-07 step 2, the line model of NOTES
+/// surface 15): header line `line` as [`compose_line`] does, then the fold's `placeholder` (the
+/// "⋯ n lines" inlay); the line covers buffer lines `line..=last_line`, which the height map
+/// hides after the header.
+pub fn compose_folded(
+    buf: &TextBuffer,
+    line: u32,
+    last_line: u32,
+    tab_size: u8,
+    decos: &[&RangeSet<Decoration>],
+    placeholder: PlaceholderId,
+) -> VisualLine {
+    let mut vl = compose_line(buf, line, tab_size, decos);
+    vl.fragments.push(Fragment::Placeholder { id: placeholder });
+    vl.last_line = last_line.max(line);
+    vl
 }

@@ -7,8 +7,11 @@
 //!   token, and malformed input becomes flagged tokens and [`LexError`]s, never a panic.
 //! - Words carry their keyword (`sql_dialect::keyword_lookup`, ASCII-only: `lımıt` and `lİmİt`
 //!   are never `LIMIT`).
-//! - [`LexState`] resumes lexing inside an unterminated construct; `relex` is a full relex in
-//!   M3a (incremental relex is M3b).
+//! - [`LexState`] resumes lexing inside an unterminated construct; [`relex`] relexes from the
+//!   last exact state before an edit until the tokens re-synchronise (M3b Task 5), from public
+//!   checkpoints ([`Lexed::checkpoint_before`]).
+//! - [`lex_with_client`] reads a script's backslash client commands as `ClientCommand` tokens
+//!   whose argument ends at the end of its line (psql, the mysql client).
 //! - [`exec_comment_gate`] reads an executable comment's version gate; [`token_class`] is the
 //!   highlight class.
 //! - An executable comment or optimizer hint whose end depends on how the server reads its body
@@ -32,8 +35,13 @@ pub mod words;
 pub use class::{TokenClass, token_class};
 #[doc(hidden)]
 pub use cursor::lex_counting_steps;
-pub use cursor::{lex, lex_chunks};
+pub use cursor::{lex, lex_chunks, lex_with_client};
 pub use exec_comment::{ExecComment, ExecMarker, GateStatus, exec_comment, exec_comment_gate};
 pub use relex::{RelexDelta, relex};
 pub use state::{BodyReading, LexState, StringRule};
 pub use token::{LexError, LexErrorCode, Lexed, TokenFlags, TokenKind};
+
+// ## m3b-t01a-seams: public checkpoints (`Lexed::checkpoint_before`) for incremental relexing
+// (Task 5); a stub until then.
+pub mod incremental;
+// ## m3b-t05-incremental: filled (checkpoints, the incremental relex, `lex_with_client`).

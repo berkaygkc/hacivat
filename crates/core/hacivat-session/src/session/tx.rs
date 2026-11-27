@@ -91,6 +91,21 @@ pub enum TxOwner {
     Cursor,
     /// The read-only guard's plan.
     Guard,
+    // ## m3b-t01c-core-seams
+    /// Hacivat's own `BEGIN` around a confirmed statement on an idle Auto session (P-M3b-1,
+    /// Task 19): Commit/Roll back, the D-014 deadline rolls it back.
+    Confirm,
+}
+
+// ## m3b-t01c-core-seams (P-M3b-12)
+impl TxOwner {
+    /// Whether Hacivat opened the transaction itself (around a cursor, the guard's, or a
+    /// confirmed statement's): it is never the user's, never refuses a close and is no idle
+    /// transaction of the user's. Every ownership check asks this, so a new owner of
+    /// Hacivat's is one line here.
+    pub fn is_hacivats(self) -> bool {
+        matches!(self, Self::Cursor | Self::Guard | Self::Confirm)
+    }
 }
 
 impl TxState {
@@ -98,8 +113,8 @@ impl TxState {
     /// Whether a transaction of the user's is open (`InTx` or `Failed`, not Hacivat's own
     /// around a cursor or the guard's).
     pub(crate) fn user_open(&self) -> bool {
-        !matches!(self.owner, TxOwner::Cursor | TxOwner::Guard)
-            && matches!(self.status, TxStatus::InTx | TxStatus::Failed)
+        // ## m3b-t01c-core-seams (P-M3b-12)
+        !self.owner.is_hacivats() && matches!(self.status, TxStatus::InTx | TxStatus::Failed)
     }
 
     /// Takes the protocol's `status` after a round trip; `statement` counts a user statement
@@ -142,6 +157,32 @@ pub enum TxError {
     Unsupported,
     /// The transaction failed: only a rollback is accepted.
     FailedNeedsRollback,
+    // ## m3b-t01c-core-seams (P-M3b-1)
+    /// MySQL/MariaDB: a DDL met an open transaction the gate did not confirm it for (an earlier
+    /// unit of the run opened it); it would commit that transaction, so nothing was sent
+    /// (Task 19).
+    ImplicitCommitUnconfirmed,
+    // ## m3b-t19-confirm-tx (fix round 1, C1, C2, m5)
+    /// The confirmed statement was committed by the server on its own (`autocommit` was on):
+    /// nothing was asked, nothing could be undone, and the rest of the run was not sent.
+    ConfirmAlreadyCommitted,
+    /// Nobody answered the confirmed statement before the D-014 deadline: it was rolled back
+    /// and the rest of the run was not sent.
+    ConfirmTimedOut,
+    /// The user rolled back (undid) the confirmed statement: it did not take effect, so the
+    /// run's error policy decides what follows.
+    ConfirmUndone,
+    // ## m3b-t19-confirm-tx (fix round 2, R1-m3)
+    /// An `EXPLAIN ANALYZE` ran outside a transaction (nothing was open after it), so what it
+    /// changed could not be rolled back; the rest of the run was not sent.
+    ExplainNotRolledBack,
+    /// MySQL/MariaDB: the user's `LOCK TABLES` locks are held, and the transaction this needed
+    /// would release them; nothing was sent.
+    TableLocksHeld,
+    // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+    /// MySQL/MariaDB: the rollback of the confirmed (or wrapped) statement ran, but the server
+    /// warned that a table does not support transactions (1196 and kin): its changes stay.
+    ConfirmNotUndone,
 }
 
 /// The transaction mode a profile starts with: Manual on production, else Auto.

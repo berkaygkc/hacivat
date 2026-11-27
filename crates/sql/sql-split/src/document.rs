@@ -1,5 +1,7 @@
-//! `SqlDocument` and its O(1) snapshots (Task 8). M3a rebuilds the document on every change
-//! (R-M3-22: off the UI thread); incremental relex and resplit are M3b.
+//! `SqlDocument` and its O(1) snapshots (Task 8). A change relexes from the nearest exact
+//! state and resplits a window around the edit (M3b Task 5, R-M3-65: `sql_lexer::relex`,
+//! `crate::incremental`), still off the UI thread (R-M3-22); whatever it answers equals a
+//! document built from the new text.
 //!
 //! A document lexes its text once (`lexed`, what highlighting reads) and runs the splitter's
 //! structural pass once; the editor-mode split is built eagerly and the execution-mode split
@@ -10,10 +12,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use sql_dialect::{ClientFlavor, DialectCtx};
-use sql_lexer::{LexState, Lexed, TokenKind, lex};
+use sql_lexer::{LexState, Lexed, TokenKind, lex, lex_with_client, relex};
 use sql_text::edit::MisalignedEdit;
 use sql_text::{TextChunks, TextEdit, TextRange, TextSize};
 
+use crate::incremental::{ApplyPath, Change, Old, resplit};
 use crate::item::{
     AmbiguityReason, AmbiguousBoundary, ClientSegment, Confidence, CopyData, Item, Split,
     SplitMode, Stmt, StmtHead, overlaps,
@@ -88,7 +91,7 @@ pub struct DocDelta {
 /// A SQL text with its lexing and its editor-mode split.
 #[derive(Debug, Clone)]
 pub struct SqlDocument {
-    text: Arc<str>,
+    text: Arc<String>,
     ctx: DialectCtx,
     flavor: ClientFlavor,
     lexed: Arc<Lexed>,
@@ -96,13 +99,26 @@ pub struct SqlDocument {
     editor: Arc<Split>,
     execution: Arc<OnceLock<Arc<Split>>>,
     revision: u64,
+    // ## m3b-t05-incremental
+    /// How the last `apply` split the text again.
+    path: ApplyPath,
+    /// The previous revision's text and lexing, written over by the next `apply` once no
+    /// snapshot holds them (a 2 MB script then costs no fresh pages per keystroke).
+    spare: Spare,
+}
+
+/// Buffers of an earlier revision, kept for reuse.
+#[derive(Debug, Clone, Default)]
+struct Spare {
+    text: Option<Arc<String>>,
+    lexed: Option<Arc<Lexed>>,
 }
 
 /// An immutable analysis of one document revision: Send + Sync, O(1) to clone. The
 /// execution-mode split is computed once, from the same lexing, when first asked for.
 #[derive(Debug, Clone)]
 pub struct DocSnapshot {
-    text: Arc<str>,
+    text: Arc<String>,
     ctx: DialectCtx,
     flavor: ClientFlavor,
     lexed: Arc<Lexed>,
@@ -118,11 +134,30 @@ fn whole(text: &str) -> TextRange {
 
 impl SqlDocument {
     pub fn new(text: String, ctx: DialectCtx, flavor: ClientFlavor) -> Self {
-        Self::build(Arc::from(text), ctx, flavor, 0)
+        Self::build(Arc::new(text), ctx, flavor, 0)
     }
 
-    fn build(text: Arc<str>, ctx: DialectCtx, flavor: ClientFlavor, revision: u64) -> Self {
-        let lexed = lex(&text, lexer_for(&ctx), ctx.modes, &LexState::Initial);
+    fn build(text: Arc<String>, ctx: DialectCtx, flavor: ClientFlavor, revision: u64) -> Self {
+        // ## m3b-t05-incremental: the client's backslash commands are tokens of their own, so a
+        // quote in a command's argument opens nothing (follow-up (b), ledger 274).
+        let lexed = lex_with_client(
+            &text,
+            lexer_for(&ctx),
+            ctx.modes,
+            &LexState::Initial,
+            flavor,
+        );
+        Self::analysed(text, ctx, flavor, lexed, revision)
+    }
+
+    /// The whole structural pass over `text`, lexed as `lexed`.
+    fn analysed(
+        text: Arc<String>,
+        ctx: DialectCtx,
+        flavor: ClientFlavor,
+        lexed: Lexed,
+        revision: u64,
+    ) -> Self {
         let analysis = analyze(&text, Some(&lexed), &ctx, flavor, &SplitStart::default());
         let editor = analysis.to_split(&text, SplitMode::Editor);
         SqlDocument {
@@ -134,6 +169,11 @@ impl SqlDocument {
             editor: Arc::new(editor),
             execution: Arc::new(OnceLock::new()),
             revision,
+            path: ApplyPath {
+                how: "new",
+                scan_exhausted: false,
+            },
+            spare: Spare::default(),
         }
     }
 
@@ -142,8 +182,15 @@ impl SqlDocument {
         Self::new(text.chunks().collect(), ctx, flavor)
     }
 
-    /// Applies `edits` in order (each against the text the previous one left) and rebuilds
-    /// the analysis (the M3a body: a full rebuild).
+    /// Applies `edits` in order (each against the text the previous one left) and updates
+    /// the analysis incrementally (R-M3-65): the batch is one change between the common prefix
+    /// and suffix of the two texts; the lexing is relexed from the nearest exact state
+    /// (`sql_lexer::relex`) and the statements around the change are split again
+    /// (`crate::incremental`), the rest kept and moved. When the change reaches across every
+    /// window (an unterminated construct before it, an executable comment whose end is
+    /// ambiguous, the MySQL stray-`END` backstop, a psql `\if` branch), the whole pass runs
+    /// again over the relexed tokens. Either way the document then answers exactly as one
+    /// built from the new text.
     ///
     /// # Errors
     /// `MisalignedEdit` when an edit does not fit the text it meets (past the end, or splitting
@@ -151,15 +198,130 @@ impl SqlDocument {
     /// the editor's buffer, and the caller must rebuild it from that buffer before analysing
     /// again.
     pub fn apply(&mut self, edits: &[TextEdit]) -> Result<DocDelta, MisalignedEdit> {
-        let mut text = String::from(&*self.text);
+        let old_len = self.text.len();
+        let mut text = self
+            .spare
+            .text
+            .take()
+            .and_then(|t| Arc::try_unwrap(t).ok())
+            .unwrap_or_default();
+        text.clear();
+        text.push_str(&self.text);
+        // The unchanged prefix and suffix of the batch (each edit's start and the bytes after
+        // its end are unchanged by it).
+        let (mut prefix, mut suffix) = (old_len, old_len);
         for edit in edits {
+            let before = text.len();
             edit.apply(&mut text)?;
+            prefix = prefix.min(usize::from(edit.delete.start()));
+            suffix = suffix.min(before - usize::from(edit.delete.end()));
         }
-        let old = std::mem::replace(
-            self,
-            Self::build(Arc::from(text), self.ctx, self.flavor, self.revision + 1),
-        );
-        Ok(delta(&old, self))
+        let new_len = text.len();
+        let mut p = prefix.min(old_len).min(new_len);
+        let mut s = suffix.min(old_len - p).min(new_len - p);
+        while !(self.text.is_char_boundary(p) && text.is_char_boundary(p)) {
+            p -= 1;
+        }
+        while !(self.text.is_char_boundary(old_len - s) && text.is_char_boundary(new_len - s)) {
+            s -= 1;
+        }
+        let change = Change {
+            p,
+            old_end: old_len - s,
+            new_end: new_len - s,
+        };
+        let edit = TextEdit {
+            delete: TextRange::new(size(p), size(change.old_end)),
+            insert: text[p..change.new_end].to_owned(),
+        };
+        let lp = lexer_for(&self.ctx);
+        let mut lexed = self.lexing_to_relex();
+        relex(&mut lexed, &text.as_str(), &edit, lp, self.ctx.modes);
+        let text = Arc::new(text);
+        let old = Old {
+            text: &self.text,
+            ctx: self.ctx,
+            flavor: self.flavor,
+            analysis: &self.analysis,
+            editor: &self.editor,
+            execution: self.execution.get().map(|x| &**x),
+        };
+        let (prev, delta) = match resplit(&old, &text, change) {
+            Some(r) => {
+                let execution = OnceLock::new();
+                if let Some(x) = r.execution {
+                    let _ = execution.set(Arc::new(x));
+                }
+                let new = SqlDocument {
+                    text,
+                    ctx: self.ctx,
+                    flavor: self.flavor,
+                    lexed: Arc::new(lexed),
+                    analysis: Arc::new(r.analysis),
+                    editor: Arc::new(r.editor),
+                    execution: Arc::new(execution),
+                    revision: self.revision + 1,
+                    path: r.path,
+                    spare: Spare::default(),
+                };
+                (std::mem::replace(self, new), r.delta)
+            }
+            None => {
+                let mut new = Self::analysed(text, self.ctx, self.flavor, lexed, self.revision + 1);
+                new.path.how = "whole";
+                let prev = std::mem::replace(self, new);
+                let d = delta(&prev, self);
+                (prev, d)
+            }
+        };
+        // The previous revision's buffers, for the next `apply` once no snapshot holds them.
+        self.spare = Spare {
+            text: Some(prev.text),
+            lexed: Some(prev.lexed),
+        };
+        Ok(delta)
+    }
+
+    /// The lexing to relex in place: this revision's own when no snapshot holds it, else a
+    /// copy (into the spare buffers when they are free).
+    fn lexing_to_relex(&mut self) -> Lexed {
+        if Arc::strong_count(&self.lexed) == 1 && Arc::weak_count(&self.lexed) == 0 {
+            let placeholder = self.spare.lexed.take().unwrap_or_else(|| {
+                Arc::new(lex(
+                    "",
+                    lexer_for(&self.ctx),
+                    self.ctx.modes,
+                    &LexState::Initial,
+                ))
+            });
+            let mine = std::mem::replace(&mut self.lexed, placeholder);
+            return Arc::try_unwrap(mine).unwrap_or_else(|shared| Lexed::clone(&shared));
+        }
+        match self
+            .spare
+            .lexed
+            .take()
+            .and_then(|l| Arc::try_unwrap(l).ok())
+        {
+            Some(mut l) => {
+                l.clone_from(&self.lexed);
+                l
+            }
+            None => Lexed::clone(&self.lexed),
+        }
+    }
+
+    /// Whether the last [`SqlDocument::apply`] split a window again rather than the whole
+    /// text (the tests' view of the fast path).
+    #[doc(hidden)]
+    pub fn last_apply_was_incremental(&self) -> bool {
+        matches!(self.path.how, "window" | "retried" | "to-end")
+    }
+
+    /// How the last [`SqlDocument::apply`] split the text again (the tests' view of each path).
+    #[doc(hidden)]
+    pub fn last_apply_path(&self) -> ApplyPath {
+        self.path
     }
 
     /// Changes the dialect context (a `SET sql_mode`, a reconnect) and rebuilds.

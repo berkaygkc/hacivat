@@ -419,13 +419,15 @@ fn pg_fixtures() -> Vec<Fixture> {
                 text: "\"k\"=>\"v\"".into(),
             })),
         ),
+        // m3b-t07: arrays decode in binary now (`tests/decode_m3b.rs`); `int2vector` keeps
+        // its own space-separated text.
         f(
-            "int4[] as opaque text",
-            Type::INT4_ARRAY,
-            "{1,NULL,3}",
+            "int2vector as opaque text",
+            Type::INT2_VECTOR,
+            "1 2 3",
             Value::Opaque(Arc::new(OpaqueVal {
-                type_name: "_int4".into(),
-                text: "{1,NULL,3}".into(),
+                type_name: "int2vector".into(),
+                text: "1 2 3".into(),
             })),
         ),
         Fixture {
@@ -681,8 +683,8 @@ fn unknown_oid_is_requested_as_text_and_opaque() {
     ] {
         assert_eq!(format_for(&ty), 1, "{ty}");
     }
-    // Text for everything else: arrays, network, bit strings, money, reg*, geometry, ranges,
-    // XML, records, extension types.
+    // m3b-t07: arrays, network types and bit strings are binary too, and money, geometry,
+    // ranges, XML and records are text under their own logical type (`tests/decode_m3b.rs`).
     for ty in [
         Type::INT4_ARRAY,
         Type::TEXT_ARRAY,
@@ -691,13 +693,30 @@ fn unknown_oid_is_requested_as_text_and_opaque() {
         Type::MACADDR,
         Type::BIT,
         Type::VARBIT,
+    ] {
+        assert_eq!(format_for(&ty), 1, "{ty}");
+    }
+    for ty in [
         Type::MONEY,
-        Type::REGCLASS,
-        Type::REGPROC,
         Type::POINT,
         Type::INT4_RANGE,
         Type::XML,
         Type::RECORD,
+    ] {
+        assert_eq!(format_for(&ty), 0, "{ty}");
+        assert_eq!(
+            buf_kind_for(&ty, NO_MOD),
+            BufKind::Var(VarKind::Text),
+            "{ty}"
+        );
+    }
+    // Opaque text for everything else: reg*, text search, vectors, extension types.
+    for ty in [
+        Type::REGCLASS,
+        Type::REGPROC,
+        Type::TS_VECTOR,
+        Type::INT2_VECTOR,
+        Type::OID_VECTOR,
         extension_type(),
     ] {
         assert_eq!(format_for(&ty), 0, "{ty}");

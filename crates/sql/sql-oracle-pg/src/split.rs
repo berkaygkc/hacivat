@@ -147,8 +147,9 @@ const PG_QUERY_VERSION: &str = "18.1.0";
 const MAX_TEXT_BYTES: usize = 8 << 20;
 
 const NUL_MESSAGE: &str = "the statement text contains a NUL character";
-const TOO_LONG: &str = "the statement text is too long for the parser";
-const TOO_DEEP: &str = "brackets nest too deeply for the parser";
+// ## m3b-t09-pg-backend (named exception): crate-visible so `tree::over_a_limit` names them.
+pub(crate) const TOO_LONG: &str = "the statement text is too long for the parser";
+pub(crate) const TOO_DEEP: &str = "brackets nest too deeply for the parser";
 const THREAD_FAILED: &str = "the parser thread failed";
 const MISMATCH: &str = "the parser's statement ranges do not match its tokens";
 
@@ -279,7 +280,8 @@ fn checked_ranges(
 
 /// Runs `run` on the parser thread, after the input checks and the nesting check (module
 /// docs). `run` gets the text and its scan.
-fn guarded<T, F>(sql: &str, run: F) -> Result<T, PgError>
+// ## m3b-t09-pg-backend (named exception): crate-visible so `tree.rs` passes the same guard.
+pub(crate) fn guarded<T, F>(sql: &str, run: F) -> Result<T, PgError>
 where
     T: Send + 'static,
     F: FnOnce(&str, &Scanned) -> Result<T, PgError> + Send + 'static,

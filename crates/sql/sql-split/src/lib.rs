@@ -10,8 +10,9 @@
 //!   (`sql_dialect::SplitProfile`), and returns the editor or the execution view ([`Split`]).
 //!   [`Split::is_certain`] / [`Split::runnable`] say what execution may send: every uncertain
 //!   boundary lies inside the one statement it refuses, which is never `Exact`.
-//! - [`SqlDocument`]: a text, its lexing and its split, rebuilt on every change in M3a;
-//!   [`DocSnapshot`] shares one revision's analysis and computes the execution split once.
+//! - [`SqlDocument`]: a text, its lexing and its split, relexed and resplit around each change
+//!   (`incremental`, M3b Task 5); [`DocSnapshot`] shares one revision's analysis and computes
+//!   the execution split once. [`StreamSplitter`] splits a script fed in chunks.
 //! - [`StmtKey`]: XXH3-128 of a statement's dialect, modes, delimiter and text.
 //! - [`head::cursor_eligible`]: whether a unit may stay suspended as a console cursor.
 //!
@@ -34,3 +35,19 @@ pub use item::{
 };
 pub use key::StmtKey;
 pub use splitter::{SplitStart, split, split_from};
+
+// ## m3b-t01a-seams: parameters, templates and HvNorm1 (Task 6); incremental resplit and the
+// streaming splitter (Task 5). Fail-closed stubs until then.
+pub mod fingerprint;
+pub mod incremental;
+pub mod params;
+pub mod stream;
+pub mod templates;
+
+pub use fingerprint::{Fingerprint, FingerprintAlgo, hv_norm1};
+pub use params::{
+    BindPlan, ParamDiag, ParamScan, ParamSettings, Placeholder, PlaceholderKind, RewrittenSql,
+    scan_params,
+};
+pub use stream::{STREAM_STATEMENT_MAX, StreamItem, StreamSplitter};
+pub use templates::{TemplatePattern, TemplateVar};

@@ -27,6 +27,8 @@ use super::text_cache::{
     with_shape,
 };
 use crate::source::{Align, CellKind, ColumnKind, NULL_MARKER};
+// ## m3c-t37
+use crate::view::CellMarks;
 
 /// An empty string's marker (`''`, mono `text-3`): data notation, like `NULL`, never Fluent.
 pub const EMPTY_MARKER: &str = "''";
@@ -51,6 +53,9 @@ pub const SKELETON_H_PX: f32 = 7.0;
 /// Where the registry's records point (the cell and header paint).
 const CELL_PATH: &str = "crates/ui/hacivat-ui-grid/src/element/layers.rs#cell";
 const HEADER_PATH: &str = "crates/ui/hacivat-ui-grid/src/element/layers.rs#header";
+// ## m3c-shotfix F7: a header title that is chrome (a Fluent word), not data: the Transposed
+// view's name column ("Column").
+const HEADER_TITLE_PATH: &str = "crates/ui/hacivat-ui-grid/src/element/layers.rs#header-title";
 const ROW_NUMBER_PATH: &str = "crates/ui/hacivat-ui-grid/src/element/layers.rs#row-number";
 
 /// Every role the grid paints with, and the row numbers' digit layouts.
@@ -66,6 +71,9 @@ pub struct Roles {
     pub row_number: Role,
     pub header_name: Role,
     pub header_type: Role,
+    // ## m3c-t36
+    /// A sort level number after the arrow: Fragment Mono 11 `blue` (NOTES surface 18).
+    pub sort_level: Role,
     /// `0` … `9` in the row-number role: row numbers paint digit by digit at the tabular
     /// advance, so scrolling shapes no row number.
     pub digits: [Arc<LineLayout>; 10],
@@ -94,6 +102,7 @@ impl Roles {
             chip: Role::new(&r.mono_micro, ColorClass::Text2, window),
             header_name: Role::new(&r.body_strong, ColorClass::Text, window),
             header_type: Role::new(&r.mono_kbd, ColorClass::Text3, window),
+            sort_level: Role::new(&r.mono_micro, ColorClass::Blue, window),
             row_number,
             digits,
             digit_advance,
@@ -353,6 +362,9 @@ pub fn paint_cell_content(
     align: Align,
     chip: Option<&SharedString>,
     at: CellBox,
+    // ## m3c-t37: the find's marks in this cell (layer 5), and where each was painted.
+    marks: Option<&CellMarks>,
+    mut marked: impl FnMut(f32, f32, bool),
     window: &mut Window,
     cx: &mut App,
     mut record: impl FnMut(Option<&Shaped>, &mut App),
@@ -417,6 +429,10 @@ pub fn paint_cell_content(
                 Align::End => x0 + avail - s.width,
                 Align::Center => x0 + (avail - s.width) / 2.0,
             };
+            // ## m3c-t37: layer 5, under the text.
+            if let Some(marks) = marks {
+                paint_marks(s, marks, x, y, row_h, palette, &mut marked, window);
+            }
             paint_shaped(s, x, y, row_h, palette, chips, window, cx);
             record(Some(s), cx);
             Some((s.degraded, x + s.width))
@@ -472,6 +488,78 @@ pub fn paint_cell_content(
         }
     }
     outcome
+}
+
+// ## m3c-t37
+/// The vertical inset of a find mark inside its row (the outline hugs the text's line box).
+const MARK_INSET_PX: f32 = 2.0;
+
+/// The x spans (from the text's own left, `x`) of `marks` over shaped text `s`: each range's
+/// glyphs when the text is one plain run (a cut text's marks end at the ellipsis, past the cut
+/// they mark the ellipsis); the whole text when it shows control chips (its display bytes are
+/// not the value's).
+fn mark_spans(s: &Shaped, marks: &CellMarks, x: f32) -> smallvec::SmallVec<[(f32, f32, bool); 2]> {
+    let mut out = smallvec::SmallVec::new();
+    let plain = s.pieces.len() == 1
+        && s.pieces[0].kind == PieceKind::Text
+        && s.pieces[0].start == 0
+        && s.display == s.source;
+    if !plain {
+        if !s.pieces.is_empty() {
+            out.push((x, x + s.width, marks.current.is_some()));
+        }
+        return out;
+    }
+    let p = &s.pieces[0];
+    let kept = p.len as usize;
+    for (i, r) in marks.ranges.iter().enumerate() {
+        let (a, b) = (r.start as usize, r.end as usize);
+        let current = marks.current == Some(i);
+        let x0 = if a < kept {
+            x + p.x + f32::from(p.layout.x_for_index(a))
+        } else if s.truncated {
+            // Past the cut: the ellipsis stands for it.
+            x + p.x + f32::from(p.layout.x_for_index(kept))
+        } else {
+            continue;
+        };
+        let x1 = if b <= kept && !(s.truncated && b == kept) {
+            x + p.x + f32::from(p.layout.x_for_index(b))
+        } else {
+            x + s.width
+        };
+        if x1 > x0 {
+            out.push((x0, x1, current));
+        }
+    }
+    out
+}
+
+/// Paints `marks` over shaped text `s` drawn from `x` in the row at `y` (layer 5, NOTES surface
+/// 19, M3c-25): other matches a 1 px `text-3` outline around their text, no fill; the current
+/// one `blue-tint-strong` inside a 1 px blue outline. `marked` hears each span.
+#[allow(clippy::too_many_arguments)]
+fn paint_marks(
+    s: &Shaped,
+    marks: &CellMarks,
+    x: f32,
+    y: f32,
+    row_h: f32,
+    palette: &Palette,
+    marked: &mut impl FnMut(f32, f32, bool),
+    window: &mut Window,
+) {
+    let (top, h) = (y + MARK_INSET_PX, (row_h - 2.0 * MARK_INSET_PX).max(1.0));
+    for (x0, x1, current) in mark_spans(s, marks, x) {
+        // One px of air around the glyphs.
+        let bounds = rect(x0 - 1.0, top, x1 - x0 + 2.0, h);
+        if current {
+            bordered(bounds, palette.blue_tint_strong, palette.blue, 2.0, window);
+        } else {
+            bordered(bounds, clear(), palette.text3, 2.0, window);
+        }
+        marked(x0, x1, current);
+    }
 }
 
 /// The text a cell paints for `kind` (the markers for `NULL` and `''`).
@@ -545,6 +633,7 @@ pub fn record_text(
         path: SharedString::new_static(path),
         visible: true,
         outside_card: false,
+        folded: false,
     });
 }
 
@@ -552,6 +641,8 @@ pub fn record_text(
 pub mod paths {
     pub const CELL: &str = super::CELL_PATH;
     pub const HEADER: &str = super::HEADER_PATH;
+    // ## m3c-shotfix F7
+    pub const HEADER_TITLE: &str = super::HEADER_TITLE_PATH;
     pub const ROW_NUMBER: &str = super::ROW_NUMBER_PATH;
 }
 

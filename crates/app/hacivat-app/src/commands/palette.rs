@@ -126,9 +126,23 @@ pub fn command_entries(cx: &App) -> Vec<CommandEntry> {
     reg.all()
         .iter()
         .filter(|d| (d.enabled)(cx))
+        // ## m3c-t40 fix round 1 (m6): Tab's grid commands keep their keys, not a palette row.
+        .filter(|d| !hacivat_ui_grid::commands::hidden_in_palette(d.id))
         .map(|d| CommandEntry {
             id: d.id,
-            title: global.l10n.t_dynamic(d.title_id, Vec::new()).into(),
+            // ## m4b-t13-explorer (named exception, carries-w1 T13 m9): titles that differ per
+            // host (`hv-cmd-scripts-reveal`, `hv-cmd-scripts-trash`) select on `$os`; every
+            // other title ignores the argument.
+            title: global
+                .l10n
+                .t_dynamic(
+                    d.title_id,
+                    vec![(
+                        "os",
+                        hacivat_l10n::ArgValue::Text(crate::scripts::file_ops::host_os().into()),
+                    )],
+                )
+                .into(),
             english_title: global.l10n.t_english(d.title_id).into(),
             keys: shortcut_label(cx, d.id).map(Into::into),
         })
@@ -199,6 +213,9 @@ impl Global for OpenPalette {}
 /// the current language and keymap.
 pub struct PaletteHost {
     palette: Entity<Palette>,
+    // ## m3c-t41-chrome
+    /// The editor that had the focus when the palette opened: its commands run in it.
+    editor: Option<WeakEntity<hacivat_ui_editor::EditorView>>,
     /// The localization generation and keymap the rows were built with.
     built_with: (u64, Option<Arc<Keymap>>),
     _subscription: Subscription,
@@ -221,7 +238,7 @@ impl PaletteHost {
         let subscription = cx.subscribe_in(
             &palette,
             window,
-            |_, palette, event: &PaletteEvent, window, cx| match event {
+            |this, palette, event: &PaletteEvent, window, cx| match event {
                 PaletteEvent::QueryChanged(query) => {
                     let items = ranked(query, cx);
                     palette.update(cx, |p, cx| {
@@ -230,10 +247,22 @@ impl PaletteHost {
                     });
                 }
                 PaletteEvent::Confirmed(id) => {
+                    // ## m3c-t41-chrome: an editor command runs in the editor the palette was
+                    // opened over: its focus comes back first, and it is the focused editor
+                    // again before the command is dispatched (the focus event itself arrives
+                    // with the next frame).
+                    let editor = this.editor.clone();
                     close_palette(window, cx);
                     remember(cx, id);
                     let id = id.clone();
                     window.defer(cx, move |window, cx| {
+                        if let Some(editor) = editor.and_then(|e| e.upgrade()) {
+                            let handle = editor.read(cx).focus_handle(cx);
+                            window.focus(&handle, cx);
+                            cx.set_global(hacivat_ui_editor::FocusedEditor(Some(
+                                editor.downgrade(),
+                            )));
+                        }
                         ActionRegistry::run(&id, window, cx);
                     });
                 }
@@ -242,6 +271,8 @@ impl PaletteHost {
         );
         Self {
             palette,
+            // ## m3c-t41-chrome
+            editor: crate::console::commands::focused_editor(cx).map(|e| e.downgrade()),
             built_with: signature(cx),
             _subscription: subscription,
         }

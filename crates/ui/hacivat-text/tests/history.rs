@@ -697,3 +697,26 @@ fn undo_and_redo_kinds_name_the_top_groups() {
         (Some(UserEvent::InputType), Some(UserEvent::InputPaste))
     );
 }
+
+// ## m4b-t11-editor: a reload from disk clears the history (UI-EDIT-04 step 9, R-M4b-38).
+
+#[test]
+fn clear_history_drops_every_undo_and_redo_group() {
+    let mut e = model("");
+    type_text(&mut e, "SELECT ");
+    e.wait(600);
+    type_text(&mut e, "1");
+    e.m.undo().unwrap();
+    assert_eq!((e.m.undo_depth(), e.m.redo_depth()), (1, 1));
+    e.m.clear_history();
+    assert_eq!((e.m.undo_depth(), e.m.redo_depth()), (0, 0));
+    assert!(e.m.undo().is_none() && e.m.redo().is_none());
+    assert_eq!(text(&e), "SELECT ", "the text stays as it is");
+    // The next edit starts a group of its own: nothing older joins it, and one undo takes it
+    // back alone.
+    type_text(&mut e, "2");
+    assert_eq!(e.m.undo_depth(), 1);
+    e.m.undo().unwrap();
+    assert_eq!(text(&e), "SELECT ");
+    assert!(e.m.undo().is_none());
+}

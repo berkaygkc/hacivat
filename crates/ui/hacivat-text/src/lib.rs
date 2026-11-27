@@ -14,9 +14,13 @@ pub mod buffer;
 pub mod change;
 pub mod changelog;
 pub mod display;
+// ## m3b-t01b-seams: folding (Task 32).
+pub mod fold;
 pub mod history;
 pub mod ime;
 pub mod model;
+// ## m3b-t01b-seams: multi-cursor (Task 31).
+pub mod multi;
 pub mod selection;
 pub mod transaction;
 pub mod units;
@@ -33,3 +37,14 @@ pub use model::{
 pub use selection::{SelectionRange, SelectionSet};
 pub use transaction::{Annotations, Origin, Transaction, UserEvent};
 pub use units::{Dir, TokenOracle, Unit, move_offset};
+// ## m3b-t01b-seams
+pub use fold::{FoldKind, FoldRange, FoldSet};
+pub use multi::{
+    MAX_OCCURRENCES, add_caret, add_caret_vertical, column_selection, select_all_occurrences,
+    select_next_occurrence, split_into_lines,
+};
+// ## m3c-t31-multi
+pub use multi::{
+    add_caret_vertical_with, carets_in_plain_text, select_all_occurrences_with,
+    select_next_occurrence_with, word_for_caret,
+};

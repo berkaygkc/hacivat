@@ -48,6 +48,9 @@ pub struct TabDecor {
     pub title_source: TextSource,
     pub env: Option<EnvMark>,
     pub hairline: bool,
+    // ## m4b-t21-shots (named item; ruling (d)): the title drawn in two parts
+    // (`hacivat_ui::panes::TabSpec::parts`).
+    pub title_parts: Option<hacivat_ui::panes::TitleParts>,
 }
 
 impl Default for TabDecor {
@@ -58,6 +61,8 @@ impl Default for TabDecor {
             title_source: TextSource::Fluent,
             env: None,
             hairline: false,
+            // ## m4b-t21-shots
+            title_parts: None,
         }
     }
 }
@@ -268,6 +273,31 @@ pub fn unregister_focus_context(cx: &mut App, handle: &FocusHandle) {
         cx.global_mut::<FocusContexts>()
             .0
             .retain(|(h, _)| h.upgrade().is_some_and(|h| h != *handle));
+    }
+}
+
+// ## m4-t14-explorer (fix round 2, ruling R-W2-12b; named exception)
+/// Adds `context` for `handle` beside the contexts it already has: one focused handle then
+/// pushes several, in registration order (the explorer tree: `ExplorerTree` always, then
+/// `Explorer` while its cursor is on a profile root). A pair already registered is kept once.
+pub fn add_focus_context(cx: &mut App, handle: FocusHandle, context: &'static str) {
+    let contexts = &mut cx.default_global::<FocusContexts>().0;
+    contexts.retain(|(h, _)| h.upgrade().is_some());
+    let present = contexts
+        .iter()
+        .any(|(h, c)| *c == context && h.upgrade().is_some_and(|h| h == handle));
+    if !present {
+        contexts.push((handle.downgrade(), context));
+    }
+}
+
+/// Drops the pair `handle`/`context`, keeping the handle's other contexts.
+pub fn remove_focus_context(cx: &mut App, handle: &FocusHandle, context: &'static str) {
+    if cx.has_global::<FocusContexts>() {
+        cx.global_mut::<FocusContexts>().0.retain(|(h, c)| {
+            h.upgrade()
+                .is_some_and(|h| !(h == *handle && *c == context))
+        });
     }
 }
 

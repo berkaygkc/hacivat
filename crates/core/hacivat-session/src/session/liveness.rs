@@ -35,8 +35,19 @@
 //! transaction warning still follow the default session's own activity (its connection needs
 //! its own keep-alive). After a clock jump only a profile held *now* keeps it connected: the
 //! profile's last activity is on the monotonic clock, which may not count the sleep.
+//!
+//! ## m3b-t12-session-carries (C7, R-M3-73; ADR 0004 `m3b-t12`)
+//! Every console session of a profile runs its own supervisor with the profile's policy
+//! ([`LivenessRole`]): its own keep-alive (its connection needs one), and its own idle clock,
+//! so `IdleTransaction` fires per session, for the session whose transaction idles. Only the
+//! profile's default session (`LivenessRole::Profile`) ever disconnects: its idle disconnect
+//! ends the whole profile, and waits for the profile's last user activity on any session and
+//! for every user transaction or user request on any of them (F1-b above). A console's
+//! supervisor (`LivenessRole::Console`) never disconnects; past the threshold it keeps
+//! pinging.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -111,6 +122,17 @@ fn seconds(s: u32) -> Option<Duration> {
     (s > 0).then(|| Duration::from_secs(u64::from(s)))
 }
 
+// ## m3b-t12-session-carries (C7, R-M3-73)
+/// Which supervisor a session runs (the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LivenessRole {
+    /// The profile's default session: its idle disconnect ends the profile.
+    Profile,
+    /// Another console session: keep-alive and its own idle-transaction warning, never a
+    /// disconnect.
+    Console,
+}
+
 /// What a tick asks the session to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LivenessAction {
@@ -141,6 +163,9 @@ pub struct Supervisor {
     profile_held: bool,
     /// The profile's last user activity on any session.
     profile_last: Option<Instant>,
+    // ## m3b-t12-session-carries
+    /// `Console`: never returns `Disconnect` (R-M3-73).
+    role: LivenessRole,
 }
 
 impl Supervisor {
@@ -156,7 +181,15 @@ impl Supervisor {
             warned: false,
             profile_held: false,
             profile_last: None,
+            role: LivenessRole::Profile,
         }
+    }
+
+    // ## m3b-t12-session-carries
+    /// The supervisor of a session in `role` (the module docs); `new` is `Profile`'s.
+    pub fn with_role(mut self, role: LivenessRole) -> Self {
+        self.role = role;
+        self
     }
 
     pub fn policy(&self) -> &LivenessPolicy {
@@ -197,6 +230,7 @@ impl Supervisor {
             // ## m3a-f1-followups: nor while the profile is held now.
             if !open_tx
                 && !self.profile_held
+                && self.role == LivenessRole::Profile
                 && self
                     .policy
                     .idle_disconnect
@@ -210,7 +244,8 @@ impl Supervisor {
             && now.saturating_duration_since(self.last_activity) >= limit
         {
             // ## m3a-f1-followups: the profile's other sessions hold the disconnect off.
-            if !open_tx && !self.profile_holds(now, limit) {
+            // ## m3b-t12-session-carries: only the profile's default disconnects.
+            if !open_tx && self.role == LivenessRole::Profile && !self.profile_holds(now, limit) {
                 return Some(LivenessAction::Disconnect);
             }
             if open_tx && !self.warned {
@@ -272,9 +307,14 @@ impl Supervisor {
 /// which of them hold a user transaction or run a user request now, and when the profile last
 /// had user activity. Every session the profile's `SessionManager` starts reports to it; a
 /// session that ends leaves it.
+///
+/// ## m3b-t26-prod-unlock (fix round 1, A-I1): it also carries the profile's live environment
+/// tag (`SessionManager::update_profile` sets it), which a session opened before a retag reads
+/// to check its startup script on a reset or reconnect (`startup_check`).
 #[derive(Debug, Default)]
 pub(crate) struct ProfileActivity {
     inner: Mutex<ProfileInner>,
+    production: AtomicBool,
 }
 
 #[derive(Debug, Default)]
@@ -299,9 +339,28 @@ impl ProfileActivity {
         }
     }
 
+    // ## m3b-t26-prod-unlock (fix round 1, A-I1)
+    /// Records the profile's live tag: production or not. Returns whether it was production.
+    pub(crate) fn set_production(&self, production: bool) -> bool {
+        self.production.swap(production, Ordering::SeqCst)
+    }
+
+    /// Whether the profile is tagged production now (its live tag, not the one a session
+    /// opened with).
+    pub(crate) fn production(&self) -> bool {
+        self.production.load(Ordering::SeqCst)
+    }
+
     /// Session `id` ended.
     pub(crate) fn leave(&self, id: SessionId) {
         self.lock().held.remove(&id);
+    }
+
+    // ## m3b-t12-session-carries (fix round 1, review I1)
+    /// Whether session `id` holds the profile now (a user transaction, or a user request
+    /// that runs).
+    pub(crate) fn holds(&self, id: SessionId) -> bool {
+        self.lock().held.contains(&id)
     }
 
     /// Whether a session other than `me` holds the profile, and the profile's last activity.
@@ -433,6 +492,71 @@ mod tests {
                 "{held}"
             );
         }
+    }
+
+    // ## m3b-t12-session-carries
+    /// R-M3-73: a console's supervisor keeps pinging past the idle threshold and warns of its
+    /// own idle transaction, but never disconnects (only the profile's default does), also
+    /// after a clock jump.
+    #[test]
+    fn a_console_supervisor_never_disconnects() {
+        let t0 = Instant::now();
+        let w0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let at = |n: u64| (t0 + Duration::from_secs(n), w0 + Duration::from_secs(n));
+        let run = |role| {
+            let mut s = Supervisor::new(idle_policy(), t0, w0).with_role(role);
+            let mut actions = Vec::new();
+            for n in 1..=900 {
+                let (now, wall) = at(n);
+                let action = s.tick(now, wall, false, TxStatus::Idle);
+                if action == Some(LivenessAction::Ping) {
+                    s.note_ping(now);
+                }
+                actions.extend(action);
+                if action == Some(LivenessAction::Disconnect) {
+                    break;
+                }
+            }
+            actions
+        };
+        let console = run(LivenessRole::Console);
+        assert!(
+            !console.contains(&LivenessAction::Disconnect),
+            "{console:?}"
+        );
+        assert_eq!(
+            console
+                .iter()
+                .filter(|a| **a == LivenessAction::Ping)
+                .count(),
+            15,
+            "its own keep-alive goes on"
+        );
+        assert_eq!(
+            run(LivenessRole::Profile).last(),
+            Some(&LivenessAction::Disconnect)
+        );
+        // Its own idle transaction is warned of, once.
+        let mut s = Supervisor::new(idle_policy(), t0, w0).with_role(LivenessRole::Console);
+        let warned = (1..=900)
+            .filter_map(|n| {
+                let (now, wall) = at(n);
+                s.tick(now, wall, false, TxStatus::InTx)
+            })
+            .filter(|a| *a == LivenessAction::IdleTransaction)
+            .count();
+        assert_eq!(warned, 1);
+        // After a clock jump: a ping, never a disconnect.
+        let mut s = Supervisor::new(idle_policy(), t0, w0).with_role(LivenessRole::Console);
+        let (now, wall) = (t0 + Duration::from_secs(1), w0 + Duration::from_secs(3600));
+        assert_eq!(
+            s.tick(now, wall, false, TxStatus::Idle),
+            Some(LivenessAction::Suspect)
+        );
+        assert_eq!(
+            s.tick(now, wall, false, TxStatus::Idle),
+            Some(LivenessAction::Ping)
+        );
     }
 
     #[test]

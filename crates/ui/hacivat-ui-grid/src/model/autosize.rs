@@ -134,6 +134,29 @@ pub fn fit_width(sample_widths: &[f32], header_w: f32) -> f32 {
     sized(sample_widths, header_w, MAX_WIDTH)
 }
 
+// ## m3c-t35: per-type width bounds (ledger 179).
+/// The narrowest and widest a column of `kind` is sized **for its data** by the initial size
+/// (logical px, padding included): a flag never needs more than a short word, a number or a
+/// timestamp never more than its longest form, while text, JSON and binary may take the whole
+/// [`MAX_INITIAL_WIDTH`]. The header still widens a column past these (up to
+/// [`MAX_HEADER_WIDTH`]); an auto-fit and a drag are not bounded by them.
+pub const fn width_bounds(kind: ColumnKind) -> (f32, f32) {
+    match kind {
+        ColumnKind::Bool => (MIN_WIDTH, 96.0),
+        ColumnKind::Number => (MIN_WIDTH, 240.0),
+        ColumnKind::Temporal | ColumnKind::Uuid | ColumnKind::Binary => (MIN_WIDTH, 320.0),
+        ColumnKind::Text | ColumnKind::Json | ColumnKind::Other => (MIN_WIDTH, MAX_INITIAL_WIDTH),
+    }
+}
+
+/// [`column_width`] for a column of `kind`: the trimmed sample width clamped to
+/// [`width_bounds`] first, then the header and the global clamps.
+pub fn column_width_of(kind: ColumnKind, sample_widths: &[f32], header_w: f32) -> f32 {
+    let (lo, hi) = width_bounds(kind);
+    let data = trim_outliers(sample_widths).width.clamp(lo, hi);
+    sized(&[data], header_w, MAX_INITIAL_WIDTH)
+}
+
 /// The initial width of a column of `loaded` rows: `measure(row)` runs on the
 /// [`sample_rows`] only.
 pub fn initial_width(loaded: u64, header_w: f32, measure: impl FnMut(u64) -> f32) -> f32 {
@@ -202,4 +225,35 @@ fn sized(sample_widths: &[f32], header_w: f32, max: f32) -> f32 {
         0.0
     };
     candidate.max(header).ceil().clamp(MIN_WIDTH, max)
+}
+
+// ## m3c-t35
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_type_bounds_cap_the_data_and_let_the_header_through() {
+        // A wide flag column measured from wide cells stays narrow; its long name still shows.
+        assert_eq!(column_width_of(ColumnKind::Bool, &[300.0; 10], 0.0), 96.0);
+        assert_eq!(column_width_of(ColumnKind::Bool, &[60.0; 10], 180.0), 180.0);
+        assert_eq!(
+            column_width_of(ColumnKind::Number, &[400.0; 10], 0.0),
+            240.0
+        );
+        assert_eq!(
+            column_width_of(ColumnKind::Temporal, &[350.0; 10], 0.0),
+            320.0
+        );
+        // Text keeps M3a's bound; within the bounds the width is M3a's.
+        assert_eq!(column_width_of(ColumnKind::Text, &[700.0; 10], 0.0), 480.0);
+        for kind in [ColumnKind::Number, ColumnKind::Text, ColumnKind::Uuid] {
+            assert_eq!(
+                column_width_of(kind, &[90.0, 95.5, 70.0], 40.0),
+                column_width(&[90.0, 95.5, 70.0], 40.0)
+            );
+        }
+        // No samples: the header, never under the narrowest width.
+        assert_eq!(column_width_of(ColumnKind::Number, &[], 20.0), MIN_WIDTH);
+    }
 }

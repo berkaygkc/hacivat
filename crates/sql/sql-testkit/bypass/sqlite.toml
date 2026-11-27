@@ -1,0 +1,275 @@
+# SQL-SAFE-06 bypass catalogue, SQLite (M3b Task 18; `alg/13` SQL-SAFE-06). Data, read by
+# path: run A (`sql-safety/tests/bypass_run_a.rs`, classifier on, offline), run A′
+# (`hacivat-exec/tests/docker_m3b_bypass.rs`, the real pool on Docker) and run B
+# (`hacivat-session/tests/docker_m2b_bypass.rs`, no classifier on Docker).
+#
+# Each row:
+# - `id`: the catalogue row (P/M/L/X, `SAFE02-n` for the SQL-SAFE-02 test table, `n-3` and
+#   `M7/I-2` for run B's review rows);
+# - `sql`: the statement; `{victim}` (another backend's ID), `{tro}` (the engine's transaction
+#   read-only variable) and `{d}` (a scratch directory) are filled in where it runs;
+# - `classifier`: run A's verdict under `ReadOnlyPlusExplain` for a human and the report's
+#   reason codes (sorted, unique), with the session's lexing modes known (the dialect's
+#   defaults unless `modes` names others; `modes = "unknown"`: not known);
+# - `server_off`: run B's outcomes that count as stopped with no classifier (a server code, `1a`,
+#   `protocol`, `function`, `gap`, `refused`); empty for a neutralised row (it may run, and
+#   must leave nothing);
+# - `accounts`: who runs it in Docker (`hv_ro`, `owner` = the test account); empty: run A only;
+# - `kind`: `server_blocked | neutralised | privilege_only | non_transactional`;
+# - `anchor`: where the row comes from;
+# - optional `search_path`, `allowlist` (the profile's function allowlist), `note`, and on
+#   MariaDB `observed`: run B's recorded outcome per account (C19, R-M3-58).
+
+[[row]]
+id = "L9"
+sql = "INSERT INTO t VALUES (2)"
+classifier = { verdict = "deny", reasons = ["WriteData"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L2"
+sql = "ATTACH '{d}/n.db' AS n"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "SessionState"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L2"
+sql = "VACUUM INTO '{d}/c.db'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ExternalFile", "ExternalIo", "ParseError", "SchemaChange"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L1"
+sql = "PRAGMA query_only = 0"
+classifier = { verdict = "deny", reasons = ["AdminControl"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L8"
+sql = "CREATE TEMP TABLE x (a)"
+classifier = { verdict = "deny", reasons = ["SchemaChange", "WriteTemp"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L3"
+sql = "SELECT writefile('{d}/w', 'x')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L3"
+sql = "SELECT load_extension('hv_t23')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L4"
+sql = "PRAGMA writable_schema = 1"
+classifier = { verdict = "deny", reasons = ["AdminControl"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L9"
+sql = "PRAGMA user_version = 7"
+classifier = { verdict = "deny", reasons = ["AdminControl"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L9"
+sql = "PRAGMA journal_mode = WAL"
+classifier = { verdict = "deny", reasons = ["AdminControl"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L6"
+sql = "BEGIN IMMEDIATE"
+classifier = { verdict = "deny", reasons = ["TxnControl"] }
+server_off = ["refused"]
+accounts = ["read_only_file"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #sqlite-ro (no server: every PR)"
+
+[[row]]
+id = "L3"
+sql = "SELECT readfile('/etc/passwd')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "L5"
+sql = "SELECT 1"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+note = "n/a: the host registers no function"
+
+[[row]]
+id = "L6"
+sql = "BEGIN"
+classifier = { verdict = "deny", reasons = ["TxnControl"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "L6"
+sql = "ATTACH 'x.db' AS x"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "SessionState"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "L7"
+sql = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "L7"
+sql = "SELECT randomblob(1000000000)"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "L8"
+sql = "INSERT INTO temp.tt VALUES (1)"
+classifier = { verdict = "deny", reasons = ["WriteData"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "SAFE02-31"
+sql = "PRAGMA query_only=0"
+classifier = { verdict = "deny", reasons = ["AdminControl"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-31"
+sql = "ATTACH 'x.db' AS x"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "SessionState"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-31"
+sql = "VACUUM INTO 'y.db'"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ExternalFile", "ExternalIo", "ParseError", "SchemaChange"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-31"
+sql = "PRAGMA table_info(t)"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "X1"
+sql = "SELECT 'never closed"
+classifier = { verdict = "deny", reasons = ["AmbiguousBoundary", "LexError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X2"
+sql = "S\u0415LECT 1"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X3"
+sql = "SELECT 1\u0000; DROP TABLE t"
+classifier = { verdict = "deny", reasons = ["LexError", "MultiStatement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X4"
+sql = "SELECT ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))"
+classifier = { verdict = "deny", reasons = ["TooComplex"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X5"
+sql = "SELECT (SELECT (SELECT load_extension('x')))"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X1"
+sql = "SELECT 1 /* never closed"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+note = "SQLite accepts a block comment that runs to the end of the text: no differential"

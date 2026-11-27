@@ -16,7 +16,9 @@
 //!   `UnitKind::CopyStream`, follow-up F1-a), the same one the Run preview reads, so the two
 //!   never disagree on a `COPY` (`)COPY t FROM STDIN` is no `COPY` to the splitter or the
 //!   server, which rejects it as a syntax error);
-//! - a `Verbatim` unit (a selection run as one) is refused until M3b;
+//! - (M3a: a `Verbatim` unit, a selection run as one, was refused. Since M3b Task 15 it runs as
+//!   one `Protocol::Simple` unit classified with `Expect::Script`: [`protocol_for`],
+//!   [`expect_for`]; R-M3-60);
 //! - a chooser candidate that would be refused is left out of `Ask`.
 //!
 //! **The PostgreSQL oracle (R-M3-24, R-M3-35).** Only for a single caret (a selection, or
@@ -56,6 +58,12 @@ use sql_split::exec_range::{
     UnitSpan, resolve,
 };
 use sql_split::{AmbiguityReason, AmbiguousBoundary, DocSnapshot, Item, SplitMode, Stmt, head};
+// ## m3b-t15-gate
+use hacivat_driver::Protocol;
+use sql_safety::{Expect, SafetyReport};
+
+use crate::gate::reads_only;
+use crate::params::PreparedUnit;
 
 /// Which Run the user asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +94,10 @@ pub struct ExecUnit {
     pub doc_range: Range<usize>,
     pub kind: UnitKind,
     pub suspendable: bool,
+    // ## m3b-t16-run-service (named exception): the result tabs' title (R-M3-66).
+    /// The unit's title: its directly preceding comment without the comment markers
+    /// (`UnitSpan::title_comment`, `titles::comment_title`), `None` without one.
+    pub title: Option<Arc<str>>,
 }
 
 /// Why Run sends nothing although the range is certain.
@@ -93,8 +105,8 @@ pub struct ExecUnit {
 pub enum RefuseReason {
     /// `COPY … FROM STDIN` / `TO STDOUT`: consoles do not stream data (`exec-copy-unsupported`).
     CopyStream,
-    /// A selection run as one statement (`UnitKind::Verbatim`): M3b.
-    RunAsOne,
+    // ## m3b-t15-gate: `RunAsOne` (a `Verbatim` unit, refused in M3a) is gone; such a unit runs
+    // as one (R-M3-60).
 }
 
 impl RefuseReason {
@@ -102,7 +114,6 @@ impl RefuseReason {
     pub fn fluent_id(self) -> &'static str {
         match self {
             RefuseReason::CopyStream => "exec-copy-unsupported",
-            RefuseReason::RunAsOne => "exec-run-as-one-unsupported",
         }
     }
 }
@@ -221,7 +232,22 @@ pub fn resolve_units_with(
     remembered: Option<CandidateKind>,
     oracle: &dyn SplitOracle,
 ) -> Resolution {
-    let policy = policy_for(action);
+    resolve_units_in(doc, at, action, policy_for(action), remembered, oracle)
+}
+
+// ## m3b-t24-exec-ui (named exception: CHOOSE-06, the console's policy)
+/// [`resolve_units_with`] under `policy` instead of `action`'s default (CHOOSE-06: the
+/// console's "Customize…" choice; the caller computes it with the preview's own function, so
+/// Run and its preview ask the same question). `action` still decides how the oracle may
+/// settle an ambiguous region.
+pub fn resolve_units_in(
+    doc: &DocSnapshot,
+    at: &[CaretOrSelection],
+    action: RunAction,
+    policy: ExecPolicy,
+    remembered: Option<CandidateKind>,
+    oracle: &dyn SplitOracle,
+) -> Resolution {
     match resolve(doc, at, &policy, SplitMode::Execution, None, remembered) {
         RangeResolution::Units(spans) => units_of(doc, &spans),
         RangeResolution::Ask {
@@ -257,8 +283,9 @@ fn span(r: TextRange) -> Range<usize> {
 // (it was a second, text-based reading of the unit's words that took `)COPY` for one).
 fn refusal(s: &UnitSpan) -> Option<RefuseReason> {
     match s.kind {
-        UnitKind::Verbatim => Some(RefuseReason::RunAsOne),
         UnitKind::CopyIn { .. } | UnitKind::CopyStream => Some(RefuseReason::CopyStream),
+        // ## m3b-t15-gate: a selection run as one is sent as one unit (R-M3-60).
+        UnitKind::Verbatim => None,
         // ## m3a-f1-followups (fix round 1, M2): no production `SubqueryOracle` exists and nothing
         // builds `Batch` today. A future oracle's range carries no splitter head, so (M3b) it
         // must pass `mentions_copy`, or be split again for its head, before it becomes a unit.
@@ -285,6 +312,52 @@ fn unit(doc: &DocSnapshot, range: TextRange, kind: UnitKind) -> ExecUnit {
         doc_range: span(range),
         kind,
         suspendable: kind == UnitKind::Statement && head::cursor_eligible(doc, range),
+        // ## m3b-t16-run-service (named exception): set by `units_of` from the span.
+        title: None,
+    }
+}
+
+// ## m3b-t15-gate
+
+/// Whether `prepared` may stay suspended as a console cursor (R-M3-23, ANDed since M3b): the
+/// lexer's read head (`ExecUnit.suspendable`, `head::cursor_eligible`) **and** the classifier's
+/// `Read` (`report` classifies exactly `prepared.final_text`, and
+/// [`crate::gate::reads_only`]: every statement's class is `Read` and none opens a write). A
+/// stale report is no `Read`. The gate's `UnitVerdict::Read` is the same condition, so
+/// `prepared.unit.suspendable && item.verdict == UnitVerdict::Read` agrees with this.
+pub fn suspendable_for(prepared: &PreparedUnit, report: &SafetyReport) -> bool {
+    prepared.unit.suspendable
+        && prepared.unit.kind == UnitKind::Statement
+        && report.matches_text(&prepared.final_text)
+        && reads_only(report)
+}
+
+/// Applies [`suspendable_for`] to every prepared unit with its report (`reports[i]` for
+/// `units[i]`): a unit without a matching report is not suspendable.
+pub fn apply_read_verdicts(units: &mut [PreparedUnit], reports: &[SafetyReport]) {
+    let paired = units.len() == reports.len();
+    for (i, u) in units.iter_mut().enumerate() {
+        let ok = paired && reports.get(i).is_some_and(|r| suspendable_for(u, r));
+        u.unit.suspendable = ok;
+    }
+}
+
+/// How the classifier reads `unit` (R-M3-60): a selection run as one (`Verbatim`) as a script
+/// of statements, every other unit as one statement.
+pub fn expect_for(unit: &ExecUnit) -> Expect {
+    match unit.kind {
+        UnitKind::Verbatim => Expect::Script,
+        _ => Expect::SingleStatement,
+    }
+}
+
+/// The protocol `unit` is sent with (R-M3-60): a selection run as one goes in one simple-query
+/// message (PostgreSQL's extended protocol takes one statement); every other unit keeps the
+/// default.
+pub fn protocol_for(unit: &ExecUnit) -> Protocol {
+    match unit.kind {
+        UnitKind::Verbatim => Protocol::Simple,
+        _ => Protocol::default(),
     }
 }
 
@@ -301,7 +374,19 @@ fn units_of(doc: &DocSnapshot, spans: &[UnitSpan]) -> Resolution {
             reason,
         };
     }
-    Resolution::Units(spans.iter().map(|s| unit(doc, s.range, s.kind)).collect())
+    // ## m3b-t16-run-service (named exception): each unit's comment title (R-M3-66).
+    Resolution::Units(
+        spans
+            .iter()
+            .map(|s| ExecUnit {
+                title: s
+                    .title_comment
+                    .and_then(|t| doc.text().get(span(t)))
+                    .and_then(crate::titles::comment_title),
+                ..unit(doc, s.range, s.kind)
+            })
+            .collect(),
+    )
 }
 
 /// The chooser without the candidates Run would refuse; the preselected one stays selected
