@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use hacivat_driver::ServerInfo;
 use hacivat_driver::ViolationReason;
 use hacivat_driver::url::FieldId;
+use hacivat_driver::{SemVerLoose, ServerInfo};
 use hacivat_l10n::ids::hv::HvConnErrRefusedReason as Refused;
 use hacivat_l10n::{
     ArgValue, Catalogs, Count, ExactDecimal, FormatInputs, IntoFluentArgs, L10n, MsgRef,
@@ -214,26 +214,117 @@ fn step_state_text(f: &Fmt, t: &StepTrace) -> String {
     }
 }
 
-/// The server's version as the user knows it: the raw version's first word (MariaDB's old
-/// `5.5.5-` prefix and any `-suffix` dropped), else the parsed version.
+/// The server's version as the user knows it ([`version_number`]), for the connection
+/// report. ## demofix-1 fix round 1 (m7): the one version helper the status bar uses too.
 pub(crate) fn version_text(info: &ServerInfo) -> String {
-    let raw = info.raw_version.trim();
-    let raw = raw.strip_prefix("5.5.5-").unwrap_or(raw);
-    let word = raw
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .split('-')
-        .next()
-        .unwrap_or_default();
-    if !word.is_empty() {
-        return word.to_string();
-    }
-    info.version
-        .as_ref()
-        .map(|v| format!("{}.{}.{}", v.major, v.minor, v.patch))
-        .unwrap_or_default()
+    version_number(&info.raw_version, info.version.as_ref()).unwrap_or_default()
 }
+
+// ## demofix-1 fix round 1 (m7): one version helper for the report and the status bar.
+/// The most characters of a version number shown (a build line can be anything).
+const VERSION_SHORT_MAX: usize = 24;
+
+/// The version number in a server's version text `raw`: the first word that is a version
+/// (`16.16`, `8.0.40`, `11.4.2`, `v23.1.11` without its `v`, `18beta1`): digits and dots, cut
+/// at the first other character, with a pre-release word (`beta1`) kept only right after the
+/// digits. A word with a `/` or `:` (a date, a time) or a bare number without a dot (`64` of
+/// `64-bit`) is not a version. MariaDB's old `5.5.5-` prefix is dropped. With no such word,
+/// the parsed version (`parsed`), else `None`.
+pub(crate) fn version_number(raw: &str, parsed: Option<&SemVerLoose>) -> Option<String> {
+    let raw = raw.trim();
+    let raw = raw.strip_prefix("5.5.5-").unwrap_or(raw);
+    let word = raw.split_whitespace().find_map(|w| {
+        let w = w.trim_matches(|c: char| matches!(c, ',' | ';' | '(' | ')'));
+        let w = match w.strip_prefix(['v', 'V']) {
+            Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => rest,
+            _ => w,
+        };
+        if !w.starts_with(|c: char| c.is_ascii_digit()) || w.contains(['/', ':']) {
+            return None;
+        }
+        let run = w
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(w.len());
+        let (digits, rest) = w.split_at(run);
+        let ends_with_dot = digits.ends_with('.');
+        let digits = digits.trim_end_matches('.');
+        let suffix: &str = if ends_with_dot {
+            ""
+        } else {
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric())
+                .unwrap_or(rest.len());
+            let s = &rest[..end];
+            if s.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                s
+            } else {
+                ""
+            }
+        };
+        (digits.contains('.') || !suffix.is_empty()).then(|| {
+            format!("{digits}{suffix}")
+                .chars()
+                .take(VERSION_SHORT_MAX)
+                .collect()
+        })
+    });
+    word.or_else(|| {
+        parsed.map(|v| {
+            if v.patch == 0 && v.major >= 10 {
+                format!("{}.{}", v.major, v.minor)
+            } else {
+                format!("{}.{}.{}", v.major, v.minor, v.patch)
+            }
+        })
+    })
+}
+
+/// The status bar's version segment and the server's whole version text: `product` and its
+/// version number ("PostgreSQL 16.16", "MariaDB 11.4.2"), and the full text, the product
+/// named once (`raw` already names it: PostgreSQL's `version()`, MariaDB's
+/// `11.4.2-MariaDB-…`), with control and bidi characters shown as `<U+XXXX>` (server text is
+/// data). The full text is `None` when it says nothing more than the short form.
+pub(crate) fn version_texts(
+    product: &str,
+    raw: &str,
+    parsed: Option<&SemVerLoose>,
+) -> (String, Option<String>) {
+    let raw = raw.trim();
+    let short = match version_number(raw, parsed) {
+        Some(n) => escape_controls(&format!("{product} {n}")),
+        None => product.to_string(),
+    };
+    if raw.is_empty() {
+        return (short, None);
+    }
+    let names_product = raw
+        .to_ascii_lowercase()
+        .contains(&product.to_ascii_lowercase());
+    let full = if names_product {
+        raw.to_string()
+    } else {
+        format!("{product} {raw}")
+    };
+    let full = escape_controls(&full);
+    let more = (full != short).then_some(full);
+    (short, more)
+}
+
+/// `s` with every control or bidi character as `<U+XXXX>`.
+fn escape_controls(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control()
+            || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        {
+            out.push_str(&format!("<U+{:04X}>", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+// ## demofix-1
 
 fn method_of(auth: AuthProviderId) -> ids::hv::HvConnDiagAuthVMethod {
     use ids::hv::HvConnDiagAuthVMethod as M;
@@ -733,6 +824,76 @@ mod tests {
         assert_eq!(seconds(Duration::from_millis(1234), 2).0, "1.23");
         assert_eq!(seconds(Duration::from_millis(214), 3).0, "0.214");
         assert_eq!(seconds(Duration::from_millis(12_005), 3).0, "12.005");
+    }
+
+    // ## demofix-1 fix round 1 (m7)
+    #[test]
+    fn versions_are_short_and_name_their_product_once() {
+        let pg = "PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on aarch64-unknown-linux-gnu, \
+                  compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit";
+        let (short, full) = version_texts("PostgreSQL", pg, None);
+        assert_eq!(short, "PostgreSQL 16.16");
+        assert_eq!(full.as_deref(), Some(pg), "the product once");
+        let (short, full) = version_texts("MySQL", "8.0.40-0ubuntu0.22.04.1", None);
+        assert_eq!(short, "MySQL 8.0.40");
+        assert_eq!(full.as_deref(), Some("MySQL 8.0.40-0ubuntu0.22.04.1"));
+        let (short, full) = version_texts("MariaDB", "11.4.2-MariaDB-ubu2404", None);
+        assert_eq!(short, "MariaDB 11.4.2");
+        assert_eq!(
+            full.as_deref(),
+            Some("11.4.2-MariaDB-ubu2404"),
+            "never \"MariaDB 11.4.2-MariaDB-…\""
+        );
+        assert_eq!(
+            version_texts("MySQL", "8.4.3", None),
+            ("MySQL 8.4.3".to_string(), None)
+        );
+        assert_eq!(
+            version_texts("SQLite", "3.45.0", None),
+            ("SQLite 3.45.0".to_string(), None)
+        );
+        assert_eq!(
+            version_texts("PostgreSQL", "", None),
+            ("PostgreSQL".to_string(), None)
+        );
+        // Odd strings: a leading v, a date and a time later in the line, a long fork name.
+        let crdb = "CockroachDB CCL v23.1.11 (aarch64-apple-darwin21.2, built 2023/09/27 \
+                    01:53:43, go1.19.10)";
+        assert_eq!(
+            version_texts("PostgreSQL", crdb, None).0,
+            "PostgreSQL 23.1.11"
+        );
+        assert_eq!(
+            version_texts("MySQL", "8.0.mysql_aurora.3.05.2", None).0,
+            "MySQL 8.0"
+        );
+        assert_eq!(
+            version_texts("PostgreSQL", "PostgreSQL 18beta1 on x86_64", None).0,
+            "PostgreSQL 18beta1"
+        );
+        // No version word: the parsed version, else the product alone.
+        let parsed = hacivat_driver::SemVerLoose::parse("16.4");
+        assert_eq!(
+            version_texts("PostgreSQL", "EnterpriseDB build", parsed.as_ref()).0,
+            "PostgreSQL 16.4"
+        );
+        let (short, full) = version_texts("PostgreSQL", "EnterpriseDB build", None);
+        assert_eq!(short, "PostgreSQL");
+        assert_eq!(full.as_deref(), Some("PostgreSQL EnterpriseDB build"));
+        // Server text is data: controls are shown, never obeyed; a huge number is cut.
+        assert_eq!(
+            version_texts("MySQL", "8.0.1\u{202E}x", None).0,
+            "MySQL 8.0.1"
+        );
+        let (_, full) = version_texts("MySQL", "8.0.1\u{202E}x", None);
+        assert_eq!(full.as_deref(), Some("MySQL 8.0.1<U+202E>x"));
+        let long = format!("1.{}", "9".repeat(80));
+        assert_eq!(
+            version_texts("MySQL", &long, None).0.len(),
+            "MySQL ".len() + 24
+        );
+        // The report's version is the same number.
+        assert_eq!(version_number(pg, None).as_deref(), Some("16.16"));
     }
 
     #[test]

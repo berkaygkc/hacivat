@@ -1170,17 +1170,16 @@ impl ScriptDoc {
         // ## demofix-1 (PO demo F4): a file is at the path again, so the tab is no longer
         // "deleted on disk", whatever the file is; the same file back (Put Back from the
         // Trash: the stamp the tab knows) needs nothing more.
-        let was_deleted = std::mem::take(&mut self.deleted);
-        if was_deleted {
+        if std::mem::take(&mut self.deleted) {
             self.hide(|n| matches!(n, Notice::Deleted), cx);
         }
         if self.stamp == Some(stamp) || self.pending_reload == Some(stamp) {
             return;
         }
-        // A dirty tab is never reloaded (R-M4b-16). demofix-1 (F4): nor a tab whose file was
-        // deleted: its text was the only copy of that file, so another file appearing at the
-        // path asks (Reload / Keep mine) instead of replacing it.
-        if self.is_dirty(cx) || self.keep_mine || was_deleted {
+        // A dirty tab is never reloaded (R-M4b-16). demofix-1 fix round 1 (ruling R-DF-1): a
+        // file appearing where a deleted one was is an external change like any other, so a
+        // clean tab reloads silently and a dirty one gets the Changed bar.
+        if self.is_dirty(cx) || self.keep_mine {
             self.show(Notice::Changed, cx);
             return;
         }

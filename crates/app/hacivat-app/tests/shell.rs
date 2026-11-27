@@ -470,5 +470,14 @@ fn every_seam_has_a_visible_grip_and_a_hover_line(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     let after = layout(vcx).1.editor_h;
     assert!((after - before - 60.0).abs() < 4.0, "{before} -> {after}");
+    // Fix round 1 (m5): the same seam from the keyboard, through the palette's commands.
+    use hacivat_app::commands::registry::RESULTS_STEP_PX;
+    assert!(run(vcx, "workspace.results_smaller"), "the command ran");
+    vcx.run_until_parked();
+    assert_eq!(layout(vcx).1.editor_h, after + RESULTS_STEP_PX);
+    assert!(run(vcx, "workspace.results_larger"), "the command ran");
+    assert!(run(vcx, "workspace.results_larger"), "the command ran");
+    vcx.run_until_parked();
+    assert_eq!(layout(vcx).1.editor_h, after - RESULTS_STEP_PX);
 }
 // ## demofix-1

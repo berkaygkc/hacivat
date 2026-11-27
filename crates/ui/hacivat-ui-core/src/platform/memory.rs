@@ -169,10 +169,71 @@ mod phys {
     }
 }
 
+// ## demofix-1 fix round 1 (I2): the F6 measurement's sampler.
+/// This process's physical footprint in bytes, what Activity Monitor's "Memory" column shows
+/// (macOS `task_vm_info.phys_footprint`: dirty and compressed memory, the GPU's included,
+/// clean file-backed pages not); `None` on other systems.
+pub fn phys_footprint_bytes() -> Option<u64> {
+    footprint::phys_footprint_bytes()
+}
+
+#[cfg(target_os = "macos")]
+mod footprint {
+    use mach2::kern_return::KERN_SUCCESS;
+    use mach2::message::mach_msg_type_number_t;
+    use mach2::task::task_info;
+    use mach2::task_info::{TASK_VM_INFO, task_vm_info};
+    use mach2::traps::mach_task_self;
+    use mach2::vm_types::{integer_t, natural_t};
+
+    pub(super) fn phys_footprint_bytes() -> Option<u64> {
+        let mut info = task_vm_info::default();
+        let mut count = (std::mem::size_of::<task_vm_info>() / std::mem::size_of::<natural_t>())
+            as mach_msg_type_number_t;
+        // SAFETY: `info` is a properly sized, writable `task_vm_info` and `count` holds its size
+        // in `natural_t` units, as `task_info(TASK_VM_INFO)` requires (the kernel fills at most
+        // `count` units and lowers `count` to what it filled); `mach_task_self()` reads the
+        // task's own send right, which is always valid.
+        let kr = unsafe {
+            task_info(
+                mach_task_self(),
+                TASK_VM_INFO,
+                (&raw mut info).cast::<integer_t>(),
+                &mut count,
+            )
+        };
+        if kr != KERN_SUCCESS {
+            return None;
+        }
+        let footprint = info.phys_footprint;
+        Some(footprint)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod footprint {
+    pub(super) fn phys_footprint_bytes() -> Option<u64> {
+        None
+    }
+}
+// ## demofix-1
+
 #[cfg(test)]
 mod tests {
     use super::vm_rss_mib;
     use crate::platform;
+
+    // ## demofix-1 fix round 1 (I2)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn phys_footprint_follows_touched_memory() {
+        let before = platform::phys_footprint_bytes().expect("readable on macOS");
+        assert!(before > 1 << 20, "{before}");
+        let big = vec![1u8; 64 << 20];
+        let after = platform::phys_footprint_bytes().unwrap();
+        assert!(after >= before + (32 << 20), "{before} -> {after}");
+        drop(big);
+    }
 
     #[test]
     fn resident_set_is_reported() {

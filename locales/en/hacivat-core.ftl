@@ -1848,6 +1848,12 @@ exec-script-lost-track = Hacivat lost track of the connection's state, so the sc
 #   $n (Number) - how many statements the line counts, e.g. 10000.
 #   $rows (Number) - the rows they changed together, e.g. 10000.
 exec-script-quiet = { $n ->
-        [one] Statement { NUMBER($first, useGrouping: "false") } ran ({ $rows } rows affected), not listed.
-       *[other] Statements { NUMBER($first, useGrouping: "false") }–{ NUMBER($last, useGrouping: "false") } ran: { $n } statements, { $rows } rows affected, not listed one by one.
+        [one] Statement { NUMBER($first, useGrouping: "false") } ran: { $rows ->
+            [one] { $rows } row
+           *[other] { $rows } rows
+        } affected, not listed.
+       *[other] Statements { NUMBER($first, useGrouping: "false") }–{ NUMBER($last, useGrouping: "false") } ran: { $n } statements, { $rows ->
+            [one] { $rows } row
+           *[other] { $rows } rows
+        } affected, not listed one by one.
     }

@@ -1258,6 +1258,6 @@ exec-script-lost-track = Hacivat bağlantının durumunu izleyemedi; betik { NUM
 ## demofix-1
 # Review: PO
 exec-script-quiet = { $n ->
-        [one] { NUMBER($first, useGrouping: "false") }. ifade çalıştı ({ $rows } satır etkilendi), listelenmedi.
+        [one] { NUMBER($first, useGrouping: "false") }. ifade çalıştı: { $rows } satır etkilendi, listelenmedi.
        *[other] { NUMBER($first, useGrouping: "false") }–{ NUMBER($last, useGrouping: "false") }. ifadeler çalıştı: { $n } ifade, { $rows } satır etkilendi; tek tek listelenmedi.
     }

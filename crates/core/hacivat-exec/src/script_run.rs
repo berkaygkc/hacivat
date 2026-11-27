@@ -1216,12 +1216,48 @@ struct QuietLog {
     tail: std::collections::VecDeque<(u64, Vec<UnitLine>)>,
 }
 
+/// ## demofix-1 fix round 1 (m4): a statement that took this long keeps its own line (with its
+/// time) even in a quiet run.
+pub const SCRIPT_SLOW_MS: u64 = 1_000;
+
 /// The rows a line reports when it is one a quiet statement writes (`None`: it says more).
+/// Quiet: a row count or "Completed" under [`SCRIPT_SLOW_MS`], and (fix round 1, m3) a
+/// transaction-control line (`BEGIN`, `SET` and `SAVEPOINT` write "Completed"; `COMMIT` and
+/// `ROLLBACK` write their own), so a per-row `BEGIN; INSERT; COMMIT;` script stays bounded.
 fn quiet_rows(msg: &LogMsg) -> Option<u64> {
     match msg {
-        LogMsg::RowsAffected { rows, .. } => Some(*rows),
-        LogMsg::Completed { .. } => Some(0),
+        LogMsg::RowsAffected { rows, ms } if *ms < SCRIPT_SLOW_MS => Some(*rows),
+        LogMsg::Completed { ms } if *ms < SCRIPT_SLOW_MS => Some(0),
+        LogMsg::TxCommitted | LogMsg::TxRolledBack => Some(0),
         _ => None,
+    }
+}
+
+// ## demofix-1 fix round 1 (m3, m4)
+#[cfg(test)]
+mod quiet_tests {
+    use super::{LogMsg, SCRIPT_SLOW_MS, quiet_rows};
+
+    #[test]
+    fn slow_statements_and_failures_keep_their_own_line() {
+        assert_eq!(
+            quiet_rows(&LogMsg::RowsAffected { rows: 3, ms: 12 }),
+            Some(3)
+        );
+        assert_eq!(quiet_rows(&LogMsg::Completed { ms: 0 }), Some(0));
+        assert_eq!(quiet_rows(&LogMsg::TxCommitted), Some(0));
+        assert_eq!(quiet_rows(&LogMsg::TxRolledBack), Some(0));
+        assert_eq!(
+            quiet_rows(&LogMsg::RowsAffected {
+                rows: 1,
+                ms: SCRIPT_SLOW_MS
+            }),
+            None,
+            "a statement of a second or more keeps its line with its time"
+        );
+        assert_eq!(quiet_rows(&LogMsg::Completed { ms: 40_000 }), None);
+        assert_eq!(quiet_rows(&LogMsg::ImplicitCommit), None);
+        assert_eq!(quiet_rows(&LogMsg::TxRolledBackByServer), None);
     }
 }
 

@@ -5374,3 +5374,12 @@ hv-cmd-input-select-next-word-start = Field: extend selection to next word start
 hv-cmd-input-delete-to-next-word-start = Field: delete to next word start
 hv-cmd-input-undo = Field: undo
 hv-cmd-input-redo = Field: redo
+
+## demofix-1
+# The palette's way to move the seam between the editor and the results (PO demo F7, review m5).
+hv-cmd-workspace-results-larger = Results: larger
+hv-cmd-workspace-results-smaller = Results: smaller
+# The status bar's server version segment: its tooltip's second line (PO demo F9, review m7).
+hv-status-version-copy-tip = Click to copy the whole version.
+# The toast after that click.
+hv-status-version-copied = Server version copied

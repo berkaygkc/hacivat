@@ -234,21 +234,43 @@ fn connection_parts(
             }
             // ## demofix-1 (PO demo F9): "PostgreSQL 16.16", never the product twice or the
             // whole build line; the full text is the segment's tooltip.
-            let (short, full) = version_texts(&info.server.product, &info.server.raw_version);
+            let (short, full) = crate::connections::report::version_texts(
+                &info.server.product,
+                &info.server.raw_version,
+                info.server.version.as_ref(),
+            );
+            let short_name: SharedString = short.clone().into();
             // ## m2b-t22-live (fix round 1): the last segment, it ellipsizes when the bar is full.
             let label = status_label(theme, short, TextSource::Data).truncate(true);
             out.push((
                 Part::Version,
                 match full {
-                    Some(full) => div()
-                        .id("status-version-tip")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .min_w(px(0.0))
-                        .child(label)
-                        .tooltip(move |_, cx| Tip::view(full.clone(), cx))
-                        .into_any_element(),
+                    // Fix round 1 (m7): the whole text is the tooltip, the accessible
+                    // description, and what a click copies (with a toast saying so).
+                    Some(full) => {
+                        use hacivat_ui::popover::{A11yDecl, Declare as _};
+                        let hint = crate::l10n_global::tr_id(cx, "hv-status-version-copy-tip");
+                        let tip: SharedString = format!("{full}\n{hint}").into();
+                        let copied = full.clone();
+                        div()
+                            .id("status-version-tip")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .min_w(px(0.0))
+                            .cursor_pointer()
+                            .child(label)
+                            .declare_full(
+                                A11yDecl::new(
+                                    hacivat_ui_core::gpui_surface::Role::Button,
+                                    short_name.clone(),
+                                )
+                                .description(full.into()),
+                            )
+                            .on_click(move |_, _, cx| copy_version(copied.clone(), cx))
+                            .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+                            .into_any_element()
+                    }
                     None => label.into_any_element(),
                 },
             ));
@@ -257,57 +279,21 @@ fn connection_parts(
     }
 }
 
-// ## demofix-1 (PO demo F9)
-/// The most characters of the version the status bar shows (a build line can be anything).
-const VERSION_SHORT_MAX: usize = 24;
-
-/// The status bar's version segment: `product` and the server's version number (the first
-/// word of `raw` that starts with a digit, up to a `-` build suffix: "PostgreSQL 16.16",
-/// "MySQL 8.0.40", "MariaDB 11.4.2"), and, when that leaves anything out, the server's whole
-/// version text for the tooltip, its product named once (PostgreSQL's `version()` already
-/// begins with it). Control characters in the server's text are shown as `<U+XXXX>`.
-pub(crate) fn version_texts(product: &str, raw: &str) -> (String, Option<SharedString>) {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return (product.to_string(), None);
-    }
-    let number = raw
-        .split_whitespace()
-        .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))
-        .map(|w| w.split('-').next().unwrap_or(w))
-        .map(|w| w.trim_end_matches([',', ';']))
-        .map(|w| w.chars().take(VERSION_SHORT_MAX).collect::<String>());
-    let full = if raw.starts_with(product) {
-        raw.to_string()
-    } else {
-        format!("{product} {raw}")
-    };
-    let full = escape_controls(&full);
-    match number {
-        Some(n) => {
-            let short = escape_controls(&format!("{product} {n}"));
-            let tip = (short != full).then(|| full.into());
-            (short, tip)
-        }
-        None => (product.to_string(), Some(full.into())),
-    }
+// ## demofix-1 fix round 1 (m7)
+/// Copies the server's whole version text, and says so.
+fn copy_version(full: String, cx: &mut App) {
+    use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
+    cx.write_to_clipboard(hacivat_ui_core::gpui_surface::ClipboardItem::new_string(
+        full,
+    ));
+    ToastQueue::push(
+        cx,
+        Toast::new(
+            ToastKind::Info,
+            std::rc::Rc::new(|cx: &App| crate::l10n_global::tr_id(cx, "hv-status-version-copied")),
+        ),
+    );
 }
-
-/// `s` with every control or bidi character as `<U+XXXX>` (server text is data).
-fn escape_controls(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_control()
-            || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-        {
-            out.push_str(&format!("<U+{:04X}>", c as u32));
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-// ## demofix-1
 
 // ## m3a-t34-status-follows
 //
@@ -1141,52 +1127,6 @@ fn preview_message(editor: &EditorView, cx: &App) -> Option<SharedString> {
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
-
-    // ## demofix-1 (PO demo F9)
-    #[test]
-    fn the_version_segment_is_short_and_names_its_product_once() {
-        let pg = "PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on aarch64-unknown-linux-gnu, \
-                  compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit";
-        let (short, tip) = super::version_texts("PostgreSQL", pg);
-        assert_eq!(short, "PostgreSQL 16.16");
-        assert_eq!(tip.as_deref(), Some(pg), "the whole text, the product once");
-        let (short, tip) = super::version_texts("MySQL", "8.0.40-0ubuntu0.22.04.1");
-        assert_eq!(short, "MySQL 8.0.40");
-        assert_eq!(tip.as_deref(), Some("MySQL 8.0.40-0ubuntu0.22.04.1"));
-        let (short, tip) = super::version_texts("MariaDB", "11.4.2-MariaDB-ubu2404");
-        assert_eq!(short, "MariaDB 11.4.2");
-        assert_eq!(tip.as_deref(), Some("MariaDB 11.4.2-MariaDB-ubu2404"));
-        // Nothing left out: no tooltip.
-        assert_eq!(
-            super::version_texts("MySQL", "8.4.3"),
-            ("MySQL 8.4.3".to_string(), None)
-        );
-        assert_eq!(
-            super::version_texts("SQLite", "3.45.0"),
-            ("SQLite 3.45.0".to_string(), None)
-        );
-        assert_eq!(
-            super::version_texts("PostgreSQL", ""),
-            ("PostgreSQL".to_string(), None)
-        );
-        // A pre-release keeps its word; a text with no number keeps the product only.
-        assert_eq!(
-            super::version_texts("PostgreSQL", "PostgreSQL 18beta1 on x86_64").0,
-            "PostgreSQL 18beta1"
-        );
-        let (short, tip) = super::version_texts("PostgreSQL", "EnterpriseDB build");
-        assert_eq!(short, "PostgreSQL");
-        assert_eq!(tip.as_deref(), Some("PostgreSQL EnterpriseDB build"));
-        // Server text is data: controls are shown, never obeyed; a huge word is cut.
-        let (short, tip) = super::version_texts("MySQL", "8.0.1\u{202E}x");
-        assert_eq!(short, "MySQL 8.0.1<U+202E>x");
-        assert_eq!(tip, None);
-        let long = "9".repeat(80);
-        assert_eq!(
-            super::version_texts("MySQL", &long).0.len(),
-            "MySQL ".len() + 24
-        );
-    }
 
     use hacivat_driver::TxStatus;
     use hacivat_proto::ErrClass;

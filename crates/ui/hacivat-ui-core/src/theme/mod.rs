@@ -218,8 +218,10 @@ mod tests {
                     (c.amber, "amber"),
                     (c.green, "green"),
                 ] {
+                    // Fix round 1 (m6): twice the first round's 0.05, so "kept apart" holds
+                    // with room, not by a hair.
                     let d = distance(ink, other, side);
-                    assert!(d >= 0.05, "{ink:?} too close to {name}: {d:.3}");
+                    assert!(d >= 0.10, "{ink:?} too close to {name}: {d:.3}");
                 }
             }
             for (i, a) in inks.iter().enumerate() {

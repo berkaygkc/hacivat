@@ -2909,4 +2909,56 @@ async fn a_deleted_open_file_that_comes_back_unchanged_is_announced() {
         "the file the tab knows, announced as present again"
     );
 }
+
+/// Fix round 1 (m1): Put Back keeps the stamp the tab knows, so a rename right after the
+/// restore (before the restore's own stamp read lands) still pairs by content: the tab follows
+/// the file instead of being told it was deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_right_after_put_back_follows_the_file() {
+    let app = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let trash = tempfile::tempdir().unwrap();
+    write_files(d.path(), &["a.sql"]);
+    let mut r = rig_with(app.path(), opts());
+    ready(&r).await;
+    let id = attach(&r, d.path()).await;
+    let root = canonical(d.path());
+    r.svc.read(id, &rel("a.sql"), None).await.unwrap();
+    std::fs::rename(d.path().join("a.sql"), trash.path().join("a.sql")).unwrap();
+    r.hint(&root, &["a.sql"]);
+    let mut seen = Vec::new();
+    wait_event(
+        &mut r.rx,
+        &mut seen,
+        "a.sql deleted",
+        |e| matches!(e, LibraryEvent::FileDeleted { rel, .. } if rel.as_str() == "a.sql"),
+    )
+    .await;
+    std::fs::rename(trash.path().join("a.sql"), d.path().join("a.sql")).unwrap();
+    r.hint(&root, &["a.sql"]);
+    wait_until("a.sql listed again", || {
+        r.rels(id).iter().any(|x| x == "a.sql")
+    })
+    .await;
+    // Renamed at once, whether or not the restore's stamp read has landed.
+    std::fs::rename(d.path().join("a.sql"), d.path().join("b.sql")).unwrap();
+    r.hint(&root, &["a.sql", "b.sql"]);
+    seen.clear();
+    let e = wait_event(&mut r.rx, &mut seen, "the move", |e| {
+        matches!(
+            e,
+            LibraryEvent::FileRenamed { .. } | LibraryEvent::FileDeleted { .. }
+        )
+    })
+    .await;
+    assert_eq!(
+        e,
+        LibraryEvent::FileRenamed {
+            id,
+            from: rel("a.sql"),
+            to: rel("b.sql")
+        },
+        "{seen:?}"
+    );
+}
 // ## demofix-1

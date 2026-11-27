@@ -1163,4 +1163,29 @@ async fn a_long_clean_run_writes_a_counted_line_every_ten_thousand_statements() 
     // Two counted lines, the last 50 statements, the run's summary.
     assert_eq!(r.log.lines().len(), 2 + SCRIPT_TAIL_STATEMENTS + 1);
 }
+
+/// Fix round 1 (m3): transaction control is quiet too, so a dump that commits every row
+/// (`BEGIN; UPDATE …; COMMIT;`) stays a few dozen lines long.
+#[tokio::test]
+async fn a_dump_that_commits_every_row_stays_bounded() {
+    use hacivat_exec::SCRIPT_TAIL_STATEMENTS;
+    let r = rig(fake_pg().tracks_transactions(), false).await;
+    let rows = 400;
+    let text: String = (1..=rows)
+        .map(|i| format!("BEGIN;\nUPDATE a SET x = 1 WHERE id = {i};\nCOMMIT;\n"))
+        .collect();
+    let (out, progress) = r
+        .run(r.request(script(&text).boxed(), None, Answers::new(&[])))
+        .await;
+    assert!(matches!(out, ScriptRunOutcome::Finished(_)), "{out:?}");
+    assert_eq!(progress.units_run, rows * 3);
+    let counted = quiet_lines(&r);
+    assert_eq!(counted.len(), 1, "{counted:?}");
+    assert_eq!(counted[0].2, rows * 3 - SCRIPT_TAIL_STATEMENTS as u64);
+    let lines = r.log.lines().len();
+    assert!(
+        lines <= 2 * SCRIPT_TAIL_STATEMENTS + 2,
+        "{lines} lines for {rows} committed rows"
+    );
+}
 // ## demofix-1

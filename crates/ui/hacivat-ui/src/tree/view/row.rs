@@ -526,13 +526,14 @@ impl<M: TreeModel> TreeView<M> {
             // Its own hue per letter (demofix-1, PO F5); the text alternative is the item's
             // description, so the letter and the words carry it, never the colour alone.
             // ## m4b-t13-explorer (named exception, controller ruling R-T2-1 a)
-            let ink = status_ink(status.kind, c);
-            status_note(status.kind, ink.to_hsla());
+            // Fix round 1 (m6): the recorder notes the very value the label is drawn in.
+            let ink = status_ink(status.kind, c).to_hsla();
+            status_note(status.kind, ink);
             el = el.child(div().flex_none().ml(px(gap)).child(Label::new(
                 status.glyph,
                 TextSource::Fluent,
                 t.type_ramp.mono_micro,
-                ink.to_hsla(),
+                ink,
             )));
         }
         if let (Some(pill), Some(i)) = (data.pill, pill_i)

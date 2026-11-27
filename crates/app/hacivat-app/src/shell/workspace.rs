@@ -650,6 +650,32 @@ impl Workspace {
         }
     }
 
+    // ## demofix-1 fix round 1 (m5): the editor / results seam from the keyboard (palette
+    // commands "Results: larger" and "Results: smaller"), as a drag of the seam would move it.
+    /// Moves the editor / results seam by `delta` px (positive: the results get smaller).
+    pub fn move_results_seam(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let t = Theme::get(cx).tokens;
+        let inset = match chrome_kind(window) {
+            ChromeKind::LinuxClient => window.client_inset().map_or(0.0, f32::from),
+            _ => 0.0,
+        };
+        let size = window.viewport_size();
+        let window_px = (
+            f32::from(size.width) - 2.0 * inset,
+            f32::from(size.height) - 2.0 * inset,
+        );
+        let top = t.spacing.titlebar_height;
+        let y = top + self.tiles.editor_h + delta;
+        self.tiles.drag(
+            Seam::Editor,
+            point(px(0.0), px(y)),
+            window_px,
+            top,
+            t.spacing.statusbar_height,
+        );
+        self.layout_changed(cx);
+    }
+
     pub fn toggle_explorer(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.tiles.explorer_visible = !self.tiles.explorer_visible;
         self.layout_changed(cx);

@@ -51,11 +51,12 @@ pub const MAX_INSPECTOR_PX: f32 = 560.0;
 /// The grab area around a 1 px seam. ## demofix-1 (PO demo F7): 6 to 8 px.
 pub const SEAM_GRAB_PX: f32 = 8.0;
 /// ## demofix-1 (PO demo F7): the grip on a seam's middle, so the seam can be found: a
-/// `text-3` bar this long and this thick (square ends: marks under 8 px take no radius), on
-/// the seam's axis. Hovered or dragged, the seam shows as a `SEAM_HOT_PX` `blue` line.
-pub const GRIP_LONG_PX: f32 = 24.0;
-pub const GRIP_SHORT_PX: f32 = 3.0;
-pub const SEAM_HOT_PX: f32 = 2.0;
+/// `text-3` bar this long, on the seam's axis. Hovered or dragged, the seam shows as a
+/// `SEAM_HOT_PX` `blue` line. Fix round 1 (m5): both are exactly the 1 px seam gap, so they
+/// never draw over a tile's content (the last code line of a small editor tile).
+pub const GRIP_LONG_PX: f32 = 32.0;
+pub const GRIP_SHORT_PX: f32 = 1.0;
+pub const SEAM_HOT_PX: f32 = 1.0;
 /// DESIGN.md `components.tree-filter.height` (no spacing token carries it).
 const TREE_FILTER_HEIGHT_PX: f32 = 28.0;
 /// The action whose key hint the explorer filter shows (bound by a later task; no hint until
