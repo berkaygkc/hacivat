@@ -93,6 +93,34 @@ pub fn assert_one_filled_badge_in(
     );
 }
 
+// ## inputnav-1 (PO demo finding F2)
+/// The focus rings of the last frame that their clip cuts, as `(ring, clip)` in logical px.
+///
+/// A ring is [`crate::theme::focus_outline`]'s outer shadow: a hard (unblurred, not inset)
+/// drop shadow in `blue`. Drawn whole inside its content mask, it shows all four edges at the
+/// same 1 px width; a clip that crosses it (a scroll body whose full-width field touches its
+/// sides: F2, the Attach dialog's Database field) cuts the edges it crosses, or all of the ring
+/// on that side.
+#[cfg(feature = "scene-check")]
+pub fn clipped_focus_rings(window: &Window, blue: Hsla) -> Vec<(Bounds<Pixels>, Bounds<Pixels>)> {
+    let want = Rgba::from(blue);
+    let scale = window.scale_factor();
+    let logical = |b: Bounds<gpui::ScaledPixels>| {
+        Bounds::new(
+            gpui::point(px(b.origin.x.0 / scale), px(b.origin.y.0 / scale)),
+            gpui::size(px(b.size.width.0 / scale), px(b.size.height.0 / scale)),
+        )
+    };
+    window
+        .rendered_scene()
+        .shadows
+        .iter()
+        .filter(|s| s.inset == 0 && s.blur_radius.0 == 0.0 && same_rgba(Rgba::from(s.color), want))
+        .map(|s| (logical(s.bounds), logical(s.content_mask.bounds)))
+        .filter(|(ring, clip)| !contains(*clip, *ring))
+        .collect()
+}
+
 /// Whether `inner` lies inside `outer`, with half a pixel of slack for rounding.
 #[cfg(feature = "scene-check")]
 fn contains(outer: Bounds<Pixels>, inner: Bounds<Pixels>) -> bool {

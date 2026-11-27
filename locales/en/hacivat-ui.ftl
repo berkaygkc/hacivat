@@ -5342,3 +5342,35 @@ hv-scripts-op-rename-incomplete = The rename may be half done: both names may sh
 #   $name (String) - the temporary file name, escaped for display, e.g. ".hv-rename-0123…".
 #   $folder (String) - the folder it is in, or the library's name for its top folder.
 hv-scripts-diag-interrupted-rename = A rename was interrupted: one of your scripts is in { $folder } under the temporary name { $name }, which isn't listed. Rename it back in your file manager.
+
+## inputnav-1
+
+# Command titles of the single-line text field's keys (keymap context `TextInput`, PO demo finding F1): a keymap view names them; the palette never lists them (the focused field runs them).
+hv-cmd-input-move-left = Field: move left
+hv-cmd-input-move-right = Field: move right
+hv-cmd-input-select-left = Field: extend selection left
+hv-cmd-input-select-right = Field: extend selection right
+hv-cmd-input-move-word-left = Field: move to previous word
+hv-cmd-input-move-word-right = Field: move to next word
+hv-cmd-input-select-word-left = Field: extend selection to previous word
+hv-cmd-input-select-word-right = Field: extend selection to next word
+hv-cmd-input-move-line-start = Field: move to start
+hv-cmd-input-move-line-end = Field: move to end
+hv-cmd-input-select-line-start = Field: extend selection to start
+hv-cmd-input-select-line-end = Field: extend selection to end
+hv-cmd-input-delete-backward = Field: delete backward
+hv-cmd-input-delete-forward = Field: delete forward
+hv-cmd-input-delete-word-backward = Field: delete previous word
+hv-cmd-input-delete-word-forward = Field: delete next word
+hv-cmd-input-delete-to-line-start = Field: delete to start
+hv-cmd-input-delete-to-line-end = Field: delete to end
+hv-cmd-input-select-all = Field: select all
+hv-cmd-input-copy = Field: copy
+hv-cmd-input-cut = Field: cut
+hv-cmd-input-paste = Field: paste
+# inputnav-1 fix round 1: the Windows word moves (to the next word's start) and the field's undo.
+hv-cmd-input-move-next-word-start = Field: move to next word start
+hv-cmd-input-select-next-word-start = Field: extend selection to next word start
+hv-cmd-input-delete-to-next-word-start = Field: delete to next word start
+hv-cmd-input-undo = Field: undo
+hv-cmd-input-redo = Field: redo

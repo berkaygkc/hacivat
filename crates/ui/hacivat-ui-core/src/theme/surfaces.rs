@@ -10,6 +10,26 @@ use super::{ShadowLayer, Theme};
 /// outline at 1px offset").
 pub const FOCUS_OUTLINE_PX: f32 = 1.0;
 
+// ## inputnav-1 (PO demo finding F2)
+/// How far [`focus_outline`] draws outside its element: the gap and the ring.
+pub const FOCUS_RING_EXTENT_PX: f32 = 2.0 * FOCUS_OUTLINE_PX;
+
+/// Gives a clipping container (a scroll body) room for the focus rings of the controls along
+/// its edges: the container reaches [`FOCUS_RING_EXTENT_PX`] further out on every side and
+/// pads its content back in by as much, so the content keeps its place and size, and a
+/// full-width field (or one at the body's top or bottom) draws its whole ring instead of
+/// losing a side to the clip (F2).
+///
+/// GPUI clips both axes of any container that scrolls or hides overflow on one axis. Use it on
+/// a container without padding, border or fill of its own (it sets the padding, and a border
+/// or fill would grow), placed at least the extent inside its parent's clip (a dialog card's
+/// padding, a gap).
+pub fn ring_room<E: Styled>(el: E) -> E {
+    let e = FOCUS_RING_EXTENT_PX;
+    el.m(px(-e)).p(px(e))
+}
+// ## inputnav-1
+
 fn box_shadows(layers: &[ShadowLayer]) -> Vec<BoxShadow> {
     layers
         .iter()
@@ -55,7 +75,7 @@ pub fn focus_outline<E: Styled>(mut el: E, theme: &Theme, focused: bool) -> E {
     };
     let style = el.style();
     let mut shadows = style.box_shadow.take().unwrap_or_default();
-    shadows.push(ring(c.blue.to_hsla(), 2.0 * FOCUS_OUTLINE_PX));
+    shadows.push(ring(c.blue.to_hsla(), FOCUS_RING_EXTENT_PX));
     shadows.push(ring(c.ground.to_hsla(), FOCUS_OUTLINE_PX));
     style.box_shadow = Some(shadows);
     el

@@ -1097,7 +1097,9 @@ impl Render for GotoHost {
             .w_full()
             .overflow_hidden()
             .when(choosing, |el| el.track_focus(&self.chooser_focus))
-            .on_key_down(cx.listener(Self::on_key_down))
+            // ## inputnav-1 (named exception): ↑/↓ are the list's before the query field sees
+            // them (a field moves to its start and end on them).
+            .capture_key_down(cx.listener(Self::on_key_down))
             .child(top)
             .child(
                 div().border_t_1().border_color(c.seam.to_hsla()).child(

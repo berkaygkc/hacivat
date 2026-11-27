@@ -137,7 +137,8 @@ impl Palette {
             return;
         }
         let m = &event.keystroke.modifiers;
-        if m.platform || m.control || m.alt || m.function {
+        // ## inputnav-1 fix round 1 (m5): ⇧↑/⇧↓ select in the query field.
+        if m.platform || m.control || m.alt || m.function || m.shift {
             return;
         }
         match event.keystroke.key.as_str() {
@@ -288,7 +289,9 @@ impl Render for Palette {
             .flex_col()
             .w_full()
             .overflow_hidden()
-            .on_key_down(cx.listener(Self::on_key_down))
+            // ## inputnav-1: ↑/↓ are the list's before the query field sees them (a field
+            // moves to its start and end on them).
+            .capture_key_down(cx.listener(Self::on_key_down))
             .child(div().p(px(t.spacing.sm)).child(self.input.clone()))
             .child(
                 div()

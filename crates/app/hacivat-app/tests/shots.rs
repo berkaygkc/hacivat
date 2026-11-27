@@ -74,6 +74,11 @@
 //!   grid run wider than its cell or header is clipped; a grid state must show a header;
 //! - (b) applies to visible labels: a label its container cut away whole draws no cut text.
 //!
+//! (n) (inputnav-1, PO demo finding F2) Every focus ring is whole: the blue ring of
+//! `focus_outline` lies inside its clip, so its four edges show at the same width
+//! (`named_rules::clipped_focus_rings`). A scroll body flush with a full-width field cut the
+//! ring's sides (the Attach dialog's Database field); such a body takes `theme::ring_room`.
+//!
 //! (m) (F5 follow-up) Every frame with an open menu: each row the menu shows is whole inside
 //! its rows' column (a menu taller than its room scrolls whole rows), and none lies over the
 //! status bar or past the window's bottom (`hacivat_ui::menu::MenuLayout`, recorded as the
@@ -2106,6 +2111,19 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     }
     // ## m2b-t24-shots (follow-up)
     failures.extend(shot.surface.cut_short(&name, shot.locale, &frame));
+    // ## inputnav-1 (PO demo finding F2): (n) every focus ring is whole, all four edges at the
+    // same width: no clip (a scroll body flush with a full-width field) cuts it.
+    failures.extend(
+        cx.update_window(handle, |_, window, cx| {
+            let blue = Theme::get(cx).tokens.colors.blue.to_hsla();
+            hacivat_ui_core::named_rules::clipped_focus_rings(window, blue)
+        })
+        .expect("the window is open")
+        .into_iter()
+        .map(|(ring, clip)| {
+            format!("{name}: (n) a focus ring {ring:?} is cut by its clip {clip:?}")
+        }),
+    );
     let badge = cx
         .update_window(handle, |_, window, cx| {
             let cp_fill = Theme::get(cx).tokens.colors.cp_fill.to_hsla();

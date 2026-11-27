@@ -1535,9 +1535,17 @@ fn viewer_in_a_short_room(cx: &mut TestAppContext, lang: &str) {
     let well = bounds_of(t.vcx, "value-viewer-well");
     assert!(inside(viewer, area), "{lang}: {viewer:?} in {area:?}");
     let slack = gpui::px(0.5);
+    // ## inputnav-1 fix round 1 (named exception, m3): the middle's box reaches the focus
+    // ring's extent into the footer's top padding (its content stops where it did).
+    let ring = gpui::px(hacivat_ui_core::theme::surfaces::FOCUS_RING_EXTENT_PX);
     assert!(
-        header.bottom() <= middle.top() + slack && middle.bottom() <= footer.top() + slack,
+        header.bottom() <= middle.top() + slack && middle.bottom() <= footer.top() + ring + slack,
         "{lang}: header {header:?}, middle {middle:?}, footer {footer:?}"
+    );
+    // The well keeps a whole line above the middle's content end, not above its box.
+    let middle = gpui::Bounds::new(
+        middle.origin,
+        gpui::size(middle.size.width, middle.size.height - ring),
     );
     assert!(inside(footer, viewer), "{lang}: {footer:?}");
     assert!(whole_line(well, middle), "{lang}: {well:?} in {middle:?}");

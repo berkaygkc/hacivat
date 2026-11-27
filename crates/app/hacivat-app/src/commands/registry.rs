@@ -272,6 +272,30 @@ pub fn register_workspace_actions(reg: &mut ActionRegistry) {
     }
 }
 
+// ## inputnav-1
+/// A text-field command is never run from the registry: the focused field resolves its own
+/// keys (`hacivat_ui::input::keys`).
+fn field_only(_: &App) -> bool {
+    false
+}
+
+/// Registers the text-field commands (context `TextInput`) so the keymap's rows name known
+/// commands and a keymap view can title them. They are never enabled: the palette and the
+/// menus never list them, and the dispatcher never runs them (it never sees the context).
+pub fn register_input_commands(reg: &mut ActionRegistry) {
+    use hacivat_ui::input::keys::{INPUT_COMMANDS, TEXT_INPUT_CONTEXT};
+    for (id, title_id, _) in INPUT_COMMANDS {
+        let _ = reg.register(ActionDef {
+            id,
+            title_id,
+            context: TEXT_INPUT_CONTEXT,
+            run: Rc::new(|_, _| {}),
+            enabled: field_only,
+        });
+    }
+}
+// ## inputnav-1
+
 /// Switches between the dark and the light theme and saves the choice.
 fn toggle_theme(cx: &mut App) {
     let pref = match Theme::get(cx).mode {

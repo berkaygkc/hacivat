@@ -1573,16 +1573,20 @@ fn split_isolated(s: &str) -> Option<(String, String, String)> {
 
 /// The body between the header and the footer: it scrolls when the window is short.
 pub(crate) fn scroll_body(body: Div) -> impl IntoElement {
-    div()
-        .id("confirm-body")
-        .debug_selector(|| "confirm-body".to_string())
-        .flex()
-        .flex_col()
-        .flex_shrink(1.0)
-        .min_h_0()
-        .overflow_y_scroll()
-        .child(scroll_viewport())
-        .child(body)
+    // ## inputnav-1 (named exception, F2): room for the focus rings of the fields along its
+    // edges (the history dialog's search field at its top), which its clip cut.
+    hacivat_ui_core::theme::ring_room(
+        div()
+            .id("confirm-body")
+            .debug_selector(|| "confirm-body".to_string())
+            .flex()
+            .flex_col()
+            .flex_shrink(1.0)
+            .min_h_0()
+            .overflow_y_scroll(),
+    )
+    .child(scroll_viewport())
+    .child(body)
 }
 
 /// The grouped footer (NOTES "New primitives"): the run group on the left, the stop group on

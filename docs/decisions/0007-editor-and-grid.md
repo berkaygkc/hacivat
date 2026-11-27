@@ -1535,3 +1535,65 @@ Task 21 (shots, cross-surface flows) and its fix round 1 (review I3, m6, m7).
   - Fix round 2 (m-a): the minimum counts the code's top inset (`EditorView::code_height`), and the notices above the strip scroll when the tile is short (a scroll viewport that gives up its height first), so the two lines lie inside the tile, not past its edge.
 - **Narrow form while the host draws (fix round 1, m7).** The frame that crosses the narrow line still asks for one more render (`banner_narrow_seen`), wherever the banner is drawn. A host that draws it from the editor's last width shows the right form on that render; no frame shows the old form.
 - **The ▶ over a line mark: its tooltip carries the hint.** `line_marks::on_line` returns `Covered { icon, labels, detail }`. `RunTip` lists the labels under "Run this statement", then the first mark's `detail` lines as wrapping `text_2` paragraphs. This amends the m4b-t17 fix-round-1 bullet "its tooltip lists them under 'Run this statement'": the key's hint ("Saving asks first… allow-secret") is no longer reachable only by the key's own tooltip (T17 re-review n1).
+
+## inputnav-1 — the single-line field's keys, and its whole focus ring
+
+PO demo findings F1 (a `TextInput` had only ←/→, ⌫, ⌘A/C/X/V, ↩ and ⎋) and F2 (a focused field's ring lost its left and right sides).
+
+- **Keys through the keymap, resolved by the field.** The field's keys are keymap rows in a new context, `TextInput` (`input.*` commands, 22 of them), in all three default keymaps. The focused `TextInput` resolves each key down against `hacivat_ui::input::keys::InputKeymap` in that context and runs the command itself. The app keeps `InputKeymap` equal to its active keymap (preset, layout and user file), so a user remaps a field key like any other. Without it, a field uses the host's default keymap.
+  - The workspace dispatcher sees every key first, with the workspace's context stack, which never holds `TextInput`. An outer context's chord therefore wins over a field's. `keymap_collisions.rs` (`text_field_chords_are_never_taken_by_a_live_outer_context`) keeps every `TextInput` chord out of every context that stays live while a field has the focus. Only `Editor`, `Grid`, `Explorer` and `ExplorerTree` may share them: they resolve while their own view has the focus, and their commands stand down where a find field carries their context.
+  - The app registers the `input.*` ids, so the keymap rows name known commands and a keymap view can title them (`hv-cmd-input-*`). They are never enabled: the palette and the menus never list them, and the dispatcher never runs them.
+  - No GPUI key bindings: `menus::rebuild` still owns those.
+- **The sets.**
+  - macOS: grapheme ←/→ (and Control-B/F); ⇧ to extend; ⌥ by word, ⌥⇧ to select; ⌘←/→, ↑/↓, Home/End and Control-A/E to the start and end, each with ⇧ to select; ⌫, Control-H and ⇧⌫ back; Delete and Control-D forward; ⌥⌫/⌥Delete by word; ⌘⌫ to the start; Control-K to the end; ⌘A/C/X/V.
+  - Windows and Linux: ←/→ and ⇧; Ctrl by word and Ctrl+⇧; Home/End and ⇧; Ctrl+⌫ and Ctrl+Delete by word; Delete; Ctrl+A/C/X/V. ↑/↓ are not bound there: they stay with the field's parents.
+  - With a selection, ←/→ collapse it to its start or end, and a word move starts from the edge it moves towards.
+- **Words.** A word move goes over white space and punctuation, then stops at the end (or start) of the next Unicode word (UAX #29 segments from `unicode-segmentation`; a segment is a word when it holds anything but white space, punctuation or controls, so an emoji is a word). Boundaries never split a grapheme cluster: Turkish `İ`, `i̇`, ZWJ sequences, flags and skin tones stay whole. As UAX #29 says, `.` and `'` between letters join them (`İstanbul'da`, `müşteri.ad`, `3.14` are one word each).
+- **Selection direction.** `ImeState` keeps the selection's head: a ⇧ move or a drag moves the head and keeps the anchor. The platform is told the direction (`UTF16Selection::reversed`) and the new selection after every move (`notify_text_selection_changed`). The caret that scrolls into view is the head.
+- **Masked, read-only, IME.** A masked field treats its whole value as one word for word moves, selections and deletes, as macOS secure fields do, so word structure is never revealed. Its copy and cut stay refused, and a double click selects it all. A read-only field moves and selects but never edits; copy works. While composing, every key stays with the IME.
+- **Mouse.** A press places the caret at the nearest grapheme edge (a hit inside a cluster lands on its edge). ⇧ extends; a drag extends from the press and follows the pointer outside the field until the button comes up (window-level mouse listeners while dragging). A double click selects the word segment (or the run of space or punctuation) under the pointer, and a triple click selects all.
+- **Fields that filter a list.** A palette or Go to script field took ↑/↓ for its list by bubbling. On macOS the field now takes ↑/↓ itself, so those lists take them in the capture phase (`Palette`, `GotoView`), as the history dialog and the explorer filter already did.
+- **F2: the ring.** `focus_outline` draws the ring as hard drop shadows reaching `FOCUS_RING_EXTENT_PX` (2 px) outside the element. GPUI clips both axes of any container that scrolls or hides overflow on one axis (`Style::overflow_mask`). So a scroll body whose full-width field touches its sides cut the ring's left and right edges, while the gaps above and below kept the top and bottom. The Attach dialog's body was one.
+  - `theme::ring_room` gives such a container the extent on every side (negative margin, equal padding), so its content keeps its place and size. It is for containers with no padding, border or fill of their own.
+  - Shots check (n) (`named_rules::clipped_focus_rings`, under `scene-check`) fails any frame in which a focus ring's shadow is not whole inside its clip, so all four edges show at the same width. Its first full run (5,772 shots) found the rest: the confirmation `scroll_body` (the history dialog's search field at its top), the keyboard-interactive prompt's body, the Go to row popover's body, and the value viewer's middle (its well at the bottom). The first three take `ring_room`. The viewer is placed from reckoned rows (`Rows`, pinned by `results_views.rs`), so its middle keeps a 2 px padding at its bottom instead (`WELL_RING_ROOM`), and its minimum and the rows' total count it; the popover is 2 px taller.
+  - The Go to row field drew a second border and ring inside its own well: its `TextInput` is now frameless, as the find bars' are, and the well takes the mock's `.in` padding (0 6 0 9).
+- **Fix round 1 (review I1–I3, m1–m10).** It amends the bullets above where they differ.
+  - **Words: ruling R-IN-1, all platforms.**
+    - Segmentation starts from UAX #29, then splits at `.` `:` `·` and their variants (U+0387, U+2024, U+FE13, U+FE52, U+FE55, U+FF0E, U+FF1A) when they sit between letters, so `schema.table`, `public.orders.id`, `müşteri.ad` and `a:b` are separate words, as in Cocoa fields and DB tools.
+    - The apostrophe joins (U+0027, U+2019: `İstanbul'da`, `don’t`), the digit joins (`3.14`, `1,000`, `v1.2`) and `_` stay.
+    - "Between letters" is decided by the nearest letter or digit on each side, so a combining mark before the dot changes nothing.
+    - The split segments drive word moves, word deletes and the double click (`ime::word_segments`).
+    - The "As UAX #29 says…" sentence of **Words** above is superseded.
+  - **Windows word moves right (I2).**
+    - Windows Ctrl+→, Ctrl+⇧+→ and Ctrl+Delete go to the start of the next word, deleting the white space before it: `foo bar` from 0 gives 4, as Notepad, the Edit and RichEdit controls, WinUI and Chromium on Windows do.
+    - The rule is: past the segment that holds the caret (a word, or a punctuation run), then past white space only (`ime::next_word_start`).
+    - These are keymap commands of their own (`input.move_next_word_start`, `input.select_next_word_start`, `input.delete_to_next_word_start`), so they can be remapped.
+    - Linux (GTK) and macOS keep the end of the word (3).
+  - **Double click (I3, m7).**
+    - The word under the pointer is the one whose glyph holds it, not the one at the nearest caret edge: the right half of a word's last letter selects that word.
+    - Past the end, a double click selects the last word, not the white space after it.
+    - A drag after a double click extends by whole words and keeps the first word.
+  - **Clusters (m6).** A move or delete that starts inside a grapheme cluster (an offset the platform, the IME or assistive technology set) first goes to the cluster's start. Grapheme steps use the whole text's clusters, so no move or delete ever splits a flag or a ZWJ sequence.
+  - **More native chords (m4).**
+    - macOS: ⌘↑/⌘↓, ⌥↑/⌥↓ and Control-P/N to the start and end, ⌘⇧↑/⌘⇧↓ and ⌥⇧↑/⌥⇧↓ to select to them.
+    - Windows and Linux: Ctrl+Home/End (and with ⇧), ⇧Delete (cut), Ctrl+Insert (copy), ⇧Insert (paste). The masked rules hold on every chord.
+    - Not supported: Control-T, -Y and -O (transpose, yank, open line).
+    - On macOS, Home and End move the caret (a deliberate deviation the PO asked for; Cocoa scrolls without moving it) (m10).
+  - **Undo (m4).**
+    - The commands are `input.undo` (⌘Z; Ctrl+Z) and `input.redo` (⇧⌘Z; Ctrl+Y and Ctrl+⇧Z).
+    - A run of typing, or of deleting in one direction, from where the last edit left the caret is one step. A caret move or a click ends the run. Paste, cut, word and line deletes, and an IME commit (the whole composition) are steps of their own.
+    - At most 100 steps. A value the app sets (`set_value`) clears the history.
+    - A masked field records nothing, so no secret outlives an edit in its history. Read-only fields refuse undo.
+    - The macOS Edit menu keeps ⌘Z on Undo: its key equivalents are GPUI bindings under a context no element has (`menus::rebuild`), and a field that handles a key stops it before the native menu sees it.
+  - **Lists and fields.**
+    - The palette leaves ⇧↑/⇧↓ to its field (m5).
+    - The SSH dialog's jump rows take ⌥↑/⌥↓ in the capture phase, since a macOS field now goes to its start or end on them.
+  - **F2 follow-ups.**
+    - The Go to row well no longer shrinks in a short room (`flex_none`; the body scrolls), and a press on its padding reaches the field (`TextInput::press`, which stops the presses it handles) (m2).
+    - The value viewer's middle reaches the ring's extent into the footer's top padding and pads its content back in (`mb(-R)`, `pb(R)`, minimum + R). Nothing moves: the well keeps its height in a short room, the popover keeps its size, and the rows' total is unchanged. The "2 px taller" note above is superseded (m3).
+  - **Precedence, documented (m8).**
+    - A live outer context's row on a field chord wins, because the dispatcher sees every key first. CI keeps the shipped keymaps free of such rows.
+    - A user keymap row can still shadow a field key. Then the outer command runs and the field does not move; `tests/inputnav.rs` pins this. A load-time warning for such user rows is not added.
+  - **Not covered.**
+    - Check (n) sees only the fields some shot focuses (m9).
+    - The accessibility tree carries no text selection, so VoiceOver and Narrator do not announce a selection. This is carried to M9 (m10).

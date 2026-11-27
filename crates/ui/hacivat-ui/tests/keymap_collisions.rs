@@ -230,3 +230,65 @@ fn azerty_digit_without_overlay_is_unreachable() {
         vec!["alt-2".to_string()]
     );
 }
+
+// ## inputnav-1
+/// The contexts of focused views that are not text fields (the editor, the result grid, the
+/// explorer tree): their bindings resolve only while their own view has the focus, or, where a
+/// find field carries their context (the editor's and the grid's find bars), they stand down
+/// for the field (`find_bar::ROUTED`, the grid's disabled commands). A `TextInput` chord may
+/// also be bound there.
+const BESIDE_FIELDS: [&str; 4] = ["Editor", "Grid", "Explorer", "ExplorerTree"];
+
+/// `TextInput` chords also bound in a context that stays live while a text field has the
+/// focus (the workspace, a tab, a dialog or palette layer): the dispatcher sees the key first,
+/// so the field would never get it. `(platform, chord, other command, other context)`.
+fn shadowed_field_chords(km: &Keymap) -> Vec<(String, String, String)> {
+    use hacivat_ui::input::keys::TEXT_INPUT_CONTEXT;
+    let field: Vec<_> = km
+        .bindings()
+        .iter()
+        .filter(|b| b.context == TEXT_INPUT_CONTEXT)
+        .collect();
+    km.bindings()
+        .iter()
+        .filter(|b| b.context != TEXT_INPUT_CONTEXT && !BESIDE_FIELDS.contains(&b.context.as_str()))
+        .filter(|b| field.iter().any(|f| f.chord[0] == b.chord[0]))
+        .map(|b| {
+            (
+                hacivat_ui_core::keymap::chord_string(&b.chord),
+                b.command.clone(),
+                b.context.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn text_field_chords_are_never_taken_by_a_live_outer_context() {
+    for preset in PRESETS {
+        for p in ALL_PLATFORMS {
+            let km = load(p, preset, None).0;
+            assert!(
+                km.bindings().iter().any(|b| b.context == "TextInput"),
+                "{preset} {p:?} has the field rows"
+            );
+            assert_eq!(shadowed_field_chords(&km), Vec::new(), "{preset} {p:?}");
+        }
+    }
+}
+
+#[test]
+fn a_workspace_chord_over_a_field_key_is_caught() {
+    let km = with_extra(KeymapPlatform::MacOs, "alt-left");
+    assert_eq!(
+        shadowed_field_chords(&km),
+        vec![(
+            "alt-left".to_string(),
+            "test.extra".to_string(),
+            "Workspace".to_string()
+        )]
+    );
+    // A two-key chord that starts with a field key shadows it too (the first press waits).
+    let km = with_extra(KeymapPlatform::Windows, "home x");
+    assert_eq!(shadowed_field_chords(&km).len(), 1);
+}

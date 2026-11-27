@@ -5230,3 +5230,59 @@ hv-scripts-op-rename-incomplete = Yeniden adlandırma yarım kalmış olabilir: 
 #   $folder (String) - the folder it is in, or the library's name for its top folder.
 # Review: PO
 hv-scripts-diag-interrupted-rename = Bir yeniden adlandırma yarıda kaldı: betiklerinizden biri { $folder } içinde, listelenmeyen geçici { $name } adıyla duruyor. Dosya yöneticinizde eski adına geri çevirin.
+
+## inputnav-1
+# Review: PO
+hv-cmd-input-move-left = Alan: sola git
+# Review: PO
+hv-cmd-input-move-right = Alan: sağa git
+# Review: PO
+hv-cmd-input-select-left = Alan: seçimi sola genişlet
+# Review: PO
+hv-cmd-input-select-right = Alan: seçimi sağa genişlet
+# Review: PO
+hv-cmd-input-move-word-left = Alan: önceki sözcüğe git
+# Review: PO
+hv-cmd-input-move-word-right = Alan: sonraki sözcüğe git
+# Review: PO
+hv-cmd-input-select-word-left = Alan: seçimi önceki sözcüğe genişlet
+# Review: PO
+hv-cmd-input-select-word-right = Alan: seçimi sonraki sözcüğe genişlet
+# Review: PO
+hv-cmd-input-move-line-start = Alan: başa git
+# Review: PO
+hv-cmd-input-move-line-end = Alan: sona git
+# Review: PO
+hv-cmd-input-select-line-start = Alan: seçimi başa genişlet
+# Review: PO
+hv-cmd-input-select-line-end = Alan: seçimi sona genişlet
+# Review: PO
+hv-cmd-input-delete-backward = Alan: geriye sil
+# Review: PO
+hv-cmd-input-delete-forward = Alan: ileriye sil
+# Review: PO
+hv-cmd-input-delete-word-backward = Alan: önceki sözcüğü sil
+# Review: PO
+hv-cmd-input-delete-word-forward = Alan: sonraki sözcüğü sil
+# Review: PO
+hv-cmd-input-delete-to-line-start = Alan: başa kadar sil
+# Review: PO
+hv-cmd-input-delete-to-line-end = Alan: sona kadar sil
+# Review: PO
+hv-cmd-input-select-all = Alan: tümünü seç
+# Review: PO
+hv-cmd-input-copy = Alan: kopyala
+# Review: PO
+hv-cmd-input-cut = Alan: kes
+# Review: PO
+hv-cmd-input-paste = Alan: yapıştır
+# Review: PO
+hv-cmd-input-move-next-word-start = Alan: sonraki sözcüğün başına git
+# Review: PO
+hv-cmd-input-select-next-word-start = Alan: seçimi sonraki sözcüğün başına genişlet
+# Review: PO
+hv-cmd-input-delete-to-next-word-start = Alan: sonraki sözcüğün başına kadar sil
+# Review: PO
+hv-cmd-input-undo = Alan: geri al
+# Review: PO
+hv-cmd-input-redo = Alan: yinele
