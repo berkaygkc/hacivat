@@ -44,12 +44,19 @@ pub enum InputCommand {
     Copy,
     Cut,
     Paste,
+    // ## inputnav-1 fix round 1 (I2): Windows word moves end at the next word's start.
+    MoveNextWordStart,
+    SelectNextWordStart,
+    DeleteToNextWordStart,
+    // ## inputnav-1 fix round 1 (m4)
+    Undo,
+    Redo,
 }
 
 /// Every text-field command: its keymap ID, its title's Fluent ID (`hv-cmd-<id with . and _ as
 /// ->`, R5) and what it does. The app registers each ID so the keymap's rows name known
 /// commands; the field runs them, never the palette.
-pub const INPUT_COMMANDS: [(&str, &str, InputCommand); 22] = [
+pub const INPUT_COMMANDS: [(&str, &str, InputCommand); 27] = [
     (
         "input.move_left",
         "hv-cmd-input-move-left",
@@ -148,6 +155,24 @@ pub const INPUT_COMMANDS: [(&str, &str, InputCommand); 22] = [
     ("input.copy", "hv-cmd-input-copy", InputCommand::Copy),
     ("input.cut", "hv-cmd-input-cut", InputCommand::Cut),
     ("input.paste", "hv-cmd-input-paste", InputCommand::Paste),
+    // ## inputnav-1 fix round 1
+    (
+        "input.move_next_word_start",
+        "hv-cmd-input-move-next-word-start",
+        InputCommand::MoveNextWordStart,
+    ),
+    (
+        "input.select_next_word_start",
+        "hv-cmd-input-select-next-word-start",
+        InputCommand::SelectNextWordStart,
+    ),
+    (
+        "input.delete_to_next_word_start",
+        "hv-cmd-input-delete-to-next-word-start",
+        InputCommand::DeleteToNextWordStart,
+    ),
+    ("input.undo", "hv-cmd-input-undo", InputCommand::Undo),
+    ("input.redo", "hv-cmd-input-redo", InputCommand::Redo),
 ];
 
 impl InputCommand {
@@ -171,6 +196,9 @@ impl InputCommand {
                 | Self::DeleteToLineEnd
                 | Self::Cut
                 | Self::Paste
+                | Self::DeleteToNextWordStart
+                | Self::Undo
+                | Self::Redo
         )
     }
 }

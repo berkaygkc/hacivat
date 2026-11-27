@@ -102,8 +102,8 @@ const NOTICE_GAP: f32 = 6.0;
 const SHORT_PAD: f32 = 6.0;
 const SHORT_WELL_GAP: f32 = 4.0;
 // ## inputnav-1 (named exception, F2)
-/// At the bottom of the scrolling middle: the well's focus ring reaches this far below the
-/// well, and the middle's clip cut it there when the well came last.
+/// At the bottom of the scrolling middle: the focus ring of what comes last (the well, Re-run)
+/// reaches this far below it, and the middle's clip cut it there.
 const WELL_RING_ROOM: f32 = hacivat_ui_core::theme::surfaces::FOCUS_RING_EXTENT_PX;
 
 /// The heights of the popover's rows in one layout (fix round 1, I1, m10).
@@ -164,8 +164,6 @@ impl Rows {
             + if has_control { self.control } else { 0.0 }
             + self.well_min
             + if notice { self.notice } else { 0.0 }
-            // ## inputnav-1 (named exception, F2): the middle's room for the well's ring.
-            + WELL_RING_ROOM
             + self.footer
     }
 }
@@ -1477,10 +1475,13 @@ impl Render for ValueViewer {
             .flex()
             .flex_col()
             .flex_shrink(1.0)
-            // ## inputnav-1 (named exception, F2): room at the middle's bottom for the well's
-            // focus ring, which the middle's clip cut there; the minimum and the rows'
-            // total count it.
+            // ## inputnav-1 (named exception, F2; fix round 1, m3): room at the middle's bottom
+            // for the focus ring of what comes last (the well, Re-run), which the middle's clip
+            // cut there. The middle reaches that far into the footer's top padding and pads its
+            // content back in, so nothing moves: the well keeps its height in a short room and
+            // the popover keeps its size.
             .min_h(px(rows.well_min + WELL_RING_ROOM))
+            .mb(px(-WELL_RING_ROOM))
             .pb(px(WELL_RING_ROOM))
             .overflow_y_scroll()
             .track_scroll(&self.middle_scroll)

@@ -959,3 +959,68 @@ context = "TextInput"
 chord = "cmd-v"
 command = "input.paste"
 context = "TextInput"
+
+# inputnav-1 fix round 1 (m4): ⌘↑/⌘↓, ⌥↑/⌥↓ and Control-P/N go to the start and end of a
+# single-line field (with ⇧ they select); ⌘Z and ⇧⌘Z undo and redo in the field (the Edit
+# menu gives the editor's ⌘Z no key equivalent, so the focused field gets it). Control-T, -Y
+# and -O (transpose, yank, open line) are not supported.
+
+[[binding]]
+chord = "cmd-up"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-down"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "alt-up"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "alt-down"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-p"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-n"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-shift-up"
+command = "input.select_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-shift-down"
+command = "input.select_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "alt-shift-up"
+command = "input.select_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "alt-shift-down"
+command = "input.select_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-z"
+command = "input.undo"
+context = "TextInput"
+
+[[binding]]
+chord = "cmd-shift-z"
+command = "input.redo"
+context = "TextInput"

@@ -2603,7 +2603,9 @@ fn render_content(
         list = list.child(
             div()
                 .debug_selector(move || selector)
-                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                // ## inputnav-1 fix round 1 (named exception): ⌥↑/⌥↓ move the jump before its
+                // host field sees them (a macOS field goes to its start or end on them).
+                .capture_key_down(move |event: &KeyDownEvent, window, cx| {
                     let moved = keys
                         .update(cx, |s, cx| s.row_key(id, event, window, cx))
                         .unwrap_or(false);

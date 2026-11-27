@@ -104,7 +104,13 @@ fn state(vcx: &mut VisualTestContext, input: &Entity<TextInput>) -> (String, Ran
 
 /// `(command, value after, selection after, reversed)` from "foo bar-baz" with the caret after
 /// "foo b" (byte 5).
-const FROM_FOO_B: [(&str, &str, Range<usize>, bool); 18] = [
+const FROM_FOO_B: [(&str, &str, Range<usize>, bool); 21] = [
+    // ## inputnav-1 fix round 1 (I2): Windows' word moves (here `-` follows `bar`, so they
+    // stop where the word end does; `the_windows_word_move_lands_on_the_next_word` tells the
+    // two rules apart).
+    ("input.move_next_word_start", "foo bar-baz", 7..7, false),
+    ("input.select_next_word_start", "foo bar-baz", 5..7, false),
+    ("input.delete_to_next_word_start", "foo b-baz", 5..5, false),
     ("input.move_left", "foo bar-baz", 4..4, false),
     ("input.move_right", "foo bar-baz", 6..6, false),
     ("input.select_left", "foo bar-baz", 4..5, true),
@@ -125,16 +131,30 @@ const FROM_FOO_B: [(&str, &str, Range<usize>, bool); 18] = [
     ("input.delete_to_line_end", "foo b", 5..5, false),
 ];
 
+/// The commands a platform binds no key to: Windows and Linux fields have no line deletes;
+/// Windows word moves right end at the next word's start, the others at the word's end.
+fn unbound(platform: KeymapPlatform, command: &str) -> bool {
+    let line_delete = command.starts_with("input.delete_to_line");
+    let word_end = matches!(
+        command,
+        "input.move_word_right" | "input.select_word_right" | "input.delete_word_forward"
+    );
+    let next_start = command.contains("next_word_start");
+    match platform {
+        KeymapPlatform::MacOs => next_start,
+        KeymapPlatform::Windows => line_delete || word_end,
+        KeymapPlatform::Linux => line_delete || next_start,
+    }
+}
+
 fn every_chord_does_what_its_command_says(cx: &mut TestAppContext, platform: KeymapPlatform) {
     let (input, vcx) = field(cx, platform);
     let mut pressed = 0;
     for (command, text, sel, reversed) in FROM_FOO_B {
         let chords = chords_of(platform, command);
-        // Windows and Linux fields have no line-delete keys; every other command has one.
-        let line_delete = command.starts_with("input.delete_to_line");
         assert_eq!(
             chords.is_empty(),
-            line_delete && platform != KeymapPlatform::MacOs,
+            unbound(platform, command),
             "{platform:?} binds {command}: {chords:?}"
         );
         for chord in chords {
@@ -197,20 +217,44 @@ fn the_keymaps_carry_the_native_sets() {
         ("input.select_word_right", &["alt-shift-right"]),
         (
             "input.move_line_start",
-            &["cmd-left", "up", "home", "ctrl-a"],
+            &[
+                "cmd-left", "up", "home", "ctrl-a", "cmd-up", "alt-up", "ctrl-p",
+            ],
         ),
         (
             "input.move_line_end",
-            &["cmd-right", "down", "end", "ctrl-e"],
+            &[
+                "cmd-right",
+                "down",
+                "end",
+                "ctrl-e",
+                "cmd-down",
+                "alt-down",
+                "ctrl-n",
+            ],
         ),
         (
             "input.select_line_start",
-            &["cmd-shift-left", "shift-up", "shift-home"],
+            &[
+                "cmd-shift-left",
+                "shift-up",
+                "shift-home",
+                "cmd-shift-up",
+                "alt-shift-up",
+            ],
         ),
         (
             "input.select_line_end",
-            &["cmd-shift-right", "shift-down", "shift-end"],
+            &[
+                "cmd-shift-right",
+                "shift-down",
+                "shift-end",
+                "cmd-shift-down",
+                "alt-shift-down",
+            ],
         ),
+        ("input.undo", &["cmd-z"]),
+        ("input.redo", &["cmd-shift-z"]),
         ("input.delete_backward", &["backspace", "ctrl-h"]),
         ("input.delete_forward", &["delete", "ctrl-d"]),
         ("input.delete_word_backward", &["alt-backspace"]),
@@ -231,23 +275,49 @@ fn the_keymaps_carry_the_native_sets() {
             ("input.select_left", "shift-left"),
             ("input.select_right", "shift-right"),
             ("input.move_word_left", "ctrl-left"),
-            ("input.move_word_right", "ctrl-right"),
             ("input.select_word_left", "ctrl-shift-left"),
-            ("input.select_word_right", "ctrl-shift-right"),
             ("input.move_line_start", "home"),
             ("input.move_line_end", "end"),
             ("input.select_line_start", "shift-home"),
             ("input.select_line_end", "shift-end"),
             ("input.delete_forward", "delete"),
             ("input.delete_word_backward", "ctrl-backspace"),
-            ("input.delete_word_forward", "ctrl-delete"),
             ("input.select_all", "ctrl-a"),
             ("input.copy", "ctrl-c"),
             ("input.cut", "ctrl-x"),
             ("input.paste", "ctrl-v"),
+            // ## inputnav-1 fix round 1 (m4)
+            ("input.move_line_start", "ctrl-home"),
+            ("input.move_line_end", "ctrl-end"),
+            ("input.select_line_start", "ctrl-shift-home"),
+            ("input.select_line_end", "ctrl-shift-end"),
+            ("input.cut", "shift-delete"),
+            ("input.copy", "ctrl-insert"),
+            ("input.paste", "shift-insert"),
+            ("input.undo", "ctrl-z"),
+            ("input.redo", "ctrl-y"),
+            ("input.redo", "ctrl-shift-z"),
         ] {
             has(p, command, chord);
         }
+        // ## inputnav-1 fix round 1 (I2): Ctrl+→ and Ctrl+Delete go to the next word's start
+        // on Windows, to the word's end on Linux (GTK).
+        let (right, select, delete) = if p == KeymapPlatform::Windows {
+            (
+                "input.move_next_word_start",
+                "input.select_next_word_start",
+                "input.delete_to_next_word_start",
+            )
+        } else {
+            (
+                "input.move_word_right",
+                "input.select_word_right",
+                "input.delete_word_forward",
+            )
+        };
+        has(p, right, "ctrl-right");
+        has(p, select, "ctrl-shift-right");
+        has(p, delete, "ctrl-delete");
         // ↑/↓ stay with the field's parents (a list it filters, a form).
         assert!(
             chords_of(p, "input.move_line_start")
@@ -273,7 +343,7 @@ fn text_field_rows_live_in_their_own_context() {
             }
         }
     }
-    assert_eq!(INPUT_COMMANDS.len(), 22);
+    assert_eq!(INPUT_COMMANDS.len(), 27);
 }
 
 #[gpui::test]
@@ -332,12 +402,26 @@ fn clipboard_chords_follow_the_platform_keymap(cx: &mut TestAppContext) {
     }
 }
 
+/// The first chord of `command` on `platform`; on Windows the word moves right are the
+/// next-word-start commands (I2).
+fn first_chord(platform: KeymapPlatform, command: &str) -> String {
+    let command = match (platform, command) {
+        (KeymapPlatform::Windows, "input.move_word_right") => "input.move_next_word_start",
+        (KeymapPlatform::Windows, "input.select_word_right") => "input.select_next_word_start",
+        (KeymapPlatform::Windows, "input.delete_word_forward") => {
+            "input.delete_to_next_word_start"
+        }
+        (_, command) => command,
+    };
+    chords_of(platform, command)[0].clone()
+}
+
 #[gpui::test]
 fn masked_fields_treat_the_value_as_one_word_and_never_copy(cx: &mut TestAppContext) {
     for platform in PLATFORMS {
         let (input, vcx) = field(cx, platform);
         input.update(vcx, |i, _| i.set_masked(true));
-        let key = |c: &str| chords_of(platform, c)[0].clone();
+        let key = |c: &str| first_chord(platform, c);
         let value = "correct horse.battery";
         reset(vcx, &input, value, 9..9);
         press(vcx, &key("input.move_word_left"));
@@ -352,10 +436,20 @@ fn masked_fields_treat_the_value_as_one_word_and_never_copy(cx: &mut TestAppCont
         // Copy and cut stay refused, with a selection.
         set_clipboard(vcx, "sentinel");
         press(vcx, &key("input.select_all"));
-        press(vcx, &key("input.copy"));
-        press(vcx, &key("input.cut"));
+        // Every copy and cut chord (fix round 1, m4: ⇧Delete, Ctrl+Insert too).
+        for command in ["input.copy", "input.cut"] {
+            for chord in chords_of(platform, command) {
+                press(vcx, &chord);
+            }
+        }
         assert_eq!(clipboard(vcx).as_deref(), Some("sentinel"));
         assert_eq!(state(vcx, &input).0, value);
+        // ## inputnav-1 fix round 1 (m4): a masked field keeps no undo history.
+        vcx.simulate_input("x");
+        assert_eq!(input.read_with(vcx, |i, _| i.history_depth()), (0, 0));
+        press(vcx, &key("input.undo"));
+        assert_eq!(state(vcx, &input).0, "x", "{platform:?}");
+        reset(vcx, &input, value, 0..0);
         // Word deletes go to the edge.
         reset(vcx, &input, value, 9..9);
         press(vcx, &key("input.delete_word_forward"));
@@ -659,6 +753,211 @@ fn double_click_selects_a_word_and_triple_click_all(cx: &mut TestAppContext) {
     click(vcx, at, 1, false);
     click(vcx, at, 2, false);
     assert_eq!(state(vcx, &input).1, 0.."correct horse".len());
+}
+
+// ---- inputnav-1 fix round 1 ---------------------------------------------------------------------
+
+/// The window point `share` of the way across the grapheme at UTF-16 offsets `from..to`.
+fn inside_glyph(
+    vcx: &mut VisualTestContext,
+    input: &Entity<TextInput>,
+    from: usize,
+    to: usize,
+    share: f32,
+) -> Point<Pixels> {
+    let a = x_at(vcx, input, from);
+    let b = x_at(vcx, input, to);
+    point(a.x + (b.x - a.x) * share, a.y)
+}
+
+/// I3: a double click on the right half of a word's last letter selects that word, not the
+/// space or comma after it.
+#[gpui::test]
+fn double_click_on_the_right_half_of_the_last_letter_selects_the_word(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::MacOs);
+    reset(vcx, &input, "foo bar", 7..7);
+    let at = inside_glyph(vcx, &input, 2, 3, 0.75);
+    click(vcx, at, 1, false);
+    click(vcx, at, 2, false);
+    assert_eq!(state(vcx, &input).1, 0..3);
+    // `müşteri, ad`: the right half of `i` (UTF-16 6..7).
+    input.update(vcx, |i, cx| {
+        i.set_value("müşteri, ad");
+        cx.notify();
+    });
+    let at = inside_glyph(vcx, &input, 6, 7, 0.75);
+    click(vcx, at, 1, false);
+    click(vcx, at, 2, false);
+    assert_eq!(state(vcx, &input).1, 0.."müşteri".len());
+    // R-IN-1 applies to the double click too: `schema.table` gives `table`.
+    input.update(vcx, |i, cx| {
+        i.set_value("schema.table");
+        cx.notify();
+    });
+    let at = inside_glyph(vcx, &input, 8, 9, 0.5);
+    click(vcx, at, 1, false);
+    click(vcx, at, 2, false);
+    assert_eq!(state(vcx, &input).1, 7..12);
+}
+
+/// m7: past the end, a double click selects the last word, not the spaces after it.
+#[gpui::test]
+fn double_click_past_the_end_selects_the_last_word(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::Linux);
+    reset(vcx, &input, "foo bar  ", 0..0);
+    let end = x_at(vcx, &input, 9);
+    let past = point(end.x + px(40.0), end.y);
+    click(vcx, past, 1, false);
+    click(vcx, past, 2, false);
+    assert_eq!(state(vcx, &input).1, 4..7);
+}
+
+/// m7: a drag after a double click extends by whole words, keeping the first word.
+#[gpui::test]
+fn a_drag_after_a_double_click_extends_by_words(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::MacOs);
+    reset(vcx, &input, "foo bar baz", 0..0);
+    let in_bar = inside_glyph(vcx, &input, 5, 6, 0.5);
+    click(vcx, in_bar, 1, false);
+    mouse_down(vcx, in_bar, 2, false);
+    assert_eq!(state(vcx, &input).1, 4..7);
+    fn drag(vcx: &mut VisualTestContext, to: Point<Pixels>) {
+        vcx.simulate_event(MouseMoveEvent {
+            position: to,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        vcx.run_until_parked();
+    }
+    let to = inside_glyph(vcx, &input, 9, 10, 0.3);
+    drag(vcx, to);
+    assert_eq!((state(vcx, &input).1, state(vcx, &input).2), (4..11, false));
+    let to = inside_glyph(vcx, &input, 1, 2, 0.5);
+    drag(vcx, to);
+    assert_eq!((state(vcx, &input).1, state(vcx, &input).2), (0..7, true));
+    mouse_up(vcx, in_bar, 2);
+}
+
+/// I2: Ctrl+→ and Ctrl+Delete from `foo bar` at 0 land on `bar` (4) on Windows, as native
+/// fields do; Linux (GTK) and macOS stop at the end of `foo` (3).
+#[gpui::test]
+fn the_windows_word_move_lands_on_the_next_word(cx: &mut TestAppContext) {
+    for (platform, right, delete, caret, left) in [
+        (
+            KeymapPlatform::Windows,
+            "input.move_next_word_start",
+            "input.delete_to_next_word_start",
+            4,
+            "bar",
+        ),
+        (
+            KeymapPlatform::Linux,
+            "input.move_word_right",
+            "input.delete_word_forward",
+            3,
+            " bar",
+        ),
+        (
+            KeymapPlatform::MacOs,
+            "input.move_word_right",
+            "input.delete_word_forward",
+            3,
+            " bar",
+        ),
+    ] {
+        let (input, vcx) = field(cx, platform);
+        reset(vcx, &input, "foo bar", 0..0);
+        press(vcx, &chords_of(platform, right)[0]);
+        assert_eq!(state(vcx, &input).1, caret..caret, "{platform:?}");
+        reset(vcx, &input, "foo bar", 0..0);
+        press(vcx, &chords_of(platform, delete)[0]);
+        assert_eq!(state(vcx, &input).0, left, "{platform:?}");
+    }
+}
+
+/// m4: undo and redo in the field, per platform keymap: a typing run is one step, a caret move
+/// ends it, and every undo and redo chord works.
+#[gpui::test]
+fn undo_and_redo_follow_typing_runs(cx: &mut TestAppContext) {
+    for platform in PLATFORMS {
+        let (input, vcx) = field(cx, platform);
+        let key = |c: &str| chords_of(platform, c);
+        vcx.simulate_input("abc");
+        press(vcx, &key("input.move_left")[0]);
+        vcx.simulate_input("ş");
+        assert_eq!(state(vcx, &input).0, "abşc");
+        press(vcx, &key("input.undo")[0]);
+        assert_eq!(
+            state(vcx, &input),
+            ("abc".into(), 2..2, false),
+            "{platform:?}"
+        );
+        press(vcx, &key("input.undo")[0]);
+        assert_eq!(state(vcx, &input).0, "", "{platform:?}");
+        for chord in key("input.redo") {
+            press(vcx, &chord);
+        }
+        // Two redo chords (Ctrl+Y and Ctrl+⇧Z) or one (⇧⌘Z): every step that was undone
+        // comes back once there are enough presses.
+        let want = if key("input.redo").len() >= 2 {
+            "abşc"
+        } else {
+            "abc"
+        };
+        assert_eq!(state(vcx, &input).0, want, "{platform:?}");
+        // A delete run is one step too.
+        press(vcx, &key("input.move_line_end")[0]);
+        press(vcx, &key("input.delete_backward")[0]);
+        press(vcx, &key("input.delete_backward")[0]);
+        press(vcx, &key("input.undo")[0]);
+        assert_eq!(state(vcx, &input).0, want, "{platform:?}");
+        // A value the app sets starts a new history.
+        input.update(vcx, |i, cx| {
+            i.set_value("yeni");
+            cx.notify();
+        });
+        assert_eq!(input.read_with(vcx, |i, _| i.history_depth()), (0, 0));
+    }
+}
+
+/// m4: an IME composition is one undo step, recorded when it commits.
+#[gpui::test]
+fn a_committed_composition_is_one_undo_step(cx: &mut TestAppContext) {
+    let (input, vcx) = field(cx, KeymapPlatform::MacOs);
+    vcx.simulate_input("ab ");
+    input.update_in(vcx, |i, w, cx| {
+        i.replace_and_mark_text_in_range(None, "k", None, w, cx);
+        i.replace_and_mark_text_in_range(None, "か", None, w, cx);
+        i.replace_and_mark_text_in_range(None, "かん", None, w, cx);
+        i.replace_text_in_range(None, "漢", w, cx);
+    });
+    assert_eq!(state(vcx, &input).0, "ab 漢");
+    press(vcx, &chords_of(KeymapPlatform::MacOs, "input.undo")[0]);
+    assert_eq!(state(vcx, &input).0, "ab ");
+}
+
+/// m4: the Windows and Linux clipboard keys of old (⇧Delete, Ctrl+Insert, ⇧Insert).
+#[gpui::test]
+fn the_old_clipboard_keys_work_on_windows_and_linux(cx: &mut TestAppContext) {
+    for platform in [KeymapPlatform::Windows, KeymapPlatform::Linux] {
+        let (input, vcx) = field(cx, platform);
+        let old = |command: &str| {
+            chords_of(platform, command)
+                .into_iter()
+                .find(|c| c.contains("insert") || c.contains("delete"))
+                .unwrap_or_else(|| panic!("{platform:?} {command}"))
+        };
+        reset(vcx, &input, "şehir", 0..0);
+        press(vcx, &chords_of(platform, "input.select_all")[0]);
+        press(vcx, &old("input.copy"));
+        assert_eq!(clipboard(vcx).as_deref(), Some("şehir"));
+        press(vcx, &old("input.cut"));
+        assert_eq!(state(vcx, &input).0, "");
+        let paste = old("input.paste");
+        press(vcx, &paste);
+        press(vcx, &paste);
+        assert_eq!(state(vcx, &input).0, "şehirşehir", "{platform:?}");
+    }
 }
 
 // ---- the focus ring (PO demo finding F2) -------------------------------------------------------

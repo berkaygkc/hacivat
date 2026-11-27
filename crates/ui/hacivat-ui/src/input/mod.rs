@@ -37,7 +37,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::popover::A11yNode;
 use crate::text::{RenderedText, TextFn, TextRegistry, TextSource, fitting_prefix};
-use ime::ImeState;
+use ime::{EditHistory, EditKind, ImeState};
 use keys::InputCommand;
 
 /// Events a `TextInput` emits (F15).
@@ -151,8 +151,23 @@ pub struct TextInput {
     // ## m3c-t33-find (named exception): drawn inside another field's well (the find field).
     frameless: bool,
     // ## inputnav-1
-    /// The left button went down on the field and is still held: a drag extends the selection.
-    dragging: bool,
+    /// The left button went down on the field and is still held: a drag extends the selection
+    /// by graphemes, or by words from the word a double click selected (fix round 1, m7).
+    dragging: Option<DragUnit>,
+    // ## inputnav-1 fix round 1 (m4)
+    /// Undo and redo; a masked field records nothing.
+    history: EditHistory,
+    /// The text and selection before the composition in progress (one undo step at commit).
+    composing_from: Option<ImeState>,
+}
+
+// ## inputnav-1 fix round 1 (m7)
+/// What a drag extends the selection by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DragUnit {
+    Grapheme,
+    /// By whole words, from the word the double click selected.
+    Word(Range<usize>),
 }
 
 /// Sees a paste's clipboard text before a non-masked input inserts it; returning `true`
@@ -202,7 +217,9 @@ impl TextInput {
             // ## m3c-t33-find
             frameless: false,
             // ## inputnav-1
-            dragging: false,
+            dragging: None,
+            history: EditHistory::default(),
+            composing_from: None,
         }
     }
 
@@ -253,6 +270,11 @@ impl TextInput {
     /// pass by controller ruling (M2a T6 fix round 1).
     pub fn set_masked(&mut self, masked: bool) {
         self.masked = masked;
+        // ## inputnav-1 fix round 1 (m4): a masked field keeps no undo history.
+        if masked {
+            self.history.clear();
+            self.composing_from = None;
+        }
     }
 
     /// Draws the field on its own well (`panel` in dark, `ground` in light), so its text-3
@@ -294,6 +316,54 @@ impl TextInput {
     /// reports `CompositionChanged(false)`.
     pub fn set_value(&mut self, s: impl Into<SharedString>) {
         self.ime.set_text(&s.into());
+        // ## inputnav-1 fix round 1 (m4): a value the app sets starts a new history.
+        self.history.clear();
+        self.composing_from = None;
+    }
+
+    // ## inputnav-1 fix round 1 (m4)
+    /// The number of undo and redo steps the field holds (tests: a masked field holds none).
+    pub fn history_depth(&self) -> (usize, usize) {
+        self.history.depth()
+    }
+
+    /// Records an edit that turned `before` into the current state (never in a masked field).
+    fn record(&mut self, kind: EditKind, before: &ImeState) {
+        if !self.masked {
+            self.history.record(kind, before, &self.ime);
+        }
+    }
+
+    /// A composition that started from `composing_from` was committed: one undo step.
+    fn record_commit(&mut self) {
+        if let Some(from) = self.composing_from.take() {
+            self.record(EditKind::Other, &from);
+        }
+    }
+
+    /// Inserts text from the platform (typing, an IME commit) or a paste, and records it: a
+    /// commit as the composition's one step, the rest as `kind`.
+    fn insert(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        kind: EditKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = sanitize(text) else { return };
+        if self.read_only {
+            return;
+        }
+        let before = self.ime.snapshot();
+        let committing = self.ime.is_composing();
+        self.ime.replace(range, &text);
+        if committing {
+            self.record_commit();
+        } else {
+            self.record(kind, &before);
+        }
+        self.edited(before.text(), window, cx);
     }
 
     pub fn is_composing(&self) -> bool {
@@ -326,7 +396,10 @@ impl TextInput {
         // switch leaves the composition to the platform (`ImeState::blur`). No
         // `notify_text_input_changed` here: the handle is no longer focused at blur time.
         let blur = cx.on_blur(&self.focus_handle, window, |this, window, cx| {
-            this.ime.blur(window.is_window_active());
+            if this.ime.blur(window.is_window_active()) {
+                // ## inputnav-1 fix round 1 (m4)
+                this.record_commit();
+            }
             this.report_composition(cx);
             let me = Some(cx.entity_id());
             let global = cx.default_global::<FocusedInput>();
@@ -395,7 +468,7 @@ impl TextInput {
     // ## inputnav-1
     /// Runs a text-field command. A read-only field moves and selects but never edits; a masked
     /// one treats its whole value as one word (as macOS secure fields do: a word move or delete
-    /// never reveals where the words are) and never copies or cuts.
+    /// never reveals where the words are), never copies or cuts, and keeps no undo history.
     pub fn run_command(
         &mut self,
         command: InputCommand,
@@ -408,8 +481,10 @@ impl TextInput {
         if command.edits() && self.read_only {
             return;
         }
-        let before = self.ime.text().to_string();
+        let before = self.ime.snapshot();
         let masked = self.masked;
+        // ## inputnav-1 fix round 1 (m4): what the edit was, for the undo history.
+        let mut kind = EditKind::Other;
         let ime = &mut self.ime;
         match command {
             InputCommand::MoveLeft => ime.move_left(),
@@ -418,20 +493,28 @@ impl TextInput {
             InputCommand::SelectRight => ime.select_right(),
             InputCommand::MoveWordLeft if masked => ime.move_line_start(),
             InputCommand::MoveWordLeft => ime.move_word_left(),
-            InputCommand::MoveWordRight if masked => ime.move_line_end(),
+            InputCommand::MoveWordRight | InputCommand::MoveNextWordStart if masked => {
+                ime.move_line_end()
+            }
             InputCommand::MoveWordRight => ime.move_word_right(),
+            InputCommand::MoveNextWordStart => ime.move_next_word_start(),
             InputCommand::SelectWordLeft if masked => ime.select_line_start(),
             InputCommand::SelectWordLeft => ime.select_word_left(),
-            InputCommand::SelectWordRight if masked => ime.select_line_end(),
+            InputCommand::SelectWordRight | InputCommand::SelectNextWordStart if masked => {
+                ime.select_line_end()
+            }
             InputCommand::SelectWordRight => ime.select_word_right(),
+            InputCommand::SelectNextWordStart => ime.select_next_word_start(),
             InputCommand::MoveLineStart => ime.move_line_start(),
             InputCommand::MoveLineEnd => ime.move_line_end(),
             InputCommand::SelectLineStart => ime.select_line_start(),
             InputCommand::SelectLineEnd => ime.select_line_end(),
             InputCommand::DeleteBackward => {
+                kind = EditKind::DeleteBackward;
                 ime.backspace();
             }
             InputCommand::DeleteForward => {
+                kind = EditKind::DeleteForward;
                 ime.delete_forward();
             }
             InputCommand::DeleteWordBackward if masked => {
@@ -440,11 +523,14 @@ impl TextInput {
             InputCommand::DeleteWordBackward => {
                 ime.delete_word_backward();
             }
-            InputCommand::DeleteWordForward if masked => {
+            InputCommand::DeleteWordForward | InputCommand::DeleteToNextWordStart if masked => {
                 ime.delete_to_line_end();
             }
             InputCommand::DeleteWordForward => {
                 ime.delete_word_forward();
+            }
+            InputCommand::DeleteToNextWordStart => {
+                ime.delete_to_next_word_start();
             }
             InputCommand::DeleteToLineStart => {
                 ime.delete_to_line_start();
@@ -471,20 +557,56 @@ impl TextInput {
                 }
                 return;
             }
+            // ## inputnav-1 fix round 1 (m4)
+            InputCommand::Undo | InputCommand::Redo => {
+                let done = if command == InputCommand::Undo {
+                    self.history.undo(&mut self.ime)
+                } else {
+                    self.history.redo(&mut self.ime)
+                };
+                if done {
+                    self.edited(before.text(), window, cx);
+                }
+                return;
+            }
         }
-        if before != self.ime.text() {
-            self.edited(&before, window, cx);
+        if before.text() != self.ime.text() {
+            self.record(kind, &before);
+            self.edited(before.text(), window, cx);
         } else {
+            // A caret move ends a typing or deleting run.
+            self.history.break_run();
             window.notify_text_selection_changed(&self.focus_handle);
             cx.notify();
         }
     }
 
-    /// The value byte under window x `x` on the painted line (the closest grapheme edge).
-    fn byte_at_x(&self, x: Pixels) -> Option<usize> {
+    // ## inputnav-1 fix round 1 (I3)
+    /// The value byte and painted x of the caret edge nearest window x `x`, and the start of
+    /// the grapheme under `x` (the one whose box holds it; past the text's end: the end).
+    fn hit(&self, x: Pixels) -> Option<(usize, usize)> {
         let layout = self.layout.as_ref()?;
-        let byte = layout.line.closest_index_for_x(x - layout.origin.x);
-        Some(layout.mask.as_ref().map_or(byte, |m| m.to_value(byte)))
+        let local = x - layout.origin.x;
+        let painted = layout.line.closest_index_for_x(local);
+        let edge = layout
+            .mask
+            .as_ref()
+            .map_or(painted, |m| m.to_value(painted));
+        let edge = self.grapheme_edge(edge);
+        let text = self.ime.text();
+        // Left of the nearest edge, the pointer is over the grapheme that ends there.
+        let edge_x = layout
+            .line
+            .x_for_index(layout.mask.as_ref().map_or(edge, |m| m.to_painted(edge)));
+        let under = if local < edge_x && edge > 0 {
+            text[..edge]
+                .grapheme_indices(true)
+                .next_back()
+                .map_or(0, |(start, _)| start)
+        } else {
+            edge
+        };
+        Some((edge, under))
     }
 
     /// The grapheme edge nearest `byte` (a hit inside a cluster, such as `i̇` or a ZWJ emoji,
@@ -507,56 +629,82 @@ impl TextInput {
     }
 
     /// A press places the caret at the clicked grapheme edge (with Shift: extends the
-    /// selection), a double click selects the word (a masked value: all of it), a triple click
-    /// selects all; a drag from the press extends the selection.
-    fn on_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// selection), a double click selects the word under the pointer (a masked value: all of
+    /// it), a triple click selects all; a drag from the press extends the selection, by words
+    /// after a double click.
+    ///
+    /// ## inputnav-1 fix round 1 (m2): public, so a well drawn around a frameless field (the Go
+    /// to row field) sends the presses on its padding here. The press stops there: a parent
+    /// that also forwards it would place the caret twice.
+    pub fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
         window.focus(&self.focus_handle, cx);
         if self.ime.is_composing() {
             return;
         }
-        let Some(byte) = self.byte_at_x(event.position.x) else {
+        let Some((edge, under)) = self.hit(event.position.x) else {
             return;
         };
-        let byte = self.grapheme_edge(byte);
+        self.history.break_run();
+        self.dragging = None;
         match event.click_count {
-            0 | 1 if event.modifiers.shift => self.ime.extend_to(byte),
-            0 | 1 => self.ime.set_caret(byte),
+            0 | 1 => {
+                if event.modifiers.shift {
+                    self.ime.extend_to(edge);
+                } else {
+                    self.ime.set_caret(edge);
+                }
+                self.dragging = Some(DragUnit::Grapheme);
+            }
             2 if !self.masked => {
-                let word = ime::word_at(self.ime.text(), byte);
-                self.ime.select_range(word);
+                let word = ime::word_at(self.ime.text(), under);
+                self.ime.select_range(word.clone());
+                self.dragging = Some(DragUnit::Word(word));
             }
             _ => self.ime.select_all(),
         }
-        self.dragging = event.click_count <= 1;
         window.notify_text_selection_changed(&self.focus_handle);
         cx.notify();
     }
 
-    /// While the press that started on the field is held, the pointer drags the head.
+    /// While the press that started on the field is held, the pointer drags the head: to the
+    /// nearest grapheme edge, or after a double click to the far edge of the word under it,
+    /// with the first word always selected.
     fn on_drag_move(
         &mut self,
         event: &MouseMoveEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.dragging || self.ime.is_composing() {
+        let Some(unit) = self.dragging.clone() else {
+            return;
+        };
+        if self.ime.is_composing() {
             return;
         }
         if event.pressed_button != Some(MouseButton::Left) {
-            self.dragging = false;
+            self.dragging = None;
             return;
         }
-        let Some(byte) = self.byte_at_x(event.position.x) else {
+        let Some((edge, under)) = self.hit(event.position.x) else {
             return;
         };
-        let byte = self.grapheme_edge(byte);
-        if byte != self.ime.head() {
-            self.ime.extend_to(byte);
+        let before = (self.ime.selection(), self.ime.is_reversed());
+        match unit {
+            DragUnit::Grapheme => self.ime.extend_to(edge),
+            DragUnit::Word(first) => {
+                let word = ime::word_at(self.ime.text(), under);
+                if word.start < first.start {
+                    // The anchor is the first word's end; the head leads leftwards.
+                    self.ime.select_range(first.end..first.end);
+                    self.ime.extend_to(word.start);
+                } else {
+                    self.ime.select_range(first.start..first.start);
+                    self.ime.extend_to(word.end.max(first.end));
+                }
+            }
+        }
+        if before != (self.ime.selection(), self.ime.is_reversed()) {
             window.notify_text_selection_changed(&self.focus_handle);
             cx.notify();
         }
@@ -624,6 +772,8 @@ impl EntityInputHandler for TextInput {
 
     fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ime.unmark();
+        // ## inputnav-1 fix round 1 (m4): the committed composition is one undo step.
+        self.record_commit();
         let text = self.ime.text().to_string();
         self.edited(&text, window, cx);
     }
@@ -641,7 +791,8 @@ impl EntityInputHandler for TextInput {
         {
             return;
         }
-        self.replace_text_in_range(None, &text, window, cx);
+        // ## inputnav-1 fix round 1 (m4): a paste is an undo step of its own.
+        self.insert(None, &text, EditKind::Other, window, cx);
     }
 
     fn replace_text_in_range(
@@ -651,13 +802,8 @@ impl EntityInputHandler for TextInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(text) = sanitize(text) else { return };
-        if self.read_only {
-            return;
-        }
-        let before = self.ime.text().to_string();
-        self.ime.replace(range, &text);
-        self.edited(&before, window, cx);
+        // ## inputnav-1 fix round 1 (m4): typing coalesces into runs.
+        self.insert(range, text, EditKind::Typing, window, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -674,8 +820,17 @@ impl EntityInputHandler for TextInput {
         if self.read_only {
             return;
         }
+        // ## inputnav-1 fix round 1 (m4): the state before a composition is its undo step,
+        // recorded once it commits.
+        if !self.ime.is_composing() {
+            self.composing_from = Some(self.ime.snapshot());
+        }
         let before = self.ime.text().to_string();
         self.ime.replace_and_mark(range, &text, new_selected_range);
+        if !self.ime.is_composing() {
+            // An empty mark cancelled the composition: nothing to undo.
+            self.composing_from = None;
+        }
         self.edited(&before, window, cx);
     }
 
@@ -756,7 +911,7 @@ impl Render for TextInput {
             .relative()
             .child(crate::follow::focus_probe(self.focus_handle.clone()))
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::press))
             .flex()
             .items_center()
             .h(px(t.spacing.field_height))
@@ -1046,7 +1201,7 @@ impl Element for InputText {
         );
         // ## inputnav-1: a drag that started on the field follows the pointer anywhere in the
         // window until the button comes up.
-        if self.input.read(cx).dragging {
+        if self.input.read(cx).dragging.is_some() {
             let input = self.input.clone();
             window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                 if phase.bubble() {
@@ -1056,7 +1211,7 @@ impl Element for InputText {
             let input = self.input.clone();
             window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
                 if phase.capture() && e.button == MouseButton::Left {
-                    input.update(cx, |i, _| i.dragging = false);
+                    input.update(cx, |i, _| i.dragging = None);
                 }
             });
         }

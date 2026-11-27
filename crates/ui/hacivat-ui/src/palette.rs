@@ -137,7 +137,8 @@ impl Palette {
             return;
         }
         let m = &event.keystroke.modifiers;
-        if m.platform || m.control || m.alt || m.function {
+        // ## inputnav-1 fix round 1 (m5): ⇧↑/⇧↓ select in the query field.
+        if m.platform || m.control || m.alt || m.function || m.shift {
             return;
         }
         match event.keystroke.key.as_str() {

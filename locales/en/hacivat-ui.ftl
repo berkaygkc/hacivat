@@ -5368,3 +5368,9 @@ hv-cmd-input-select-all = Field: select all
 hv-cmd-input-copy = Field: copy
 hv-cmd-input-cut = Field: cut
 hv-cmd-input-paste = Field: paste
+# inputnav-1 fix round 1: the Windows word moves (to the next word's start) and the field's undo.
+hv-cmd-input-move-next-word-start = Field: move to next word start
+hv-cmd-input-select-next-word-start = Field: extend selection to next word start
+hv-cmd-input-delete-to-next-word-start = Field: delete to next word start
+hv-cmd-input-undo = Field: undo
+hv-cmd-input-redo = Field: redo

@@ -843,3 +843,57 @@ context = "TextInput"
 chord = "ctrl-v"
 command = "input.paste"
 context = "TextInput"
+
+# inputnav-1 fix round 1 (m4): Ctrl+Home/End (with ⇧ they select), the old clipboard keys
+# (⇧Delete cut, Ctrl+Insert copy, ⇧Insert paste; a masked field still never copies or cuts),
+# and undo (Ctrl+Z) and redo (Ctrl+Y, Ctrl+⇧Z) in the field.
+
+[[binding]]
+chord = "ctrl-home"
+command = "input.move_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-end"
+command = "input.move_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-home"
+command = "input.select_line_start"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-end"
+command = "input.select_line_end"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-delete"
+command = "input.cut"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-insert"
+command = "input.copy"
+context = "TextInput"
+
+[[binding]]
+chord = "shift-insert"
+command = "input.paste"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-z"
+command = "input.undo"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-y"
+command = "input.redo"
+context = "TextInput"
+
+[[binding]]
+chord = "ctrl-shift-z"
+command = "input.redo"
+context = "TextInput"

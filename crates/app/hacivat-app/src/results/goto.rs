@@ -882,6 +882,14 @@ impl Render for GotoPopover {
                 c.seam_strong.to_hsla()
             })
             .bg(well.to_hsla())
+            // ## inputnav-1 fix round 1 (m2): the field keeps its 26 px in a short room (the
+            // body scrolls instead), and a press on the well's padding reaches the field (the
+            // field stops the presses it gets itself).
+            .flex_none()
+            .on_mouse_down(hacivat_ui_core::gpui_surface::MouseButton::Left, {
+                let input = self.input.clone();
+                move |event, window, cx| input.update(cx, |i, cx| i.press(event, window, cx))
+            })
             .child(div().flex_1().child(self.input.clone()));
         let field = focus_outline(field, &theme, field_focused);
         // ## m3c-shotfix F5: the popover never runs past its room (under the toolbar, above the

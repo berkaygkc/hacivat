@@ -5276,3 +5276,13 @@ hv-cmd-input-copy = Alan: kopyala
 hv-cmd-input-cut = Alan: kes
 # Review: PO
 hv-cmd-input-paste = Alan: yapıştır
+# Review: PO
+hv-cmd-input-move-next-word-start = Alan: sonraki sözcüğün başına git
+# Review: PO
+hv-cmd-input-select-next-word-start = Alan: seçimi sonraki sözcüğün başına genişlet
+# Review: PO
+hv-cmd-input-delete-to-next-word-start = Alan: sonraki sözcüğün başına kadar sil
+# Review: PO
+hv-cmd-input-undo = Alan: geri al
+# Review: PO
+hv-cmd-input-redo = Alan: yinele
