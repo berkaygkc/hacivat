@@ -2494,6 +2494,8 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             + m4b::M4B_STATES.len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
+    // ## demofix-1 fix round 1 (named exception, review m8): 70, with the two Output states
+    // (`output-script-counted`, `output-paused`) after `output-events-dropped`.
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
     // ## m3b-t29-shots: then the M3b states x 16: Task 22's 7, Task 25's 11, Task 21's 20
     // (16 confirmations with Task 29's staging Execute all, 4 commit prompts), Task 23's 9,
@@ -2513,14 +2515,14 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     // ## m4-t32-shots: and the M4 states x 16.
     assert_eq!(
         all.len(),
-        1020 + 68 * 16
+        1020 + 70 * 16
             + 71 * 16
             + 101 * 16
             + m4::M4_STATES.len() * 16
             // ## m4b-t11-editor
             + m4b::M4B_STATES.len() * 16
     );
-    let m3b_from = 1020 + 68 * 16;
+    let m3b_from = 1020 + 70 * 16;
     let order = [
         m3b::T22.to_vec(),
         m3b::T25.to_vec(),
