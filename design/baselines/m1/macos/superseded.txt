@@ -11,6 +11,8 @@
 #   toast-info    M2a Task 9: the dismiss mark is an icon Button, a few px further left.
 #   settings-general  M3c Task 42: the navigation lists 7 sections and row titles wrap
 #                 (docs/benchmarks/m3c.md, section 5.2, "T42 settings"; PO P2-13).
+#   palette-open  M4b demofix-1 (PO demo F7, m5): two new palette commands, "Results: larger"
+#                 and "Results: smaller", lengthen the open palette's list.
 #
 # When the PO re-baselines one (a new PNG committed here), its line goes. A line that matches no
 # baseline fails the comparison, so this list cannot outlive what it excuses. The approved
@@ -20,3 +22,4 @@ dialog-about-*
 menu-app-*
 toast-info-*
 settings-general-*
+palette-open-*
