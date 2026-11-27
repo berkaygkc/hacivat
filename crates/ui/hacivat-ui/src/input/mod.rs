@@ -2,9 +2,13 @@
 //!
 //! Plain typing and IME composition share one path: GPUI delivers all text to
 //! [`EntityInputHandler::replace_text_in_range`] (and marked text to
-//! `replace_and_mark_text_in_range`); the key handler only edits with named keys (Backspace,
-//! arrows) and never inserts printable characters itself. While a composition is in progress,
-//! every key belongs to the IME. The model is [`ime::ImeState`].
+//! `replace_and_mark_text_in_range`); the key handler never inserts printable characters itself.
+//! It runs the commands the keymap's `TextInput` rows bind ([`keys`], inputnav-1: grapheme and
+//! word moves, Shift selections, line ends, word and line deletes, the clipboard), and turns
+//! Enter and Escape into `Submitted` and `Cancelled`. While a composition is in progress, every
+//! key belongs to the IME. The mouse places the caret at a grapheme edge, drags and Shift-clicks
+//! extend the selection, a double click selects a word and a triple click all. The model is
+//! [`ime::ImeState`].
 //!
 //! A masked input (M2a, passwords) paints `•` per grapheme, never copies or cuts, and exposes an
 //! empty accessible value; [`TextInput::value`] still returns the text. A paste reaches the app

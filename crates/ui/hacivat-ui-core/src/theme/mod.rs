@@ -7,7 +7,7 @@ mod generated;
 pub mod surfaces;
 
 pub use generated::{Colors, DARK, LIGHT, Motion, Radii, SHARED, SharedColors, Spacing, TypeRamp};
-pub use surfaces::{focus_outline, popover_surface};
+pub use surfaces::{focus_outline, popover_surface, ring_room};
 
 /// Packed `0xRRGGBBAA`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -660,3 +660,84 @@ fn double_click_selects_a_word_and_triple_click_all(cx: &mut TestAppContext) {
     click(vcx, at, 2, false);
     assert_eq!(state(vcx, &input).1, 0.."correct horse".len());
 }
+
+// ---- the focus ring (PO demo finding F2) -------------------------------------------------------
+
+/// A full-width field in a scroll body inside a padded card (the Attach dialog's Database
+/// field): with `room`, the body is given room for the ring (`ring_room`).
+#[cfg(feature = "scene-check")]
+struct ScrollBody {
+    input: Entity<TextInput>,
+    room: bool,
+}
+
+#[cfg(feature = "scene-check")]
+impl Render for ScrollBody {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        use gpui::StatefulInteractiveElement as _;
+        let body = div()
+            .id("body")
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .child(div().h(px(12.0)))
+            .child(self.input.clone())
+            .child(div().h(px(12.0)));
+        let body = if self.room {
+            hacivat_ui_core::theme::ring_room(body)
+        } else {
+            body
+        };
+        div().w(px(400.0)).p(px(16.0)).flex().flex_col().child(body)
+    }
+}
+
+/// The focused field's ring: whole on all four sides (each edge 1 px of blue at a 1 px gap),
+/// only when the scroll body has room for it.
+#[cfg(feature = "scene-check")]
+#[gpui::test]
+fn a_full_width_field_in_a_scroll_body_draws_its_whole_ring(cx: &mut TestAppContext) {
+    use hacivat_ui_core::named_rules::clipped_focus_rings;
+    use hacivat_ui_core::theme::{DARK, surfaces::FOCUS_RING_EXTENT_PX};
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    for room in [false, true] {
+        let (host, vcx) = cx.add_window_view(|_, cx| ScrollBody {
+            input: cx.new(|cx| TextInput::new(cx, placeholder())),
+            room,
+        });
+        let input = host.read_with(vcx, |h, _| h.input.clone());
+        vcx.update(|w, cx| {
+            w.activate_window();
+            input.focus_handle(cx).focus(w, cx);
+        });
+        vcx.run_until_parked();
+        vcx.update(|w, _| w.refresh());
+        vcx.run_until_parked();
+        let (clipped, rings) = vcx.update(|w, _| {
+            let blue = DARK.colors.blue.to_hsla();
+            let s = w.scale_factor();
+            let rings: Vec<(f32, f32)> = w
+                .rendered_scene()
+                .shadows
+                .iter()
+                .filter(|sh| sh.inset == 0 && sh.blur_radius.0 == 0.0 && sh.color == blue)
+                .map(|sh| (sh.bounds.origin.x.0 / s, sh.bounds.size.width.0 / s))
+                .collect();
+            (clipped_focus_rings(w, blue), rings)
+        });
+        // One ring around the field, which keeps its place and width either way (16 px card
+        // padding, 368 px wide): the ring starts the extent before it and is that much wider
+        // on each side.
+        let e = FOCUS_RING_EXTENT_PX;
+        assert_eq!(rings, [(16.0 - e, 368.0 + 2.0 * e)], "room: {room}");
+        if room {
+            assert_eq!(clipped, Vec::new());
+        } else {
+            // F2: the body's clip cuts the ring's left and right sides, not its top or bottom.
+            assert_eq!(clipped.len(), 1, "{clipped:?}");
+            let (ring, clip) = clipped[0];
+            assert!(ring.left() < clip.left() && ring.right() > clip.right());
+            assert!(ring.top() >= clip.top() && ring.bottom() <= clip.bottom());
+        }
+    }
+}

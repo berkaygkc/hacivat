@@ -1063,15 +1063,19 @@ impl Render for AttachDialog {
             )
             .children(self.subtitle(&theme, cx))
             .child(
-                div()
-                    .id("scripts-attach-body")
-                    .flex()
-                    .flex_col()
-                    .flex_shrink(1.0)
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(hacivat_ui::text::scroll_viewport())
-                    .child(body),
+                // ## inputnav-1 (named exception, F2): room for the full-width fields' focus
+                // rings, which the scroll body's clip cut at the sides.
+                hacivat_ui_core::theme::ring_room(
+                    div()
+                        .id("scripts-attach-body")
+                        .flex()
+                        .flex_col()
+                        .flex_shrink(1.0)
+                        .min_h_0()
+                        .overflow_y_scroll(),
+                )
+                .child(hacivat_ui::text::scroll_viewport())
+                .child(body),
             )
             .child(
                 div()
