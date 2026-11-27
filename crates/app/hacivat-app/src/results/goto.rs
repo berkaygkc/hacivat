@@ -359,6 +359,9 @@ impl GotoPopover {
         let input = cx.new(|cx| {
             let mut input = TextInput::new(cx, placeholder);
             input.set_mono(true);
+            // ## inputnav-1 (named exception, F2): the well around it draws the frame and the
+            // ring; the field drew a second border and ring inside it.
+            input.set_frameless(true);
             input
         });
         let subscriptions = vec![cx.subscribe(&input, Self::on_input_event)];
@@ -867,7 +870,10 @@ impl Render for GotoPopover {
             .h(px(FIELD_PX))
             .flex()
             .items_center()
-            .px(px(6.0))
+            // ## inputnav-1 (named exception): the mock's `.in` padding (0 6 0 9), now that the
+            // field inside is frameless.
+            .pl(px(9.0))
+            .pr(px(6.0))
             .rounded(px(t.radii.sm))
             .border_1()
             .border_color(if invalid {
@@ -881,17 +887,21 @@ impl Render for GotoPopover {
         // ## m3c-shotfix F5: the popover never runs past its room (under the toolbar, above the
         // strip; NOTES cross-cutting 3): its title and its keys or buttons always show, and in
         // a short room what lies between them (the field and the lines) scrolls.
-        let mut body = div()
-            .id("goto-body")
-            .debug_selector(|| "goto-body".to_string())
-            .flex()
-            .flex_col()
-            .gap(px(ROW_GAP_PX))
-            .flex_shrink(1.0)
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .track_scroll(&self.body_scroll)
-            .child(hacivat_ui::text::scroll_viewport());
+        // ## inputnav-1 (named exception, F2): room for the field's focus ring, which the body's
+        // clip cut at the sides.
+        let mut body = hacivat_ui_core::theme::ring_room(
+            div()
+                .id("goto-body")
+                .debug_selector(|| "goto-body".to_string())
+                .flex()
+                .flex_col()
+                .gap(px(ROW_GAP_PX))
+                .flex_shrink(1.0)
+                .min_h(px(0.0))
+                .overflow_y_scroll(),
+        )
+        .track_scroll(&self.body_scroll)
+        .child(hacivat_ui::text::scroll_viewport());
         if !short {
             body = body.child(field);
         }

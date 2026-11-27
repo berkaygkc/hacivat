@@ -15,16 +15,18 @@ pub const FOCUS_OUTLINE_PX: f32 = 1.0;
 pub const FOCUS_RING_EXTENT_PX: f32 = 2.0 * FOCUS_OUTLINE_PX;
 
 /// Gives a clipping container (a scroll body) room for the focus rings of the controls along
-/// its left and right sides: the container reaches [`FOCUS_RING_EXTENT_PX`] further out on both
-/// sides and pads its content back in by as much, so the content keeps its place and width and
-/// a full-width field draws its whole ring instead of losing its sides to the clip (F2).
+/// its edges: the container reaches [`FOCUS_RING_EXTENT_PX`] further out on every side and
+/// pads its content back in by as much, so the content keeps its place and size, and a
+/// full-width field (or one at the body's top or bottom) draws its whole ring instead of
+/// losing a side to the clip (F2).
 ///
 /// GPUI clips both axes of any container that scrolls or hides overflow on one axis. Use it on
-/// a container without horizontal padding of its own (it sets that padding), placed at least
-/// the extent inside its parent's clip (a dialog card's padding).
+/// a container without padding, border or fill of its own (it sets the padding, and a border
+/// or fill would grow), placed at least the extent inside its parent's clip (a dialog card's
+/// padding, a gap).
 pub fn ring_room<E: Styled>(el: E) -> E {
-    el.mx(px(-FOCUS_RING_EXTENT_PX))
-        .px(px(FOCUS_RING_EXTENT_PX))
+    let e = FOCUS_RING_EXTENT_PX;
+    el.m(px(-e)).p(px(e))
 }
 // ## inputnav-1
 
