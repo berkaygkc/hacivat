@@ -408,9 +408,7 @@ fn first_chord(platform: KeymapPlatform, command: &str) -> String {
     let command = match (platform, command) {
         (KeymapPlatform::Windows, "input.move_word_right") => "input.move_next_word_start",
         (KeymapPlatform::Windows, "input.select_word_right") => "input.select_next_word_start",
-        (KeymapPlatform::Windows, "input.delete_word_forward") => {
-            "input.delete_to_next_word_start"
-        }
+        (KeymapPlatform::Windows, "input.delete_word_forward") => "input.delete_to_next_word_start",
         (_, command) => command,
     };
     chords_of(platform, command)[0].clone()
