@@ -556,17 +556,28 @@ fn line_row_of(line: &LogLine, ix: &str, cx: &App) -> AnyElement {
                 .size(IconSize::Chrome)
                 .color(if ink_text { c.text } else { c.text_2 }.to_hsla()),
         )
-        .child(
-            div().flex_none().child(
+        // ## demofix-1 fix round 1 (m8): a sentence alone on its row (no code, no server text)
+        // that is longer than the row (the counted line at 960 in a long locale) ellipsizes
+        // instead of running out of it; Copy has it whole. Rows with a code or server text keep
+        // their sentence whole, as before.
+        .child({
+            let alone = code.is_none() && server_text.is_none();
+            let cell = if alone {
+                div().flex_shrink(1.0).min_w(px(0.0))
+            } else {
+                div().flex_none()
+            };
+            cell.child(
                 Label::new(
                     core_text(&line.msg, cx),
                     TextSource::Fluent,
                     style,
                     ink.to_hsla(),
                 )
+                .truncate(alone)
                 .id(ElementId::Name(format!("log-sentence-{ix}").into())),
-            ),
-        )
+            )
+        })
         .children(code.map(|code| {
             div()
                 .flex_none()
@@ -673,6 +684,8 @@ impl hacivat_ui_grid::RowRenderer for LogRows {
                 .pl(px(12.0))
                 .pr(px(12.0))
                 .overflow_hidden()
+                // ## demofix-1 fix round 1 (m8): a row the list cuts at its fold is scrolled.
+                .child(hacivat_ui::text::clip_box())
                 .child(line_row_of(missed, "dropped", cx))
                 .into_any_element();
         }
@@ -702,6 +715,9 @@ impl hacivat_ui_grid::RowRenderer for LogRows {
             .pl(px(indent))
             .pr(px(12.0))
             .overflow_hidden()
+            // ## demofix-1 fix round 1 (m8): a row the list cuts at its fold is scrolled, not
+            // clipped (the frame checks; the list notes itself as a scroll viewport).
+            .child(hacivat_ui::text::clip_box())
             .children(content);
         // ## m3b-t25-results: the selected line reads as a selection (blue tint, Hue Is
         // Meaning: blue is selection).

@@ -185,6 +185,10 @@ impl<R: RowRenderer> Element for ListElement<R> {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<AnyElement> {
+        // ## demofix-1 fix round 1 (m8): the list scrolls, so a row its viewport cuts at the top
+        // or bottom edge is scrolled, not clipped (the frame checks; as the tree does).
+        let mask = window.content_mask().bounds.intersect(&bounds);
+        hacivat_ui::text::TextRegistry::note_scroll_viewport(cx, mask);
         let (rows, row_h) = self.view.update(cx, |list, cx| {
             let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
             list.scroll.set_viewport(w, h);
